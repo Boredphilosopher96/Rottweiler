@@ -2,6 +2,7 @@
 
 mod admin;
 mod provider_factory;
+mod subscription_credentials;
 
 pub use admin::{
     AdminError, DEFAULT_MODEL_CATALOG_URL, ModelCatalogRefresh, OAuthLogin, OAuthLoginResult,

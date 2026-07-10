@@ -167,3 +167,15 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 **Rationale.** Tree-sitter gives every language a floor with no setup; LSP gives depth where servers exist; hooks give formatters/linters a uniform mechanism that third parties can extend (dogfooding rule: the built-in `[toolchain]` tier is sugar over the same hook registration a plugin would use).
 
 **Revisit when.** Index memory/latency on giant monorepos breaks budgets → make indexing lazy/scoped.
+
+---
+
+## ADR-017: Built-in subscription providers are isolated, pinned compatibility profiles
+
+**Decision.** `openai_codex` and `github_copilot` are the only built-in consumer-subscription profiles in v1. They are direct provider adapters over Rottweiler IR, never nested coding-agent processes. They have separate adapter kinds, credentials, fixed production origins, header policies, capability/model tables, reasoning-signature namespaces, accounting semantics, record/replay fixtures, and live compatibility canaries. Ordinary `openai` and `anthropic` remain API-key providers and cannot consume subscription credentials. ChatGPT uses its own Rottweiler login and credential bundle; Claude subscription login is explicitly not supported. GitHub Copilot requires a Rottweiler-owned OAuth App client id with device flow enabled—OpenCode's, VS Code's, Copilot CLI's, and `gh`'s identities/tokens are not copied or silently reused. All credentials share one versioned Rottweiler Keychain vault item, cached for the engine lifetime.
+
+**Rationale.** Users already pay for these coding subscriptions and both products expose working native-client paths used by established coding harnesses. Treating them as explicit compatibility profiles provides useful batteries-included defaults without contaminating the provider-neutral IR or pretending undocumented consumer transports are stable public APIs. Isolation, pinned upstream audits, deterministic wire fixtures, and paid/quota live canaries make drift visible. A single vault item avoids repeated macOS permission prompts while retaining OS-backed storage.
+
+**Constraints.** ChatGPT tokens may reach only the fixed ChatGPT Codex backend; Copilot tokens may reach only the exact GitHub auth and Copilot API origins. Redirects are disabled. Project config cannot override those origins or client identities. Subscription usage is never mislabeled as ordinary API-key cost. Any unsupported IR field fails before network or has an explicit, tested compatibility mapping. Upstream OpenCode behavior is evidence for compatibility, not authority to impersonate its client identity.
+
+**Revisit when.** OpenAI or GitHub publishes a stable first-party raw provider API/SDK that preserves Rottweiler's headless provider boundary, or a compatibility canary fails; migrate deliberately and retain fixture compatibility where possible.

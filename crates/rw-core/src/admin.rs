@@ -2,8 +2,9 @@ use std::{collections::BTreeMap, fmt, path::PathBuf};
 
 use rw_providers::{
     DEFAULT_OAUTH_CALLBACK_TIMEOUT, OAuthAuthorizationCode, OAuthAuthorizationCodeConfig,
-    ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource, Secret as ProviderSecret,
-    default_models_path, refresh_models_dev_with_proxy_auth,
+    OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT, ProxyAuthentication, ProxyEnvironment, ProxySettings,
+    ProxySource, Secret as ProviderSecret, default_models_path, openai_subscription_oauth_flow,
+    refresh_models_dev_with_proxy_auth,
 };
 use rw_store::{
     config::ConfigLoader,
@@ -16,6 +17,10 @@ use rw_types::config::ProviderConfig;
 use thiserror::Error;
 use url::Url;
 
+use crate::subscription_credentials::{
+    OpenAiSubscriptionCredentialBundle, openai_subscription_credential_id,
+};
+
 /// Default public model-catalog endpoint used by the administrative facade.
 pub const DEFAULT_MODEL_CATALOG_URL: &str = rw_providers::DEFAULT_MODELS_DEV_URL;
 
@@ -27,7 +32,7 @@ pub struct AdminError {
 }
 
 impl AdminError {
-    fn new(message: impl Into<String>) -> Self {
+    pub(crate) fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
@@ -245,6 +250,7 @@ pub struct OAuthLogin {
     authorization_url: String,
     redirect_uri: String,
     warnings: Vec<String>,
+    openai_subscription: bool,
 }
 
 impl OAuthLogin {
@@ -280,6 +286,25 @@ impl OAuthLogin {
             .await
             .map_err(AdminError::from_display)?;
         let mut warnings = Vec::new();
+        if self.openai_subscription {
+            let bundle = OpenAiSubscriptionCredentialBundle::from_login(&tokens)?;
+            let encoded = bundle.encode()?;
+            let stored = self
+                .credential_manager
+                .store(
+                    &CredentialReference::new(openai_subscription_credential_id(
+                        &self.provider_name,
+                    )),
+                    &StoredSecret::new(encoded),
+                )
+                .map_err(AdminError::from_display)?;
+            warnings.extend(stored.warnings().iter().map(ToString::to_string));
+            return Ok(OAuthLoginResult {
+                provider: self.provider_name,
+                refresh_token_stored: true,
+                warnings,
+            });
+        }
         let access_identifier = self
             .provider
             .oauth_access_token_credential
@@ -351,21 +376,19 @@ pub async fn begin_oauth_login(provider_name: &str) -> Result<OAuthLogin, AdminE
                 "provider {provider_name:?} is not configured at user scope; add [providers.{provider_name}] to the user config"
             ))
         })?;
-    let authorization_endpoint = required_url(
-        provider_name,
-        "oauth_authorization_endpoint",
-        provider.oauth_authorization_endpoint.as_deref(),
-    )?;
-    let token_endpoint = required_url(
-        provider_name,
-        "oauth_token_endpoint",
-        provider.oauth_token_endpoint.as_deref(),
-    )?;
-    let client_id = provider.oauth_client_id.clone().ok_or_else(|| {
-        AdminError::new(format!(
-            "provider {provider_name:?} does not configure oauth_client_id"
-        ))
-    })?;
+    let openai_subscription = matches!(
+        provider.kind.as_str(),
+        "openai_codex" | "openai_subscription"
+    );
+    let token_endpoint = if openai_subscription {
+        Url::parse(OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT).map_err(AdminError::from_display)?
+    } else {
+        required_url(
+            provider_name,
+            "oauth_token_endpoint",
+            provider.oauth_token_endpoint.as_deref(),
+        )?
+    };
     let global_proxy = effective
         .config
         .network
@@ -408,18 +431,36 @@ pub async fn begin_oauth_login(provider_name: &str) -> Result<OAuthLogin, AdminE
             Some(ProxySource::Environment) | None => (None, Vec::new()),
         };
     warnings.extend(credential_warnings);
-    let flow = OAuthAuthorizationCode::with_proxy(
-        OAuthAuthorizationCodeConfig {
-            authorization_endpoint,
-            token_endpoint,
-            client_id,
-            scopes: provider.oauth_scopes.clone(),
-            callback_timeout: DEFAULT_OAUTH_CALLBACK_TIMEOUT,
-        },
-        resolution.as_ref().map(|value| &value.url),
-        proxy_authentication.as_ref(),
-    )
-    .map_err(AdminError::from_display)?;
+    let flow = if openai_subscription {
+        openai_subscription_oauth_flow(
+            resolution.as_ref().map(|value| &value.url),
+            proxy_authentication.as_ref(),
+        )
+        .map_err(AdminError::from_display)?
+    } else {
+        let authorization_endpoint = required_url(
+            provider_name,
+            "oauth_authorization_endpoint",
+            provider.oauth_authorization_endpoint.as_deref(),
+        )?;
+        let client_id = provider.oauth_client_id.clone().ok_or_else(|| {
+            AdminError::new(format!(
+                "provider {provider_name:?} does not configure oauth_client_id"
+            ))
+        })?;
+        OAuthAuthorizationCode::with_proxy(
+            OAuthAuthorizationCodeConfig {
+                authorization_endpoint,
+                token_endpoint,
+                client_id,
+                scopes: provider.oauth_scopes.clone(),
+                callback_timeout: DEFAULT_OAUTH_CALLBACK_TIMEOUT,
+            },
+            resolution.as_ref().map(|value| &value.url),
+            proxy_authentication.as_ref(),
+        )
+        .map_err(AdminError::from_display)?
+    };
     let session = flow.begin().await.map_err(AdminError::from_display)?;
     let authorization_url = session.authorization_url().to_string();
     let redirect_uri = session.redirect_uri().to_string();
@@ -431,6 +472,7 @@ pub async fn begin_oauth_login(provider_name: &str) -> Result<OAuthLogin, AdminE
         authorization_url,
         redirect_uri,
         warnings,
+        openai_subscription,
     })
 }
 
@@ -556,7 +598,7 @@ mod tests {
 
     use rw_store::credentials::{
         CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
-        KeychainUnavailable, Secret,
+        CredentialReference, KeychainUnavailable, Secret,
     };
     use rw_types::config::ProviderConfig;
 
@@ -650,15 +692,10 @@ mod tests {
         let warnings = store_provider_api_key_with_manager(&manager, "fixture", &provider, &key.0)
             .unwrap_or_else(|error| panic!("injected keychain store must work: {error}"));
         assert!(warnings.is_empty());
-        assert_eq!(
-            keychain
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get("fixture-stored-key")
-                .map(String::as_str),
-            Some("stored-key")
-        );
+        let stored = manager
+            .resolve(&CredentialReference::new("fixture-stored-key"))
+            .unwrap_or_else(|error| panic!("stored key must resolve from the vault: {error}"));
+        assert_eq!(stored.secret().expose_secret(), "stored-key");
 
         let resolved = resolve_provider_api_key_with_manager(&manager, "fixture", &provider)
             .unwrap_or_else(|error| panic!("injected resolution must work: {error}"));

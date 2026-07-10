@@ -189,7 +189,13 @@ provider-specific proxy. `[models].aliases` remains the provider-blind ordered
 `provider/model` routing table; `[models].thinking` maps aliases to
 `off|low|medium|high`. Proxy authentication is configured as a non-secret
 username plus a `proxy_password_credential` identifier; the password resolves
-through the OS keychain (or warned 0600 fallback) and is never rendered.
+as one logical key inside Rottweiler's single versioned OS-keychain vault (or
+warned 0600 fallback) and is never rendered. Production managers share a
+process cache. Whole-vault writes serialize through one fixed per-OS-user lock,
+fresh-read the durable vault, merge one logical key, then replace it, so separate
+CLI/engine processes and alternate config roots cannot lose each other's writes.
+`ROTTWEILER_CREDENTIAL_BACKEND=file` prevents every OS-keychain call and selects
+the warned fallback explicitly (used by hermetic subprocess tests).
 The global `[network]` form uses the same fields. Provider definitions and all
 proxy/authentication fields are user-scoped and ignored in project config.
 An API key uses `api_key_credential` when configured, otherwise the stable
@@ -212,6 +218,23 @@ credential manager; neither config nor the event/session protocol carries them.
 If a token refresh rotates the refresh token, the adapter persists the rotated
 value through an injected credential sink before returning the new access token;
 storage failure is fail-closed and sanitized.
+
+The `openai_codex` (alias `openai_subscription`) kind is intentionally separate
+from standard OpenAI API-key adapters. Its built-in browser flow uses the public
+client id, PKCE/state, the exact `http://localhost:1455/auth/callback`, and the
+required organization/simplified-flow/originator authorization parameters. One
+atomic credential bundle stores access token, refresh token, and the ChatGPT
+account id decoded from TLS-acquired JWT claims as an unverified routing hint
+(never as authorization or entitlement evidence); Rottweiler never reads
+`~/.codex/auth.json`. Calls go only to the fixed ChatGPT Codex Responses endpoint
+with bearer, account, originator, versioned user-agent, and random provider-session
+headers. Refresh is shared per logical provider and a rotated bundle is persisted
+before new bearer material is exposed. The backend request profile uses the
+Responses normalizer but moves system text to `instructions`, disables storage,
+requests encrypted reasoning content, and omits `max_output_tokens` because the
+subscription backend rejects that field. Consequently the harness cannot enforce
+a per-request output maximum on this transport; it still reconciles returned token
+usage, and exposes no API-dollar pricing for subscription models.
 
 `rw-core::ProviderFactory` is the only production composition root for those
 pieces. It resolves provider > global > environment proxy precedence and proxy

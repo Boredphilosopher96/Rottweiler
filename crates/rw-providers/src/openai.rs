@@ -110,11 +110,20 @@ impl OpenAiCompatibleProvider {
         self.validate_request_capabilities(&request)?;
         require_network(self.config.network_policy)?;
         let reasoning_endpoint = !self.config.supported_reasoning_efforts.is_empty();
-        let body = match self.config.wire_mode {
+        let material = self.config.auth.material().await?;
+        let mut body = match self.config.wire_mode {
             OpenAiWireMode::ChatCompletions => build_chat_request(&request, reasoning_endpoint),
             OpenAiWireMode::Responses => build_responses_request(&request, reasoning_endpoint),
         };
-        let material = self.config.auth.material().await?;
+        if let Some(session_id) = material.openai_subscription_session_id() {
+            if self.config.wire_mode != OpenAiWireMode::Responses {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::InvalidRequest,
+                    "ChatGPT subscription authentication requires Responses wire mode",
+                ));
+            }
+            apply_subscription_request_shape(&mut body, session_id)?;
+        }
         let mut headers = HeaderMap::new();
         material.apply_openai(&mut headers)?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -195,6 +204,47 @@ impl OpenAiCompatibleProvider {
         }
         Ok(())
     }
+}
+
+fn apply_subscription_request_shape(
+    body: &mut Value,
+    session_id: &str,
+) -> Result<(), ProviderError> {
+    let object = body.as_object_mut().ok_or_else(|| {
+        ProviderError::new(
+            ProviderErrorKind::Protocol,
+            "ChatGPT subscription request body was not an object",
+        )
+    })?;
+    let mut system_parts = Vec::new();
+    if let Some(input) = object.get_mut("input").and_then(Value::as_array_mut) {
+        input.retain(|item| {
+            let is_system = item.get("role").and_then(Value::as_str) == Some("system");
+            if is_system && let Some(content) = item.get("content").and_then(Value::as_str) {
+                system_parts.push(content.to_owned());
+            }
+            !is_system
+        });
+    }
+    object.insert("store".to_owned(), Value::Bool(false));
+    object.remove("max_output_tokens");
+    object.insert(
+        "instructions".to_owned(),
+        Value::String(system_parts.join("\n\n")),
+    );
+    object.insert(
+        "prompt_cache_key".to_owned(),
+        Value::String(session_id.to_owned()),
+    );
+    object.insert("include".to_owned(), json!(["reasoning.encrypted_content"]));
+    if let Some(tools) = object.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools {
+            if let Some(tool) = tool.as_object_mut() {
+                tool.insert("strict".to_owned(), Value::Bool(false));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -968,8 +1018,8 @@ mod tests {
     };
 
     use super::{
-        OpenAiState, OpenAiWireMode, ResponsesReasoningSignature, build_chat_request,
-        build_responses_request, decode_responses_reasoning_signature,
+        OpenAiState, OpenAiWireMode, ResponsesReasoningSignature, apply_subscription_request_shape,
+        build_chat_request, build_responses_request, decode_responses_reasoning_signature,
         encode_responses_reasoning_signature, openai_stream_error, parse_usage, responses_items,
     };
 
@@ -1166,6 +1216,72 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn subscription_shape_moves_system_text_and_sets_codex_fields() {
+        let request = ProviderRequest {
+            model: "gpt-5.6".to_owned(),
+            turns: vec![
+                Turn {
+                    role: Role::System,
+                    blocks: vec![Block::Text {
+                        text: "first system".to_owned(),
+                    }],
+                    meta: TurnMeta::default(),
+                },
+                Turn {
+                    role: Role::System,
+                    blocks: vec![Block::Text {
+                        text: "second system".to_owned(),
+                    }],
+                    meta: TurnMeta::default(),
+                },
+                Turn {
+                    role: Role::User,
+                    blocks: vec![Block::Text {
+                        text: "hello".to_owned(),
+                    }],
+                    meta: TurnMeta::default(),
+                },
+            ],
+            tools: vec![ToolDefinition {
+                name: "read_file".to_owned(),
+                description: "read".to_owned(),
+                input_schema: json!({"type":"object"}),
+            }],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: 321,
+            temperature: None,
+            thinking: ThinkingLevel::Medium,
+        };
+        let mut body = build_responses_request(&request, true);
+        apply_subscription_request_shape(&mut body, "rw-session-fixture")
+            .unwrap_or_else(|error| panic!("subscription shape must apply: {error}"));
+
+        assert_eq!(body["instructions"], "first system\n\nsecond system");
+        assert_eq!(body["store"], false);
+        assert_eq!(body["prompt_cache_key"], "rw-session-fixture");
+        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+        assert!(body.get("max_output_tokens").is_none());
+        assert_eq!(body["tools"][0]["strict"], false);
+        assert!(
+            body["input"]
+                .as_array()
+                .is_some_and(|items| items.iter().all(|item| item["role"] != "system"))
+        );
+
+        let mut empty = build_responses_request(
+            &ProviderRequest {
+                turns: Vec::new(),
+                tools: Vec::new(),
+                ..request
+            },
+            false,
+        );
+        apply_subscription_request_shape(&mut empty, "rw-empty")
+            .unwrap_or_else(|error| panic!("empty subscription shape must apply: {error}"));
+        assert_eq!(empty["instructions"], "");
     }
 
     #[test]

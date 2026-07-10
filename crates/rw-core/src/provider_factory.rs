@@ -6,11 +6,14 @@ use async_trait::async_trait;
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, AuthProvider,
     BoxEventStream, CacheBreakpointSupport, Capabilities, FixtureRedactor, ModelPricing,
-    NetworkPolicy, OAuthRefreshConfig, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    OpenAiWireMode, PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderRequest,
-    ProviderRouter, ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource,
-    RefreshTokenSink, RefreshingOAuth, RetryPolicy, RouterError, Secret as ProviderSecret,
-    StaticAuth, ThinkingLevel, WireFrameSink, WireMode,
+    NetworkPolicy, OAuthRefreshConfig, OPENAI_SUBSCRIPTION_CLIENT_ID,
+    OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT,
+    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiSubscriptionAuth,
+    OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink, OpenAiWireMode, PricingTable,
+    Provider, ProviderError, ProviderErrorKind, ProviderRequest, ProviderRouter,
+    ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource, RefreshTokenSink,
+    RefreshingOAuth, RetryPolicy, RouterError, Secret as ProviderSecret, StaticAuth, ThinkingLevel,
+    WireFrameSink, WireMode,
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
@@ -21,6 +24,9 @@ use thiserror::Error;
 use url::{Host, Url};
 
 use crate::admin::provider_api_key_credential_reference;
+use crate::subscription_credentials::{
+    OpenAiSubscriptionCredentialBundle, openai_subscription_credential_id,
+};
 
 const ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
@@ -327,16 +333,27 @@ where
                 &redactor,
                 &warnings,
             )?;
-            let auth = self.resolve_auth(
-                provider_name,
-                provider_config,
-                kind,
-                &endpoint,
-                proxy.as_ref().map(|value| &value.url),
-                proxy_authentication.as_ref(),
-                &redactor,
-                &warnings,
-            )?;
+            let auth = if kind == AdapterKind::OpenAiSubscription {
+                self.resolve_openai_subscription_auth(
+                    provider_name,
+                    provider_config,
+                    proxy.as_ref().map(|value| &value.url),
+                    proxy_authentication.as_ref(),
+                    &redactor,
+                    &warnings,
+                )?
+            } else {
+                self.resolve_auth(
+                    provider_name,
+                    provider_config,
+                    kind,
+                    &endpoint,
+                    proxy.as_ref().map(|value| &value.url),
+                    proxy_authentication.as_ref(),
+                    &redactor,
+                    &warnings,
+                )?
+            };
             connections.insert(
                 provider_name.clone(),
                 ProviderConnection {
@@ -360,7 +377,29 @@ where
                 model,
                 kind.catalog_namespace(),
             );
-            let capabilities = model_capabilities(kind, pricing.as_ref());
+            if kind == AdapterKind::OpenAiSubscription && !subscription_model_allowed(model) {
+                return Err(ProviderFactoryError::new(
+                    provider_name,
+                    "model is not in the conservative ChatGPT subscription allowlist",
+                ));
+            }
+            let supported_thinking = if kind == AdapterKind::OpenAiSubscription {
+                vec![
+                    ThinkingLevel::Off,
+                    ThinkingLevel::Low,
+                    ThinkingLevel::Medium,
+                    ThinkingLevel::High,
+                ]
+            } else {
+                pricing
+                    .as_ref()
+                    .map_or_else(Vec::new, |value| value.reasoning_efforts.clone())
+            };
+            let capabilities = if kind == AdapterKind::OpenAiSubscription {
+                subscription_model_capabilities()
+            } else {
+                model_capabilities(kind, pricing.as_ref())
+            };
             let inner = construct_adapter(
                 candidate,
                 kind,
@@ -370,15 +409,13 @@ where
                 connection.proxy_authentication.clone(),
                 self.network_policy,
                 &capabilities,
-                pricing.as_ref(),
+                &supported_thinking,
             )?;
             let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
                 inner,
                 expected_model: model.clone(),
                 capabilities: capabilities.clone(),
-                supported_thinking: pricing
-                    .as_ref()
-                    .map_or_else(Vec::new, |value| value.reasoning_efforts.clone()),
+                supported_thinking,
             });
             let registration_key = format!("__model_{index:08}");
             registration_keys.insert(candidate.clone(), registration_key.clone());
@@ -392,7 +429,11 @@ where
                     model: model.clone(),
                     catalog_model,
                     capabilities,
-                    pricing,
+                    pricing: if kind == AdapterKind::OpenAiSubscription {
+                        None
+                    } else {
+                        pricing
+                    },
                 },
             );
         }
@@ -623,6 +664,66 @@ where
         }
     }
 
+    fn resolve_openai_subscription_auth(
+        &self,
+        provider_name: &str,
+        provider: &ProviderConfig,
+        proxy: Option<&Url>,
+        proxy_authentication: Option<&ProxyAuthentication>,
+        redactor: &FixtureRedactor,
+        warnings: &RuntimeWarnings,
+    ) -> Result<Arc<dyn AuthProvider>, ProviderFactoryError> {
+        if provider.api_key_env.is_some()
+            || provider.api_key_credential.is_some()
+            || provider.oauth_token_env.is_some()
+            || provider.oauth_authorization_endpoint.is_some()
+            || provider.oauth_token_endpoint.is_some()
+            || provider.oauth_client_id.is_some()
+            || !provider.oauth_scopes.is_empty()
+            || provider.oauth_access_token_credential.is_some()
+            || provider.oauth_refresh_token_credential.is_some()
+        {
+            return Err(ProviderFactoryError::new(
+                provider_name,
+                "openai_codex uses only its built-in ChatGPT subscription OAuth credential bundle",
+            ));
+        }
+        let reference = CredentialReference::new(openai_subscription_credential_id(provider_name));
+        let resolved = self.resolve_required(provider_name, &reference)?;
+        warnings.extend(resolved.warnings().iter().map(ToString::to_string));
+        let bundle =
+            OpenAiSubscriptionCredentialBundle::parse(resolved.secret().expose_secret())
+                .map_err(|error| ProviderFactoryError::new(provider_name, error.to_string()))?;
+        let token_endpoint = Url::parse(OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT).map_err(|_| {
+            ProviderFactoryError::new(provider_name, "invalid built-in ChatGPT token endpoint")
+        })?;
+        let sink: Arc<dyn OpenAiSubscriptionTokenSink> = Arc::new(CredentialSubscriptionSink {
+            manager: Arc::clone(&self.credentials),
+            reference,
+            provider: provider_name.to_owned(),
+            refresh_token: std::sync::Mutex::new(bundle.refresh_token().to_owned()),
+            warnings: warnings.clone(),
+        });
+        let auth = OpenAiSubscriptionAuth::with_proxy(
+            OpenAiSubscriptionAuthConfig {
+                token_endpoint,
+                client_id: OPENAI_SUBSCRIPTION_CLIENT_ID.to_owned(),
+                access_token: Some(ProviderSecret::new(bundle.access_token())),
+                refresh_token: ProviderSecret::new(bundle.refresh_token()),
+                account_id: Some(ProviderSecret::new(bundle.account_id())),
+                originator: "rottweiler".to_owned(),
+                user_agent: format!("rottweiler/{}", env!("CARGO_PKG_VERSION")),
+                session_id: random_subscription_session_id(provider_name)?,
+            },
+            proxy,
+            proxy_authentication,
+            sink,
+            Arc::new(redactor.clone()),
+        )
+        .map_err(|error| ProviderFactoryError::new(provider_name, error.to_string()))?;
+        Ok(Arc::new(auth))
+    }
+
     fn resolve_required(
         &self,
         provider: &str,
@@ -653,6 +754,78 @@ struct CredentialRefreshSink<E, K> {
     reference: CredentialReference,
     provider: String,
     warnings: RuntimeWarnings,
+}
+
+struct CredentialSubscriptionSink<E, K> {
+    manager: Arc<CredentialManager<E, K>>,
+    reference: CredentialReference,
+    provider: String,
+    refresh_token: std::sync::Mutex<String>,
+    warnings: RuntimeWarnings,
+}
+
+impl<E, K> fmt::Debug for CredentialSubscriptionSink<E, K> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialSubscriptionSink")
+            .field("provider", &self.provider)
+            .field("credential_reference", &self.reference.identifier())
+            .field("refresh_token", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl<E, K> OpenAiSubscriptionTokenSink for CredentialSubscriptionSink<E, K>
+where
+    E: CredentialEnvironment + Send + Sync + 'static,
+    K: CredentialKeychain + Send + Sync + 'static,
+{
+    async fn persist(
+        &self,
+        access_token: &ProviderSecret,
+        rotated_refresh_token: Option<&ProviderSecret>,
+        account_id: &ProviderSecret,
+    ) -> Result<(), ProviderError> {
+        let current_refresh = self
+            .refresh_token
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let refresh = rotated_refresh_token.map_or_else(
+            || current_refresh.clone(),
+            |token| token.expose_secret().to_owned(),
+        );
+        let bundle = OpenAiSubscriptionCredentialBundle::new(
+            access_token.expose_secret().to_owned(),
+            refresh.clone(),
+            account_id.expose_secret().to_owned(),
+        );
+        let encoded = bundle.encode().map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Authentication,
+                "could not encode refreshed ChatGPT subscription credentials",
+            )
+        })?;
+        let stored = self
+            .manager
+            .store(&self.reference, &StoredSecret::new(encoded))
+            .map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Authentication,
+                    "could not persist refreshed ChatGPT subscription credentials",
+                )
+            })?;
+        self.warnings
+            .extend(stored.warnings().iter().map(ToString::to_string));
+        if rotated_refresh_token.is_some() {
+            *self
+                .refresh_token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = refresh;
+        }
+        Ok(())
+    }
 }
 
 impl<E, K> fmt::Debug for CredentialRefreshSink<E, K> {
@@ -834,6 +1007,7 @@ enum AdapterKind {
     Anthropic,
     OpenAiResponses,
     OpenAiChat,
+    OpenAiSubscription,
     OpenAiCompatibleResponses,
     OpenAiCompatibleChat,
 }
@@ -844,11 +1018,12 @@ impl AdapterKind {
             "anthropic" => Ok(Self::Anthropic),
             "openai" | "openai_responses" => Ok(Self::OpenAiResponses),
             "openai_chat" => Ok(Self::OpenAiChat),
+            "openai_codex" | "openai_subscription" => Ok(Self::OpenAiSubscription),
             "openai_compatible_responses" => Ok(Self::OpenAiCompatibleResponses),
             "openai_compatible" | "openai_compatible_chat" => Ok(Self::OpenAiCompatibleChat),
             _ => Err(ProviderFactoryError::new(
                 provider,
-                "unsupported adapter kind; expected anthropic, openai, openai_chat, openai_compatible, or openai_compatible_responses",
+                "unsupported adapter kind; expected anthropic, openai, openai_chat, openai_codex, openai_compatible, or openai_compatible_responses",
             )),
         }
     }
@@ -863,7 +1038,7 @@ impl AdapterKind {
     const fn catalog_namespace(self) -> Option<&'static str> {
         match self {
             Self::Anthropic => Some("anthropic"),
-            Self::OpenAiResponses | Self::OpenAiChat => Some("openai"),
+            Self::OpenAiResponses | Self::OpenAiChat | Self::OpenAiSubscription => Some("openai"),
             Self::OpenAiCompatibleResponses | Self::OpenAiCompatibleChat => None,
         }
     }
@@ -872,7 +1047,9 @@ impl AdapterKind {
         match self {
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
             Self::OpenAiResponses | Self::OpenAiChat => Some("OPENAI_API_KEY"),
-            Self::OpenAiCompatibleResponses | Self::OpenAiCompatibleChat => None,
+            Self::OpenAiSubscription
+            | Self::OpenAiCompatibleResponses
+            | Self::OpenAiCompatibleChat => None,
         }
     }
 }
@@ -911,6 +1088,7 @@ fn resolve_endpoint(
         AdapterKind::Anthropic => Some(ANTHROPIC_MESSAGES_ENDPOINT),
         AdapterKind::OpenAiResponses => Some(OPENAI_RESPONSES_ENDPOINT),
         AdapterKind::OpenAiChat => Some(OPENAI_CHAT_ENDPOINT),
+        AdapterKind::OpenAiSubscription => Some(OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT),
         AdapterKind::OpenAiCompatibleResponses | AdapterKind::OpenAiCompatibleChat => None,
     });
     let value = value.ok_or_else(|| {
@@ -919,6 +1097,12 @@ fn resolve_endpoint(
             "openai-compatible adapters require an explicit endpoint",
         )
     })?;
+    if kind == AdapterKind::OpenAiSubscription && config.base_url.is_some() {
+        return Err(ProviderFactoryError::new(
+            provider,
+            "openai_codex endpoint is fixed and cannot be overridden",
+        ));
+    }
     parse_remote_or_loopback_endpoint(provider, value)
 }
 
@@ -1016,12 +1200,49 @@ fn find_pricing(
     (None, None)
 }
 
+fn subscription_model_allowed(model: &str) -> bool {
+    matches!(
+        model,
+        "gpt-5.5" | "gpt-5.3-codex-spark" | "gpt-5.4" | "gpt-5.4-mini"
+    )
+}
+
+fn subscription_model_capabilities() -> Capabilities {
+    Capabilities {
+        tool_calling: true,
+        vision: false,
+        thinking: true,
+        cache_breakpoints: CacheBreakpointSupport::Automatic,
+        max_context_tokens: None,
+        max_output_tokens: None,
+        wire_mode: WireMode::OpenAiResponses,
+    }
+}
+
+fn random_subscription_session_id(provider: &str) -> Result<String, ProviderFactoryError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| {
+        ProviderFactoryError::new(
+            provider,
+            "operating-system randomness is unavailable for subscription session id",
+        )
+    })?;
+    let mut value = String::with_capacity(35);
+    value.push_str("rw-");
+    for byte in bytes {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    Ok(value)
+}
+
 fn model_capabilities(kind: AdapterKind, pricing: Option<&ModelPricing>) -> Capabilities {
     let wire_mode = match kind {
         AdapterKind::Anthropic => WireMode::AnthropicMessages,
-        AdapterKind::OpenAiResponses | AdapterKind::OpenAiCompatibleResponses => {
-            WireMode::OpenAiResponses
-        }
+        AdapterKind::OpenAiResponses
+        | AdapterKind::OpenAiSubscription
+        | AdapterKind::OpenAiCompatibleResponses => WireMode::OpenAiResponses,
         AdapterKind::OpenAiChat | AdapterKind::OpenAiCompatibleChat => {
             WireMode::OpenAiChatCompletions
         }
@@ -1054,7 +1275,7 @@ fn construct_adapter(
     proxy_authentication: Option<ProxyAuthentication>,
     network_policy: NetworkPolicy,
     capabilities: &Capabilities,
-    pricing: Option<&ModelPricing>,
+    supported_thinking: &[ThinkingLevel],
 ) -> Result<Arc<dyn Provider>, ProviderFactoryError> {
     let result: Result<Arc<dyn Provider>, ProviderError> = match kind {
         AdapterKind::Anthropic => AnthropicProvider::new(AnthropicConfig {
@@ -1064,26 +1285,23 @@ fn construct_adapter(
             proxy,
             proxy_authentication,
             network_policy,
-            thinking_strategy: pricing
-                .filter(|value| {
-                    value
-                        .reasoning_efforts
-                        .iter()
-                        .any(|effort| *effort != ThinkingLevel::Off)
-                })
-                .map(|_| AnthropicThinkingStrategy::Adaptive),
+            thinking_strategy: supported_thinking
+                .iter()
+                .any(|effort| *effort != ThinkingLevel::Off)
+                .then_some(AnthropicThinkingStrategy::Adaptive),
             max_context_tokens: capabilities.max_context_tokens,
             max_output_tokens: capabilities.max_output_tokens,
         })
         .map(|provider| Arc::new(provider) as Arc<dyn Provider>),
         AdapterKind::OpenAiResponses
+        | AdapterKind::OpenAiSubscription
         | AdapterKind::OpenAiChat
         | AdapterKind::OpenAiCompatibleResponses
         | AdapterKind::OpenAiCompatibleChat => {
             let wire_mode = match kind {
-                AdapterKind::OpenAiResponses | AdapterKind::OpenAiCompatibleResponses => {
-                    OpenAiWireMode::Responses
-                }
+                AdapterKind::OpenAiResponses
+                | AdapterKind::OpenAiSubscription
+                | AdapterKind::OpenAiCompatibleResponses => OpenAiWireMode::Responses,
                 AdapterKind::OpenAiChat | AdapterKind::OpenAiCompatibleChat => {
                     OpenAiWireMode::ChatCompletions
                 }
@@ -1099,8 +1317,7 @@ fn construct_adapter(
                 wire_mode,
                 tool_calling: capabilities.tool_calling,
                 cache_breakpoints: capabilities.cache_breakpoints,
-                supported_reasoning_efforts: pricing
-                    .map_or_else(Vec::new, |value| value.reasoning_efforts.clone()),
+                supported_reasoning_efforts: supported_thinking.to_vec(),
                 supports_vision: capabilities.vision,
                 max_context_tokens: capabilities.max_context_tokens,
                 max_output_tokens: capabilities.max_output_tokens,

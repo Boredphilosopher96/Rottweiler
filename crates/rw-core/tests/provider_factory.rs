@@ -17,7 +17,7 @@ use rw_providers::{
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
-    KeychainUnavailable, Secret,
+    KEYCHAIN_VAULT_ID, KeychainUnavailable, Secret,
 };
 use rw_types::{
     Block, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta,
@@ -231,6 +231,32 @@ fn config(endpoint: &str, candidates: &[&str]) -> rw_types::config::Config {
     config
 }
 
+fn subscription_config(model: &str) -> rw_types::config::Config {
+    let mut config = rw_types::config::Config::default();
+    "fast".clone_into(&mut config.models.default);
+    config
+        .models
+        .aliases
+        .insert("fast".to_owned(), vec![format!("fixture/{model}")]);
+    config.providers.insert(
+        "fixture".to_owned(),
+        ProviderConfig {
+            kind: "openai_codex".to_owned(),
+            ..ProviderConfig::default()
+        },
+    );
+    config
+}
+
+fn subscription_keychain() -> TestKeychain {
+    let keychain = TestKeychain::default();
+    keychain.insert(
+        "providers.fixture.openai_subscription",
+        r#"{"version":1,"access_token":"subscription-access-canary","refresh_token":"subscription-refresh-canary","account_id":"acct-fixture"}"#,
+    );
+    keychain
+}
+
 fn manager(
     environment: TestEnvironment,
     keychain: TestKeychain,
@@ -383,7 +409,10 @@ async fn static_oauth_and_refresh_rotation_use_shared_credential_boundary() {
     provider.oauth_client_id = Some("public-client".to_owned());
     provider.oauth_refresh_token_credential = Some("fixture-refresh".to_owned());
     let keychain = TestKeychain::default();
-    keychain.insert("fixture-refresh", REFRESH_CANARY);
+    keychain.insert(
+        KEYCHAIN_VAULT_ID,
+        &format!("version = 1\n[credentials]\nfixture-refresh = {REFRESH_CANARY:?}\n"),
+    );
     let fallback = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
     let credentials_path = fallback.path().join("credentials.toml");
     let runtime = ProviderFactory::with_backends(
@@ -764,4 +793,66 @@ fn official_kind_uses_canonical_catalog_namespace_while_compatible_is_explicit()
         .unwrap_or_else(|| panic!("compatible model must resolve"));
     assert_eq!(model.catalog_model(), Some("misleading/model-a"));
     assert!(model.capabilities().tool_calling);
+}
+
+#[test]
+fn subscription_kind_has_independent_capabilities_and_no_dollar_pricing() {
+    let config = subscription_config("gpt-5.4-mini");
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), subscription_keychain()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Deny,
+        pricing([("openai/gpt-5.4-mini", false)]),
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("subscription provider must build: {error}"));
+    let model = runtime
+        .resolved_model("fixture/gpt-5.4-mini")
+        .unwrap_or_else(|| panic!("subscription model must resolve"));
+    assert_eq!(model.catalog_model(), Some("openai/gpt-5.4-mini"));
+    assert!(model.pricing().is_none());
+    assert!(model.capabilities().tool_calling);
+    assert!(model.capabilities().thinking);
+    assert!(!model.capabilities().vision);
+    assert_eq!(
+        model.capabilities().wire_mode,
+        rw_providers::WireMode::OpenAiResponses
+    );
+    assert!(runtime.provider("fixture/gpt-5.4-mini").is_some());
+
+    let debug = format!("{runtime:?}");
+    assert!(!debug.contains("subscription-access-canary"));
+    assert!(!debug.contains("subscription-refresh-canary"));
+    assert!(!debug.contains("acct-fixture"));
+}
+
+#[test]
+fn subscription_kind_rejects_auth_endpoint_and_model_conflicts() {
+    let build = |config: &rw_types::config::Config| {
+        ProviderFactory::with_backends(
+            manager(TestEnvironment::default(), subscription_keychain()),
+            ProxyEnvironment::default(),
+            NetworkPolicy::Deny,
+            pricing([("openai/gpt-5.4-mini", false)]),
+        )
+        .build(config)
+    };
+
+    let mut api_key = subscription_config("gpt-5.4-mini");
+    api_key
+        .providers
+        .get_mut("fixture")
+        .unwrap_or_else(|| panic!("fixture provider must exist"))
+        .api_key_env = Some("OPENAI_API_KEY".to_owned());
+    assert!(build(&api_key).is_err());
+
+    let mut endpoint = subscription_config("gpt-5.4-mini");
+    endpoint
+        .providers
+        .get_mut("fixture")
+        .unwrap_or_else(|| panic!("fixture provider must exist"))
+        .base_url = Some("https://example.com/v1/responses".to_owned());
+    assert!(build(&endpoint).is_err());
+    assert!(build(&subscription_config("gpt-5.5-pro")).is_err());
+    assert!(build(&subscription_config("gpt-5.6-luna")).is_err());
 }

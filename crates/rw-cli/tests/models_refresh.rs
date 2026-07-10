@@ -160,6 +160,7 @@ fn refresh_resolves_global_proxy_password_from_user_credential_store() {
         .env_clear()
         .current_dir(root.path())
         .env("ROTTWEILER_HOME", &user_root)
+        .env("ROTTWEILER_CREDENTIAL_BACKEND", "file")
         .args([
             "models",
             "refresh",

@@ -1729,6 +1729,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "futures-util",
+ "getrandom 0.4.3",
  "rw-context",
  "rw-ext",
  "rw-mcp",
@@ -1736,6 +1737,7 @@ dependencies = [
  "rw-store",
  "rw-tools",
  "rw-types",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -1803,6 +1805,7 @@ name = "rw-store"
 version = "0.1.0"
 dependencies = [
  "keyring",
+ "rustix",
  "rw-types",
  "serde",
  "tempfile",

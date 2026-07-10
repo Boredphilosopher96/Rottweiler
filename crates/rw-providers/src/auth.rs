@@ -89,11 +89,31 @@ pub enum AuthMaterial {
     ApiKey(Secret),
     /// OAuth or API bearer token.
     Bearer(Secret),
+    /// `ChatGPT` subscription bearer plus required Codex backend identity headers.
+    OpenAiSubscription {
+        /// OAuth access token.
+        access_token: Secret,
+        /// `ChatGPT` workspace/account identifier derived from token claims.
+        account_id: Secret,
+        /// Client origin classification.
+        originator: String,
+        /// Versioned client identifier.
+        user_agent: String,
+        /// Stable Rottweiler provider-session identifier.
+        session_id: String,
+    },
     /// No authentication, useful for trusted local model servers.
     None,
 }
 
 impl AuthMaterial {
+    pub(crate) fn openai_subscription_session_id(&self) -> Option<&str> {
+        match self {
+            Self::OpenAiSubscription { session_id, .. } => Some(session_id),
+            Self::ApiKey(_) | Self::Bearer(_) | Self::None => None,
+        }
+    }
+
     pub(crate) fn apply_openai(&self, headers: &mut HeaderMap) -> Result<(), ProviderError> {
         match self {
             Self::ApiKey(secret) | Self::Bearer(secret) => {
@@ -102,6 +122,27 @@ impl AuthMaterial {
                     AUTHORIZATION,
                     &format!("Bearer {}", secret.expose()),
                 )?;
+            }
+            Self::OpenAiSubscription {
+                access_token,
+                account_id,
+                originator,
+                user_agent,
+                session_id,
+            } => {
+                insert_sensitive(
+                    headers,
+                    AUTHORIZATION,
+                    &format!("Bearer {}", access_token.expose()),
+                )?;
+                insert_sensitive(
+                    headers,
+                    HeaderName::from_static("chatgpt-account-id"),
+                    account_id.expose(),
+                )?;
+                insert_header(headers, HeaderName::from_static("originator"), originator)?;
+                insert_header(headers, HeaderName::from_static("user-agent"), user_agent)?;
+                insert_header(headers, HeaderName::from_static("session-id"), session_id)?;
             }
             Self::None => {}
         }
@@ -124,10 +165,31 @@ impl AuthMaterial {
                     &format!("Bearer {}", secret.expose()),
                 )?;
             }
+            Self::OpenAiSubscription { .. } => {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::InvalidRequest,
+                    "ChatGPT subscription authentication is OpenAI Responses-only",
+                ));
+            }
             Self::None => {}
         }
         Ok(())
     }
+}
+
+fn insert_header(
+    headers: &mut HeaderMap,
+    name: HeaderName,
+    value: &str,
+) -> Result<(), ProviderError> {
+    let header = HeaderValue::from_str(value).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "provider header contains bytes that cannot be sent",
+        )
+    })?;
+    headers.insert(name, header);
+    Ok(())
 }
 
 fn insert_sensitive(
@@ -229,6 +291,14 @@ pub struct OAuthAuthorizationCode {
     config: OAuthAuthorizationCodeConfig,
     client: reqwest::Client,
     entropy: Arc<dyn OAuthEntropy>,
+    extra_authorization_parameters: Vec<(String, String)>,
+    loopback_redirect: OAuthLoopbackRedirect,
+}
+
+#[derive(Clone, Debug)]
+enum OAuthLoopbackRedirect {
+    EphemeralIpLiteral,
+    FixedLocalhost { port: u16, path: &'static str },
 }
 
 impl fmt::Debug for OAuthAuthorizationCode {
@@ -287,7 +357,25 @@ impl OAuthAuthorizationCode {
             config,
             client,
             entropy,
+            extra_authorization_parameters: Vec::new(),
+            loopback_redirect: OAuthLoopbackRedirect::EphemeralIpLiteral,
         }
+    }
+
+    pub(crate) fn with_fixed_localhost_callback(mut self, port: u16, path: &'static str) -> Self {
+        self.loopback_redirect = OAuthLoopbackRedirect::FixedLocalhost { port, path };
+        self
+    }
+
+    /// Adds provider-documented, non-protocol authorization parameters.
+    /// Reserved `OAuth`/PKCE fields remain owned by this implementation.
+    #[must_use]
+    pub fn with_authorization_parameters(
+        mut self,
+        parameters: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.extra_authorization_parameters = parameters.into_iter().collect();
+        self
     }
 
     /// Binds an ephemeral IPv4 loopback callback and constructs the browser URL.
@@ -297,6 +385,24 @@ impl OAuthAuthorizationCode {
     /// Returns an error for unsafe endpoint configuration, unavailable secure
     /// randomness, or a loopback bind failure.
     pub async fn begin(&self) -> Result<OAuthLoginSession, ProviderError> {
+        self.validate_begin_configuration()?;
+        let (listener, redirect_uri) = self.bind_loopback_callback().await?;
+        let (authorization_url, state, verifier) = self.build_authorization_url(&redirect_uri)?;
+
+        Ok(OAuthLoginSession {
+            authorization_url,
+            redirect_uri,
+            listener,
+            state: Secret::new(state),
+            verifier: Secret::new(verifier),
+            token_endpoint: self.config.token_endpoint.clone(),
+            client_id: self.config.client_id.clone(),
+            client: self.client.clone(),
+            callback_timeout: self.config.callback_timeout,
+        })
+    }
+
+    fn validate_begin_configuration(&self) -> Result<(), ProviderError> {
         validate_oauth_endpoint("authorization", &self.config.authorization_endpoint)?;
         validate_oauth_endpoint("token", &self.config.token_endpoint)?;
         if self.config.client_id.trim().is_empty() {
@@ -322,6 +428,17 @@ impl OAuthAuthorizationCode {
                 "OAuth scopes must not contain empty values",
             ));
         }
+        if self.extra_authorization_parameters.iter().any(|(name, _)| {
+            name.trim().is_empty()
+                || RESERVED_AUTHORIZATION_PARAMETERS
+                    .iter()
+                    .any(|reserved| name == reserved)
+        }) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "OAuth extra authorization parameters must be non-empty and non-reserved",
+            ));
+        }
         if self
             .config
             .authorization_endpoint
@@ -338,7 +455,15 @@ impl OAuthAuthorizationCode {
             ));
         }
 
-        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        Ok(())
+    }
+
+    async fn bind_loopback_callback(&self) -> Result<(TcpListener, Url), ProviderError> {
+        let port = match self.loopback_redirect {
+            OAuthLoopbackRedirect::EphemeralIpLiteral => 0,
+            OAuthLoopbackRedirect::FixedLocalhost { port, .. } => port,
+        };
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
             .await
             .map_err(|error| {
                 ProviderError::new(
@@ -352,17 +477,28 @@ impl OAuthAuthorizationCode {
                 format!("could not inspect OAuth loopback callback: {error}"),
             )
         })?;
-        let redirect_uri = Url::parse(&format!(
-            "http://127.0.0.1:{}/oauth/callback",
-            address.port()
-        ))
-        .map_err(|_| {
+        let redirect_uri = match self.loopback_redirect {
+            OAuthLoopbackRedirect::EphemeralIpLiteral => {
+                format!("http://127.0.0.1:{}/oauth/callback", address.port())
+            }
+            OAuthLoopbackRedirect::FixedLocalhost { path, .. } => {
+                format!("http://localhost:{}{path}", address.port())
+            }
+        };
+        let redirect_uri = Url::parse(&redirect_uri).map_err(|_| {
             ProviderError::new(
                 ProviderErrorKind::Protocol,
                 "could not construct OAuth loopback redirect URI",
             )
         })?;
 
+        Ok((listener, redirect_uri))
+    }
+
+    fn build_authorization_url(
+        &self,
+        redirect_uri: &Url,
+    ) -> Result<(Url, String, String), ProviderError> {
         let state = random_base64url(self.entropy.as_ref())?;
         let verifier = random_base64url(self.entropy.as_ref())?;
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
@@ -378,19 +514,12 @@ impl OAuthAuthorizationCode {
             query.append_pair("state", &state);
             query.append_pair("code_challenge", &challenge);
             query.append_pair("code_challenge_method", "S256");
+            for (name, value) in &self.extra_authorization_parameters {
+                query.append_pair(name, value);
+            }
         }
 
-        Ok(OAuthLoginSession {
-            authorization_url,
-            redirect_uri,
-            listener,
-            state: Secret::new(state),
-            verifier: Secret::new(verifier),
-            token_endpoint: self.config.token_endpoint.clone(),
-            client_id: self.config.client_id.clone(),
-            client: self.client.clone(),
-            callback_timeout: self.config.callback_timeout,
-        })
+        Ok((authorization_url, state, verifier))
     }
 }
 
@@ -509,6 +638,7 @@ impl OAuthLoginSession {
             ));
         }
         Ok(OAuthTokenSet {
+            id_token: response.id_token.map(Secret::new),
             access_token: Secret::new(response.access_token),
             refresh_token: response.refresh_token.map(Secret::new),
             expires_in: response.expires_in,
@@ -518,6 +648,7 @@ impl OAuthLoginSession {
 
 /// Tokens returned by a successful authorization-code exchange.
 pub struct OAuthTokenSet {
+    id_token: Option<Secret>,
     access_token: Secret,
     refresh_token: Option<Secret>,
     expires_in: Option<u64>,
@@ -527,6 +658,7 @@ impl fmt::Debug for OAuthTokenSet {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("OAuthTokenSet")
+            .field("id_token", &self.id_token.as_ref().map(|_| "[REDACTED]"))
             .field("access_token", &"[REDACTED]")
             .field(
                 "refresh_token",
@@ -538,6 +670,11 @@ impl fmt::Debug for OAuthTokenSet {
 }
 
 impl OAuthTokenSet {
+    /// Optional `OpenID` Connect ID token returned by the authorization server.
+    #[must_use]
+    pub const fn id_token(&self) -> Option<&Secret> {
+        self.id_token.as_ref()
+    }
     /// Short-lived bearer token, for immediate use and credential persistence.
     #[must_use]
     pub const fn access_token(&self) -> &Secret {
@@ -559,6 +696,7 @@ impl OAuthTokenSet {
 
 #[derive(Deserialize)]
 struct AuthorizationCodeTokenResponse {
+    id_token: Option<String>,
     access_token: String,
     refresh_token: Option<String>,
     expires_in: Option<u64>,

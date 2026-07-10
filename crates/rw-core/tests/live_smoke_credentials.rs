@@ -34,6 +34,25 @@ struct LiveSettings {
     openai_model: String,
 }
 
+struct OpenAiSubscriptionLiveSettings {
+    fixture_root: std::path::PathBuf,
+    openai_model: String,
+}
+
+impl OpenAiSubscriptionLiveSettings {
+    fn from_environment() -> Self {
+        let acknowledgement = required_environment("RW_LIVE_SMOKE");
+        assert_eq!(
+            acknowledgement, LIVE_ACKNOWLEDGEMENT,
+            "RW_LIVE_SMOKE must equal {LIVE_ACKNOWLEDGEMENT:?}; this explicit opt-in confirms that the ignored test may consume subscription quota"
+        );
+        Self {
+            fixture_root: validate_fixture_root(&required_environment("RW_LIVE_SMOKE_FIXTURE_DIR")),
+            openai_model: required_environment("RW_LIVE_OPENAI_MODEL"),
+        }
+    }
+}
+
 impl LiveSettings {
     fn from_environment() -> Self {
         let acknowledgement = required_environment("RW_LIVE_SMOKE");
@@ -163,6 +182,44 @@ async fn prepare_runtime(settings: &LiveSettings) -> PreparedRuntime {
         anthropic_candidate,
         openai_candidate,
     }
+}
+
+async fn prepare_openai_subscription_runtime(
+    settings: &OpenAiSubscriptionLiveSettings,
+) -> (ProviderRuntime, String) {
+    let loader = ConfigLoader::from_environment()
+        .unwrap_or_else(|error| panic!("user config discovery must succeed: {error}"));
+    let credentials_path = loader.credentials_path();
+    let mut config = loader
+        .load()
+        .unwrap_or_else(|error| panic!("user config must load before live smoke: {error}"))
+        .config;
+    let candidate = format!("{OPENAI_PROVIDER}/{}", settings.openai_model);
+    "live-openai-subscription".clone_into(&mut config.models.default);
+    config.models.aliases = BTreeMap::from([(
+        "live-openai-subscription".to_owned(),
+        vec![candidate.clone()],
+    )]);
+    config.models.thinking = BTreeMap::from([(
+        "live-openai-subscription".to_owned(),
+        ConfigThinkingLevel::Off,
+    )]);
+    let runtime = ProviderFactory::with_backends(
+        Arc::new(CredentialManager::system(credentials_path)),
+        ProxyEnvironment::capture(),
+        NetworkPolicy::Allow,
+        load_pricing().await,
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("ChatGPT subscription provider must preflight: {error}"));
+    assert!(runtime.provider(&candidate).is_some());
+    assert!(
+        runtime
+            .resolved_model(&candidate)
+            .is_some_and(|model| model.capabilities().tool_calling),
+        "live ChatGPT subscription model must advertise tool support"
+    );
+    (runtime, candidate)
 }
 
 fn inject_live_models(
@@ -389,6 +446,39 @@ async fn credential_store_two_family_record_and_offline_replay() {
         openai,
         tool_request(settings.openai_model),
         &settings.fixture_root.join("openai"),
+        redactor,
+    )
+    .await;
+}
+
+/// Direct ChatGPT-subscription invocation using Rottweiler's own credential bundle:
+///
+/// ```text
+/// # User config must define provider `openai` with kind `openai_codex` and
+/// # `rw auth login openai` must have completed successfully.
+/// RW_LIVE_SMOKE=accept-paid-requests \
+/// RW_LIVE_SMOKE_FIXTURE_DIR=/absolute/existing/path/outside/repository \
+/// RW_LIVE_OPENAI_MODEL=<current-subscription-tool-model> \
+/// cargo test --locked -p rw-core --test live_smoke_credentials \
+///   chatgpt_subscription_record_and_offline_replay -- --ignored --exact --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "consumes explicitly authorized ChatGPT subscription quota"]
+async fn chatgpt_subscription_record_and_offline_replay() {
+    let settings = OpenAiSubscriptionLiveSettings::from_environment();
+    let (runtime, candidate) = prepare_openai_subscription_runtime(&settings).await;
+    let redactor = runtime.fixture_redactor();
+    assert!(
+        redactor.registered_secret_count() >= 3,
+        "factory must register access, refresh, and account credentials before the live request"
+    );
+    let openai = runtime
+        .provider(&candidate)
+        .unwrap_or_else(|| panic!("factory-preflighted ChatGPT subscription provider must exist"));
+    capture_and_replay(
+        openai,
+        tool_request(settings.openai_model),
+        &settings.fixture_root.join("openai-subscription"),
         redactor,
     )
     .await;

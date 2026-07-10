@@ -10,6 +10,7 @@ mod auth;
 mod http;
 mod models_dev;
 mod openai;
+mod openai_subscription;
 mod pricing;
 mod proxy;
 mod recording;
@@ -31,6 +32,13 @@ pub use models_dev::{
     refresh_models_dev_with_proxy_auth,
 };
 pub use openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode};
+pub use openai_subscription::{
+    OPENAI_SUBSCRIPTION_AUTHORIZATION_ENDPOINT, OPENAI_SUBSCRIPTION_CLIENT_ID,
+    OPENAI_SUBSCRIPTION_REDIRECT_URI, OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT,
+    OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT, OpenAiSubscriptionAuth, OpenAiSubscriptionAuthConfig,
+    OpenAiSubscriptionTokenSink, extract_openai_subscription_account_id,
+    openai_subscription_oauth_flow, openai_subscription_oauth_flow_with_endpoints,
+};
 pub use pricing::{CostBreakdown, ModelPricing, PricingTable};
 pub use proxy::{ProxyEnvironment, ProxyResolution, ProxySettings, ProxySource};
 pub use recording::{FixtureRedactor, Recorder, ReplayProvider};

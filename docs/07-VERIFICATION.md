@@ -52,6 +52,18 @@ previous and subsequent registrations still redact. Catalog tests also bind an
 official kind to its canonical namespace despite a conflicting logical-name
 entry, while a compatible adapter uses only its explicit logical entry.
 
+The built-in `openai_codex` path has its own deterministic contract suite. It
+asserts the exact fixed callback and authorization parameters, PKCE/state, token
+exchange and deduplicated refresh, JWT account-id extraction, rotated credential
+persistence before bearer exposure, fixed-endpoint and mixed-auth rejection,
+required backend headers, subscription-specific Responses body, and dynamic
+secret redaction. Factory tests prove its tool/reasoning capabilities do not
+depend on API pricing metadata and that dollar pricing remains unavailable.
+The live opt-in smoke records and replays a named tool call through the same raw
+Responses normalizer; current evidence covers `gpt-5.4-mini`. Unproven models are
+not added to the conservative allowlist, and `max_output_tokens` is deliberately
+absent because the live subscription backend rejects it.
+
 These deterministic fixtures do **not** substitute for M1's credentialed live
 smoke. A minimal tool-call recording from both remote API families remains a
 release/milestone gate whenever credentials are available; CI must continue to
