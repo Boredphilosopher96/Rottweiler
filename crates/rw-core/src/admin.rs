@@ -1,10 +1,11 @@
 use std::{collections::BTreeMap, fmt, path::PathBuf};
 
 use rw_providers::{
-    DEFAULT_OAUTH_CALLBACK_TIMEOUT, OAuthAuthorizationCode, OAuthAuthorizationCodeConfig,
-    OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT, ProxyAuthentication, ProxyEnvironment, ProxySettings,
-    ProxySource, Secret as ProviderSecret, default_models_path, openai_subscription_oauth_flow,
-    refresh_models_dev_with_proxy_auth,
+    DEFAULT_OAUTH_CALLBACK_TIMEOUT, DeviceFlowCancellation, GITHUB_COPILOT_DEVICE_CODE_ENDPOINT,
+    GitHubCopilotDeviceFlow, GitHubCopilotDeviceSession, OAuthAuthorizationCode,
+    OAuthAuthorizationCodeConfig, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT, ProxyAuthentication,
+    ProxyEnvironment, ProxySettings, ProxySource, Secret as ProviderSecret, default_models_path,
+    openai_subscription_oauth_flow, refresh_models_dev_with_proxy_auth,
 };
 use rw_store::{
     config::ConfigLoader,
@@ -17,6 +18,7 @@ use rw_types::config::ProviderConfig;
 use thiserror::Error;
 use url::Url;
 
+use crate::copilot_credentials::{GitHubCopilotCredential, github_copilot_credential_id};
 use crate::subscription_credentials::{
     OpenAiSubscriptionCredentialBundle, openai_subscription_credential_id,
 };
@@ -354,6 +356,116 @@ pub struct OAuthLoginResult {
     pub warnings: Vec<String>,
 }
 
+/// Authentication interaction selected from the configured provider kind.
+pub enum ProviderLogin {
+    /// Browser-based authorization-code login.
+    OAuth(Box<OAuthLogin>),
+    /// GitHub device authorization for the isolated Copilot profile.
+    GitHubCopilot(Box<GitHubCopilotLogin>),
+}
+
+/// Opaque in-progress GitHub Copilot device authorization.
+pub struct GitHubCopilotLogin {
+    provider_name: String,
+    credential_manager: CredentialManager,
+    session: GitHubCopilotDeviceSession,
+    verification_uri: String,
+    user_code: String,
+    oauth_client_id: String,
+    warnings: Vec<String>,
+}
+
+impl GitHubCopilotLogin {
+    /// GitHub page where the user enters [`Self::user_code`].
+    #[must_use]
+    pub fn verification_uri(&self) -> &str {
+        &self.verification_uri
+    }
+
+    /// Short device code that the UI must show directly to the user.
+    #[must_use]
+    pub fn user_code(&self) -> &str {
+        &self.user_code
+    }
+
+    /// Configuration and credential fallback warnings discovered before login.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Polls until GitHub authorizes, denies, expires, or cancellation wins.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized device-flow or credential-storage failure.
+    pub async fn complete(
+        self,
+        cancellation: &ProviderLoginCancellation,
+    ) -> Result<GitHubCopilotLoginResult, AdminError> {
+        let token = self
+            .session
+            .complete(&cancellation.0)
+            .await
+            .map_err(AdminError::from_display)?
+            .into_secret();
+        let warnings = store_github_copilot_token_with_manager(
+            &self.credential_manager,
+            &self.provider_name,
+            &token,
+            &self.oauth_client_id,
+        )?;
+        Ok(GitHubCopilotLoginResult {
+            provider: self.provider_name,
+            warnings,
+        })
+    }
+}
+
+/// Cooperative cancellation for an in-progress provider login.
+#[derive(Clone, Debug, Default)]
+pub struct ProviderLoginCancellation(DeviceFlowCancellation);
+
+impl ProviderLoginCancellation {
+    /// Cancels any current or future device-flow polling wait.
+    pub fn cancel(&self) {
+        self.0.cancel();
+    }
+}
+
+/// Completion details for a stored GitHub Copilot device credential.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitHubCopilotLoginResult {
+    /// Locally configured provider name.
+    pub provider: String,
+    /// Credential-storage warnings that the active UI must surface.
+    pub warnings: Vec<String>,
+}
+
+/// Selects the login protocol from the configured provider kind.
+///
+/// # Errors
+///
+/// Returns a sanitized configuration, proxy, device-flow, or OAuth error.
+pub async fn begin_provider_login(provider_name: &str) -> Result<ProviderLogin, AdminError> {
+    let effective = ConfigLoader::from_environment()
+        .map_err(AdminError::from_display)?
+        .load()
+        .map_err(AdminError::from_display)?;
+    let provider = configured_provider(&effective, provider_name)?;
+    if provider.kind == "github_copilot" {
+        begin_github_copilot_login(provider_name)
+            .await
+            .map(Box::new)
+            .map(ProviderLogin::GitHubCopilot)
+    } else {
+        begin_oauth_login(provider_name)
+            .await
+            .map(Box::new)
+            .map(ProviderLogin::OAuth)
+    }
+}
+
 /// Starts a configured provider's OAuth Authorization Code + PKCE flow.
 ///
 /// # Errors
@@ -476,6 +588,99 @@ pub async fn begin_oauth_login(provider_name: &str) -> Result<OAuthLogin, AdminE
     })
 }
 
+async fn begin_github_copilot_login(provider_name: &str) -> Result<GitHubCopilotLogin, AdminError> {
+    let loader = ConfigLoader::from_environment().map_err(AdminError::from_display)?;
+    let credentials_path = loader.credentials_path();
+    let effective = loader.load().map_err(AdminError::from_display)?;
+    let provider = configured_provider(&effective, provider_name)?.clone();
+    validate_github_copilot_profile(provider_name, &provider)?;
+    let device_endpoint =
+        Url::parse(GITHUB_COPILOT_DEVICE_CODE_ENDPOINT).map_err(AdminError::from_display)?;
+    let global_proxy = effective
+        .config
+        .network
+        .proxy
+        .as_deref()
+        .map(Url::parse)
+        .transpose()
+        .map_err(AdminError::from_display)?;
+    let per_provider = provider
+        .proxy
+        .as_deref()
+        .map(Url::parse)
+        .transpose()
+        .map_err(AdminError::from_display)?
+        .map(|proxy| BTreeMap::from([(provider_name.to_owned(), proxy)]))
+        .unwrap_or_default();
+    let proxies = ProxySettings {
+        global: global_proxy,
+        per_provider,
+        environment: ProxyEnvironment::capture(),
+    };
+    let resolution = proxies.resolve(provider_name, &device_endpoint);
+    let credential_manager = CredentialManager::system(credentials_path);
+    let (proxy_authentication, credential_warnings) =
+        match resolution.as_ref().map(|value| value.source) {
+            Some(ProxySource::Provider) => resolve_proxy_authentication(
+                &credential_manager,
+                provider.proxy_username.as_deref(),
+                provider.proxy_password_credential.as_deref(),
+            )?,
+            Some(ProxySource::Global) => resolve_proxy_authentication(
+                &credential_manager,
+                effective.config.network.proxy_username.as_deref(),
+                effective
+                    .config
+                    .network
+                    .proxy_password_credential
+                    .as_deref(),
+            )?,
+            Some(ProxySource::Environment) | None => (None, Vec::new()),
+        };
+    let flow = GitHubCopilotDeviceFlow::from_compiled(
+        resolution.as_ref().map(|value| &value.url),
+        proxy_authentication.as_ref(),
+    )
+    .map_err(AdminError::from_display)?;
+    let session = flow.begin().await.map_err(AdminError::from_display)?;
+    let verification_uri = session.verification_uri().to_string();
+    let user_code = session.user_code().to_owned();
+    let oauth_client_id = session.client_id().to_owned();
+    let mut warnings = config_warnings(&effective);
+    warnings.extend(credential_warnings);
+    Ok(GitHubCopilotLogin {
+        provider_name: provider_name.to_owned(),
+        credential_manager,
+        session,
+        verification_uri,
+        user_code,
+        oauth_client_id,
+        warnings,
+    })
+}
+
+fn validate_github_copilot_profile(
+    provider_name: &str,
+    provider: &ProviderConfig,
+) -> Result<(), AdminError> {
+    if provider.base_url.is_some()
+        || provider.api_key_env.is_some()
+        || provider.api_key_credential.is_some()
+        || provider.oauth_token_env.is_some()
+        || provider.oauth_authorization_endpoint.is_some()
+        || provider.oauth_token_endpoint.is_some()
+        || provider.oauth_client_id.is_some()
+        || !provider.oauth_scopes.is_empty()
+        || provider.oauth_access_token_credential.is_some()
+        || provider.oauth_refresh_token_credential.is_some()
+    {
+        return Err(AdminError::new(format!(
+            "provider {provider_name:?} uses the fixed github_copilot profile and cannot configure API-key, generic OAuth, or endpoint fields"
+        )));
+    }
+    Ok(())
+}
+
 fn configured_provider<'a>(
     effective: &'a rw_store::config::LoadedConfig,
     provider_name: &str,
@@ -519,6 +724,27 @@ where
     let reference = provider_api_key_credential_reference(provider_name, provider)?;
     let stored = manager
         .store(&reference, api_key)
+        .map_err(AdminError::from_display)?;
+    Ok(stored.warnings().iter().map(ToString::to_string).collect())
+}
+
+fn store_github_copilot_token_with_manager<E, K>(
+    manager: &CredentialManager<E, K>,
+    provider_name: &str,
+    access_token: &ProviderSecret,
+    oauth_client_id: &str,
+) -> Result<Vec<String>, AdminError>
+where
+    E: CredentialEnvironment,
+    K: CredentialKeychain,
+{
+    let credential = GitHubCopilotCredential::from_secret(access_token, oauth_client_id)?;
+    let encoded = credential.encode()?;
+    let stored = manager
+        .store(
+            &CredentialReference::new(github_copilot_credential_id(provider_name)),
+            &StoredSecret::new(encoded),
+        )
         .map_err(AdminError::from_display)?;
     Ok(stored.warnings().iter().map(ToString::to_string).collect())
 }
@@ -596,17 +822,19 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use rw_providers::Secret as ProviderSecret;
     use rw_store::credentials::{
         CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
-        CredentialReference, KeychainUnavailable, Secret,
+        CredentialReference, KEYCHAIN_VAULT_ID, KeychainUnavailable, Secret,
     };
     use rw_types::config::ProviderConfig;
 
     use super::{
         ProviderApiKey, default_provider_api_key_credential_id,
         provider_api_key_credential_reference, resolve_provider_api_key_with_manager,
-        store_provider_api_key_with_manager,
+        store_github_copilot_token_with_manager, store_provider_api_key_with_manager,
     };
+    use crate::copilot_credentials::{GitHubCopilotCredential, github_copilot_credential_id};
 
     #[derive(Clone, Default)]
     struct TestEnvironment(BTreeMap<String, String>);
@@ -701,5 +929,38 @@ mod tests {
             .unwrap_or_else(|error| panic!("injected resolution must work: {error}"));
         assert_eq!(resolved.api_key().expose_secret(), "environment-key");
         assert!(resolved.warnings().is_empty());
+    }
+
+    #[test]
+    fn copilot_token_is_one_rottweiler_owned_logical_vault_entry() {
+        let keychain = TestKeychain::default();
+        let manager = CredentialManager::with_backends(
+            TestEnvironment::default(),
+            keychain.clone(),
+            PathBuf::from("unused-test-credentials.toml"),
+        );
+        let token = ProviderSecret::new("copilot-token-canary".to_owned());
+        let warnings = store_github_copilot_token_with_manager(
+            &manager,
+            "github-copilot",
+            &token,
+            "rottweiler-test-client",
+        )
+        .unwrap_or_else(|error| panic!("injected token store must work: {error}"));
+        assert!(warnings.is_empty());
+        let identifier = github_copilot_credential_id("github-copilot");
+        let stored = manager
+            .resolve(&CredentialReference::new(identifier.clone()))
+            .unwrap_or_else(|error| panic!("stored Copilot token must resolve: {error}"));
+        let credential = GitHubCopilotCredential::parse(stored.secret().expose_secret())
+            .unwrap_or_else(|error| panic!("stored Copilot credential must parse: {error}"));
+        assert_eq!(credential.access_token(), "copilot-token-canary");
+        assert_eq!(credential.oauth_client_id(), "rottweiler-test-client");
+        let entries = keychain
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(entries.len(), 1);
+        assert!(entries.contains_key(KEYCHAIN_VAULT_ID));
     }
 }

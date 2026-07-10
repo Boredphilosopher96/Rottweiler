@@ -7,6 +7,7 @@
 
 mod anthropic;
 mod auth;
+mod github_copilot;
 mod http;
 mod models_dev;
 mod openai;
@@ -25,6 +26,15 @@ pub use auth::{
     OAuthAuthorizationCode, OAuthAuthorizationCodeConfig, OAuthEntropy, OAuthLoginSession,
     OAuthRefreshConfig, OAuthTokenSet, ProxyAuthentication, RefreshTokenSink, RefreshingOAuth,
     Secret, StaticAuth, SystemOAuthEntropy,
+};
+pub use github_copilot::{
+    DeviceFlowCancellation, GITHUB_COPILOT_ACCESS_TOKEN_ENDPOINT, GITHUB_COPILOT_API_VERSION,
+    GITHUB_COPILOT_BASE_URL, GITHUB_COPILOT_COMPILED_CLIENT_ID,
+    GITHUB_COPILOT_DEVICE_CODE_ENDPOINT, GitHubCopilotAccessToken, GitHubCopilotCatalog,
+    GitHubCopilotDeviceAuthorization, GitHubCopilotDeviceFlow, GitHubCopilotDeviceSession,
+    GitHubCopilotEndpoint, GitHubCopilotModel, GitHubCopilotPricing, GitHubCopilotProvider,
+    GitHubCopilotProviderConfig, GitHubCopilotRuntime, GitHubDeviceFlowTransport, GitHubDevicePoll,
+    github_copilot_ai_credits, github_copilot_micros_usd_per_million, parse_github_copilot_models,
 };
 pub use http::{ProcessNetworkDenyGuard, deny_outbound_network_for_process};
 pub use models_dev::{
@@ -48,8 +58,9 @@ pub use retry::{
 pub use router::{ModelCandidate, ProviderRouter, RouterError};
 pub use types::{
     BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason, NetworkPolicy, Provider,
-    ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest, ThinkingLevel, TokenUsage,
-    ToolChoice, ToolDefinition, WireFrameSink, WireMode,
+    ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest,
+    ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition, UsageAccounting, WireFrameSink,
+    WireMode,
 };
 
 /// Identifies this workspace component in diagnostics.

@@ -5,15 +5,16 @@ use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc};
 use async_trait::async_trait;
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, AuthProvider,
-    BoxEventStream, CacheBreakpointSupport, Capabilities, FixtureRedactor, ModelPricing,
-    NetworkPolicy, OAuthRefreshConfig, OPENAI_SUBSCRIPTION_CLIENT_ID,
-    OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiSubscriptionAuth,
-    OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink, OpenAiWireMode, PricingTable,
-    Provider, ProviderError, ProviderErrorKind, ProviderRequest, ProviderRouter,
-    ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource, RefreshTokenSink,
-    RefreshingOAuth, RetryPolicy, RouterError, Secret as ProviderSecret, StaticAuth, ThinkingLevel,
-    WireFrameSink, WireMode,
+    BoxEventStream, CacheBreakpointSupport, Capabilities, FixtureRedactor,
+    GITHUB_COPILOT_COMPILED_CLIENT_ID, GitHubCopilotProvider, GitHubCopilotProviderConfig,
+    GitHubCopilotRuntime, ModelPricing, NetworkPolicy, OAuthRefreshConfig,
+    OPENAI_SUBSCRIPTION_CLIENT_ID, OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT,
+    OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+    OpenAiSubscriptionAuth, OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink,
+    OpenAiWireMode, PricingTable, Provider, ProviderError, ProviderErrorKind,
+    ProviderModelMetadata, ProviderRequest, ProviderRouter, ProxyAuthentication, ProxyEnvironment,
+    ProxySettings, ProxySource, RefreshTokenSink, RefreshingOAuth, RetryPolicy, RouterError,
+    Secret as ProviderSecret, StaticAuth, ThinkingLevel, UsageAccounting, WireFrameSink, WireMode,
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
@@ -24,6 +25,7 @@ use thiserror::Error;
 use url::{Host, Url};
 
 use crate::admin::provider_api_key_credential_reference;
+use crate::copilot_credentials::{GitHubCopilotCredential, github_copilot_credential_id};
 use crate::subscription_credentials::{
     OpenAiSubscriptionCredentialBundle, openai_subscription_credential_id,
 };
@@ -31,6 +33,7 @@ use crate::subscription_credentials::{
 const ANTHROPIC_MESSAGES_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const OPENAI_RESPONSES_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 const OPENAI_CHAT_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+const GITHUB_COPILOT_ENDPOINT: &str = "https://api.githubcopilot.com";
 
 /// Sanitized provider-composition failure. Secret values are never retained.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -58,6 +61,7 @@ pub struct ResolvedModel {
     catalog_model: Option<String>,
     capabilities: Capabilities,
     pricing: Option<ModelPricing>,
+    accounting: UsageAccounting,
 }
 
 impl ResolvedModel {
@@ -95,6 +99,12 @@ impl ResolvedModel {
     #[must_use]
     pub const fn pricing(&self) -> Option<&ModelPricing> {
         self.pricing.as_ref()
+    }
+
+    /// Accounting unit for usage reported by this provider route.
+    #[must_use]
+    pub const fn accounting(&self) -> UsageAccounting {
+        self.accounting
     }
 }
 
@@ -139,6 +149,36 @@ impl ProviderRuntime {
         self.models.get(candidate)
     }
 
+    /// Resolves current provider-neutral capabilities, rates, and billing unit.
+    /// Dynamic providers may perform an authenticated catalog lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized discovery error or an unknown-candidate error.
+    pub async fn model_metadata(
+        &self,
+        candidate: &str,
+    ) -> Result<ProviderModelMetadata, ProviderFactoryError> {
+        let provider = self.providers.get(candidate).ok_or_else(|| {
+            ProviderFactoryError::new(candidate, "model candidate is not configured")
+        })?;
+        if let Some(metadata) = provider
+            .model_metadata()
+            .await
+            .map_err(|error| ProviderFactoryError::new(candidate, error.to_string()))?
+        {
+            return Ok(metadata);
+        }
+        let model = self.models.get(candidate).ok_or_else(|| {
+            ProviderFactoryError::new(candidate, "model metadata is inconsistent")
+        })?;
+        Ok(ProviderModelMetadata {
+            capabilities: model.capabilities.clone(),
+            pricing: model.pricing.clone(),
+            accounting: model.accounting,
+        })
+    }
+
     /// Known-secret redactor for [`rw_providers::Recorder`].
     #[must_use]
     pub fn fixture_redactor(&self) -> FixtureRedactor {
@@ -175,6 +215,13 @@ pub struct ProviderFactory<E = SystemEnvironment, K = OsKeychain> {
     network_policy: NetworkPolicy,
     pricing: PricingTable,
     retry: RetryPolicy,
+    github_copilot_test_origins: BTreeMap<String, GitHubCopilotTestOrigin>,
+}
+
+#[derive(Clone)]
+struct GitHubCopilotTestOrigin {
+    origin: Url,
+    oauth_client_id: String,
 }
 
 impl ProviderFactory<SystemEnvironment, OsKeychain> {
@@ -209,6 +256,7 @@ where
             network_policy,
             pricing,
             retry: RetryPolicy::default(),
+            github_copilot_test_origins: BTreeMap::new(),
         }
     }
 
@@ -216,6 +264,26 @@ where
     #[must_use]
     pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Injects a loopback-only Copilot origin for deterministic acceptance tests.
+    /// Production composition must use the fixed public origin.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_github_copilot_test_origin(
+        mut self,
+        provider: impl Into<String>,
+        origin: Url,
+        oauth_client_id: impl Into<String>,
+    ) -> Self {
+        self.github_copilot_test_origins.insert(
+            provider.into(),
+            GitHubCopilotTestOrigin {
+                origin,
+                oauth_client_id: oauth_client_id.into(),
+            },
+        );
         self
     }
 
@@ -342,6 +410,8 @@ where
                     &redactor,
                     &warnings,
                 )?
+            } else if kind == AdapterKind::GitHubCopilot {
+                Arc::new(StaticAuth::new(AuthMaterial::None)) as Arc<dyn AuthProvider>
             } else {
                 self.resolve_auth(
                     provider_name,
@@ -354,12 +424,25 @@ where
                     &warnings,
                 )?
             };
+            let copilot_runtime = if kind == AdapterKind::GitHubCopilot {
+                Some(self.resolve_github_copilot_runtime(
+                    provider_name,
+                    provider_config,
+                    proxy.as_ref().map(|value| &value.url),
+                    proxy_authentication.as_ref(),
+                    &redactor,
+                    &warnings,
+                )?)
+            } else {
+                None
+            };
             connections.insert(
                 provider_name.clone(),
                 ProviderConnection {
                     kind,
                     endpoint,
                     auth,
+                    copilot_runtime,
                     proxy: proxy.map(|value| value.url),
                     proxy_authentication,
                 },
@@ -371,12 +454,16 @@ where
                 ProviderFactoryError::new(provider_name, "provider connection is inconsistent")
             })?;
             let kind = connection.kind;
-            let (catalog_model, pricing) = find_pricing(
-                &self.pricing,
-                provider_name,
-                model,
-                kind.catalog_namespace(),
-            );
+            let (catalog_model, pricing) = if kind == AdapterKind::GitHubCopilot {
+                (None, None)
+            } else {
+                find_pricing(
+                    &self.pricing,
+                    provider_name,
+                    model,
+                    kind.catalog_namespace(),
+                )
+            };
             if kind == AdapterKind::OpenAiSubscription && !subscription_model_allowed(model) {
                 return Err(ProviderFactoryError::new(
                     provider_name,
@@ -395,16 +482,25 @@ where
                     .as_ref()
                     .map_or_else(Vec::new, |value| value.reasoning_efforts.clone())
             };
-            let capabilities = if kind == AdapterKind::OpenAiSubscription {
-                subscription_model_capabilities()
-            } else {
-                model_capabilities(kind, pricing.as_ref())
+            let capabilities = match kind {
+                AdapterKind::OpenAiSubscription => subscription_model_capabilities(),
+                AdapterKind::GitHubCopilot => github_copilot_capabilities(),
+                _ => model_capabilities(kind, pricing.as_ref()),
+            };
+            let accounting = match kind {
+                AdapterKind::OpenAiSubscription => UsageAccounting::SubscriptionQuota,
+                AdapterKind::GitHubCopilot => UsageAccounting::AiCredits {
+                    micros_usd_per_credit: 10_000,
+                },
+                _ if pricing.is_some() => UsageAccounting::ApiDollars,
+                _ => UsageAccounting::UnpricedApi,
             };
             let inner = construct_adapter(
                 candidate,
                 kind,
                 connection.endpoint.clone(),
                 Arc::clone(&connection.auth),
+                connection.copilot_runtime.clone(),
                 connection.proxy.clone(),
                 connection.proxy_authentication.clone(),
                 self.network_policy,
@@ -416,6 +512,7 @@ where
                 expected_model: model.clone(),
                 capabilities: capabilities.clone(),
                 supported_thinking,
+                defer_capabilities: kind == AdapterKind::GitHubCopilot,
             });
             let registration_key = format!("__model_{index:08}");
             registration_keys.insert(candidate.clone(), registration_key.clone());
@@ -429,11 +526,15 @@ where
                     model: model.clone(),
                     catalog_model,
                     capabilities,
-                    pricing: if kind == AdapterKind::OpenAiSubscription {
+                    pricing: if matches!(
+                        kind,
+                        AdapterKind::OpenAiSubscription | AdapterKind::GitHubCopilot
+                    ) {
                         None
                     } else {
                         pricing
                     },
+                    accounting,
                 },
             );
         }
@@ -724,6 +825,68 @@ where
         Ok(Arc::new(auth))
     }
 
+    fn resolve_github_copilot_runtime(
+        &self,
+        provider_name: &str,
+        provider: &ProviderConfig,
+        proxy: Option<&Url>,
+        proxy_authentication: Option<&ProxyAuthentication>,
+        redactor: &FixtureRedactor,
+        warnings: &RuntimeWarnings,
+    ) -> Result<Arc<GitHubCopilotRuntime>, ProviderFactoryError> {
+        if provider.api_key_env.is_some()
+            || provider.api_key_credential.is_some()
+            || provider.oauth_token_env.is_some()
+            || provider.oauth_authorization_endpoint.is_some()
+            || provider.oauth_token_endpoint.is_some()
+            || provider.oauth_client_id.is_some()
+            || !provider.oauth_scopes.is_empty()
+            || provider.oauth_access_token_credential.is_some()
+            || provider.oauth_refresh_token_credential.is_some()
+        {
+            return Err(ProviderFactoryError::new(
+                provider_name,
+                "github_copilot uses only its built-in device-flow credential",
+            ));
+        }
+        let reference = CredentialReference::new(github_copilot_credential_id(provider_name));
+        let resolved = self.resolve_required(provider_name, &reference)?;
+        warnings.extend(resolved.warnings().iter().map(ToString::to_string));
+        let credential = GitHubCopilotCredential::parse(resolved.secret().expose_secret())
+            .map_err(|error| ProviderFactoryError::new(provider_name, error.to_string()))?;
+        let test_origin = self.github_copilot_test_origins.get(provider_name);
+        let expected_client_id = if let Some(test_origin) = test_origin {
+            test_origin.oauth_client_id.as_str()
+        } else {
+            GITHUB_COPILOT_COMPILED_CLIENT_ID.ok_or_else(|| {
+                ProviderFactoryError::new(
+                    provider_name,
+                    "this build has no Rottweiler GitHub Copilot OAuth client identity",
+                )
+            })?
+        };
+        if credential.oauth_client_id() != expected_client_id {
+            return Err(ProviderFactoryError::new(
+                provider_name,
+                "stored GitHub Copilot credential belongs to a different OAuth client identity",
+            ));
+        }
+        let token = ProviderSecret::new(credential.access_token().to_owned());
+        redactor.register_secret(&token);
+        let runtime = if let Some(test_origin) = test_origin {
+            GitHubCopilotRuntime::with_test_origin(
+                token,
+                test_origin.origin.clone(),
+                self.network_policy,
+            )
+        } else {
+            GitHubCopilotRuntime::new(token, proxy, proxy_authentication, self.network_policy)
+        };
+        runtime
+            .map(Arc::new)
+            .map_err(|error| ProviderFactoryError::new(provider_name, error.to_string()))
+    }
+
     fn resolve_required(
         &self,
         provider: &str,
@@ -892,12 +1055,14 @@ struct ModelBoundProvider {
     expected_model: String,
     capabilities: Capabilities,
     supported_thinking: Vec<ThinkingLevel>,
+    defer_capabilities: bool,
 }
 
 struct ProviderConnection {
     kind: AdapterKind,
     endpoint: Url,
     auth: Arc<dyn AuthProvider>,
+    copilot_runtime: Option<Arc<GitHubCopilotRuntime>>,
     proxy: Option<Url>,
     proxy_authentication: Option<ProxyAuthentication>,
 }
@@ -919,6 +1084,10 @@ impl ModelBoundProvider {
                 ProviderErrorKind::InvalidRequest,
                 "request model does not match the model-bound provider",
             ));
+        }
+        request.validate_tool_choice()?;
+        if self.defer_capabilities {
+            return Ok(());
         }
         if !self.capabilities.tool_calling && !request.tools.is_empty() {
             return Err(ProviderError::new(
@@ -987,6 +1156,10 @@ impl Provider for ModelBoundProvider {
         self.capabilities.clone()
     }
 
+    async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
+        self.inner.model_metadata().await
+    }
+
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         self.validate(&request)?;
         self.inner.stream(request).await
@@ -1008,6 +1181,7 @@ enum AdapterKind {
     OpenAiResponses,
     OpenAiChat,
     OpenAiSubscription,
+    GitHubCopilot,
     OpenAiCompatibleResponses,
     OpenAiCompatibleChat,
 }
@@ -1019,11 +1193,12 @@ impl AdapterKind {
             "openai" | "openai_responses" => Ok(Self::OpenAiResponses),
             "openai_chat" => Ok(Self::OpenAiChat),
             "openai_codex" | "openai_subscription" => Ok(Self::OpenAiSubscription),
+            "github_copilot" => Ok(Self::GitHubCopilot),
             "openai_compatible_responses" => Ok(Self::OpenAiCompatibleResponses),
             "openai_compatible" | "openai_compatible_chat" => Ok(Self::OpenAiCompatibleChat),
             _ => Err(ProviderFactoryError::new(
                 provider,
-                "unsupported adapter kind; expected anthropic, openai, openai_chat, openai_codex, openai_compatible, or openai_compatible_responses",
+                "unsupported adapter kind; expected anthropic, github_copilot, openai, openai_chat, openai_codex, openai_compatible, or openai_compatible_responses",
             )),
         }
     }
@@ -1039,7 +1214,9 @@ impl AdapterKind {
         match self {
             Self::Anthropic => Some("anthropic"),
             Self::OpenAiResponses | Self::OpenAiChat | Self::OpenAiSubscription => Some("openai"),
-            Self::OpenAiCompatibleResponses | Self::OpenAiCompatibleChat => None,
+            Self::GitHubCopilot | Self::OpenAiCompatibleResponses | Self::OpenAiCompatibleChat => {
+                None
+            }
         }
     }
 
@@ -1048,6 +1225,7 @@ impl AdapterKind {
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
             Self::OpenAiResponses | Self::OpenAiChat => Some("OPENAI_API_KEY"),
             Self::OpenAiSubscription
+            | Self::GitHubCopilot
             | Self::OpenAiCompatibleResponses
             | Self::OpenAiCompatibleChat => None,
         }
@@ -1089,6 +1267,7 @@ fn resolve_endpoint(
         AdapterKind::OpenAiResponses => Some(OPENAI_RESPONSES_ENDPOINT),
         AdapterKind::OpenAiChat => Some(OPENAI_CHAT_ENDPOINT),
         AdapterKind::OpenAiSubscription => Some(OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT),
+        AdapterKind::GitHubCopilot => Some(GITHUB_COPILOT_ENDPOINT),
         AdapterKind::OpenAiCompatibleResponses | AdapterKind::OpenAiCompatibleChat => None,
     });
     let value = value.ok_or_else(|| {
@@ -1097,10 +1276,14 @@ fn resolve_endpoint(
             "openai-compatible adapters require an explicit endpoint",
         )
     })?;
-    if kind == AdapterKind::OpenAiSubscription && config.base_url.is_some() {
+    if matches!(
+        kind,
+        AdapterKind::OpenAiSubscription | AdapterKind::GitHubCopilot
+    ) && config.base_url.is_some()
+    {
         return Err(ProviderFactoryError::new(
             provider,
-            "openai_codex endpoint is fixed and cannot be overridden",
+            "subscription provider endpoint is fixed and cannot be overridden",
         ));
     }
     parse_remote_or_loopback_endpoint(provider, value)
@@ -1219,6 +1402,20 @@ fn subscription_model_capabilities() -> Capabilities {
     }
 }
 
+fn github_copilot_capabilities() -> Capabilities {
+    Capabilities {
+        // Copilot is a coding-agent route, so tools must reach lazy discovery;
+        // the discovered model record remains the authoritative fail-closed gate.
+        tool_calling: true,
+        vision: false,
+        thinking: false,
+        cache_breakpoints: CacheBreakpointSupport::None,
+        max_context_tokens: None,
+        max_output_tokens: None,
+        wire_mode: WireMode::GitHubCopilot,
+    }
+}
+
 fn random_subscription_session_id(provider: &str) -> Result<String, ProviderFactoryError> {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut bytes = [0_u8; 16];
@@ -1240,6 +1437,7 @@ fn random_subscription_session_id(provider: &str) -> Result<String, ProviderFact
 fn model_capabilities(kind: AdapterKind, pricing: Option<&ModelPricing>) -> Capabilities {
     let wire_mode = match kind {
         AdapterKind::Anthropic => WireMode::AnthropicMessages,
+        AdapterKind::GitHubCopilot => WireMode::GitHubCopilot,
         AdapterKind::OpenAiResponses
         | AdapterKind::OpenAiSubscription
         | AdapterKind::OpenAiCompatibleResponses => WireMode::OpenAiResponses,
@@ -1271,6 +1469,7 @@ fn construct_adapter(
     kind: AdapterKind,
     endpoint: Url,
     auth: Arc<dyn AuthProvider>,
+    copilot_runtime: Option<Arc<GitHubCopilotRuntime>>,
     proxy: Option<Url>,
     proxy_authentication: Option<ProxyAuthentication>,
     network_policy: NetworkPolicy,
@@ -1293,6 +1492,24 @@ fn construct_adapter(
             max_output_tokens: capabilities.max_output_tokens,
         })
         .map(|provider| Arc::new(provider) as Arc<dyn Provider>),
+        AdapterKind::GitHubCopilot => copilot_runtime
+            .ok_or_else(|| {
+                ProviderError::new(
+                    ProviderErrorKind::InvalidRequest,
+                    "GitHub Copilot runtime is missing",
+                )
+            })
+            .and_then(|runtime| {
+                GitHubCopilotProvider::new(GitHubCopilotProviderConfig {
+                    name: candidate.to_owned(),
+                    model_id: candidate
+                        .split_once('/')
+                        .map_or(candidate, |(_, model)| model)
+                        .to_owned(),
+                    runtime,
+                })
+            })
+            .map(|provider| Arc::new(provider) as Arc<dyn Provider>),
         AdapterKind::OpenAiResponses
         | AdapterKind::OpenAiSubscription
         | AdapterKind::OpenAiChat
@@ -1305,7 +1522,7 @@ fn construct_adapter(
                 AdapterKind::OpenAiChat | AdapterKind::OpenAiCompatibleChat => {
                     OpenAiWireMode::ChatCompletions
                 }
-                AdapterKind::Anthropic => unreachable!(),
+                AdapterKind::Anthropic | AdapterKind::GitHubCopilot => unreachable!(),
             };
             OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
                 name: candidate.to_owned(),

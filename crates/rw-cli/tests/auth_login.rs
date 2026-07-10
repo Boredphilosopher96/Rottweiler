@@ -36,6 +36,7 @@ oauth_scopes = ["models", "offline_access"]
         .current_dir(root.path())
         .env("HOME", root.path())
         .env("ROTTWEILER_HOME", &user_root)
+        .env("ROTTWEILER_CREDENTIAL_BACKEND", "file")
         .args(["auth", "login", "subscription"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -102,6 +103,38 @@ oauth_scopes = ["models", "offline_access"]
     for canary in [ATTACKER_STATE, CODE, &expected_state] {
         assert!(!stderr.contains(canary));
     }
+}
+
+#[test]
+fn copilot_login_rejects_api_key_mixing_before_credentials_or_network() {
+    let root = tempdir().expect("temporary directory should be created");
+    let user_root = root.path().join("user");
+    fs::create_dir_all(&user_root).expect("user config directory should be created");
+    fs::write(
+        user_root.join("config.toml"),
+        r#"
+[providers.github-copilot]
+kind = "github_copilot"
+api_key_env = "COPILOT_TOKEN_MUST_NOT_BE_READ"
+"#,
+    )
+    .expect("Copilot config should be written");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rw"))
+        .env_clear()
+        .current_dir(root.path())
+        .env("HOME", root.path())
+        .env("ROTTWEILER_HOME", &user_root)
+        .env("ROTTWEILER_CREDENTIAL_BACKEND", "file")
+        .args(["auth", "login", "github-copilot"])
+        .output()
+        .expect("rw auth login should exit");
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be UTF-8");
+    assert!(stderr.contains("fixed github_copilot profile"));
+    assert!(!stderr.contains("COPILOT_TOKEN_MUST_NOT_BE_READ"));
+    assert!(!user_root.join("credentials.toml").exists());
 }
 
 fn query_value(url: &Url, name: &str) -> String {

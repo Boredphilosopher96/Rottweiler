@@ -22,7 +22,8 @@ use tokio::{
 use crate::types::RawSseFrame;
 use crate::{
     BoxEventStream, CacheBreakpointSupport, Capabilities, Provider, ProviderError,
-    ProviderErrorKind, ProviderEvent, ProviderRequest, WireFrameSink, WireMode,
+    ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest, WireFrameSink,
+    WireMode,
 };
 
 const FIXTURE_VERSION: u16 = 4;
@@ -33,6 +34,8 @@ struct RecordFixture {
     version: u16,
     provider: String,
     capabilities: RecordedCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_metadata: Option<ProviderModelMetadata>,
     wire_mode: WireMode,
     request_hash: String,
     occurrence: u64,
@@ -50,6 +53,8 @@ struct CapabilityManifest {
     version: u16,
     provider: String,
     capabilities: RecordedCapabilities,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_metadata: Option<ProviderModelMetadata>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -249,6 +254,8 @@ impl WriteJob {
             &self.request_hash,
             self.occurrence,
             &self.fixture.capabilities,
+            self.fixture.model_metadata.as_ref(),
+            self.fixture.start_error.is_some(),
         )?;
         write_fixture_sync(
             &self.directory,
@@ -427,6 +434,10 @@ impl Provider for Recorder {
         self.inner.capabilities()
     }
 
+    async fn model_metadata(&self) -> Result<Option<crate::ProviderModelMetadata>, ProviderError> {
+        self.inner.model_metadata().await
+    }
+
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         // Reserving bounded writer capacity happens before assigning an
         // occurrence or contacting the provider. Backpressure therefore
@@ -439,7 +450,31 @@ impl Provider for Recorder {
         // Reserve the occurrence at invocation time. In particular, a slow
         // provider handshake must not let a later call steal its sequence slot.
         let occurrence = next_occurrence(&self.occurrences, &occurrence_key);
-        let capabilities = self.inner.capabilities();
+        let model_metadata = match self.inner.model_metadata().await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let capabilities = self.inner.capabilities();
+                let context = RecordingContext {
+                    directory: self.directory.clone(),
+                    provider,
+                    capabilities: RecordedCapabilities::from(&capabilities),
+                    model_metadata: None,
+                    wire_mode: capabilities.wire_mode,
+                    request_hash,
+                    occurrence,
+                    request,
+                    captured: Arc::new(CapturedFrames::default()),
+                    redactor: self.redactor.clone(),
+                    items: Vec::new(),
+                    permit,
+                };
+                return Err(persist_start_error(context, error).await);
+            }
+        };
+        let capabilities = model_metadata.as_ref().map_or_else(
+            || self.inner.capabilities(),
+            |value| value.capabilities.clone(),
+        );
         let wire_mode = capabilities.wire_mode;
         let captured = Arc::new(CapturedFrames::default());
         let sink: Arc<dyn WireFrameSink> = captured.clone();
@@ -449,6 +484,7 @@ impl Provider for Recorder {
                 directory: self.directory.clone(),
                 provider,
                 capabilities: RecordedCapabilities::from(&capabilities),
+                model_metadata,
                 wire_mode,
                 request_hash,
                 occurrence,
@@ -476,21 +512,8 @@ impl Provider for Recorder {
             Ok(stream) => stream,
             Err(error) => {
                 let context = start.context.take().ok_or_else(writer_state_error)?;
-                let completion = context.enqueue_start_error(error.clone());
                 start.finish_tracking();
-                if let Err(record_error) = await_write(completion).await {
-                    // Retain the provider error category so retry/failover
-                    // decisions remain identical when recording cannot write.
-                    return Err(ProviderError {
-                        kind: error.kind,
-                        message: format!(
-                            "{}; replay recording also failed: {}",
-                            error.message, record_error.message
-                        ),
-                        retry_after_ms: error.retry_after_ms,
-                    });
-                }
-                return Err(error);
+                return Err(persist_start_error(context, error).await);
             }
         };
         let context = start.context.take().ok_or_else(writer_state_error)?;
@@ -537,6 +560,7 @@ struct RecordingContext {
     directory: PathBuf,
     provider: String,
     capabilities: RecordedCapabilities,
+    model_metadata: Option<ProviderModelMetadata>,
     wire_mode: WireMode,
     request_hash: String,
     occurrence: u64,
@@ -592,6 +616,7 @@ impl RecordingContext {
             version: FIXTURE_VERSION,
             provider: self.provider.clone(),
             capabilities: self.capabilities,
+            model_metadata: self.model_metadata,
             wire_mode: self.wire_mode,
             request_hash: self.request_hash.clone(),
             occurrence: self.occurrence,
@@ -651,6 +676,23 @@ async fn await_write(
     completion: oneshot::Receiver<Result<(), ProviderError>>,
 ) -> Result<(), ProviderError> {
     completion.await.map_err(|_| writer_state_error())?
+}
+
+async fn persist_start_error(context: RecordingContext, error: ProviderError) -> ProviderError {
+    let completion = context.enqueue_start_error(error.clone());
+    match await_write(completion).await {
+        Ok(()) => error,
+        Err(record_error) => ProviderError {
+            // Retain the provider category so retry/failover behavior remains
+            // identical when the diagnostic fixture cannot be written.
+            kind: error.kind,
+            message: format!(
+                "{}; replay recording also failed: {}",
+                error.message, record_error.message
+            ),
+            retry_after_ms: error.retry_after_ms,
+        },
+    }
 }
 
 fn writer_state_error() -> ProviderError {
@@ -750,6 +792,7 @@ pub struct ReplayProvider {
     name: String,
     directory: PathBuf,
     capabilities: Capabilities,
+    model_metadata: Option<ProviderModelMetadata>,
     occurrences: Arc<Mutex<BTreeMap<String, u64>>>,
 }
 
@@ -767,11 +810,12 @@ impl ReplayProvider {
     ) -> Result<Self, ProviderError> {
         let name = name.into();
         let directory = directory.into();
-        let capabilities = load_recorded_capabilities(&directory, &name).await?;
+        let (capabilities, model_metadata) = load_recorded_capabilities(&directory, &name).await?;
         Ok(Self {
             name,
             directory,
             capabilities,
+            model_metadata,
             occurrences: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -785,6 +829,10 @@ impl Provider for ReplayProvider {
 
     fn capabilities(&self) -> Capabilities {
         self.capabilities.clone()
+    }
+
+    async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
+        Ok(self.model_metadata.clone())
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
@@ -809,8 +857,11 @@ impl Provider for ReplayProvider {
         })?;
         if fixture.version != FIXTURE_VERSION
             || fixture.provider != self.name
-            || fixture.capabilities != RecordedCapabilities::from(&self.capabilities)
-            || fixture.wire_mode != self.capabilities.wire_mode
+            || !fixture_matches_manifest(
+                &fixture,
+                &RecordedCapabilities::from(&self.capabilities),
+                self.model_metadata.as_ref(),
+            )
             || fixture.request_hash != hash
             || fixture.occurrence != occurrence
         {
@@ -843,7 +894,24 @@ impl Provider for ReplayProvider {
                     crate::OpenAiWireMode::Responses,
                     &fixture.raw_sse,
                 ),
-                WireMode::NormalizedReplay => recorded_to_results(fixture.items.clone()),
+                // Version-4 fixtures written before exact Copilot dialects were
+                // persisted keep their already-normalized items. This is an
+                // explicit compatibility path and never guesses from frames.
+                WireMode::GitHubCopilot | WireMode::NormalizedReplay => {
+                    recorded_to_results(fixture.items.clone())
+                }
+                WireMode::GitHubCopilotMessages => crate::github_copilot::replay_sse_frames(
+                    crate::GitHubCopilotEndpoint::Messages,
+                    &fixture.raw_sse,
+                ),
+                WireMode::GitHubCopilotResponses => crate::github_copilot::replay_sse_frames(
+                    crate::GitHubCopilotEndpoint::Responses,
+                    &fixture.raw_sse,
+                ),
+                WireMode::GitHubCopilotChatCompletions => crate::github_copilot::replay_sse_frames(
+                    crate::GitHubCopilotEndpoint::ChatCompletions,
+                    &fixture.raw_sse,
+                ),
             };
             reconcile_raw_replay(parsed, fixture.items)?
         };
@@ -927,7 +995,7 @@ fn raw_replay_mismatch() -> ProviderError {
 async fn load_recorded_capabilities(
     directory: &Path,
     provider: &str,
-) -> Result<Capabilities, ProviderError> {
+) -> Result<(Capabilities, Option<ProviderModelMetadata>), ProviderError> {
     let manifest_path = capability_manifest_path(directory, provider);
     let manifest_bytes = tokio::fs::read(&manifest_path).await.map_err(|_| {
         ProviderError::new(
@@ -979,8 +1047,11 @@ async fn load_recorded_capabilities(
         })?;
         if fixture.version != FIXTURE_VERSION
             || fixture.provider != provider
-            || fixture.capabilities != manifest.capabilities
-            || fixture.wire_mode != manifest.capabilities.wire_mode
+            || !fixture_matches_manifest(
+                &fixture,
+                &manifest.capabilities,
+                manifest.model_metadata.as_ref(),
+            )
         {
             return Err(ProviderError::new(
                 ProviderErrorKind::Protocol,
@@ -991,7 +1062,7 @@ async fn load_recorded_capabilities(
             ));
         }
     }
-    Ok(manifest.capabilities.into())
+    Ok((manifest.capabilities.into(), manifest.model_metadata))
 }
 
 fn ensure_capability_manifest(
@@ -1000,16 +1071,30 @@ fn ensure_capability_manifest(
     hash: &str,
     occurrence: u64,
     capabilities: &RecordedCapabilities,
+    model_metadata: Option<&ProviderModelMetadata>,
+    is_start_error: bool,
 ) -> Result<(), ProviderError> {
     std::fs::create_dir_all(directory).map_err(record_io_error)?;
+    if let Some(metadata) = model_metadata {
+        validate_metadata_capabilities(capabilities, metadata)?;
+    }
     let manifest = CapabilityManifest {
         version: FIXTURE_VERSION,
         provider: provider.to_owned(),
         capabilities: capabilities.clone(),
+        model_metadata: model_metadata.cloned(),
     };
     let target = capability_manifest_path(directory, provider);
     if target.exists() {
-        return read_and_validate_manifest(&target, provider, capabilities);
+        return reconcile_capability_manifest(
+            &target,
+            provider,
+            capabilities,
+            model_metadata,
+            is_start_error,
+            hash,
+            occurrence,
+        );
     }
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| {
         ProviderError::new(
@@ -1034,7 +1119,15 @@ fn ensure_capability_manifest(
         }
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             std::fs::remove_file(&temporary).map_err(record_io_error)?;
-            read_and_validate_manifest(&target, provider, capabilities)
+            reconcile_capability_manifest(
+                &target,
+                provider,
+                capabilities,
+                model_metadata,
+                is_start_error,
+                hash,
+                occurrence,
+            )
         }
         Err(error) => {
             let _ = std::fs::remove_file(&temporary);
@@ -1043,10 +1136,15 @@ fn ensure_capability_manifest(
     }
 }
 
-fn read_and_validate_manifest(
+#[allow(clippy::too_many_arguments)]
+fn reconcile_capability_manifest(
     path: &Path,
     provider: &str,
     capabilities: &RecordedCapabilities,
+    model_metadata: Option<&ProviderModelMetadata>,
+    is_start_error: bool,
+    hash: &str,
+    occurrence: u64,
 ) -> Result<(), ProviderError> {
     let bytes = std::fs::read(path).map_err(record_io_error)?;
     let manifest: CapabilityManifest = serde_json::from_slice(&bytes).map_err(|error| {
@@ -1056,13 +1154,128 @@ fn read_and_validate_manifest(
         )
     })?;
     validate_manifest(provider, &manifest)?;
-    if &manifest.capabilities != capabilities {
+    match (manifest.model_metadata.as_ref(), model_metadata) {
+        (None, Some(metadata)) => {
+            validate_metadata_capabilities(capabilities, metadata)?;
+            if !wire_mode_evolves_from_unresolved(
+                manifest.capabilities.wire_mode,
+                capabilities.wire_mode,
+            ) {
+                return Err(changed_manifest_error(provider));
+            }
+            let upgraded = CapabilityManifest {
+                version: FIXTURE_VERSION,
+                provider: provider.to_owned(),
+                capabilities: capabilities.clone(),
+                model_metadata: Some(metadata.clone()),
+            };
+            replace_manifest_atomically(path, &upgraded, hash, occurrence)
+        }
+        (Some(existing), Some(incoming))
+            if existing == incoming && &manifest.capabilities == capabilities =>
+        {
+            Ok(())
+        }
+        (Some(_), None)
+            if is_start_error
+                && wire_mode_evolves_from_unresolved(
+                    capabilities.wire_mode,
+                    manifest.capabilities.wire_mode,
+                ) =>
+        {
+            // A transient discovery failure may be recorded after a resolved
+            // manifest. It cannot downgrade the final catalog snapshot.
+            Ok(())
+        }
+        (None, None) if &manifest.capabilities == capabilities => Ok(()),
+        _ => Err(changed_manifest_error(provider)),
+    }
+}
+
+fn fixture_matches_manifest(
+    fixture: &RecordFixture,
+    manifest_capabilities: &RecordedCapabilities,
+    manifest_metadata: Option<&ProviderModelMetadata>,
+) -> bool {
+    let exact = &fixture.capabilities == manifest_capabilities
+        && fixture.model_metadata.as_ref() == manifest_metadata
+        && fixture.wire_mode == manifest_capabilities.wire_mode;
+    if exact {
+        return true;
+    }
+    manifest_metadata.is_some()
+        && fixture.model_metadata.is_none()
+        && fixture.start_error.is_some()
+        && fixture.raw_sse.is_empty()
+        && fixture.items.is_empty()
+        && fixture.wire_mode == fixture.capabilities.wire_mode
+        && wire_mode_evolves_from_unresolved(
+            fixture.capabilities.wire_mode,
+            manifest_capabilities.wire_mode,
+        )
+}
+
+fn wire_mode_evolves_from_unresolved(unresolved: WireMode, resolved: WireMode) -> bool {
+    unresolved == resolved
+        || matches!(
+            (unresolved, resolved),
+            (
+                WireMode::GitHubCopilot,
+                WireMode::GitHubCopilotMessages
+                    | WireMode::GitHubCopilotResponses
+                    | WireMode::GitHubCopilotChatCompletions
+            )
+        )
+}
+
+fn validate_metadata_capabilities(
+    capabilities: &RecordedCapabilities,
+    metadata: &ProviderModelMetadata,
+) -> Result<(), ProviderError> {
+    if RecordedCapabilities::from(&metadata.capabilities) != *capabilities {
         return Err(ProviderError::new(
             ProviderErrorKind::Protocol,
-            format!("provider {provider:?} changed capabilities within one recording directory"),
+            "provider model metadata capabilities do not match the recorded capabilities",
         ));
     }
     Ok(())
+}
+
+fn replace_manifest_atomically(
+    path: &Path,
+    manifest: &CapabilityManifest,
+    hash: &str,
+    occurrence: u64,
+) -> Result<(), ProviderError> {
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(|error| {
+        ProviderError::new(
+            ProviderErrorKind::Protocol,
+            format!("could not serialize upgraded replay capability manifest: {error}"),
+        )
+    })?;
+    let temporary = path.with_file_name(format!(
+        ".{}-upgrade-{hash}-{occurrence:08}.tmp",
+        path.file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("capabilities")
+    ));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut output = options.open(&temporary).map_err(record_io_error)?;
+    output.write_all(&bytes).map_err(record_io_error)?;
+    output.sync_all().map_err(record_io_error)?;
+    drop(output);
+    std::fs::rename(&temporary, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temporary);
+        record_io_error(error)
+    })
+}
+
+fn changed_manifest_error(provider: &str) -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Protocol,
+        format!("provider {provider:?} changed model metadata within one recording directory"),
+    )
 }
 
 fn validate_manifest(provider: &str, manifest: &CapabilityManifest) -> Result<(), ProviderError> {
@@ -1070,6 +1283,14 @@ fn validate_manifest(provider: &str, manifest: &CapabilityManifest) -> Result<()
         return Err(ProviderError::new(
             ProviderErrorKind::Protocol,
             "replay capability manifest version or provider does not match",
+        ));
+    }
+    if manifest.model_metadata.as_ref().is_some_and(|metadata| {
+        RecordedCapabilities::from(&metadata.capabilities) != manifest.capabilities
+    }) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Protocol,
+            "replay model metadata capabilities do not match the capability manifest",
         ));
     }
     Ok(())
@@ -1179,10 +1400,11 @@ mod tests {
     use futures_util::StreamExt;
     use tokio::sync::Notify;
 
+    use crate::types::RawSseFrame;
     use crate::{
         BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason, Provider,
-        ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest, ThinkingLevel,
-        TokenUsage, ToolChoice, WireFrameSink, WireMode,
+        ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest,
+        ThinkingLevel, TokenUsage, ToolChoice, UsageAccounting, WireFrameSink, WireMode,
     };
 
     use super::{
@@ -1198,6 +1420,16 @@ mod tests {
     }
 
     struct StartErrorProvider;
+
+    struct MetadataErrorProvider;
+
+    struct FlakyMetadataProvider {
+        metadata_calls: AtomicUsize,
+    }
+
+    struct LegacyCopilotRawProvider;
+
+    struct ResolvedMetadataStartErrorProvider;
 
     struct RawPrefixProvider;
 
@@ -1273,6 +1505,176 @@ mod tests {
                     .with_retry_after(1_250),
             )
         }
+    }
+
+    #[async_trait]
+    impl Provider for MetadataErrorProvider {
+        fn name(&self) -> &'static str {
+            "metadata-error"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            test_capabilities()
+        }
+
+        async fn model_metadata(
+            &self,
+        ) -> Result<Option<crate::ProviderModelMetadata>, ProviderError> {
+            Err(ProviderError::new(
+                ProviderErrorKind::Server,
+                "fixture metadata discovery failed",
+            ))
+        }
+
+        async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+            panic!("stream must not run after metadata discovery failure")
+        }
+    }
+
+    #[async_trait]
+    impl Provider for FlakyMetadataProvider {
+        fn name(&self) -> &'static str {
+            "flaky-metadata"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                wire_mode: WireMode::GitHubCopilot,
+                ..test_capabilities()
+            }
+        }
+
+        async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
+            if self.metadata_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Server,
+                    "fixture transient metadata failure",
+                ));
+            }
+            Ok(Some(flaky_metadata()))
+        }
+
+        async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+            Ok(flaky_metadata_items(None))
+        }
+
+        async fn stream_with_wire_sink(
+            &self,
+            _request: ProviderRequest,
+            sink: Arc<dyn WireFrameSink>,
+        ) -> Result<BoxEventStream, ProviderError> {
+            Ok(flaky_metadata_items(Some(&sink)))
+        }
+    }
+
+    #[async_trait]
+    impl Provider for LegacyCopilotRawProvider {
+        fn name(&self) -> &'static str {
+            "legacy-copilot"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                wire_mode: WireMode::GitHubCopilot,
+                ..test_capabilities()
+            }
+        }
+
+        async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+            Ok(legacy_copilot_items())
+        }
+
+        async fn stream_with_wire_sink(
+            &self,
+            _request: ProviderRequest,
+            sink: Arc<dyn WireFrameSink>,
+        ) -> Result<BoxEventStream, ProviderError> {
+            // Deliberately ambiguous/error-shaped raw data proves the legacy
+            // compatibility path replays recorded normalized items, not a
+            // guessed Copilot dialect.
+            sink.capture(None, r#"{"error":{"type":"future_error"}}"#);
+            Ok(legacy_copilot_items())
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ResolvedMetadataStartErrorProvider {
+        fn name(&self) -> &'static str {
+            "resolved-metadata-start-error"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                wire_mode: WireMode::GitHubCopilot,
+                ..test_capabilities()
+            }
+        }
+
+        async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
+            Ok(Some(flaky_metadata()))
+        }
+
+        async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+            Err(ProviderError::new(
+                ProviderErrorKind::Timeout,
+                "fixture resolved provider start timeout",
+            ))
+        }
+    }
+
+    fn flaky_metadata() -> ProviderModelMetadata {
+        ProviderModelMetadata {
+            capabilities: Capabilities {
+                tool_calling: true,
+                vision: true,
+                thinking: true,
+                cache_breakpoints: CacheBreakpointSupport::None,
+                max_context_tokens: Some(200_000),
+                max_output_tokens: Some(32_000),
+                wire_mode: WireMode::GitHubCopilotResponses,
+            },
+            pricing: None,
+            accounting: UsageAccounting::AiCredits {
+                micros_usd_per_credit: 10_000,
+            },
+        }
+    }
+
+    fn flaky_metadata_items(sink: Option<&Arc<dyn WireFrameSink>>) -> BoxEventStream {
+        let frames = [
+            (
+                "response.created",
+                r#"{"response":{"model":"gpt-fixture"}}"#,
+            ),
+            ("response.output_text.delta", r#"{"delta":"resolved"}"#),
+            ("response.completed", r#"{"response":{"usage":{}}}"#),
+        ];
+        if let Some(sink) = sink {
+            for (event, data) in frames {
+                sink.capture(Some(event), data);
+            }
+        }
+        let raw = frames
+            .into_iter()
+            .map(|(event, data)| RawSseFrame {
+                event: Some(event.to_owned()),
+                data: data.to_owned(),
+            })
+            .collect::<Vec<_>>();
+        Box::pin(futures_util::stream::iter(
+            crate::github_copilot::replay_sse_frames(crate::GitHubCopilotEndpoint::Responses, &raw),
+        ))
+    }
+
+    fn legacy_copilot_items() -> BoxEventStream {
+        Box::pin(futures_util::stream::iter([
+            Ok(ProviderEvent::TextDelta {
+                text: "legacy-normalized".to_owned(),
+            }),
+            Ok(ProviderEvent::Finished {
+                reason: FinishReason::Stop,
+            }),
+        ]))
     }
 
     #[async_trait]
@@ -1877,6 +2279,157 @@ mod tests {
         assert_eq!(live_error, replay_error);
         assert!(replay_error.is_retryable());
         assert_eq!(replay_error.retry_after_ms, Some(1_250));
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn metadata_discovery_error_is_recorded_without_an_occurrence_hole() {
+        let directory = unique_temp_directory("metadata-start-error");
+        let recorder = Recorder::new(
+            Arc::new(MetadataErrorProvider),
+            &directory,
+            FixtureRedactor::default(),
+        );
+
+        let Err(live_error) = recorder.stream(request()).await else {
+            panic!("metadata discovery must fail");
+        };
+        let replay = ReplayProvider::load("metadata-error", &directory)
+            .await
+            .unwrap_or_else(|error| panic!("metadata-error replay must load: {error}"));
+        let Err(replay_error) = replay.stream(request()).await else {
+            panic!("metadata discovery start error must replay");
+        };
+        assert_eq!(live_error, replay_error);
+        assert_eq!(replay_error.kind, ProviderErrorKind::Server);
+        let hash = request_hash(&request())
+            .unwrap_or_else(|error| panic!("fixture request must hash: {error}"));
+        assert!(fixture_path(&directory, "metadata-error", &hash, 0).is_file());
+        assert!(!fixture_path(&directory, "metadata-error", &hash, 1).is_file());
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn transient_metadata_failure_then_success_upgrades_manifest_and_replays_both() {
+        let directory = unique_temp_directory("metadata-evolution");
+        let recorder = Recorder::new(
+            Arc::new(FlakyMetadataProvider {
+                metadata_calls: AtomicUsize::new(0),
+            }),
+            &directory,
+            FixtureRedactor::default(),
+        );
+
+        let Err(first_live) = recorder.stream(request()).await else {
+            panic!("first metadata discovery must fail");
+        };
+        let second_live = collect(&recorder).await;
+        assert!(matches!(
+            second_live.as_slice(),
+            [
+                Ok(ProviderEvent::MessageStart { .. }),
+                Ok(ProviderEvent::TextDelta { text }),
+                Ok(ProviderEvent::Usage { .. }),
+                Ok(ProviderEvent::Finished { .. })
+            ] if text == "resolved"
+        ));
+
+        let replay = ReplayProvider::load("flaky-metadata", &directory)
+            .await
+            .unwrap_or_else(|error| panic!("evolved replay must load: {error}"));
+        let metadata = replay
+            .model_metadata()
+            .await
+            .unwrap_or_else(|error| panic!("replay metadata must resolve: {error}"))
+            .unwrap_or_else(|| panic!("resolved metadata must persist"));
+        assert_eq!(
+            metadata.capabilities.wire_mode,
+            WireMode::GitHubCopilotResponses
+        );
+        let Err(first_replay) = replay.stream(request()).await else {
+            panic!("first replay occurrence must retain discovery failure");
+        };
+        assert_eq!(first_live, first_replay);
+        let second_replay = collect(&replay).await;
+        assert_eq!(second_live, second_replay);
+
+        let hash = request_hash(&request())
+            .unwrap_or_else(|error| panic!("fixture request must hash: {error}"));
+        let first_bytes = tokio::fs::read(fixture_path(&directory, "flaky-metadata", &hash, 0))
+            .await
+            .unwrap_or_else(|error| panic!("first fixture must read: {error}"));
+        let first: RecordFixture = serde_json::from_slice(&first_bytes)
+            .unwrap_or_else(|error| panic!("first fixture must parse: {error}"));
+        let second_bytes = tokio::fs::read(fixture_path(&directory, "flaky-metadata", &hash, 1))
+            .await
+            .unwrap_or_else(|error| panic!("second fixture must read: {error}"));
+        let second: RecordFixture = serde_json::from_slice(&second_bytes)
+            .unwrap_or_else(|error| panic!("second fixture must parse: {error}"));
+        assert_eq!(first.model_metadata, None);
+        assert_eq!(first.wire_mode, WireMode::GitHubCopilot);
+        assert!(second.model_metadata.is_some());
+        assert_eq!(second.wire_mode, WireMode::GitHubCopilotResponses);
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn legacy_generic_copilot_fixture_replays_normalized_items_without_guessing() {
+        let directory = unique_temp_directory("legacy-copilot-wire");
+        let recorder = Recorder::new(
+            Arc::new(LegacyCopilotRawProvider),
+            &directory,
+            FixtureRedactor::default(),
+        );
+        let live = collect(&recorder).await;
+        let replay = ReplayProvider::load("legacy-copilot", &directory)
+            .await
+            .unwrap_or_else(|error| panic!("legacy replay must load: {error}"));
+        let replayed = collect(&replay).await;
+        assert_eq!(live, replayed);
+
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn resolved_exact_dialect_replays_empty_raw_start_error() {
+        let directory = unique_temp_directory("resolved-empty-raw");
+        let recorder = Recorder::new(
+            Arc::new(ResolvedMetadataStartErrorProvider),
+            &directory,
+            FixtureRedactor::default(),
+        );
+        let Err(live_error) = recorder.stream(request()).await else {
+            panic!("resolved provider start must fail");
+        };
+        let replay = ReplayProvider::load("resolved-metadata-start-error", &directory)
+            .await
+            .unwrap_or_else(|error| panic!("resolved replay must load: {error}"));
+        assert_eq!(
+            replay.capabilities().wire_mode,
+            WireMode::GitHubCopilotResponses
+        );
+        let Err(replay_error) = replay.stream(request()).await else {
+            panic!("empty-raw start error must replay");
+        };
+        assert_eq!(live_error, replay_error);
+
+        let hash = request_hash(&request())
+            .unwrap_or_else(|error| panic!("fixture request must hash: {error}"));
+        let bytes = tokio::fs::read(fixture_path(
+            &directory,
+            "resolved-metadata-start-error",
+            &hash,
+            0,
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("fixture must read: {error}"));
+        let fixture: RecordFixture = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("fixture must parse: {error}"));
+        assert_eq!(fixture.wire_mode, WireMode::GitHubCopilotResponses);
+        assert!(fixture.raw_sse.is_empty());
 
         let _ = tokio::fs::remove_dir_all(directory).await;
     }

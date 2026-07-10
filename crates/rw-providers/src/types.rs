@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
+use crate::ModelPricing;
+
 /// A provider-neutral request assembled by the engine.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRequest {
@@ -56,7 +58,7 @@ impl ProviderRequest {
     ///
     /// Returns a sanitized invalid-request error when a required or named tool
     /// choice cannot be satisfied by this request's tool definitions.
-    pub(crate) fn validate_tool_choice(&self) -> Result<(), ProviderError> {
+    pub fn validate_tool_choice(&self) -> Result<(), ProviderError> {
         match &self.tool_choice {
             ToolChoice::Required if self.tools.is_empty() => Err(ProviderError::new(
                 ProviderErrorKind::InvalidRequest,
@@ -105,7 +107,8 @@ pub enum ThinkingLevel {
 }
 
 /// Prompt-cache behavior offered by an adapter.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CacheBreakpointSupport {
     /// The API has no explicit cache breakpoint controls.
     None,
@@ -116,7 +119,7 @@ pub enum CacheBreakpointSupport {
 }
 
 /// Capabilities used by the engine to degrade gracefully.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Capabilities {
     /// Supports function tool calls.
     pub tool_calling: bool,
@@ -134,6 +137,34 @@ pub struct Capabilities {
     pub wire_mode: WireMode,
 }
 
+/// Billing/quota unit associated with dynamically discovered model metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum UsageAccounting {
+    /// Ordinary API usage with dollar-denominated pricing.
+    ApiDollars,
+    /// Ordinary API usage without an authoritative rate.
+    UnpricedApi,
+    /// Subscription quota that must not be presented as a zero-dollar API.
+    SubscriptionQuota,
+    /// Provider credits with an explicit nominal micro-USD conversion.
+    AiCredits {
+        /// Nominal value of one credit in micro-US-dollars.
+        micros_usd_per_credit: u64,
+    },
+}
+
+/// Capabilities, rates, and billing unit discovered asynchronously by a provider.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderModelMetadata {
+    /// Model-specific capabilities enforced by the provider.
+    pub capabilities: Capabilities,
+    /// Optional authenticated model pricing.
+    pub pricing: Option<ModelPricing>,
+    /// Unit used to interpret rates and usage.
+    pub accounting: UsageAccounting,
+}
+
 /// Provider HTTP dialect. Kept inside the provider boundary and recorded so
 /// raw replay frames are routed through the same parser as live traffic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -145,6 +176,14 @@ pub enum WireMode {
     OpenAiChatCompletions,
     /// `OpenAI` Responses SSE.
     OpenAiResponses,
+    /// Dynamically discovered GitHub Copilot Messages, Responses, or Chat SSE.
+    GitHubCopilot,
+    /// Resolved GitHub Copilot Anthropic-compatible Messages SSE.
+    GitHubCopilotMessages,
+    /// Resolved GitHub Copilot OpenAI-compatible Responses SSE.
+    GitHubCopilotResponses,
+    /// Resolved GitHub Copilot OpenAI-compatible Chat Completions SSE.
+    GitHubCopilotChatCompletions,
     /// Already-normalized replay events.
     NormalizedReplay,
 }
@@ -308,6 +347,16 @@ pub trait Provider: Send + Sync {
 
     /// Declared features for graceful engine degradation.
     fn capabilities(&self) -> Capabilities;
+
+    /// Resolves authenticated model metadata when a provider has a dynamic
+    /// catalog. Static providers use the default `None` result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized discovery or validation error.
+    async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
+        Ok(None)
+    }
 
     /// Starts a normalized streaming response.
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError>;

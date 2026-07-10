@@ -64,6 +64,35 @@ Responses normalizer; current evidence covers `gpt-5.4-mini`. Unproven models ar
 not added to the conservative allowlist, and `max_output_tokens` is deliberately
 absent because the live subscription backend rejects it.
 
+The `github_copilot` contract is also entirely deterministic in CI. An injected
+device-flow transport and clock exercise the verification URI/user code,
+polling intervals, slow-down handling, expiry, denial, and cancellation without
+opening a browser or reading a real credential backend. Captured `/models`
+fixtures cover policy filtering, required capabilities, Messages > Responses >
+Chat endpoint selection, nominal AI-credit conversion, and malformed/401/403
+failure classes. Factory fixtures use injected vault/keychain backends and a
+test-only loopback runtime; the credential canary is registered before discovery
+or inference, API-key and endpoint mixing fail before network, and an offline
+`ReplayProvider` consumes the recorded inference without a discovery socket.
+Additional adversarial fixtures prove that the outer exact-model binding does
+not suppress discovered vision or thinking support, while the inner adapter
+rejects each capability when absent before inference. The async provider-neutral
+metadata surface returns the authenticated limits, capabilities, `ModelPricing`,
+and explicit AI-Credit unit; a hand calculation checks 2,000 input, 500 output,
+and 1,000 cached tokens as exactly 1.1 credits at the fixture rates. Credential
+fixtures also require the stored issuing client id to match the injected test
+identity, mirroring the exact compiled-identity check in production.
+An accept-canary listener additionally proves invalid required/named tool choices
+return before any `/models` socket. Copilot replay under the process-wide network
+deny guard lives in its own integration-test binary, so the global guard cannot
+race or contaminate parallel loopback acceptance tests.
+Developer builds without the compile-time Rottweiler OAuth client hook fail
+login with an actionable configuration error; CI never borrows another tool's
+client identity or token. The ignored release canary in
+`crates/rw-core/tests/live_smoke_credentials.rs` additionally requires that
+Rottweiler-owned client identity, an existing device-flow credential, and an
+explicit `RW_LIVE_GITHUB_COPILOT_MODEL`; ordinary CI only compiles this path.
+
 These deterministic fixtures do **not** substitute for M1's credentialed live
 smoke. A minimal tool-call recording from both remote API families remains a
 release/milestone gate whenever credentials are available; CI must continue to

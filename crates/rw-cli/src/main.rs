@@ -6,8 +6,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
 use rw_core::{
-    DEFAULT_MODEL_CATALOG_URL, ProviderApiKey, begin_oauth_login, refresh_model_catalog,
-    store_provider_api_key,
+    DEFAULT_MODEL_CATALOG_URL, GitHubCopilotLogin, OAuthLogin, ProviderApiKey, ProviderLogin,
+    ProviderLoginCancellation, begin_provider_login, refresh_model_catalog, store_provider_api_key,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -62,7 +62,7 @@ enum ModelsCommand {
 
 #[derive(Debug, Subcommand)]
 enum AuthCommand {
-    /// Run a provider's documented OAuth Authorization Code + PKCE flow.
+    /// Run the configured provider's browser or device authorization flow.
     Login {
         /// User-configured provider name from `[providers.<name>]`.
         provider: String,
@@ -134,7 +134,16 @@ fn auth_set_key(provider_name: &str) -> Result<()> {
 }
 
 async fn auth_login(provider_name: &str) -> Result<()> {
-    let login = begin_oauth_login(provider_name).await.into_diagnostic()?;
+    match begin_provider_login(provider_name)
+        .await
+        .into_diagnostic()?
+    {
+        ProviderLogin::OAuth(login) => auth_oauth_login(*login).await,
+        ProviderLogin::GitHubCopilot(login) => auth_github_copilot_login(*login).await,
+    }
+}
+
+async fn auth_oauth_login(login: OAuthLogin) -> Result<()> {
     for warning in login.warnings() {
         eprintln!("warning: {warning}");
     }
@@ -158,4 +167,59 @@ async fn auth_login(provider_name: &str) -> Result<()> {
         println!("authenticated provider {}", result.provider);
     }
     Ok(())
+}
+
+async fn auth_github_copilot_login(login: GitHubCopilotLogin) -> Result<()> {
+    for warning in login.warnings() {
+        eprintln!("warning: {warning}");
+    }
+    write_github_device_prompt(
+        &mut io::stdout(),
+        login.verification_uri(),
+        login.user_code(),
+    )
+    .into_diagnostic()?;
+    eprintln!("waiting for GitHub device authorization; press Ctrl-C to cancel");
+    let cancellation = ProviderLoginCancellation::default();
+    let poll_cancellation = cancellation.clone();
+    let result = tokio::select! {
+        result = login.complete(&poll_cancellation) => result.into_diagnostic()?,
+        signal = tokio::signal::ctrl_c() => {
+            signal.into_diagnostic()?;
+            cancellation.cancel();
+            return Err(miette::miette!("GitHub device authorization cancelled"));
+        }
+    };
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+    println!("authenticated provider {}", result.provider);
+    Ok(())
+}
+
+fn write_github_device_prompt(
+    writer: &mut impl Write,
+    verification_uri: &str,
+    user_code: &str,
+) -> io::Result<()> {
+    writeln!(writer, "Open {verification_uri}")?;
+    writeln!(writer, "Enter code: {user_code}")?;
+    writer.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_github_device_prompt;
+
+    #[test]
+    fn copilot_device_prompt_surfaces_only_the_user_facing_values() {
+        let mut output = Vec::new();
+        write_github_device_prompt(&mut output, "https://github.com/login/device", "ABCD-EFGH")
+            .unwrap_or_else(|error| panic!("device prompt must render: {error}"));
+        assert_eq!(
+            String::from_utf8(output)
+                .unwrap_or_else(|error| panic!("device prompt must be UTF-8: {error}")),
+            "Open https://github.com/login/device\nEnter code: ABCD-EFGH\n"
+        );
+    }
 }

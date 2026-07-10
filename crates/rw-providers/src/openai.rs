@@ -1,9 +1,10 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures_util::StreamExt;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
-use rw_types::{Block, ImageRef, Role, ToolOutput, Turn};
+use rw_types::{Block, ImageRef, Role, ToolOutput, ToolOutputPart, Turn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use url::Url;
@@ -19,6 +20,7 @@ use crate::{
 
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1_048_576;
 const RESPONSES_REASONING_SIGNATURE_PREFIX: &str = "openai.responses.reasoning.v1:";
+const CHAT_REASONING_SIGNATURE_PREFIX: &str = "openai.chat.reasoning.v1:";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct ResponsesReasoningSignature {
@@ -115,6 +117,7 @@ impl OpenAiCompatibleProvider {
             OpenAiWireMode::ChatCompletions => build_chat_request(&request, reasoning_endpoint),
             OpenAiWireMode::Responses => build_responses_request(&request, reasoning_endpoint),
         };
+        apply_auth_request_shape(&mut body, &material);
         if let Some(session_id) = material.openai_subscription_session_id() {
             if self.config.wire_mode != OpenAiWireMode::Responses {
                 return Err(ProviderError::new(
@@ -184,6 +187,12 @@ impl OpenAiCompatibleProvider {
                 "configured OpenAI-compatible endpoint does not support function tools",
             ));
         }
+        if !self.config.supports_vision && request_has_image(request) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Unsupported,
+                "configured OpenAI-compatible endpoint does not support image input",
+            ));
+        }
         let reasoning_endpoint = !self.config.supported_reasoning_efforts.is_empty();
         let unsupported_reasoning = if reasoning_endpoint {
             !self
@@ -203,6 +212,34 @@ impl OpenAiCompatibleProvider {
             ));
         }
         Ok(())
+    }
+}
+
+fn request_has_image(request: &ProviderRequest) -> bool {
+    request.turns.iter().any(|turn| {
+        turn.blocks.iter().any(|block| match block {
+            Block::Image { .. } => true,
+            Block::ToolResult {
+                output: ToolOutput::Mixed { parts },
+                ..
+            } => parts
+                .iter()
+                .any(|part| matches!(part, ToolOutputPart::Image { .. })),
+            Block::Text { .. }
+            | Block::Thinking { .. }
+            | Block::ToolCall { .. }
+            | Block::ToolResult { .. }
+            | Block::Citation { .. } => false,
+        })
+    })
+}
+
+fn apply_auth_request_shape(body: &mut Value, material: &crate::AuthMaterial) {
+    if material.omit_max_output_tokens()
+        && let Some(object) = body.as_object_mut()
+    {
+        object.remove("max_completion_tokens");
+        object.remove("max_output_tokens");
     }
 }
 
@@ -409,6 +446,8 @@ fn chat_messages(turn: &Turn) -> Vec<Value> {
     let mut content = Vec::new();
     let mut tool_calls = Vec::new();
     let mut messages = Vec::new();
+    let mut reasoning_content = String::new();
+    let mut reasoning_opaque = None;
     for block in &turn.blocks {
         match block {
             Block::Text { text: value } => {
@@ -431,10 +470,21 @@ fn chat_messages(turn: &Turn) -> Vec<Value> {
             Block::ToolResult { id, output, .. } => messages.push(json!({
                 "role": "tool", "tool_call_id": id.0, "content": tool_output_text(output),
             })),
-            Block::Thinking { .. } | Block::Citation { .. } => {}
+            Block::Thinking { content, signature } => {
+                reasoning_content.push_str(content);
+                reasoning_opaque = signature
+                    .as_deref()
+                    .and_then(decode_chat_reasoning_signature);
+            }
+            Block::Citation { .. } => {}
         }
     }
-    if !text.is_empty() || !content.is_empty() || !tool_calls.is_empty() {
+    if !text.is_empty()
+        || !content.is_empty()
+        || !tool_calls.is_empty()
+        || !reasoning_content.is_empty()
+        || reasoning_opaque.is_some()
+    {
         let mut message = Map::from_iter([("role".to_owned(), json!(role))]);
         if content.iter().any(|part| part["type"] == "image_url") {
             message.insert("content".to_owned(), Value::Array(content));
@@ -444,9 +494,34 @@ fn chat_messages(turn: &Turn) -> Vec<Value> {
         if !tool_calls.is_empty() {
             message.insert("tool_calls".to_owned(), Value::Array(tool_calls));
         }
+        if !reasoning_content.is_empty() {
+            message.insert("reasoning_content".to_owned(), json!(reasoning_content));
+        }
+        if let Some(reasoning_opaque) = reasoning_opaque {
+            message.insert("reasoning_opaque".to_owned(), json!(reasoning_opaque));
+        }
         messages.insert(0, Value::Object(message));
     }
     messages
+}
+
+fn encode_chat_reasoning_signature(value: &str) -> Option<String> {
+    (!value.is_empty()).then(|| {
+        format!(
+            "{CHAT_REASONING_SIGNATURE_PREFIX}{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(value.as_bytes())
+        )
+    })
+}
+
+fn decode_chat_reasoning_signature(value: &str) -> Option<String> {
+    let payload = value.strip_prefix(CHAT_REASONING_SIGNATURE_PREFIX)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    String::from_utf8(bytes)
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 fn responses_items(turn: &Turn) -> Vec<Value> {
@@ -605,12 +680,13 @@ impl OpenAiState {
             let reasoning = delta["reasoning_content"]
                 .as_str()
                 .or_else(|| delta["reasoning"].as_str());
-            if let Some(content) = reasoning
-                && !content.is_empty()
-            {
+            let reasoning_opaque = delta["reasoning_opaque"]
+                .as_str()
+                .and_then(encode_chat_reasoning_signature);
+            if reasoning.is_some_and(|content| !content.is_empty()) || reasoning_opaque.is_some() {
                 events.push(ProviderEvent::ThinkingDelta {
-                    content: content.to_owned(),
-                    signature: None,
+                    content: reasoning.unwrap_or_default().to_owned(),
+                    signature: reasoning_opaque,
                 });
             }
             for tool in delta["tool_calls"].as_array().into_iter().flatten() {
@@ -1009,16 +1085,21 @@ pub(crate) fn replay_sse_frames(
 
 #[cfg(test)]
 mod tests {
-    use rw_types::{Block, Role, Turn, TurnMeta};
+    use std::sync::Arc;
+
+    use rw_types::{Block, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta};
     use serde_json::json;
+    use url::Url;
 
     use crate::{
-        ProviderErrorKind, ProviderEvent, ProviderRequest, ThinkingLevel, TokenUsage, ToolChoice,
-        ToolDefinition, sse::SseEvent,
+        AuthMaterial, CacheBreakpointSupport, NetworkPolicy, ProviderErrorKind, ProviderEvent,
+        ProviderRequest, Secret, StaticAuth, ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition,
+        sse::SseEvent,
     };
 
     use super::{
-        OpenAiState, OpenAiWireMode, ResponsesReasoningSignature, apply_subscription_request_shape,
+        OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiState, OpenAiWireMode,
+        ResponsesReasoningSignature, apply_auth_request_shape, apply_subscription_request_shape,
         build_chat_request, build_responses_request, decode_responses_reasoning_signature,
         encode_responses_reasoning_signature, openai_stream_error, parse_usage, responses_items,
     };
@@ -1380,5 +1461,122 @@ mod tests {
             "response": {"error": {"type": "invalid_request_error"}}
         }));
         assert_eq!(nested.kind, ProviderErrorKind::InvalidRequest);
+    }
+
+    #[test]
+    fn copilot_gpt_omits_wire_max_but_other_auth_keeps_it() {
+        let request = ProviderRequest {
+            model: "gpt-fixture".to_owned(),
+            turns: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: 512,
+            temperature: None,
+            thinking: ThinkingLevel::Off,
+        };
+        let mut copilot = build_responses_request(&request, false);
+        apply_auth_request_shape(
+            &mut copilot,
+            &AuthMaterial::GitHubCopilot {
+                access_token: Secret::new("fixture"),
+                user_agent: "rottweiler/fixture".to_owned(),
+                initiator: "user".to_owned(),
+                vision: false,
+                omit_max_output_tokens: true,
+            },
+        );
+        assert!(copilot.get("max_output_tokens").is_none());
+
+        let mut ordinary = build_responses_request(&request, false);
+        apply_auth_request_shape(&mut ordinary, &AuthMaterial::Bearer(Secret::new("fixture")));
+        assert_eq!(ordinary["max_output_tokens"], json!(512));
+    }
+
+    #[test]
+    fn chat_reasoning_opaque_round_trips_through_ir_signature() {
+        let mut state = OpenAiState::new(OpenAiWireMode::ChatCompletions);
+        let events = state
+            .handle(&SseEvent {
+                event: None,
+                data: json!({
+                    "model": "fixture",
+                    "choices": [{
+                        "index": 0,
+                        "delta": {
+                            "reasoning_content": "summary",
+                            "reasoning_opaque": "opaque-fixture"
+                        }
+                    }]
+                })
+                .to_string(),
+            })
+            .unwrap_or_else(|error| panic!("chat reasoning must parse: {error}"));
+        let signature = events.into_iter().find_map(|event| match event {
+            ProviderEvent::ThinkingDelta {
+                signature: Some(signature),
+                ..
+            } => Some(signature),
+            _ => None,
+        });
+        let signature = signature.unwrap_or_else(|| panic!("signature must be emitted"));
+        let messages = super::chat_messages(&Turn {
+            role: Role::Assistant,
+            blocks: vec![Block::Thinking {
+                content: "summary".to_owned(),
+                signature: Some(signature),
+            }],
+            meta: TurnMeta::default(),
+        });
+        assert_eq!(messages[0]["reasoning_content"], json!("summary"));
+        assert_eq!(messages[0]["reasoning_opaque"], json!("opaque-fixture"));
+    }
+
+    #[test]
+    fn vision_rejection_detects_images_nested_in_tool_results() {
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            name: "fixture".to_owned(),
+            endpoint: Url::parse("http://127.0.0.1:9/responses")
+                .unwrap_or_else(|error| panic!("fixture URL must parse: {error}")),
+            auth: Arc::new(StaticAuth::new(AuthMaterial::None)),
+            proxy: None,
+            proxy_authentication: None,
+            network_policy: NetworkPolicy::Deny,
+            wire_mode: OpenAiWireMode::Responses,
+            tool_calling: true,
+            cache_breakpoints: CacheBreakpointSupport::None,
+            supported_reasoning_efforts: Vec::new(),
+            supports_vision: false,
+            max_context_tokens: None,
+            max_output_tokens: None,
+        })
+        .unwrap_or_else(|error| panic!("fixture provider must build: {error}"));
+        let request = ProviderRequest {
+            model: "fixture".to_owned(),
+            turns: vec![Turn {
+                role: Role::Tool,
+                blocks: vec![Block::ToolResult {
+                    id: ToolCallId("call-1".to_owned()),
+                    output: ToolOutput::Mixed {
+                        parts: vec![ToolOutputPart::Image {
+                            media_type: "image/png".to_owned(),
+                            data: ImageRef::InlineBase64 {
+                                data: "fixture".to_owned(),
+                            },
+                        }],
+                    },
+                    is_error: false,
+                }],
+                meta: TurnMeta::default(),
+            }],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: 32,
+            temperature: None,
+            thinking: ThinkingLevel::Off,
+        };
+        let Err(error) = provider.validate_request_capabilities(&request) else {
+            panic!("nested image must be rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Unsupported);
     }
 }

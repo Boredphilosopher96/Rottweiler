@@ -102,15 +102,39 @@ pub enum AuthMaterial {
         /// Stable Rottweiler provider-session identifier.
         session_id: String,
     },
+    /// GitHub Copilot subscription bearer and integration identity headers.
+    GitHubCopilot {
+        /// GitHub OAuth device-flow token used directly by Copilot inference.
+        access_token: Secret,
+        /// Versioned Rottweiler client identity.
+        user_agent: String,
+        /// Whether this request follows user input or agent-generated work.
+        initiator: String,
+        /// Whether the request contains image input.
+        vision: bool,
+        /// Copilot GPT shims reject both `OpenAI` max-output fields. The wrapper
+        /// enforces the discovered limit before setting this wire profile.
+        omit_max_output_tokens: bool,
+    },
     /// No authentication, useful for trusted local model servers.
     None,
 }
 
 impl AuthMaterial {
+    pub(crate) const fn omit_max_output_tokens(&self) -> bool {
+        matches!(
+            self,
+            Self::GitHubCopilot {
+                omit_max_output_tokens: true,
+                ..
+            }
+        )
+    }
+
     pub(crate) fn openai_subscription_session_id(&self) -> Option<&str> {
         match self {
             Self::OpenAiSubscription { session_id, .. } => Some(session_id),
-            Self::ApiKey(_) | Self::Bearer(_) | Self::None => None,
+            Self::ApiKey(_) | Self::Bearer(_) | Self::GitHubCopilot { .. } | Self::None => None,
         }
     }
 
@@ -144,6 +168,13 @@ impl AuthMaterial {
                 insert_header(headers, HeaderName::from_static("user-agent"), user_agent)?;
                 insert_header(headers, HeaderName::from_static("session-id"), session_id)?;
             }
+            Self::GitHubCopilot {
+                access_token,
+                user_agent,
+                initiator,
+                vision,
+                omit_max_output_tokens: _,
+            } => apply_github_copilot(headers, access_token, user_agent, initiator, *vision)?,
             Self::None => {}
         }
         Ok(())
@@ -171,10 +202,66 @@ impl AuthMaterial {
                     "ChatGPT subscription authentication is OpenAI Responses-only",
                 ));
             }
+            Self::GitHubCopilot {
+                access_token,
+                user_agent,
+                initiator,
+                vision,
+                omit_max_output_tokens: _,
+            } => {
+                apply_github_copilot(headers, access_token, user_agent, initiator, *vision)?;
+                insert_header(
+                    headers,
+                    HeaderName::from_static("anthropic-beta"),
+                    "interleaved-thinking-2025-05-14",
+                )?;
+            }
             Self::None => {}
         }
         Ok(())
     }
+}
+
+fn apply_github_copilot(
+    headers: &mut HeaderMap,
+    access_token: &Secret,
+    user_agent: &str,
+    initiator: &str,
+    vision: bool,
+) -> Result<(), ProviderError> {
+    if !matches!(initiator, "user" | "agent") {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "GitHub Copilot request initiator must be user or agent",
+        ));
+    }
+    insert_sensitive(
+        headers,
+        AUTHORIZATION,
+        &format!("Bearer {}", access_token.expose()),
+    )?;
+    insert_header(headers, HeaderName::from_static("user-agent"), user_agent)?;
+    insert_header(
+        headers,
+        HeaderName::from_static("x-github-api-version"),
+        crate::GITHUB_COPILOT_API_VERSION,
+    )?;
+    insert_header(
+        headers,
+        HeaderName::from_static("openai-intent"),
+        "conversation-edits",
+    )?;
+    insert_header(headers, HeaderName::from_static("x-initiator"), initiator)?;
+    if vision {
+        insert_header(
+            headers,
+            HeaderName::from_static("copilot-vision-request"),
+            "true",
+        )?;
+    }
+    // Deliberately never emit x-api-key: Copilot accepts the GitHub bearer.
+    headers.remove(HeaderName::from_static("x-api-key"));
+    Ok(())
 }
 
 fn insert_header(

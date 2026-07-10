@@ -27,6 +27,7 @@ use serde_json::json;
 const LIVE_ACKNOWLEDGEMENT: &str = "accept-paid-requests";
 const ANTHROPIC_PROVIDER: &str = "anthropic";
 const OPENAI_PROVIDER: &str = "openai";
+const GITHUB_COPILOT_PROVIDER: &str = "github-copilot";
 
 struct LiveSettings {
     fixture_root: std::path::PathBuf,
@@ -37,6 +38,25 @@ struct LiveSettings {
 struct OpenAiSubscriptionLiveSettings {
     fixture_root: std::path::PathBuf,
     openai_model: String,
+}
+
+struct GitHubCopilotLiveSettings {
+    fixture_root: std::path::PathBuf,
+    model: String,
+}
+
+impl GitHubCopilotLiveSettings {
+    fn from_environment() -> Self {
+        let acknowledgement = required_environment("RW_LIVE_SMOKE");
+        assert_eq!(
+            acknowledgement, LIVE_ACKNOWLEDGEMENT,
+            "RW_LIVE_SMOKE must equal {LIVE_ACKNOWLEDGEMENT:?}; this explicit opt-in confirms that the ignored test may consume GitHub Copilot subscription quota"
+        );
+        Self {
+            fixture_root: validate_fixture_root(&required_environment("RW_LIVE_SMOKE_FIXTURE_DIR")),
+            model: required_environment("RW_LIVE_GITHUB_COPILOT_MODEL"),
+        }
+    }
 }
 
 impl OpenAiSubscriptionLiveSettings {
@@ -219,6 +239,34 @@ async fn prepare_openai_subscription_runtime(
             .is_some_and(|model| model.capabilities().tool_calling),
         "live ChatGPT subscription model must advertise tool support"
     );
+    (runtime, candidate)
+}
+
+async fn prepare_github_copilot_runtime(
+    settings: &GitHubCopilotLiveSettings,
+) -> (ProviderRuntime, String) {
+    let loader = ConfigLoader::from_environment()
+        .unwrap_or_else(|error| panic!("user config discovery must succeed: {error}"));
+    let credentials_path = loader.credentials_path();
+    let mut config = loader
+        .load()
+        .unwrap_or_else(|error| panic!("user config must load before live smoke: {error}"))
+        .config;
+    let candidate = format!("{GITHUB_COPILOT_PROVIDER}/{}", settings.model);
+    "live-github-copilot".clone_into(&mut config.models.default);
+    config.models.aliases =
+        BTreeMap::from([("live-github-copilot".to_owned(), vec![candidate.clone()])]);
+    config.models.thinking =
+        BTreeMap::from([("live-github-copilot".to_owned(), ConfigThinkingLevel::Off)]);
+    let runtime = ProviderFactory::with_backends(
+        Arc::new(CredentialManager::system(credentials_path)),
+        ProxyEnvironment::capture(),
+        NetworkPolicy::Allow,
+        load_pricing().await,
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("GitHub Copilot provider must preflight: {error}"));
+    assert!(runtime.provider(&candidate).is_some());
     (runtime, candidate)
 }
 
@@ -479,6 +527,41 @@ async fn chatgpt_subscription_record_and_offline_replay() {
         openai,
         tool_request(settings.openai_model),
         &settings.fixture_root.join("openai-subscription"),
+        redactor,
+    )
+    .await;
+}
+
+/// Direct GitHub Copilot invocation using Rottweiler's own OAuth identity and
+/// logical credential-vault entry:
+///
+/// ```text
+/// # The release build must contain ROTTWEILER_GITHUB_COPILOT_CLIENT_ID.
+/// # User config must define provider `github-copilot` with kind
+/// # `github_copilot`, and `rw auth login github-copilot` must have completed.
+/// RW_LIVE_SMOKE=accept-paid-requests \
+/// RW_LIVE_SMOKE_FIXTURE_DIR=/absolute/existing/path/outside/repository \
+/// RW_LIVE_GITHUB_COPILOT_MODEL=<currently-enabled-tool-capable-model> \
+/// cargo test --locked -p rw-core --test live_smoke_credentials \
+///   github_copilot_record_and_offline_replay -- --ignored --exact --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "consumes explicitly authorized GitHub Copilot subscription quota"]
+async fn github_copilot_record_and_offline_replay() {
+    let settings = GitHubCopilotLiveSettings::from_environment();
+    let (runtime, candidate) = prepare_github_copilot_runtime(&settings).await;
+    let redactor = runtime.fixture_redactor();
+    assert!(
+        redactor.registered_secret_count() >= 1,
+        "factory must register the Copilot token before discovery or inference"
+    );
+    let copilot = runtime
+        .provider(&candidate)
+        .unwrap_or_else(|| panic!("factory-preflighted GitHub Copilot provider must exist"));
+    capture_and_replay(
+        copilot,
+        tool_request(settings.model),
+        &settings.fixture_root.join("github-copilot"),
         redactor,
     )
     .await;
