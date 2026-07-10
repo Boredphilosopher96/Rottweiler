@@ -3,7 +3,10 @@ use std::{
     io::{self, Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -13,18 +16,20 @@ use miette::{IntoDiagnostic, Result, miette};
 use rustyline::{DefaultEditor, error::ReadlineError};
 use rw_core::runtime_support::{
     ApprovalDecision, AskUserInput, AskUserTool, BashTool, Block, BoxEventStream,
-    CacheBreakpointSupport, CancellationToken, Capabilities, CommandFixtureRedactor, EditTool,
-    ExecutionLease, FetchRequest, FetchResponse, FixtureRedactor, GlobTool, GrepTool,
-    GuardedHttpFetchError, GuardedHttpFetchRequest, LsTool, MultiEditTool, MutationScope,
-    PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
-    ProxyEnvironment, ProxySettings, QuestionAsker, ReadTool, Recorder, RecordingCommandExecutor,
-    ReplayCommandExecutor, ReplayProvider, SessionId, SymbolIndex, SymbolsTool, ThinkingLevel,
-    TodoTool, TokioCommandExecutor, Tool, ToolCapability, ToolContext, ToolDescriptor, ToolError,
-    ToolLimits, ToolOutput, ToolRegistry, ToolResult, Turn, WebFetchTool, WebFetcher, WireMode,
-    WriteTool, deny_outbound_network_for_process, guarded_http_fetch,
+    CacheBreakpointSupport, CacheHint, CancellationToken, Capabilities, CapabilityManifest,
+    CommandFixtureRedactor, EditTool, ExecutionLease, FetchRequest, FetchResponse, FixtureRedactor,
+    GlobTool, GrepTool, GuardedHttpFetchError, GuardedHttpFetchRequest, LsTool, MultiEditTool,
+    MutationScope, PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent,
+    ProviderRequest, ProxyEnvironment, ProxySettings, QuestionAsker, ReadTool, Recorder,
+    RecordingCommandExecutor, ReplayCommandExecutor, ReplayProvider, SessionId, SymbolIndex,
+    SymbolsTool, ThinkingLevel, TodoTool, TokioCommandExecutor, Tool, ToolCapability, ToolChoice,
+    ToolContext, ToolDefinition, ToolDescriptor, ToolError, ToolLimits, ToolOutput, ToolRegistry,
+    ToolResult, Turn, WebFetchTool, WebFetcher, WireMode, WriteTool,
+    deny_outbound_network_for_process, guarded_http_fetch,
 };
 use rw_core::{
-    AgentLoopError, EngineEvent, EventClock, EventMeta, ModelDriver, MutationCheckpoint,
+    AccountingAttribution, AgentLoopError, BudgetLedgerQuery, BudgetLedgerTotals, EngineEvent,
+    EventClock, EventMeta, MessageDisposition, ModelDriver, MutationCheckpoint,
     MutationCheckpointCoordinator, MutationCheckpointOutcome, PermissionGate, ProviderFactory,
     QuestionId, RewindCheckpoint, SESSION_EVENT_VERSION, SequenceId, SessionActor,
     SessionActorConfig, SessionEventSink, SystemEventClock, ToolOutputStream, TurnStatus,
@@ -34,7 +39,10 @@ use rw_core::{
 use rw_store::{
     checkpoint::{CheckpointStore, OpaqueMutation, RewindHandle},
     config::ConfigLoader,
-    session::{SessionEventLog, SessionIndex, SessionProjection, SessionSummary},
+    session::{
+        AccountingLedger, SessionEventLog, SessionIndex, SessionProjection, SessionSummary,
+        TurnAccountingEntry, UtcTimestamp,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -47,6 +55,7 @@ const DEFAULT_EVENT_CAPACITY: usize = 1_024;
 const DEFAULT_DOOM_LOOP_LIMIT: usize = 5;
 const MAX_REDIRECTS: usize = 5;
 const SESSION_METADATA_VERSION: u16 = 1;
+const PROMPT_SHAPE_VERSION: u16 = 2;
 
 pub(crate) struct RunOptions {
     pub prompt: Option<String>,
@@ -62,6 +71,12 @@ pub(crate) struct RunOptions {
     pub perf_markers: bool,
     pub replay_provider: String,
     pub model: Option<String>,
+    pub action: RunAction,
+}
+
+pub(crate) enum RunAction {
+    Agent,
+    PromptDump { turn: Option<u64> },
 }
 
 #[allow(clippy::too_many_lines)]
@@ -100,13 +115,15 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
 
     let session_id = select_session(&storage_root, &workspace, &options)?;
     validate_session_id(&session_id)?;
-    let resuming = options.resume.is_some() || options.continue_latest;
-    if resuming
-        && !storage_root
-            .join("sessions")
-            .join(&session_id)
-            .join("events.jsonl")
-            .is_file()
+    let session_exists = storage_root
+        .join("sessions")
+        .join(&session_id)
+        .join("events.jsonl")
+        .is_file();
+    let resuming = (options.resume.is_some() || options.continue_latest) && session_exists;
+    if !session_exists
+        && (options.resume.is_some()
+            || (options.continue_latest && !is_zero_turn_prompt_dump(&options)))
     {
         return Err(miette!("session {session_id:?} does not exist"));
     }
@@ -167,12 +184,39 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     let recovered_events = load_session_events(&log)?;
     let recovered = project_session_events(&recovered_events)
         .map_err(|error| miette!("session log projection failed: {error}"))?;
-    let durable_sink = Arc::new(DurableEventSink::new(log));
+    let durable_sink = Arc::new(DurableEventSink::new(
+        log,
+        storage_root.clone(),
+        session_id.clone(),
+    )?);
+    durable_sink.reconcile_accounting(&recovered_events)?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::new(checkpoint_store));
 
-    let interactive = options.prompt.is_none();
+    let prompt_dump_turn = match options.action {
+        RunAction::Agent => None,
+        RunAction::PromptDump { turn } => Some(turn),
+    };
+    let inspection = prompt_dump_turn.is_some();
+    let recorded_prompt_shape = if let Some(turn) = prompt_dump_turn.flatten() {
+        Some(
+            durable_sink
+                .prompt_shapes
+                .shape_for_turn(turn)?
+                .ok_or_else(|| {
+                    miette!(
+                        "exact request shape is unavailable for historical turn {turn}; the session predates prompt-shape recording or its metadata is missing"
+                    )
+                })?,
+        )
+    } else if inspection {
+        durable_sink.prompt_shapes.latest_shape()?
+    } else {
+        None
+    };
+    let interactive = !inspection && options.prompt.is_none();
     let question_asker: Arc<dyn QuestionAsker> = Arc::new(HeadlessQuestionAsker);
-    let offline_fixture = options.replay_dir.is_some() || options.in_memory_replay_script.is_some();
+    let offline_fixture =
+        inspection || options.replay_dir.is_some() || options.in_memory_replay_script.is_some();
     let fixture_redactor = FixtureRedactor::default();
     let command_fixture_mode = if options.record_replay_script.is_some() {
         CommandFixtureMode::Record {
@@ -224,59 +268,168 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         session_id: SessionId(session_id.clone()),
     });
 
-    let model_alias = options.model.clone().unwrap_or(persisted_model_alias);
-    let _network_denial = ((options.replay_dir.is_some()
-        && options.record_replay_script.is_none())
+    let configured_run_model_alias = options.model.clone().unwrap_or(persisted_model_alias);
+    let inspection_profile = if inspection {
+        Some(recorded_prompt_shape.as_ref().map_or_else(
+            || {
+                let candidate = loaded_config
+                    .config
+                    .models
+                    .aliases
+                    .get(&configured_run_model_alias)
+                    .and_then(|candidates| candidates.first())
+                    .ok_or_else(|| {
+                        miette!(
+                            "exact request shape is unavailable: model alias {:?} has no candidate",
+                            configured_run_model_alias
+                        )
+                    })?;
+                let (provider_name, _) = candidate.split_once('/').ok_or_else(|| {
+                    miette!("exact request shape is unavailable: candidate is not provider-qualified")
+                })?;
+                let kind = loaded_config
+                    .config
+                    .providers
+                    .get(provider_name)
+                    .ok_or_else(|| {
+                        miette!(
+                            "exact request shape is unavailable: provider {provider_name:?} is not configured"
+                        )
+                    })?
+                    .kind
+                    .as_str();
+                let cache_support = match kind {
+                    "anthropic" => CacheBreakpointSupport::Explicit,
+                    "openai" | "openai_responses" | "openai_chat" | "openai_codex"
+                    | "openai_subscription" => CacheBreakpointSupport::Automatic,
+                    "github_copilot" | "openai_compatible" | "openai_compatible_chat"
+                    | "openai_compatible_responses" => CacheBreakpointSupport::None,
+                    _ => {
+                        return Err(miette!(
+                            "exact request shape is unavailable: unsupported provider kind {kind:?}"
+                        ));
+                    }
+                };
+                Ok(PromptShapeProfile {
+                    model_alias: configured_run_model_alias.clone(),
+                    tools: built_tools
+                        .registry
+                        .descriptors()
+                        .into_iter()
+                        .map(|tool| ToolDefinition {
+                            name: tool.name,
+                            description: tool.description,
+                            input_schema: tool.input_schema,
+                        })
+                        .collect(),
+                    cache_support,
+                    cache_hint: None,
+                    cache_breakpoints: cache_breakpoints_for_hint(None, cache_support),
+                })
+            },
+            |(profile, _)| Ok(profile.clone()),
+        )?)
+    } else {
+        None
+    };
+    let actor_tools = inspection_profile.as_ref().map_or_else(
+        || Ok(Arc::clone(&built_tools.registry)),
+        historical_tool_registry,
+    )?;
+
+    let model_alias = inspection_profile.as_ref().map_or_else(
+        || configured_run_model_alias.clone(),
+        |profile| profile.model_alias.clone(),
+    );
+    let _network_denial = (inspection
+        || (options.replay_dir.is_some() && options.record_replay_script.is_none())
         || options.in_memory_replay_script.is_some())
     .then(deny_outbound_network_for_process);
-    let (model, engine_redactor): (Arc<dyn ModelDriver>, FixtureRedactor) =
-        if let Some(script_path) = &options.in_memory_replay_script {
-            let script = load_provider_script(script_path)?;
-            let scripted: Arc<dyn Provider> = Arc::new(ScriptProvider::new(
-                options.replay_provider.clone(),
-                script,
-                0,
-            ));
-            (
-                Arc::new(ProviderModel { provider: scripted }),
-                fixture_redactor.clone(),
-            )
-        } else if let Some(script_path) = &options.record_replay_script {
-            let directory = options
-                .replay_dir
-                .as_ref()
-                .ok_or_else(|| miette!("--record-replay-script requires --replay-dir"))?;
-            let script = load_provider_script(script_path)?;
-            let scripted: Arc<dyn Provider> = Arc::new(ScriptProvider::new(
-                options.replay_provider.clone(),
-                script,
-                options.record_script_delay_ms,
-            ));
-            let recorder: Arc<dyn Provider> =
-                Arc::new(Recorder::new(scripted, directory, fixture_redactor.clone()));
-            (
-                Arc::new(ProviderModel { provider: recorder }),
-                fixture_redactor.clone(),
-            )
-        } else if let Some(directory) = &options.replay_dir {
-            let replay: Arc<dyn Provider> = Arc::new(
-                ReplayProvider::load(&options.replay_provider, directory)
-                    .await
-                    .map_err(|error| miette!("replay provider could not load: {error}"))?,
-            );
-            (
-                Arc::new(ProviderModel { provider: replay }),
-                fixture_redactor.clone(),
-            )
-        } else {
-            let pricing = PricingTable::bundled()
-                .map_err(|error| miette!("bundled model catalog is invalid: {error}"))?;
-            let runtime = ProviderFactory::system(config_loader.credentials_path(), pricing)
-                .build(&loaded_config.config)
-                .map_err(|error| miette!("provider runtime could not start: {error}"))?;
-            let redactor = runtime.fixture_redactor();
-            (Arc::new(runtime), redactor)
-        };
+    let (model, engine_redactor): (Arc<dyn ModelDriver>, FixtureRedactor) = if inspection {
+        let cache_support = inspection_profile
+            .as_ref()
+            .map_or(CacheBreakpointSupport::None, |profile| {
+                profile.cache_support
+            });
+        let scripted: Arc<dyn Provider> = Arc::new(
+            ScriptProvider::new("prompt-dump-offline".to_owned(), Vec::new(), 0)
+                .with_cache_support(cache_support),
+        );
+        (
+            Arc::new(ProviderModel::new(
+                scripted,
+                loaded_config.config.compaction.clone(),
+                loaded_config.config.budget.clone(),
+            )),
+            fixture_redactor.clone(),
+        )
+    } else if let Some(script_path) = &options.in_memory_replay_script {
+        let script = load_provider_script(script_path)?;
+        let scripted: Arc<dyn Provider> = Arc::new(ScriptProvider::new(
+            options.replay_provider.clone(),
+            script,
+            0,
+        ));
+        (
+            Arc::new(ProviderModel::new(
+                scripted,
+                loaded_config.config.compaction.clone(),
+                loaded_config.config.budget.clone(),
+            )),
+            fixture_redactor.clone(),
+        )
+    } else if let Some(script_path) = &options.record_replay_script {
+        let directory = options
+            .replay_dir
+            .as_ref()
+            .ok_or_else(|| miette!("--record-replay-script requires --replay-dir"))?;
+        let script = load_provider_script(script_path)?;
+        let scripted: Arc<dyn Provider> = Arc::new(ScriptProvider::new(
+            options.replay_provider.clone(),
+            script,
+            options.record_script_delay_ms,
+        ));
+        let recorder: Arc<dyn Provider> =
+            Arc::new(Recorder::new(scripted, directory, fixture_redactor.clone()));
+        (
+            Arc::new(ProviderModel::new(
+                recorder,
+                loaded_config.config.compaction.clone(),
+                loaded_config.config.budget.clone(),
+            )),
+            fixture_redactor.clone(),
+        )
+    } else if let Some(directory) = &options.replay_dir {
+        let replay: Arc<dyn Provider> = Arc::new(
+            ReplayProvider::load(&options.replay_provider, directory)
+                .await
+                .map_err(|error| miette!("replay provider could not load: {error}"))?,
+        );
+        (
+            Arc::new(ProviderModel::new(
+                replay,
+                loaded_config.config.compaction.clone(),
+                loaded_config.config.budget.clone(),
+            )),
+            fixture_redactor.clone(),
+        )
+    } else {
+        let pricing = PricingTable::bundled()
+            .map_err(|error| miette!("bundled model catalog is invalid: {error}"))?;
+        let runtime = ProviderFactory::system(config_loader.credentials_path(), pricing)
+            .build(&loaded_config.config)
+            .map_err(|error| miette!("provider runtime could not start: {error}"))?;
+        let redactor = runtime.fixture_redactor();
+        (Arc::new(runtime), redactor)
+    };
+    let model: Arc<dyn ModelDriver> = if inspection {
+        model
+    } else {
+        Arc::new(PromptRecordingModel {
+            inner: model,
+            journal: Arc::clone(&durable_sink.prompt_shapes),
+        })
+    };
     let permissions = match options.permission_mode {
         Some(mode) => Arc::new(PermissionGate::for_headless_mode(mode.into())),
         None => Arc::new(PermissionGate::new(
@@ -289,7 +442,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         initial_session_context: initial_context,
         model_alias,
         model,
-        tools: Arc::clone(&built_tools.registry),
+        tools: actor_tools,
         permissions,
         hooks: Arc::new(builtin_hook_dispatcher().map_err(display_agent_error)?),
         commands: Arc::new(builtin_command_registry().map_err(display_agent_error)?),
@@ -306,7 +459,27 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     })
     .map_err(display_agent_error)?;
 
-    let outcome = if let Some(prompt) = options.prompt {
+    let outcome = if let Some(turn) = prompt_dump_turn {
+        let dump = actor
+            .dump_prompt(turn.map(|turn| rw_core::TurnId(turn.to_string())))
+            .await
+            .map_err(display_agent_error)?;
+        if let (Some(_), Some((profile, record))) = (turn, &recorded_prompt_shape) {
+            let tools = dump
+                .tools
+                .iter()
+                .map(|tool| ToolDefinition {
+                    name: tool.name.clone(),
+                    description: tool.description.clone(),
+                    input_schema: tool.input_schema.clone(),
+                })
+                .collect::<Vec<_>>();
+            validate_historical_prompt_shape(&dump, &tools, profile, record)?;
+        }
+        serde_json::to_writer_pretty(io::stdout().lock(), &dump).into_diagnostic()?;
+        println!();
+        None
+    } else if let Some(prompt) = options.prompt {
         run_print(
             &actor,
             &session_id,
@@ -362,6 +535,346 @@ struct SessionMetadata {
     initial_session_context: Vec<Turn>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PromptShapeProfile {
+    model_alias: String,
+    tools: Vec<ToolDefinition>,
+    cache_support: CacheBreakpointSupport,
+    #[serde(default)]
+    cache_hint: Option<CacheHint>,
+    #[serde(default)]
+    cache_breakpoints: Vec<PromptCacheBreakpoint>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PromptCacheBreakpoint {
+    after_item_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PromptShapeRecord {
+    profile_id: String,
+    request_fingerprint: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PromptShapeState {
+    version: u16,
+    #[serde(default)]
+    profiles: BTreeMap<String, PromptShapeProfile>,
+    #[serde(default)]
+    records: BTreeMap<String, PromptShapeRecord>,
+}
+
+impl Default for PromptShapeState {
+    fn default() -> Self {
+        Self {
+            version: PROMPT_SHAPE_VERSION,
+            profiles: BTreeMap::new(),
+            records: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PromptShapeJournal {
+    path: PathBuf,
+    state: Mutex<PromptShapeState>,
+    active_turn: Mutex<Option<rw_core::TurnId>>,
+}
+
+impl PromptShapeJournal {
+    fn open(storage_root: &Path, session_id: &str) -> Result<Self> {
+        validate_session_id(session_id)?;
+        let directory = storage_root.join("sessions").join(session_id);
+        ensure_real_directory(&directory, false)?;
+        let path = directory.join("prompt-shapes.json");
+        let state = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(miette!("prompt-shape metadata is not a regular file"));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    if metadata.permissions().mode() & 0o077 != 0 {
+                        return Err(miette!(
+                            "prompt-shape metadata permissions grant group or other access"
+                        ));
+                    }
+                }
+                let bytes = std::fs::read(&path).into_diagnostic()?;
+                let state: PromptShapeState = serde_json::from_slice(&bytes).into_diagnostic()?;
+                if state.version != PROMPT_SHAPE_VERSION {
+                    return Err(miette!("unsupported prompt-shape metadata version"));
+                }
+                validate_prompt_shape_state(&state)?;
+                state
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => PromptShapeState::default(),
+            Err(error) => return Err(error).into_diagnostic(),
+        };
+        Ok(Self {
+            path,
+            state: Mutex::new(state),
+            active_turn: Mutex::new(None),
+        })
+    }
+
+    fn set_active_turn(&self, turn_id: rw_core::TurnId) {
+        *self
+            .active_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(turn_id);
+    }
+
+    fn clear_active_turn(&self, turn_id: &rw_core::TurnId) {
+        let mut active = self
+            .active_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active.as_ref() == Some(turn_id) {
+            *active = None;
+        }
+    }
+
+    fn record_request(
+        &self,
+        model_alias: &str,
+        request: &ProviderRequest,
+        cache_support: CacheBreakpointSupport,
+    ) -> Result<()> {
+        if request.tool_choice == ToolChoice::None {
+            return Ok(());
+        }
+        let Some(turn_id) = self
+            .active_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        else {
+            return Ok(());
+        };
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.records.contains_key(&turn_id.0) {
+            return Ok(());
+        }
+        let profile = PromptShapeProfile {
+            model_alias: model_alias.to_owned(),
+            tools: request.tools.clone(),
+            cache_support,
+            cache_hint: request.cache_hint,
+            cache_breakpoints: cache_breakpoints_for_hint(request.cache_hint, cache_support),
+        };
+        let profile_id = hash_serialized(&profile)?;
+        let request_fingerprint = prompt_request_fingerprint(
+            model_alias,
+            &request.turns,
+            &request.tools,
+            request.cache_hint,
+            cache_support,
+            &profile.cache_breakpoints,
+        )?;
+        state.profiles.entry(profile_id.clone()).or_insert(profile);
+        state.records.insert(
+            turn_id.0,
+            PromptShapeRecord {
+                profile_id,
+                request_fingerprint,
+            },
+        );
+        persist_prompt_shape_state(&self.path, &state)
+    }
+
+    fn shape_for_turn(&self, turn: u64) -> Result<Option<(PromptShapeProfile, PromptShapeRecord)>> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(record) = state.records.get(&turn.to_string()) else {
+            return Ok(None);
+        };
+        let profile = state
+            .profiles
+            .get(&record.profile_id)
+            .ok_or_else(|| miette!("prompt-shape record references a missing profile"))?;
+        Ok(Some((profile.clone(), record.clone())))
+    }
+
+    fn latest_shape(&self) -> Result<Option<(PromptShapeProfile, PromptShapeRecord)>> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some((_, record)) = state
+            .records
+            .iter()
+            .filter_map(|(turn, record)| turn.parse::<u64>().ok().map(|turn| (turn, record)))
+            .max_by_key(|(turn, _)| *turn)
+        else {
+            return Ok(None);
+        };
+        let profile = state
+            .profiles
+            .get(&record.profile_id)
+            .ok_or_else(|| miette!("prompt-shape record references a missing profile"))?;
+        Ok(Some((profile.clone(), record.clone())))
+    }
+}
+
+fn hash_serialized(value: &impl Serialize) -> Result<String> {
+    let bytes = serde_json::to_vec(value).into_diagnostic()?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+fn cache_breakpoints_for_hint(
+    cache_hint: Option<CacheHint>,
+    cache_support: CacheBreakpointSupport,
+) -> Vec<PromptCacheBreakpoint> {
+    if cache_support == CacheBreakpointSupport::None {
+        return Vec::new();
+    }
+    let after_item_id = cache_hint
+        .and_then(|hint| hint.stable_prefix_turns.checked_sub(1))
+        .map(|index| format!("system:{index}"));
+    vec![PromptCacheBreakpoint { after_item_id }]
+}
+
+fn prompt_dump_cache_breakpoints(dump: &rw_core::PromptDump) -> Vec<PromptCacheBreakpoint> {
+    dump.cache_breakpoints
+        .iter()
+        .map(|breakpoint| PromptCacheBreakpoint {
+            after_item_id: breakpoint
+                .after_item_id
+                .as_ref()
+                .map(|item_id| item_id.0.clone()),
+        })
+        .collect()
+}
+
+fn is_blake3_hex(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_prompt_shape_state(state: &PromptShapeState) -> Result<()> {
+    for (profile_id, profile) in &state.profiles {
+        if !is_blake3_hex(profile_id) || hash_serialized(profile)? != *profile_id {
+            return Err(miette!(
+                "prompt-shape profile id does not match its serialized content"
+            ));
+        }
+        if profile
+            .cache_hint
+            .is_some_and(|hint| hint.tools_in_prefix == profile.tools.is_empty())
+            || profile.cache_breakpoints
+                != cache_breakpoints_for_hint(profile.cache_hint, profile.cache_support)
+        {
+            return Err(miette!(
+                "prompt-shape profile contains inconsistent cache metadata"
+            ));
+        }
+    }
+    for (turn, record) in &state.records {
+        if turn.parse::<u64>().is_err() {
+            return Err(miette!("prompt-shape record has an invalid turn id"));
+        }
+        if !is_blake3_hex(&record.request_fingerprint) {
+            return Err(miette!(
+                "prompt-shape record has an invalid request fingerprint"
+            ));
+        }
+        if !state.profiles.contains_key(&record.profile_id) {
+            return Err(miette!("prompt-shape record references a missing profile"));
+        }
+    }
+    Ok(())
+}
+
+fn prompt_request_fingerprint(
+    model_alias: &str,
+    turns: &[Turn],
+    tools: &[ToolDefinition],
+    cache_hint: Option<CacheHint>,
+    cache_support: CacheBreakpointSupport,
+    cache_breakpoints: &[PromptCacheBreakpoint],
+) -> Result<String> {
+    hash_serialized(&serde_json::json!({
+        "model_alias": model_alias,
+        "turns": turns,
+        "tools": tools,
+        "cache_hint": cache_hint,
+        "cache_support": cache_support,
+        "cache_breakpoints": cache_breakpoints,
+    }))
+}
+
+fn validate_historical_prompt_shape(
+    dump: &rw_core::PromptDump,
+    tools: &[ToolDefinition],
+    profile: &PromptShapeProfile,
+    record: &PromptShapeRecord,
+) -> Result<()> {
+    let fingerprint = prompt_request_fingerprint(
+        &dump.model_alias.0,
+        &dump.turns,
+        tools,
+        profile.cache_hint,
+        profile.cache_support,
+        &profile.cache_breakpoints,
+    )?;
+    if fingerprint != record.request_fingerprint {
+        return Err(miette!(
+            "historical prompt reconstruction did not match its recorded request shape"
+        ));
+    }
+    if prompt_dump_cache_breakpoints(dump) != profile.cache_breakpoints {
+        return Err(miette!(
+            "historical prompt reconstruction did not match its recorded cache behavior"
+        ));
+    }
+    Ok(())
+}
+
+fn persist_prompt_shape_state(path: &Path, state: &PromptShapeState) -> Result<()> {
+    let bytes = serde_json::to_vec(state).into_diagnostic()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| miette!("prompt-shape path has no parent"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(".prompt-shapes-{}-{nonce}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary).into_diagnostic()?;
+    let result = (|| -> Result<()> {
+        file.write_all(&bytes).into_diagnostic()?;
+        file.flush().into_diagnostic()?;
+        file.sync_all().into_diagnostic()?;
+        std::fs::rename(&temporary, path).into_diagnostic()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn select_session(storage_root: &Path, workspace: &Path, options: &RunOptions) -> Result<String> {
     if let Some(session) = &options.resume {
         return Ok(session.clone());
@@ -374,12 +887,19 @@ fn select_session(storage_root: &Path, workspace: &Path, options: &RunOptions) -
         if let Some(session) = latest_workspace_session(storage_root, workspace)? {
             return Ok(session);
         }
+        if is_zero_turn_prompt_dump(options) {
+            return new_session_id();
+        }
         return Err(miette!(
             "there is no previous session for workspace {} to continue",
             workspace.display()
         ));
     }
     new_session_id()
+}
+
+fn is_zero_turn_prompt_dump(options: &RunOptions) -> bool {
+    matches!(options.action, RunAction::PromptDump { turn: None })
 }
 
 fn latest_workspace_session(storage_root: &Path, workspace: &Path) -> Result<Option<String>> {
@@ -614,16 +1134,25 @@ fn new_session_id() -> Result<String> {
 
 struct DurableEventSink {
     log: Arc<Mutex<SessionEventLog>>,
+    storage_root: PathBuf,
+    session_id: String,
+    prompt_shapes: Arc<PromptShapeJournal>,
+    accounting_dirty: AtomicBool,
     todo_restore: Mutex<Option<TodoRestoreBinding>>,
 }
 
 impl DurableEventSink {
-    fn new(log: SessionEventLog) -> Self {
+    fn new(log: SessionEventLog, storage_root: PathBuf, session_id: String) -> Result<Self> {
         let log = Arc::new(Mutex::new(log));
-        Self {
+        let prompt_shapes = Arc::new(PromptShapeJournal::open(&storage_root, &session_id)?);
+        Ok(Self {
             log,
+            storage_root,
+            session_id,
+            prompt_shapes,
+            accounting_dirty: AtomicBool::new(false),
             todo_restore: Mutex::new(None),
-        }
+        })
     }
 
     fn bind_todo(&self, binding: TodoRestoreBinding) {
@@ -713,10 +1242,30 @@ impl SessionEventSink for DurableEventSink {
                 .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
             }
         }
-        Ok(envelopes
+        let persisted = envelopes
             .into_iter()
             .map(|envelope| envelope.event)
-            .collect())
+            .collect::<Vec<_>>();
+        for event in &persisted {
+            match event {
+                EngineEvent::TurnStarted { turn_id, .. } => {
+                    self.prompt_shapes.set_active_turn(turn_id.clone());
+                }
+                EngineEvent::TurnFinished { turn_id, .. } => {
+                    self.prompt_shapes.clear_active_turn(turn_id);
+                }
+                _ => {}
+            }
+        }
+        if let Err(error) = self.reconcile_accounting(&persisted) {
+            self.accounting_dirty.store(true, Ordering::Release);
+            tracing::warn!(
+                session_id = %self.session_id,
+                reason = %error,
+                "durable accounting projection will be repaired on the next query"
+            );
+        }
+        Ok(persisted)
     }
 
     async fn read_after(
@@ -734,6 +1283,64 @@ impl SessionEventSink for DurableEventSink {
                     .is_some_and(|meta| last_seen.is_none_or(|last| meta.sequence_id > last))
             })
             .collect())
+    }
+
+    async fn budget_totals(
+        &self,
+        query: BudgetLedgerQuery,
+    ) -> std::result::Result<BudgetLedgerTotals, AgentLoopError> {
+        if self.accounting_dirty.swap(false, Ordering::AcqRel) {
+            let repair = self
+                .load()
+                .and_then(|events| self.reconcile_accounting(&events));
+            if let Err(error) = repair {
+                self.accounting_dirty.store(true, Ordering::Release);
+                return Err(AgentLoopError::Persistence(error.to_string()));
+            }
+        }
+        let now = UtcTimestamp::from_unix_millis(query.now_unix_ms)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let day_start = UtcTimestamp::from_unix_millis(query.utc_day_start_unix_ms)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let trailing_start = UtcTimestamp::from_unix_millis(query.trailing_minute_start_unix_ms)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        let totals = AccountingLedger::open(&self.storage_root)
+            .and_then(|ledger| {
+                ledger.totals(
+                    &self.session_id,
+                    &day_start.utc_day(),
+                    &trailing_start,
+                    &now,
+                )
+            })
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        Ok(BudgetLedgerTotals {
+            authoritative: true,
+            session_cost_micros_usd: totals.session_micros_usd,
+            session_ai_credit_micros: totals.session_ai_credit_micros,
+            daily_cost_micros_usd: totals.day_micros_usd,
+            daily_ai_credit_micros: totals.day_ai_credit_micros,
+            trailing_minute_cost_micros_usd: totals.trailing_all_sessions_micros_usd,
+            trailing_minute_ai_credit_micros: totals.trailing_all_sessions_ai_credit_micros,
+            session_subscription_quota_entries: totals.session_subscription_quota_turns,
+            session_cost_unavailable_entries: totals.session_unavailable_turns,
+            session_non_usd_monetary_entries: totals.session_non_usd_monetary_turns,
+            daily_subscription_quota_entries: totals.day_subscription_quota_turns,
+            daily_cost_unavailable_entries: totals.day_unavailable_turns,
+            daily_non_usd_monetary_entries: totals.day_non_usd_monetary_turns,
+        })
+    }
+}
+
+impl DurableEventSink {
+    fn reconcile_accounting(&self, events: &[EngineEvent]) -> Result<()> {
+        let entries = project_accounting(&self.session_id, events)?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+        AccountingLedger::open(&self.storage_root)
+            .and_then(|ledger| ledger.reconcile(&entries))
+            .map_err(|error| miette!("session accounting could not reconcile: {error}"))
     }
 }
 
@@ -960,6 +1567,25 @@ fn recover_rewind_transactions(
 
 struct ProviderModel {
     provider: Arc<dyn Provider>,
+    model_metadata: Option<rw_core::ProviderModelMetadata>,
+    compaction: rw_core::CompactionConfig,
+    budget: rw_core::BudgetConfig,
+}
+
+impl ProviderModel {
+    fn new(
+        provider: Arc<dyn Provider>,
+        compaction: rw_core::CompactionConfig,
+        budget: rw_core::BudgetConfig,
+    ) -> Self {
+        let model_metadata = provider.cached_model_metadata();
+        Self {
+            provider,
+            model_metadata,
+            compaction,
+            budget,
+        }
+    }
 }
 
 impl ModelDriver for ProviderModel {
@@ -980,12 +1606,137 @@ impl ModelDriver for ProviderModel {
             }
         }))
     }
+
+    fn context_metadata(&self, _alias: &str) -> rw_core::ModelContextMetadata {
+        let capabilities = self.model_metadata.as_ref().map_or_else(
+            || self.provider.capabilities(),
+            |metadata| metadata.capabilities.clone(),
+        );
+        rw_core::ModelContextMetadata {
+            max_context_tokens: capabilities.max_context_tokens,
+            max_output_tokens: capabilities.max_output_tokens,
+            cache_breakpoints: Some(capabilities.cache_breakpoints),
+        }
+    }
+
+    fn compaction_config(&self) -> rw_core::CompactionConfig {
+        self.compaction.clone()
+    }
+
+    fn budget_config(&self) -> rw_core::BudgetConfig {
+        self.budget.clone()
+    }
+
+    fn cost(&self, _alias: &str, usage: rw_core::ModelTokenUsage) -> rw_core::Cost {
+        self.model_metadata.as_ref().map_or_else(
+            || rw_core::Cost::Unavailable {
+                reason: "recorded provider accounting is unavailable".to_owned(),
+            },
+            |metadata| rw_core::cost_from_model_metadata(metadata, usage),
+        )
+    }
+}
+
+struct PromptRecordingModel {
+    inner: Arc<dyn ModelDriver>,
+    journal: Arc<PromptShapeJournal>,
+}
+
+impl ModelDriver for PromptRecordingModel {
+    fn stream(
+        &self,
+        alias: &str,
+        request: ProviderRequest,
+    ) -> std::result::Result<BoxEventStream, AgentLoopError> {
+        let cache_support = self
+            .inner
+            .context_metadata(alias)
+            .cache_breakpoints
+            .unwrap_or(CacheBreakpointSupport::None);
+        self.journal
+            .record_request(alias, &request, cache_support)
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
+        self.inner.stream(alias, request)
+    }
+
+    fn context_metadata(&self, alias: &str) -> rw_core::ModelContextMetadata {
+        self.inner.context_metadata(alias)
+    }
+
+    fn compaction_config(&self) -> rw_core::CompactionConfig {
+        self.inner.compaction_config()
+    }
+
+    fn budget_config(&self) -> rw_core::BudgetConfig {
+        self.inner.budget_config()
+    }
+
+    fn cost(&self, alias: &str, usage: rw_core::ModelTokenUsage) -> rw_core::Cost {
+        self.inner.cost(alias, usage)
+    }
+
+    fn cost_for_reported_model(
+        &self,
+        alias: &str,
+        reported_model: Option<&str>,
+        usage: rw_core::ModelTokenUsage,
+    ) -> rw_core::Cost {
+        self.inner
+            .cost_for_reported_model(alias, reported_model, usage)
+    }
+
+    fn cost_for_route(
+        &self,
+        alias: &str,
+        route: Option<&str>,
+        reported_model: Option<&str>,
+        usage: rw_core::ModelTokenUsage,
+    ) -> rw_core::Cost {
+        self.inner
+            .cost_for_route(alias, route, reported_model, usage)
+    }
+}
+
+struct HistoricalPromptTool(ToolDescriptor);
+
+#[async_trait]
+impl Tool for HistoricalPromptTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        self.0.clone()
+    }
+
+    async fn execute(
+        &self,
+        _context: &ToolContext,
+        _input: serde_json::Value,
+    ) -> std::result::Result<ToolResult, ToolError> {
+        Err(ToolError::InvalidInput(
+            "historical prompt tools cannot execute".to_owned(),
+        ))
+    }
+}
+
+fn historical_tool_registry(profile: &PromptShapeProfile) -> Result<Arc<ToolRegistry>> {
+    let mut registry = ToolRegistry::new();
+    for tool in &profile.tools {
+        registry
+            .register(Arc::new(HistoricalPromptTool(ToolDescriptor {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+                capabilities: CapabilityManifest::default(),
+            })))
+            .map_err(|error| miette!("historical prompt tool could not register: {error}"))?;
+    }
+    Ok(Arc::new(registry))
 }
 
 struct ScriptProvider {
     name: String,
     scripts: Mutex<VecDeque<Vec<ProviderEvent>>>,
     event_delay: std::time::Duration,
+    model_metadata: Option<rw_core::ProviderModelMetadata>,
+    cache_support: CacheBreakpointSupport,
 }
 
 impl ScriptProvider {
@@ -994,7 +1745,20 @@ impl ScriptProvider {
             name,
             scripts: Mutex::new(scripts.into()),
             event_delay: std::time::Duration::from_millis(event_delay_ms),
+            model_metadata: None,
+            cache_support: CacheBreakpointSupport::None,
         }
+    }
+
+    fn with_cache_support(mut self, cache_support: CacheBreakpointSupport) -> Self {
+        self.cache_support = cache_support;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_model_metadata(mut self, metadata: rw_core::ProviderModelMetadata) -> Self {
+        self.model_metadata = Some(metadata);
+        self
     }
 }
 
@@ -1009,11 +1773,21 @@ impl Provider for ScriptProvider {
             tool_calling: true,
             vision: false,
             thinking: true,
-            cache_breakpoints: CacheBreakpointSupport::None,
+            cache_breakpoints: self.cache_support,
             max_context_tokens: Some(128_000),
             max_output_tokens: Some(16_384),
             wire_mode: WireMode::NormalizedReplay,
         }
+    }
+
+    async fn model_metadata(
+        &self,
+    ) -> std::result::Result<Option<rw_core::ProviderModelMetadata>, ProviderError> {
+        Ok(self.model_metadata.clone())
+    }
+
+    fn cached_model_metadata(&self) -> Option<rw_core::ProviderModelMetadata> {
+        self.model_metadata.clone()
     }
 
     async fn stream(
@@ -1509,6 +2283,7 @@ fn embedded_ipv4(high: u16, low: u16) -> Ipv4Addr {
     Ipv4Addr::new(a, b, c, d)
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_print(
     actor: &rw_core::SessionHandle,
     session_id: &str,
@@ -1518,22 +2293,41 @@ async fn run_print(
 ) -> Result<Option<TurnStatus>> {
     let mut events = actor.subscribe();
     let dispatch_started = std::time::Instant::now();
-    actor
-        .send_message(prompt)
+    let actor_task = actor.clone();
+    let prompt_task = prompt.to_owned();
+    let dispatch = tokio::spawn(async move { actor_task.send_message(prompt_task).await });
+    // Prime the subscription before awaiting the command completion. Otherwise
+    // an initial durable replay can overtake the connection-scoped ACK.
+    let first_event = events
+        .recv()
         .await
+        .map_err(|error| miette!("session event stream failed: {error}"))?;
+    let disposition = dispatch
+        .await
+        .map_err(|error| miette!("message dispatch worker failed: {error}"))?
         .map_err(display_agent_error)?;
+    let command_mode = disposition == MessageDisposition::Command;
+    let waits_for_compaction = prompt
+        .split_whitespace()
+        .next()
+        .is_some_and(|name| name == "/compact");
     let mut aggregate = PrintAggregate::new(session_id);
     let mut target_turn = None;
+    let mut first_event = Some(first_event);
     loop {
-        let event = tokio::select! {
-            event = events.recv() => event
-                .map_err(|error| miette!("session event stream failed: {error}"))?,
-            signal = tokio::signal::ctrl_c() => {
-                signal.into_diagnostic()?;
-                if !actor.interrupt().await.map_err(display_agent_error)? {
-                    return Err(miette!("interrupt received while no turn was running"));
+        let event = if let Some(event) = first_event.take() {
+            event
+        } else {
+            tokio::select! {
+                event = events.recv() => event
+                    .map_err(|error| miette!("session event stream failed: {error}"))?,
+                signal = tokio::signal::ctrl_c() => {
+                    signal.into_diagnostic()?;
+                    if !actor.interrupt().await.map_err(display_agent_error)? {
+                        return Err(miette!("interrupt received while no turn was running"));
+                    }
+                    continue;
                 }
-                continue;
             }
         };
         if let EngineEvent::ToolApprovalNeeded { tool_call_id, .. } = &event {
@@ -1572,12 +2366,20 @@ async fn run_print(
         {
             target_turn = Some(agent_turn.to_string());
         }
-        let target_finished = matches!(
-            &event,
-            EngineEvent::TurnFinished { turn_id, .. }
-                if Some(&turn_id.0) == target_turn.as_ref()
-        );
-        if target_turn.is_some() {
+        let target_finished = if command_mode {
+            if waits_for_compaction {
+                matches!(&event, EngineEvent::CompactionFinished { .. })
+            } else {
+                matches!(&event, EngineEvent::CommandFinished { .. })
+            }
+        } else {
+            matches!(
+                &event,
+                EngineEvent::TurnFinished { turn_id, .. }
+                    if Some(&turn_id.0) == target_turn.as_ref()
+            )
+        };
+        if command_mode || target_turn.is_some() {
             aggregate.push(event);
         }
         if target_finished {
@@ -1632,6 +2434,10 @@ impl PrintAggregate {
                 self.status = Some(status.clone());
                 self.usage = usage.clone();
             }
+            EngineEvent::CommandFinished { message, .. } => {
+                self.text.push_str(message);
+                self.text.push('\n');
+            }
             _ => {}
         }
         self.events.push(event);
@@ -1660,7 +2466,48 @@ fn render_text_event(event: &EngineEvent, repl: bool) -> Result<()> {
                 io::stdout().flush().into_diagnostic()?;
             }
         }
-        EngineEvent::CommandFinished { message, .. } if repl => println!("{message}"),
+        EngineEvent::ContextSnapshotReady { snapshot, .. } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(snapshot).into_diagnostic()?
+            );
+        }
+        EngineEvent::CostSnapshotReady { snapshot, .. } => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(snapshot).into_diagnostic()?
+            );
+        }
+        EngineEvent::PromptDumpReady { dump, .. } => {
+            println!("{}", serde_json::to_string_pretty(dump).into_diagnostic()?);
+        }
+        EngineEvent::ContextItemPinned { item_id, .. } => {
+            println!("pinned context item {}", item_id.0);
+        }
+        EngineEvent::ContextItemEvicted { item_id, .. } => {
+            println!("evicted context item {}", item_id.0);
+        }
+        EngineEvent::CompactionStarted { reason, .. } => {
+            println!("compaction started ({reason:?})");
+        }
+        EngineEvent::CompactionAttemptFinished { cost, .. } => {
+            println!("compaction attempt accounted ({cost:?})");
+        }
+        EngineEvent::CompactionFinished {
+            reclaimed_tokens, ..
+        } => {
+            println!("compaction finished; reclaimed {reclaimed_tokens} estimated tokens");
+        }
+        EngineEvent::BudgetStatusChanged {
+            level,
+            scope,
+            current,
+            limit,
+            ..
+        } => {
+            eprintln!("budget {level:?} ({scope:?}): {current}/{limit}");
+        }
+        EngineEvent::CommandFinished { message, .. } => println!("{message}"),
         EngineEvent::GuardTriggered { message, .. } => {
             eprintln!("error: {message}");
         }
@@ -1881,6 +2728,38 @@ fn repl_event_message(event: &EngineEvent, format: OutputFormat) -> Result<Optio
         EngineEvent::TextDelta { text, .. } | EngineEvent::ToolOutputDelta { chunk: text, .. } => {
             Some(text.clone())
         }
+        EngineEvent::ContextSnapshotReady { snapshot, .. } => Some(format!(
+            "{}\n",
+            serde_json::to_string_pretty(snapshot).into_diagnostic()?
+        )),
+        EngineEvent::CostSnapshotReady { snapshot, .. } => Some(format!(
+            "{}\n",
+            serde_json::to_string_pretty(snapshot).into_diagnostic()?
+        )),
+        EngineEvent::ContextItemPinned { item_id, .. } => {
+            Some(format!("pinned context item {}\n", item_id.0))
+        }
+        EngineEvent::ContextItemEvicted { item_id, .. } => {
+            Some(format!("evicted context item {}\n", item_id.0))
+        }
+        EngineEvent::CompactionStarted { reason, .. } => {
+            Some(format!("compaction started ({reason:?})\n"))
+        }
+        EngineEvent::CompactionAttemptFinished { cost, .. } => {
+            Some(format!("compaction attempt accounted ({cost:?})\n"))
+        }
+        EngineEvent::CompactionFinished {
+            reclaimed_tokens, ..
+        } => Some(format!(
+            "compaction finished; reclaimed {reclaimed_tokens} estimated tokens\n"
+        )),
+        EngineEvent::BudgetStatusChanged {
+            level,
+            scope,
+            current,
+            limit,
+            ..
+        } => Some(format!("budget {level:?} ({scope:?}): {current}/{limit}\n")),
         EngineEvent::CommandFinished { message, .. } => Some(format!("{message}\n")),
         EngineEvent::GuardTriggered { message, .. } => Some(format!("error: {message}\n")),
         EngineEvent::Error { error, .. } => Some(format!("error: {}\n", error.message)),
@@ -1899,6 +2778,7 @@ fn parse_approval(input: &str) -> ApprovalDecision {
 fn refresh_session_index(storage_root: &Path) -> Result<()> {
     let sessions_root = storage_root.join("sessions");
     let mut projections = Vec::new();
+    let mut accounting_entries = Vec::new();
     match std::fs::read_dir(&sessions_root) {
         Ok(entries) => {
             for entry in entries {
@@ -1913,12 +2793,13 @@ fn refresh_session_index(storage_root: &Path) -> Result<()> {
                     .map_err(|error| miette!("session {id:?} could not open: {error}"))?;
                 let events = load_session_events(&log)?;
                 projections.push(project_session(&id, &events, log.path()));
+                accounting_entries.extend(project_accounting(&id, &events)?);
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).into_diagnostic(),
     }
-    SessionIndex::rebuild(storage_root, &projections)
+    SessionIndex::rebuild(storage_root, &projections, &accounting_entries)
         .map_err(|error| miette!("session index rebuild failed: {error}"))?;
     Ok(())
 }
@@ -1937,7 +2818,67 @@ fn update_one_session_index(
     SessionIndex::open(storage_root)
         .map_err(|error| miette!("session index could not open: {error}"))?
         .upsert(&projection)
-        .map_err(|error| miette!("session index could not update: {error}"))
+        .map_err(|error| miette!("session index could not update: {error}"))?;
+    let accounting_entries = project_accounting(session_id, &events)?;
+    AccountingLedger::open(storage_root)
+        .and_then(|ledger| ledger.reconcile(&accounting_entries))
+        .map_err(|error| miette!("session accounting could not update: {error}"))
+}
+
+fn project_accounting(
+    session_id: &str,
+    events: &[EngineEvent],
+) -> Result<Vec<TurnAccountingEntry>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            EngineEvent::TurnFinished {
+                meta,
+                turn_id,
+                usage,
+                cost,
+                ..
+            } => Some((meta, turn_id, usage, cost, AccountingAttribution::Main)),
+            EngineEvent::CompactionFinished {
+                meta,
+                summary_turn_id,
+                usage: Some(usage),
+                cost: Some(cost),
+                ..
+            }
+            | EngineEvent::CompactionAttemptFinished {
+                meta,
+                summary_turn_id,
+                usage,
+                cost,
+            } => Some((
+                meta,
+                summary_turn_id,
+                usage,
+                cost,
+                AccountingAttribution::Compaction,
+            )),
+            _ => None,
+        })
+        .map(|(meta, turn_id, usage, cost, attribution)| {
+            let emitted_at_utc = UtcTimestamp::parse(meta.emitted_at.clone()).map_err(|error| {
+                miette!(
+                    "turn {} has a malformed accounting timestamp: {error}",
+                    turn_id.0
+                )
+            })?;
+            Ok(TurnAccountingEntry {
+                session_id: session_id.to_owned(),
+                turn_id: turn_id.clone(),
+                sequence_id: meta.sequence_id,
+                utc_day: emitted_at_utc.utc_day(),
+                emitted_at_utc,
+                attribution,
+                usage: usage.clone(),
+                cost: cost.clone(),
+            })
+        })
+        .collect()
 }
 
 fn project_session(session_id: &str, events: &[EngineEvent], path: &Path) -> SessionProjection {
@@ -2080,6 +3021,405 @@ mod tests {
         let title = compact_title(&format!("hello\n{}", "world ".repeat(30)));
         assert!(!title.contains('\n'));
         assert!(title.chars().count() <= 80);
+    }
+
+    #[test]
+    fn accounting_projection_keeps_main_and_compaction_attribution() {
+        let meta = |sequence| EventMeta {
+            protocol_version: SESSION_EVENT_VERSION,
+            session_id: SessionId("accounting-session".to_owned()),
+            sequence_id: SequenceId(sequence),
+            emitted_at: "2026-07-10T12:34:56.789Z".to_owned(),
+            caused_by: None,
+        };
+        let usage = Usage {
+            input_tokens: 11,
+            output_tokens: 12,
+            cache_read_tokens: 13,
+            cache_write_tokens: 14,
+            reasoning_tokens: 15,
+        };
+        let cost = Cost::AiCredits {
+            credits_micros: 16,
+            nominal_amount_micros: None,
+            currency: None,
+        };
+        let entries = project_accounting(
+            "accounting-session",
+            &[
+                EngineEvent::TurnFinished {
+                    meta: meta(3),
+                    turn_id: TurnId("1".to_owned()),
+                    status: TurnStatus::Completed,
+                    usage: usage.clone(),
+                    cost: cost.clone(),
+                },
+                EngineEvent::CompactionAttemptFinished {
+                    meta: meta(4),
+                    summary_turn_id: TurnId("compact-attempt-1".to_owned()),
+                    usage: usage.clone(),
+                    cost: cost.clone(),
+                },
+                EngineEvent::CompactionFinished {
+                    meta: meta(5),
+                    summary_turn_id: TurnId("compact-1".to_owned()),
+                    reclaimed_tokens: 20,
+                    usage: Some(usage.clone()),
+                    cost: Some(cost.clone()),
+                },
+            ],
+        )
+        .expect("accounting projection");
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].attribution, AccountingAttribution::Main);
+        assert_eq!(entries[1].attribution, AccountingAttribution::Compaction);
+        assert_eq!(entries[1].sequence_id, SequenceId(4));
+        assert_eq!(entries[1].usage, usage);
+        assert_eq!(entries[1].cost, cost);
+        assert_eq!(entries[1].utc_day.as_str(), "2026-07-10");
+        assert_eq!(entries[2].attribution, AccountingAttribution::Compaction);
+        assert_eq!(entries[2].sequence_id, SequenceId(5));
+
+        let root = tempdir().expect("accounting ledger root");
+        let ledger = AccountingLedger::open(root.path()).expect("accounting ledger");
+        ledger.reconcile(&entries).expect("initial reconciliation");
+        ledger
+            .reconcile(&entries)
+            .expect("idempotent reconciliation");
+        let persisted = ledger.entries().expect("persisted accounting entries");
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(persisted[1].sequence_id, SequenceId(4));
+        assert_eq!(persisted[2].sequence_id, SequenceId(5));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn historical_anthropic_prompt_shape_restores_cache_and_tool_schema_offline() {
+        let root = tempdir().expect("prompt metadata root");
+        let session_id = "historical-anthropic";
+        std::fs::create_dir_all(root.path().join("sessions").join(session_id))
+            .expect("session directory");
+        let journal = Arc::new(
+            PromptShapeJournal::open(root.path(), session_id).expect("prompt-shape journal"),
+        );
+        journal.set_active_turn(TurnId("1".to_owned()));
+        let system = Turn {
+            role: Role::System,
+            blocks: vec![Block::Text {
+                text: "stable historical policy".to_owned(),
+            }],
+            meta: TurnMeta::default(),
+        };
+        let user = Turn {
+            role: Role::User,
+            blocks: vec![Block::Text {
+                text: "HISTORICAL_PROMPT_SECRET".to_owned(),
+            }],
+            meta: TurnMeta::default(),
+        };
+        let tool = ToolDefinition {
+            name: "historic_read".to_owned(),
+            description: "Historical read schema".to_owned(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"legacy_path": {"type": "string"}},
+                "required": ["legacy_path"]
+            }),
+        };
+        let request = ProviderRequest {
+            model: "fast".to_owned(),
+            turns: vec![system.clone(), user.clone()],
+            tools: vec![tool.clone()],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: 512,
+            temperature: None,
+            thinking: ThinkingLevel::Off,
+            cache_hint: Some(rw_core::runtime_support::CacheHint {
+                stable_prefix_turns: 1,
+                tools_in_prefix: true,
+            }),
+        };
+        journal
+            .record_request("fast", &request, CacheBreakpointSupport::Explicit)
+            .expect("record prompt shape");
+        let metadata = std::fs::read_to_string(
+            root.path()
+                .join("sessions")
+                .join(session_id)
+                .join("prompt-shapes.json"),
+        )
+        .expect("prompt-shape metadata");
+        assert!(!metadata.contains("HISTORICAL_PROMPT_SECRET"));
+        let (profile, record) = journal
+            .shape_for_turn(1)
+            .expect("historical shape lookup")
+            .expect("historical shape");
+        assert_eq!(profile.cache_support, CacheBreakpointSupport::Explicit);
+        assert_eq!(profile.cache_hint, request.cache_hint);
+        assert_eq!(
+            profile.cache_breakpoints,
+            vec![PromptCacheBreakpoint {
+                after_item_id: Some("system:0".to_owned()),
+            }]
+        );
+        assert_eq!(profile.tools, vec![tool]);
+        assert_eq!(
+            journal
+                .latest_shape()
+                .expect("latest prompt shape")
+                .expect("recorded latest prompt shape"),
+            (profile.clone(), record.clone())
+        );
+
+        let provider: Arc<dyn Provider> = Arc::new(
+            ScriptProvider::new("anthropic-history".to_owned(), Vec::new(), 0)
+                .with_cache_support(profile.cache_support),
+        );
+        let model: Arc<dyn ModelDriver> = Arc::new(ProviderModel::new(
+            provider,
+            rw_core::CompactionConfig::default(),
+            rw_core::BudgetConfig::default(),
+        ));
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let actor = SessionActor::spawn(SessionActorConfig {
+            session_id: SessionId(session_id.to_owned()),
+            workspace_root: workspace,
+            initial_session_context: vec![system],
+            model_alias: profile.model_alias.clone(),
+            model,
+            tools: historical_tool_registry(&profile).expect("historical tools"),
+            permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
+            hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
+            commands: Arc::new(builtin_command_registry().expect("commands")),
+            event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
+            event_clock: Arc::new(SystemEventClock),
+            secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
+            checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
+            recovered: rw_core::SessionRecoveredState {
+                conversation: vec![user],
+                ..rw_core::SessionRecoveredState::default()
+            },
+            max_turns: 1,
+            identical_tool_failure_limit: 1,
+            max_output_tokens: 512,
+            thinking: ThinkingLevel::Off,
+            event_capacity: 32,
+        })
+        .expect("historical prompt actor");
+        let dump = actor.dump_prompt(None).await.expect("historical dump");
+        assert_eq!(dump.tools[0].input_schema, profile.tools[0].input_schema);
+        assert_eq!(dump.cache_breakpoints.len(), 1);
+        let tools = dump
+            .tools
+            .iter()
+            .map(|tool| ToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            })
+            .collect::<Vec<_>>();
+        validate_historical_prompt_shape(&dump, &tools, &profile, &record)
+            .expect("recorded prompt shape must validate");
+        assert_eq!(
+            prompt_request_fingerprint(
+                &dump.model_alias.0,
+                &dump.turns,
+                &tools,
+                profile.cache_hint,
+                profile.cache_support,
+                &profile.cache_breakpoints,
+            )
+            .expect("dump fingerprint"),
+            record.request_fingerprint
+        );
+        assert_ne!(
+            prompt_request_fingerprint(
+                &dump.model_alias.0,
+                &dump.turns,
+                &tools,
+                profile.cache_hint,
+                CacheBreakpointSupport::Automatic,
+                &profile.cache_breakpoints,
+            )
+            .expect("provider-managed cache fingerprint"),
+            record.request_fingerprint,
+            "explicit and provider-managed cache modes must not share a fingerprint"
+        );
+
+        let mut mismatched_profile = profile.clone();
+        mismatched_profile.cache_hint = Some(CacheHint {
+            stable_prefix_turns: 2,
+            tools_in_prefix: true,
+        });
+        mismatched_profile.cache_breakpoints = cache_breakpoints_for_hint(
+            mismatched_profile.cache_hint,
+            mismatched_profile.cache_support,
+        );
+        let mismatched_record = PromptShapeRecord {
+            profile_id: hash_serialized(&mismatched_profile).expect("mismatched profile id"),
+            request_fingerprint: prompt_request_fingerprint(
+                &dump.model_alias.0,
+                &dump.turns,
+                &tools,
+                mismatched_profile.cache_hint,
+                mismatched_profile.cache_support,
+                &mismatched_profile.cache_breakpoints,
+            )
+            .expect("mismatched fingerprint"),
+        };
+        let error = validate_historical_prompt_shape(
+            &dump,
+            &tools,
+            &mismatched_profile,
+            &mismatched_record,
+        )
+        .expect_err("a different stable boundary must fail closed");
+        assert!(error.to_string().contains("recorded cache behavior"));
+    }
+
+    #[test]
+    fn prompt_shape_sidecar_rejects_tampering_and_missing_profile_references() {
+        let root = tempdir().expect("prompt metadata root");
+        let session_id = "tampered-prompt-shape";
+        let session_directory = root.path().join("sessions").join(session_id);
+        std::fs::create_dir_all(&session_directory).expect("session directory");
+        let journal = PromptShapeJournal::open(root.path(), session_id).expect("shape journal");
+        journal.set_active_turn(TurnId("1".to_owned()));
+        let request = ProviderRequest {
+            model: "fast".to_owned(),
+            turns: vec![Turn {
+                role: Role::System,
+                blocks: vec![Block::Text {
+                    text: "stable policy".to_owned(),
+                }],
+                meta: TurnMeta::default(),
+            }],
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: 128,
+            temperature: None,
+            thinking: ThinkingLevel::Off,
+            cache_hint: Some(CacheHint {
+                stable_prefix_turns: 1,
+                tools_in_prefix: false,
+            }),
+        };
+        journal
+            .record_request("fast", &request, CacheBreakpointSupport::Explicit)
+            .expect("record prompt shape");
+
+        let path = session_directory.join("prompt-shapes.json");
+        let pristine = std::fs::read(&path).expect("prompt-shape bytes");
+        let mut tampered: PromptShapeState =
+            serde_json::from_slice(&pristine).expect("prompt-shape state");
+        let profile_id = tampered.records["1"].profile_id.clone();
+        tampered
+            .profiles
+            .get_mut(&profile_id)
+            .expect("recorded profile")
+            .cache_breakpoints[0]
+            .after_item_id = Some("system:9".to_owned());
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&tampered).expect("tampered state"),
+        )
+        .expect("write tampered state");
+        let error = PromptShapeJournal::open(root.path(), session_id)
+            .expect_err("tampered profile must fail closed");
+        assert!(error.to_string().contains("profile id does not match"));
+
+        let mut missing_profile: PromptShapeState =
+            serde_json::from_slice(&pristine).expect("prompt-shape state");
+        missing_profile
+            .records
+            .get_mut("1")
+            .expect("recorded turn")
+            .profile_id = "0".repeat(64);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&missing_profile).expect("missing profile state"),
+        )
+        .expect("write missing profile state");
+        let error = PromptShapeJournal::open(root.path(), session_id)
+            .expect_err("missing profile reference must fail closed");
+        assert!(error.to_string().contains("references a missing profile"));
+    }
+
+    #[test]
+    fn offline_provider_model_replays_subscription_and_ai_credit_accounting() {
+        let capabilities = serde_json::json!({
+            "tool_calling": true,
+            "vision": false,
+            "thinking": false,
+            "cache_breakpoints": "none",
+            "max_context_tokens": 128_000,
+            "max_output_tokens": 16384,
+            "wire_mode": "normalized_replay"
+        });
+        let metadata = |accounting: serde_json::Value, pricing: serde_json::Value| {
+            serde_json::from_value::<rw_core::ProviderModelMetadata>(serde_json::json!({
+                "capabilities": capabilities.clone(),
+                "pricing": pricing,
+                "accounting": accounting
+            }))
+            .expect("provider metadata fixture")
+        };
+        let usage = rw_core::ModelTokenUsage {
+            input_tokens: 2,
+            output_tokens: 0,
+            cache_read_tokens: 1,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+        };
+        let subscription: Arc<dyn Provider> = Arc::new(
+            ScriptProvider::new("subscription-replay".to_owned(), Vec::new(), 0)
+                .with_model_metadata(metadata(
+                    serde_json::json!({"kind": "subscription_quota"}),
+                    serde_json::Value::Null,
+                )),
+        );
+        let subscription_model = ProviderModel::new(
+            subscription,
+            rw_core::CompactionConfig::default(),
+            rw_core::BudgetConfig::default(),
+        );
+        assert!(matches!(
+            subscription_model.cost("fast", usage),
+            Cost::SubscriptionQuota { used: Some(used), unit: Some(unit) }
+                if used == "3" && unit == "tokens"
+        ));
+
+        let credits: Arc<dyn Provider> = Arc::new(
+            ScriptProvider::new("credit-replay".to_owned(), Vec::new(), 0).with_model_metadata(
+                metadata(
+                    serde_json::json!({
+                        "kind": "ai_credits",
+                        "micros_usd_per_credit": 2
+                    }),
+                    serde_json::json!({
+                        "display_name": "credit fixture",
+                        "input_per_million_micros_usd": 1_000_000,
+                        "output_per_million_micros_usd": 1_000_000,
+                        "cache_read_per_million_micros_usd": 0
+                    }),
+                ),
+            ),
+        );
+        let credit_model = ProviderModel::new(
+            credits,
+            rw_core::CompactionConfig::default(),
+            rw_core::BudgetConfig::default(),
+        );
+        assert!(matches!(
+            credit_model.cost("fast", usage),
+            Cost::AiCredits {
+                credits_micros: 1_000_000,
+                nominal_amount_micros: Some(nominal),
+                currency: Some(currency),
+            } if nominal == "2" && currency == "USD"
+        ));
     }
 
     #[test]
@@ -2282,7 +3622,8 @@ mod tests {
         assert_eq!(before.data["count"], 1);
 
         let log = SessionEventLog::open(root.path(), &session.0).expect("event log");
-        let sink = DurableEventSink::new(log);
+        let sink = DurableEventSink::new(log, root.path().to_owned(), session.0.clone())
+            .expect("durable sink");
         sink.bind_todo(TodoRestoreBinding {
             todo: Arc::clone(&todo),
             workspace: workspace.clone(),
@@ -2375,13 +3716,19 @@ mod tests {
         }
         let scripted: Arc<dyn Provider> =
             Arc::new(ScriptProvider::new("direct-rewind".to_owned(), scripts, 0));
-        let model: Arc<dyn ModelDriver> = Arc::new(ProviderModel { provider: scripted });
+        let model: Arc<dyn ModelDriver> = Arc::new(ProviderModel::new(
+            scripted,
+            rw_core::CompactionConfig::default(),
+            rw_core::BudgetConfig::default(),
+        ));
         let mut registry = ToolRegistry::new();
         registry
             .register(Arc::new(WriteTool::new(ToolLimits::default())))
             .expect("write tool");
         let log = SessionEventLog::open(&storage, &session.0).expect("event log");
-        let sink = Arc::new(DurableEventSink::new(log));
+        let sink = Arc::new(
+            DurableEventSink::new(log, storage.clone(), session.0.clone()).expect("durable sink"),
+        );
         let checkpoints = Arc::new(DurableCheckpointCoordinator::new(Arc::new(
             CheckpointStore::open(
                 &checkpoint_root(&storage, &workspace, &session.0),

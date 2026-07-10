@@ -20,7 +20,10 @@ use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
     CredentialReference, OsKeychain, Secret as StoredSecret, SystemEnvironment,
 };
-use rw_types::config::{Config, ProviderConfig};
+use rw_types::{
+    Cost,
+    config::{BudgetConfig, CompactionConfig, Config, ProviderConfig},
+};
 use thiserror::Error;
 use url::{Host, Url};
 
@@ -114,9 +117,14 @@ pub struct ProviderRuntime {
     providers: BTreeMap<String, Arc<dyn Provider>>,
     models: BTreeMap<String, ResolvedModel>,
     alias_thinking: BTreeMap<String, ThinkingLevel>,
+    alias_candidates: BTreeMap<String, Vec<String>>,
+    route_candidates: BTreeMap<String, String>,
     default_alias: String,
     redactor: FixtureRedactor,
     warnings: RuntimeWarnings,
+    pricing_table: PricingTable,
+    compaction: CompactionConfig,
+    budget: BudgetConfig,
 }
 
 impl fmt::Debug for ProviderRuntime {
@@ -189,6 +197,154 @@ impl ProviderRuntime {
     #[must_use]
     pub fn warnings(&self) -> Vec<String> {
         self.warnings.snapshot()
+    }
+
+    /// Synchronous metadata for the first configured candidate of an alias.
+    #[must_use]
+    pub fn resolved_alias_model(&self, alias: &str) -> Option<&ResolvedModel> {
+        self.models.get(self.alias_candidates.get(alias)?.first()?)
+    }
+
+    /// Capabilities for the first alias candidate, upgraded with any metadata
+    /// cached by a lazily discovered provider.
+    #[must_use]
+    pub fn resolved_alias_capabilities(&self, alias: &str) -> Option<Capabilities> {
+        let candidate = self.alias_candidates.get(alias)?.first()?;
+        self.providers
+            .get(candidate)
+            .and_then(|provider| provider.cached_model_metadata())
+            .map(|metadata| metadata.capabilities)
+            .or_else(|| {
+                self.models
+                    .get(candidate)
+                    .map(|model| model.capabilities.clone())
+            })
+    }
+
+    /// Runtime compaction settings captured from validated user config.
+    #[must_use]
+    pub const fn compaction_config(&self) -> &CompactionConfig {
+        &self.compaction
+    }
+
+    /// Runtime budget settings captured from validated user config.
+    #[must_use]
+    pub const fn budget_config(&self) -> &BudgetConfig {
+        &self.budget
+    }
+
+    /// Typed accounting disposition for the first alias candidate.
+    #[must_use]
+    pub fn accounting_for_alias(&self, alias: &str, usage: rw_providers::TokenUsage) -> Cost {
+        let Some(candidates) = self.alias_candidates.get(alias) else {
+            return Cost::Unavailable {
+                reason: "model alias accounting is unavailable".to_owned(),
+            };
+        };
+        let [candidate] = candidates.as_slice() else {
+            return Cost::Unavailable {
+                reason: "actual failover model is not known for accounting".to_owned(),
+            };
+        };
+        self.accounting_for_candidate(candidate, usage)
+    }
+
+    /// Prices usage only when the normalized stream model uniquely identifies
+    /// the candidate that actually served a failover-capable alias.
+    #[must_use]
+    pub fn accounting_for_reported_model(
+        &self,
+        alias: &str,
+        reported_model: Option<&str>,
+        usage: rw_providers::TokenUsage,
+    ) -> Cost {
+        let Some(candidates) = self.alias_candidates.get(alias) else {
+            return Cost::Unavailable {
+                reason: "model alias accounting is unavailable".to_owned(),
+            };
+        };
+        let mut matches = candidates.iter().filter(|candidate| {
+            reported_model.is_some_and(|reported| {
+                self.models
+                    .get(*candidate)
+                    .is_some_and(|model| model.model == reported)
+            })
+        });
+        let Some(candidate) = matches.next() else {
+            return Cost::Unavailable {
+                reason: "actual routed model is unavailable for accounting".to_owned(),
+            };
+        };
+        if matches.next().is_some() {
+            return Cost::Unavailable {
+                reason: "actual routed model is ambiguous for accounting".to_owned(),
+            };
+        }
+        self.accounting_for_candidate(candidate, usage)
+    }
+
+    /// Prices usage using the opaque route identity emitted by the router.
+    #[must_use]
+    pub fn accounting_for_route(
+        &self,
+        route: Option<&str>,
+        usage: rw_providers::TokenUsage,
+    ) -> Cost {
+        let Some(candidate) = route.and_then(|route| self.route_candidates.get(route)) else {
+            return Cost::Unavailable {
+                reason: "actual routed candidate is unavailable for accounting".to_owned(),
+            };
+        };
+        self.accounting_for_candidate(candidate, usage)
+    }
+
+    fn accounting_for_candidate(&self, candidate: &str, usage: rw_providers::TokenUsage) -> Cost {
+        let Some(model) = self.models.get(candidate) else {
+            return Cost::Unavailable {
+                reason: "model candidate accounting is unavailable".to_owned(),
+            };
+        };
+        let cached_metadata = self
+            .providers
+            .get(candidate)
+            .and_then(|provider| provider.cached_model_metadata());
+        let accounting = cached_metadata
+            .as_ref()
+            .map_or(model.accounting, |metadata| metadata.accounting);
+        match accounting {
+            UsageAccounting::ApiDollars => model
+                .catalog_model
+                .as_deref()
+                .and_then(|canonical| self.pricing_table.cost(canonical, usage).ok().flatten())
+                .map_or_else(
+                    || Cost::Unavailable {
+                        reason: "authoritative API pricing is unavailable".to_owned(),
+                    },
+                    |cost| Cost::Monetary {
+                        amount_micros: cost.total_micros_usd,
+                        currency: "USD".to_owned(),
+                    },
+                ),
+            UsageAccounting::AiCredits {
+                micros_usd_per_credit,
+            } => cached_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.pricing.as_ref())
+                .or(model.pricing.as_ref())
+                .map_or_else(
+                    || Cost::Unavailable {
+                        reason: "authoritative AI-credit pricing is unavailable".to_owned(),
+                    },
+                    |pricing| ai_credit_cost(pricing, usage, micros_usd_per_credit),
+                ),
+            UsageAccounting::SubscriptionQuota => Cost::SubscriptionQuota {
+                used: Some(total_usage_tokens(usage).to_string()),
+                unit: Some("tokens".to_owned()),
+            },
+            UsageAccounting::UnpricedApi => Cost::Unavailable {
+                reason: "authoritative API pricing is unavailable".to_owned(),
+            },
+        }
     }
 
     /// Dispatches through an alias after applying its configured thinking dial.
@@ -295,6 +451,14 @@ where
     /// credentials, unsupported adapter kinds, or malformed model aliases.
     #[allow(clippy::too_many_lines)]
     pub fn build(&self, config: &Config) -> Result<ProviderRuntime, ProviderFactoryError> {
+        config
+            .compaction
+            .validate()
+            .map_err(|error| ProviderFactoryError::new("compaction", error))?;
+        config
+            .budget
+            .validate()
+            .map_err(|error| ProviderFactoryError::new("budget", error))?;
         if config.models.aliases.is_empty() {
             return Err(ProviderFactoryError::new(
                 "models",
@@ -449,6 +613,7 @@ where
             );
         }
 
+        let mut route_candidates = BTreeMap::new();
         for (index, (candidate, (provider_name, model))) in unique_candidates.iter().enumerate() {
             let connection = connections.get(provider_name).ok_or_else(|| {
                 ProviderFactoryError::new(provider_name, "provider connection is inconsistent")
@@ -516,6 +681,7 @@ where
             });
             let registration_key = format!("__model_{index:08}");
             registration_keys.insert(candidate.clone(), registration_key.clone());
+            route_candidates.insert(registration_key.clone(), candidate.clone());
             registry.push((registration_key, Arc::clone(&bounded)));
             providers.insert(candidate.clone(), bounded);
             models.insert(
@@ -560,14 +726,20 @@ where
             .iter()
             .map(|(alias, level)| (alias.clone(), convert_thinking(*level)))
             .collect();
+        let alias_candidates = config.models.aliases.clone();
         Ok(ProviderRuntime {
             router,
             providers,
             models,
             alias_thinking,
+            alias_candidates,
+            route_candidates,
             default_alias: config.models.default.clone(),
             redactor,
             warnings,
+            pricing_table: self.pricing.clone(),
+            compaction: config.compaction.clone(),
+            budget: config.budget.clone(),
         })
     }
 
@@ -1160,6 +1332,10 @@ impl Provider for ModelBoundProvider {
         self.inner.model_metadata().await
     }
 
+    fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
+        self.inner.cached_model_metadata()
+    }
+
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         self.validate(&request)?;
         self.inner.stream(request).await
@@ -1455,12 +1631,163 @@ fn model_capabilities(kind: AdapterKind, pricing: Option<&ModelPricing>) -> Capa
                 .iter()
                 .any(|effort| *effort != ThinkingLevel::Off)
         }),
-        // Price fields alone do not prove a cache-control protocol.
-        cache_breakpoints: CacheBreakpointSupport::None,
+        cache_breakpoints: match kind {
+            AdapterKind::Anthropic => CacheBreakpointSupport::Explicit,
+            AdapterKind::OpenAiResponses
+            | AdapterKind::OpenAiChat
+            | AdapterKind::OpenAiSubscription => CacheBreakpointSupport::Automatic,
+            AdapterKind::GitHubCopilot
+            | AdapterKind::OpenAiCompatibleResponses
+            | AdapterKind::OpenAiCompatibleChat => CacheBreakpointSupport::None,
+        },
         max_context_tokens: pricing.and_then(|value| value.max_context_tokens),
         max_output_tokens: pricing.and_then(|value| value.max_output_tokens),
         wire_mode,
     }
+}
+
+fn ai_credit_cost(
+    pricing: &ModelPricing,
+    usage: rw_providers::TokenUsage,
+    micros_usd_per_credit: u64,
+) -> Cost {
+    let nominal = [
+        (usage.input_tokens, pricing.input_per_million_micros_usd),
+        (usage.output_tokens, pricing.output_per_million_micros_usd),
+        (
+            usage.cache_read_tokens,
+            pricing
+                .cache_read_per_million_micros_usd
+                .unwrap_or(pricing.input_per_million_micros_usd),
+        ),
+        (
+            usage.cache_write_tokens,
+            pricing
+                .cache_write_per_million_micros_usd
+                .unwrap_or(pricing.input_per_million_micros_usd),
+        ),
+        (
+            usage.reasoning_tokens,
+            pricing
+                .reasoning_per_million_micros_usd
+                .unwrap_or(pricing.output_per_million_micros_usd),
+        ),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, (tokens, rate)| {
+        let component = u128::from(tokens)
+            .checked_mul(u128::from(rate))?
+            .checked_add(500_000)?
+            / 1_000_000;
+        total.checked_add(u64::try_from(component).ok()?)
+    });
+    let Some(nominal) = nominal else {
+        return Cost::Unavailable {
+            reason: "AI-credit cost exceeds the supported range".to_owned(),
+        };
+    };
+    let credits = (micros_usd_per_credit > 0)
+        .then(|| {
+            u128::from(nominal)
+                .checked_mul(1_000_000)?
+                .checked_add(u128::from(micros_usd_per_credit / 2))?
+                .checked_div(u128::from(micros_usd_per_credit))
+        })
+        .flatten()
+        .and_then(|credits| u64::try_from(credits).ok());
+    credits.map_or_else(
+        || Cost::Unavailable {
+            reason: "AI-credit conversion exceeds the supported range".to_owned(),
+        },
+        |credits_micros| Cost::AiCredits {
+            credits_micros,
+            nominal_amount_micros: Some(nominal.to_string()),
+            currency: Some("USD".to_owned()),
+        },
+    )
+}
+
+fn nominal_cost_micros(pricing: &ModelPricing, usage: rw_providers::TokenUsage) -> Option<u64> {
+    [
+        (usage.input_tokens, pricing.input_per_million_micros_usd),
+        (usage.output_tokens, pricing.output_per_million_micros_usd),
+        (
+            usage.cache_read_tokens,
+            pricing
+                .cache_read_per_million_micros_usd
+                .unwrap_or(pricing.input_per_million_micros_usd),
+        ),
+        (
+            usage.cache_write_tokens,
+            pricing
+                .cache_write_per_million_micros_usd
+                .unwrap_or(pricing.input_per_million_micros_usd),
+        ),
+        (
+            usage.reasoning_tokens,
+            pricing
+                .reasoning_per_million_micros_usd
+                .unwrap_or(pricing.output_per_million_micros_usd),
+        ),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, (tokens, rate)| {
+        let component = u128::from(tokens)
+            .checked_mul(u128::from(rate))?
+            .checked_add(500_000)?
+            / 1_000_000;
+        total.checked_add(u64::try_from(component).ok()?)
+    })
+}
+
+/// Converts provider-neutral model metadata and normalized usage into a typed cost.
+#[must_use]
+pub fn cost_from_model_metadata(
+    metadata: &ProviderModelMetadata,
+    usage: rw_providers::TokenUsage,
+) -> Cost {
+    match metadata.accounting {
+        UsageAccounting::ApiDollars => metadata.pricing.as_ref().map_or_else(
+            || Cost::Unavailable {
+                reason: "authoritative API pricing is unavailable".to_owned(),
+            },
+            |pricing| {
+                nominal_cost_micros(pricing, usage).map_or_else(
+                    || Cost::Unavailable {
+                        reason: "API cost exceeds the supported range".to_owned(),
+                    },
+                    |amount_micros| Cost::Monetary {
+                        amount_micros,
+                        currency: "USD".to_owned(),
+                    },
+                )
+            },
+        ),
+        UsageAccounting::AiCredits {
+            micros_usd_per_credit,
+        } => metadata.pricing.as_ref().map_or_else(
+            || Cost::Unavailable {
+                reason: "authoritative AI-credit pricing is unavailable".to_owned(),
+            },
+            |pricing| ai_credit_cost(pricing, usage, micros_usd_per_credit),
+        ),
+        UsageAccounting::SubscriptionQuota => Cost::SubscriptionQuota {
+            used: Some(total_usage_tokens(usage).to_string()),
+            unit: Some("tokens".to_owned()),
+        },
+        UsageAccounting::UnpricedApi => Cost::Unavailable {
+            reason: "authoritative API pricing is unavailable".to_owned(),
+        },
+    }
+}
+
+fn total_usage_tokens(usage: rw_providers::TokenUsage) -> u64 {
+    usage
+        .input_tokens
+        .saturating_add(usage.output_tokens)
+        .saturating_add(usage.cache_read_tokens)
+        .saturating_add(usage.cache_write_tokens)
+        .saturating_add(usage.reasoning_tokens)
 }
 
 #[allow(clippy::too_many_arguments)]

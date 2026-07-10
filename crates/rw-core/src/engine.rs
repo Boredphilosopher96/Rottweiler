@@ -12,25 +12,37 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::{FutureExt, StreamExt};
+use rw_context::{
+    AssembledContext, AssemblyInput, Budgeter, CompactionInput,
+    CompactionReason as ContextCompactionReason, Compactor, ContextAssembler,
+    ContextItem as AssemblyContextItem, ContextItemId as AssemblyContextItemId,
+    ContextItemKind as AssemblyContextItemKind, ContextProvenance, ConversationPin,
+    LocalTokenEstimator, OverflowPolicy, PRUNED_TOOL_OUTPUT_REPLACEMENT, PreCompactHook,
+    PruneConfig, PruneRecord, PruneRecordKind, Pruner, ToonPromptEncoder,
+};
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
     HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEvent, HookFailure,
     HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
 };
 use rw_providers::{
-    BoxEventStream, FinishReason, ProviderEvent, ProviderRequest, ThinkingLevel, TokenUsage,
-    ToolChoice, ToolDefinition,
+    BoxEventStream, CacheBreakpointSupport, CacheHint, FinishReason, ProviderEvent,
+    ProviderRequest, ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition,
 };
 use rw_tools::{
     AskUserInput, CancellationToken, MutationScope, QuestionAsker, ToolContext, ToolDescriptor,
     ToolError, ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult,
 };
+use rw_types::config::{BudgetConfig, CompactionConfig};
 use rw_types::{
-    Answer, ApprovalDecision, Block, ClientCommand, ClientId, ClientRole, CommandAckMeta,
-    CommandMeta, CommandOutcome, Cost, EngineError, EngineErrorCategory, EngineEvent, EventMeta,
-    PROTOCOL_VERSION, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
-    RewindTarget, Role, SequenceId, SessionId, ToolCallId, ToolOutput, ToolOutputPart,
-    ToolOutputStream, Turn, TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
+    AccountingAttribution, Answer, ApprovalDecision, Block, BudgetLevel, BudgetScope, BudgetUnit,
+    CacheBreakpoint, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta,
+    CommandOutcome, CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot,
+    ContextItemState, ContextSnapshot, Cost, CostSnapshot, EngineError, EngineErrorCategory,
+    EngineEvent, EventMeta, ModelAlias, PROTOCOL_VERSION, PromptDump, PromptTool, Question,
+    QuestionId, QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId,
+    SessionId, ToolCallId, ToolOutput, ToolOutputPart, ToolOutputStream, Turn, TurnAccounting,
+    TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -104,6 +116,59 @@ pub trait ModelDriver: Send + Sync {
         alias: &str,
         request: ProviderRequest,
     ) -> Result<BoxEventStream, AgentLoopError>;
+
+    /// Context/cache metadata known without a network call. Unknown context
+    /// windows conservatively disable estimate-triggered auto-compaction.
+    fn context_metadata(&self, _alias: &str) -> ModelContextMetadata {
+        ModelContextMetadata::default()
+    }
+
+    /// Validated compaction settings associated with this model runtime.
+    fn compaction_config(&self) -> CompactionConfig {
+        CompactionConfig::default()
+    }
+
+    /// Validated spend guardrails associated with this model runtime.
+    fn budget_config(&self) -> BudgetConfig {
+        BudgetConfig::default()
+    }
+
+    /// Billing disposition for normalized usage.
+    fn cost(&self, _alias: &str, _usage: TokenUsage) -> Cost {
+        Cost::Unavailable {
+            reason: "provider accounting is unavailable".to_owned(),
+        }
+    }
+
+    /// Billing disposition when the normalized stream reported the concrete
+    /// model that served a failover-capable alias.
+    fn cost_for_reported_model(
+        &self,
+        alias: &str,
+        _reported_model: Option<&str>,
+        usage: TokenUsage,
+    ) -> Cost {
+        self.cost(alias, usage)
+    }
+
+    /// Billing disposition keyed by an opaque router-owned candidate identity.
+    fn cost_for_route(
+        &self,
+        alias: &str,
+        _route: Option<&str>,
+        reported_model: Option<&str>,
+        usage: TokenUsage,
+    ) -> Cost {
+        self.cost_for_reported_model(alias, reported_model, usage)
+    }
+}
+
+/// Synchronous context metadata consumed by the provider-neutral assembler.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ModelContextMetadata {
+    pub max_context_tokens: Option<u64>,
+    pub max_output_tokens: Option<u64>,
+    pub cache_breakpoints: Option<CacheBreakpointSupport>,
 }
 
 impl ModelDriver for ProviderRuntime {
@@ -114,6 +179,48 @@ impl ModelDriver for ProviderRuntime {
     ) -> Result<BoxEventStream, AgentLoopError> {
         self.stream_alias(alias, request)
             .map_err(|error| AgentLoopError::Provider(error.to_string()))
+    }
+
+    fn context_metadata(&self, alias: &str) -> ModelContextMetadata {
+        self.resolved_alias_capabilities(alias).map_or_else(
+            ModelContextMetadata::default,
+            |capabilities| ModelContextMetadata {
+                max_context_tokens: capabilities.max_context_tokens,
+                max_output_tokens: capabilities.max_output_tokens,
+                cache_breakpoints: Some(capabilities.cache_breakpoints),
+            },
+        )
+    }
+
+    fn compaction_config(&self) -> CompactionConfig {
+        ProviderRuntime::compaction_config(self).clone()
+    }
+
+    fn budget_config(&self) -> BudgetConfig {
+        ProviderRuntime::budget_config(self).clone()
+    }
+
+    fn cost(&self, alias: &str, usage: TokenUsage) -> Cost {
+        self.accounting_for_alias(alias, usage)
+    }
+
+    fn cost_for_reported_model(
+        &self,
+        alias: &str,
+        reported_model: Option<&str>,
+        usage: TokenUsage,
+    ) -> Cost {
+        self.accounting_for_reported_model(alias, reported_model, usage)
+    }
+
+    fn cost_for_route(
+        &self,
+        _alias: &str,
+        route: Option<&str>,
+        _reported_model: Option<&str>,
+        usage: TokenUsage,
+    ) -> Cost {
+        self.accounting_for_route(route, usage)
     }
 }
 
@@ -154,6 +261,8 @@ pub enum AgentTurnStatus {
     MaxTurns,
     /// Identical failing tool invocations reached the configured threshold.
     DoomLoop,
+    /// A configured session or daily spend cap stopped the turn.
+    BudgetExceeded,
 }
 
 /// Unstamped event assembled inside the single-writer actor. The only public,
@@ -242,6 +351,52 @@ enum PendingEvent {
         turn: u64,
         status: AgentTurnStatus,
         usage: SessionUsage,
+        cost: Cost,
+    },
+    ContextUsage {
+        turn: u64,
+        used_tokens: u64,
+        usable_tokens: u64,
+        reserved_tokens: u64,
+        stable_prefix_hash: String,
+        cache_hit_basis_points: u16,
+        estimated_input_tokens: u64,
+        provider_input_tokens: u64,
+        correction_millionths: u64,
+    },
+    BudgetStatus {
+        turn: u64,
+        level: BudgetLevel,
+        scope: BudgetScope,
+        unit: BudgetUnit,
+        current: u64,
+        limit: u64,
+    },
+    CompactionStarted {
+        reason: CompactionReason,
+    },
+    CompactionAttemptFinished {
+        summary_turn: u64,
+        usage: SessionUsage,
+        cost: Cost,
+    },
+    CompactionFinished {
+        summary_turn: u64,
+        reclaimed_tokens: u64,
+        usage: Option<SessionUsage>,
+        cost: Option<Cost>,
+    },
+    ToolOutputPruned {
+        tool_call_id: String,
+        reclaimed_tokens: u64,
+    },
+    ContextItemPinned {
+        item_id: ContextItemId,
+        effective_after_agent_turn: u64,
+    },
+    ContextItemEvicted {
+        item_id: ContextItemId,
+        effective_after_agent_turn: u64,
     },
     Error {
         message: String,
@@ -265,9 +420,20 @@ fn wire_turn_id(turn: u64) -> TurnId {
     TurnId(turn.to_string())
 }
 
+fn unavailable_cost() -> Cost {
+    Cost::Unavailable {
+        reason: "provider accounting is unavailable".to_owned(),
+    }
+}
+
 /// Replay-injectable timestamp source for event metadata.
 pub trait EventClock: Send + Sync {
     fn emitted_at(&self) -> String;
+
+    /// Milliseconds since the Unix epoch used for deterministic budget windows.
+    fn unix_time_millis(&self) -> u64 {
+        0
+    }
 }
 
 /// UTC wall-clock timestamps for production sessions.
@@ -281,6 +447,40 @@ impl EventClock for SystemEventClock {
             .unwrap_or_default();
         format_unix_rfc3339(elapsed.as_secs(), elapsed.subsec_millis())
     }
+
+    fn unix_time_millis(&self) -> u64 {
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+/// Time bounds for a storage-neutral cross-session accounting query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BudgetLedgerQuery {
+    pub now_unix_ms: u64,
+    pub utc_day_start_unix_ms: u64,
+    pub trailing_minute_start_unix_ms: u64,
+}
+
+/// Reconciled totals supplied by durable storage for budget enforcement.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BudgetLedgerTotals {
+    /// True when totals came from a durable reconciled cross-session ledger.
+    pub authoritative: bool,
+    pub session_cost_micros_usd: u64,
+    pub session_ai_credit_micros: u64,
+    pub daily_cost_micros_usd: u64,
+    pub daily_ai_credit_micros: u64,
+    pub trailing_minute_cost_micros_usd: u64,
+    pub trailing_minute_ai_credit_micros: u64,
+    pub session_subscription_quota_entries: u64,
+    pub session_cost_unavailable_entries: u64,
+    pub session_non_usd_monetary_entries: u64,
+    pub daily_subscription_quota_entries: u64,
+    pub daily_cost_unavailable_entries: u64,
+    pub daily_non_usd_monetary_entries: u64,
 }
 
 fn format_unix_rfc3339(seconds: u64, millis: u32) -> String {
@@ -466,15 +666,98 @@ impl PendingEvent {
                 turn,
                 status,
                 usage,
+                cost,
             } => EngineEvent::TurnFinished {
                 meta,
                 turn_id: wire_turn_id(turn),
                 status: status.into(),
                 usage: usage.into(),
-                cost: Cost::Unavailable {
-                    reason: "provider accounting was not supplied to the M2 session runtime"
-                        .to_owned(),
-                },
+                cost,
+            },
+            Self::ContextUsage {
+                turn,
+                used_tokens,
+                usable_tokens,
+                reserved_tokens,
+                stable_prefix_hash,
+                cache_hit_basis_points,
+                estimated_input_tokens,
+                provider_input_tokens,
+                correction_millionths,
+            } => EngineEvent::ContextUsageUpdated {
+                meta,
+                turn_id: wire_turn_id(turn),
+                used_tokens,
+                usable_tokens,
+                reserved_tokens,
+                stable_prefix_hash,
+                cache_hit_basis_points,
+                estimated_input_tokens,
+                provider_input_tokens,
+                correction_millionths,
+            },
+            Self::BudgetStatus {
+                turn,
+                level,
+                scope,
+                unit,
+                current,
+                limit,
+            } => EngineEvent::BudgetStatusChanged {
+                meta,
+                turn_id: wire_turn_id(turn),
+                level,
+                scope,
+                unit,
+                current,
+                limit,
+            },
+            Self::CompactionStarted { reason } => EngineEvent::CompactionStarted { meta, reason },
+            Self::CompactionAttemptFinished {
+                summary_turn,
+                usage,
+                cost,
+            } => EngineEvent::CompactionAttemptFinished {
+                meta,
+                summary_turn_id: wire_turn_id(summary_turn),
+                usage: usage.into(),
+                cost,
+            },
+            Self::CompactionFinished {
+                summary_turn,
+                reclaimed_tokens,
+                usage,
+                cost,
+            } => EngineEvent::CompactionFinished {
+                meta,
+                summary_turn_id: wire_turn_id(summary_turn),
+                reclaimed_tokens,
+                usage: usage.map(Into::into),
+                cost,
+            },
+            Self::ToolOutputPruned {
+                tool_call_id,
+                reclaimed_tokens,
+            } => EngineEvent::ToolOutputPruned {
+                meta,
+                tool_call_id: ToolCallId(tool_call_id),
+                reclaimed_tokens,
+            },
+            Self::ContextItemPinned {
+                item_id,
+                effective_after_agent_turn,
+            } => EngineEvent::ContextItemPinned {
+                meta,
+                item_id,
+                effective_after_agent_turn,
+            },
+            Self::ContextItemEvicted {
+                item_id,
+                effective_after_agent_turn,
+            } => EngineEvent::ContextItemEvicted {
+                meta,
+                item_id,
+                effective_after_agent_turn,
             },
             Self::Error { message } => EngineEvent::Error {
                 meta,
@@ -522,6 +805,7 @@ impl From<AgentTurnStatus> for TurnStatus {
             AgentTurnStatus::Failed => Self::Failed,
             AgentTurnStatus::MaxTurns => Self::MaxTurns,
             AgentTurnStatus::DoomLoop => Self::DoomLoop,
+            AgentTurnStatus::BudgetExceeded => Self::BudgetExceeded,
         }
     }
 }
@@ -575,6 +859,18 @@ impl From<SessionUsage> for Usage {
     }
 }
 
+impl From<SessionUsage> for TokenUsage {
+    fn from(value: SessionUsage) -> Self {
+        Self {
+            input_tokens: value.input_tokens,
+            output_tokens: value.output_tokens,
+            cache_read_tokens: value.cache_read_tokens,
+            cache_write_tokens: value.cache_write_tokens,
+            reasoning_tokens: value.reasoning_tokens,
+        }
+    }
+}
+
 /// Immediate disposition of a submitted user message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MessageDisposition {
@@ -606,6 +902,19 @@ pub struct SessionRecoveredState {
     pub interrupted_tool_repairs: Vec<InterruptedToolRepair>,
     pub interrupted_tool_turn: Option<Turn>,
     pub pending_questions: BTreeMap<String, RecoveredQuestion>,
+    pub context_surgery: Vec<ContextSurgeryAction>,
+    pub pruned_tool_outputs: BTreeMap<String, u64>,
+    pub accounting: Vec<TurnAccounting>,
+    pub budgeter: Budgeter,
+    pub interrupted_compaction: bool,
+}
+
+/// Durable context surgery projected from pin/evict events.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextSurgeryAction {
+    pub item_id: ContextItemId,
+    pub pinned: bool,
+    pub effective_after_agent_turn: u64,
 }
 
 /// Durable interactive question state reconstructed from `QuestionAsked` and
@@ -649,12 +958,17 @@ fn parse_turn_id(turn_id: &TurnId) -> Result<u64, SessionProjectionError> {
         .map_err(|_| SessionProjectionError::InvalidTurnId(turn_id.0.clone()))
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::match_same_arms, clippy::too_many_lines)]
 fn recovered_pending_event(
     event: &EngineEvent,
 ) -> Result<Option<PendingEvent>, SessionProjectionError> {
     let pending = match event {
         EngineEvent::CommandAcknowledged { .. } => {
+            return Err(SessionProjectionError::ConnectionScopedEvent);
+        }
+        EngineEvent::ContextSnapshotReady { .. }
+        | EngineEvent::CostSnapshotReady { .. }
+        | EngineEvent::PromptDumpReady { .. } => {
             return Err(SessionProjectionError::ConnectionScopedEvent);
         }
         EngineEvent::TurnStarted { turn_id, .. } => PendingEvent::TurnStarted {
@@ -820,6 +1134,7 @@ fn recovered_pending_event(
             turn_id,
             status,
             usage,
+            cost,
             ..
         } => PendingEvent::TurnFinished {
             turn: parse_turn_id(turn_id)?,
@@ -829,6 +1144,7 @@ fn recovered_pending_event(
                 TurnStatus::Failed => AgentTurnStatus::Failed,
                 TurnStatus::MaxTurns => AgentTurnStatus::MaxTurns,
                 TurnStatus::DoomLoop => AgentTurnStatus::DoomLoop,
+                TurnStatus::BudgetExceeded => AgentTurnStatus::BudgetExceeded,
             },
             usage: SessionUsage {
                 input_tokens: usage.input_tokens,
@@ -837,6 +1153,106 @@ fn recovered_pending_event(
                 cache_write_tokens: usage.cache_write_tokens,
                 reasoning_tokens: usage.reasoning_tokens,
             },
+            cost: cost.clone(),
+        },
+        EngineEvent::ContextUsageUpdated {
+            turn_id,
+            used_tokens,
+            usable_tokens,
+            reserved_tokens,
+            stable_prefix_hash,
+            cache_hit_basis_points,
+            estimated_input_tokens,
+            provider_input_tokens,
+            correction_millionths,
+            ..
+        } => PendingEvent::ContextUsage {
+            turn: parse_turn_id(turn_id)?,
+            used_tokens: *used_tokens,
+            usable_tokens: *usable_tokens,
+            reserved_tokens: *reserved_tokens,
+            stable_prefix_hash: stable_prefix_hash.clone(),
+            cache_hit_basis_points: *cache_hit_basis_points,
+            estimated_input_tokens: *estimated_input_tokens,
+            provider_input_tokens: *provider_input_tokens,
+            correction_millionths: *correction_millionths,
+        },
+        EngineEvent::BudgetStatusChanged {
+            turn_id,
+            level,
+            scope,
+            unit,
+            current,
+            limit,
+            ..
+        } => PendingEvent::BudgetStatus {
+            turn: parse_turn_id(turn_id)?,
+            level: level.clone(),
+            scope: scope.clone(),
+            unit: unit.clone(),
+            current: *current,
+            limit: *limit,
+        },
+        EngineEvent::CompactionStarted { reason, .. } => PendingEvent::CompactionStarted {
+            reason: reason.clone(),
+        },
+        EngineEvent::CompactionAttemptFinished {
+            summary_turn_id,
+            usage,
+            cost,
+            ..
+        } => PendingEvent::CompactionAttemptFinished {
+            summary_turn: parse_turn_id(summary_turn_id)?,
+            usage: SessionUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_read_tokens: usage.cache_read_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
+            },
+            cost: cost.clone(),
+        },
+        EngineEvent::CompactionFinished {
+            summary_turn_id,
+            reclaimed_tokens,
+            usage,
+            cost,
+            ..
+        } => PendingEvent::CompactionFinished {
+            summary_turn: parse_turn_id(summary_turn_id)?,
+            reclaimed_tokens: *reclaimed_tokens,
+            usage: usage.as_ref().map(|usage| SessionUsage {
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_read_tokens: usage.cache_read_tokens,
+                cache_write_tokens: usage.cache_write_tokens,
+                reasoning_tokens: usage.reasoning_tokens,
+            }),
+            cost: cost.clone(),
+        },
+        EngineEvent::ToolOutputPruned {
+            tool_call_id,
+            reclaimed_tokens,
+            ..
+        } => PendingEvent::ToolOutputPruned {
+            tool_call_id: tool_call_id.0.clone(),
+            reclaimed_tokens: *reclaimed_tokens,
+        },
+        EngineEvent::ContextItemPinned {
+            item_id,
+            effective_after_agent_turn,
+            ..
+        } => PendingEvent::ContextItemPinned {
+            item_id: item_id.clone(),
+            effective_after_agent_turn: *effective_after_agent_turn,
+        },
+        EngineEvent::ContextItemEvicted {
+            item_id,
+            effective_after_agent_turn,
+            ..
+        } => PendingEvent::ContextItemEvicted {
+            item_id: item_id.clone(),
+            effective_after_agent_turn: *effective_after_agent_turn,
         },
         EngineEvent::DriverChanged {
             driver_client_id, ..
@@ -861,15 +1277,10 @@ fn recovered_pending_event(
         EngineEvent::Error { error, .. } => PendingEvent::Error {
             message: error.message.clone(),
         },
-        EngineEvent::CompactionStarted { .. }
-        | EngineEvent::CompactionFinished { .. }
-        | EngineEvent::SubagentSpawned { .. }
+        EngineEvent::SubagentSpawned { .. }
         | EngineEvent::SubagentFinished { .. }
-        | EngineEvent::ToolOutputPruned { .. }
         | EngineEvent::ModeChanged { .. }
         | EngineEvent::ModelChanged { .. }
-        | EngineEvent::ContextItemPinned { .. }
-        | EngineEvent::ContextItemEvicted { .. }
         | EngineEvent::UserShellStateChanged { .. } => return Ok(None),
     };
     Ok(Some(pending))
@@ -883,7 +1294,7 @@ fn recovered_pending_event(
 /// # Errors
 ///
 /// Returns an error for unsupported versions or a non-contiguous sequence.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::match_same_arms, clippy::too_many_lines)]
 pub fn project_session_events(
     events: &[EngineEvent],
 ) -> Result<SessionRecoveredState, SessionProjectionError> {
@@ -903,6 +1314,20 @@ pub fn project_session_events(
     let mut interrupted_tool_repairs = Vec::new();
     let mut interrupted_tool_turn = None;
     let mut pending_questions = BTreeMap::new();
+    let mut context_surgery = Vec::new();
+    let mut pruned_tool_outputs = BTreeMap::new();
+    let mut accounting = Vec::new();
+    let mut compacted_conversation = None::<Vec<(u64, Turn)>>;
+    let mut compaction_surgery_start = None::<usize>;
+    let mut budgeter = Budgeter::default();
+    let mut rewind_archives = Vec::<(
+        BTreeMap<u64, usize>,
+        Vec<Turn>,
+        Vec<u64>,
+        Vec<ContextSurgeryAction>,
+        BTreeMap<String, u64>,
+        Budgeter,
+    )>::new();
     for event in events {
         let meta = event_meta(event).ok_or(SessionProjectionError::ConnectionScopedEvent)?;
         if meta.protocol_version != SESSION_EVENT_VERSION {
@@ -949,6 +1374,10 @@ pub fn project_session_events(
                     .push(content.clone());
             }
             PendingEvent::ConversationTurnCommitted { agent_turn, turn } => {
+                if let Some(compacted) = &mut compacted_conversation {
+                    compacted.push((*agent_turn, turn.clone()));
+                    continue;
+                }
                 if turn.role == Role::User
                     && let Some(pending) = uncommitted_users.get_mut(agent_turn)
                     && !pending.is_empty()
@@ -964,12 +1393,35 @@ pub fn project_session_events(
                 }
             }
             PendingEvent::ConversationRewound { to_turn, .. } => {
-                let retained = conversation_agent_turns
+                if let Some((
+                    ends,
+                    restored,
+                    restored_turns,
+                    restored_surgery,
+                    restored_pruned,
+                    restored_budgeter,
+                )) = rewind_archives
                     .iter()
-                    .take_while(|turn| **turn <= *to_turn)
-                    .count();
-                conversation.truncate(retained);
-                conversation_agent_turns.truncate(retained);
+                    .find(|(ends, ..)| ends.contains_key(to_turn))
+                    .cloned()
+                {
+                    let retained = ends.get(to_turn).copied().unwrap_or_default();
+                    conversation = restored.into_iter().take(retained).collect();
+                    conversation_agent_turns = restored_turns.into_iter().take(retained).collect();
+                    context_surgery = restored_surgery
+                        .into_iter()
+                        .filter(|action| action.effective_after_agent_turn <= *to_turn)
+                        .collect();
+                    pruned_tool_outputs = restored_pruned;
+                    budgeter = restored_budgeter;
+                } else {
+                    let retained = conversation_agent_turns
+                        .iter()
+                        .take_while(|turn| **turn <= *to_turn)
+                        .count();
+                    conversation.truncate(retained);
+                    conversation_agent_turns.truncate(retained);
+                }
                 turn_ends.retain(|turn, _| *turn <= *to_turn);
                 queued.clear();
                 uncommitted_users.retain(|turn, _| *turn <= *to_turn);
@@ -981,8 +1433,13 @@ pub fn project_session_events(
                 completed_turns = u64::try_from(turn_ends.len()).unwrap_or(u64::MAX);
                 pending_questions
                     .retain(|_, question: &mut RecoveredQuestion| question.agent_turn <= *to_turn);
+                context_surgery.retain(|action: &ContextSurgeryAction| {
+                    action.effective_after_agent_turn <= *to_turn
+                });
             }
-            PendingEvent::TurnFinished { turn, .. } => {
+            PendingEvent::TurnFinished {
+                turn, usage, cost, ..
+            } => {
                 if active_turn == Some(*turn) {
                     active_turn = None;
                 }
@@ -991,6 +1448,12 @@ pub fn project_session_events(
                 turn_ends.insert(*turn, conversation.len());
                 pending_questions
                     .retain(|_, question: &mut RecoveredQuestion| question.agent_turn != *turn);
+                accounting.push(TurnAccounting {
+                    turn_id: wire_turn_id(*turn),
+                    attribution: AccountingAttribution::Main,
+                    usage: (*usage).into(),
+                    cost: cost.clone(),
+                });
             }
             PendingEvent::TextDelta { turn, text } if active_turn == Some(*turn) => {
                 append_text(&mut partial_assistant_blocks, text);
@@ -1035,7 +1498,108 @@ pub fn project_session_events(
             | PendingEvent::HookFailure { .. }
             | PendingEvent::CommandFinished { .. }
             | PendingEvent::GuardTriggered { .. }
-            | PendingEvent::Error { .. } => {}
+            | PendingEvent::BudgetStatus { .. } => {}
+            PendingEvent::Error { .. } => {
+                compacted_conversation = None;
+                if let Some(start) = compaction_surgery_start.take() {
+                    context_surgery.truncate(start);
+                }
+            }
+            PendingEvent::ContextUsage {
+                estimated_input_tokens,
+                provider_input_tokens,
+                ..
+            } if *estimated_input_tokens > 0 && *provider_input_tokens > 0 => {
+                budgeter.reconcile(
+                    *estimated_input_tokens,
+                    TokenUsage {
+                        input_tokens: *provider_input_tokens,
+                        ..TokenUsage::default()
+                    },
+                );
+            }
+            PendingEvent::ContextUsage { .. } => {}
+            PendingEvent::CompactionStarted { .. } => {
+                rewind_archives.push((
+                    turn_ends.clone(),
+                    conversation.clone(),
+                    conversation_agent_turns.clone(),
+                    context_surgery.clone(),
+                    pruned_tool_outputs.clone(),
+                    budgeter,
+                ));
+                compacted_conversation = Some(Vec::new());
+                compaction_surgery_start = Some(context_surgery.len());
+            }
+            PendingEvent::CompactionAttemptFinished {
+                summary_turn,
+                usage,
+                cost,
+            } => {
+                accounting.push(TurnAccounting {
+                    turn_id: wire_turn_id(*summary_turn),
+                    attribution: AccountingAttribution::Compaction,
+                    usage: (*usage).into(),
+                    cost: cost.clone(),
+                });
+            }
+            PendingEvent::CompactionFinished {
+                summary_turn,
+                usage: Some(usage),
+                cost: Some(cost),
+                ..
+            } => {
+                if let Some(compacted) = compacted_conversation.take() {
+                    conversation = compacted.iter().map(|(_, turn)| turn.clone()).collect();
+                    conversation_agent_turns = compacted
+                        .iter()
+                        .map(|(agent_turn, _)| *agent_turn)
+                        .collect();
+                }
+                if let Some(start) = compaction_surgery_start.take() {
+                    context_surgery.drain(..start);
+                }
+                accounting.push(TurnAccounting {
+                    turn_id: wire_turn_id(*summary_turn),
+                    attribution: AccountingAttribution::Compaction,
+                    usage: (*usage).into(),
+                    cost: cost.clone(),
+                });
+            }
+            PendingEvent::CompactionFinished { .. } => {
+                if let Some(compacted) = compacted_conversation.take() {
+                    conversation = compacted.iter().map(|(_, turn)| turn.clone()).collect();
+                    conversation_agent_turns = compacted
+                        .iter()
+                        .map(|(agent_turn, _)| *agent_turn)
+                        .collect();
+                }
+                if let Some(start) = compaction_surgery_start.take() {
+                    context_surgery.drain(..start);
+                }
+            }
+            PendingEvent::ToolOutputPruned {
+                tool_call_id,
+                reclaimed_tokens,
+            } => {
+                pruned_tool_outputs.insert(tool_call_id.clone(), *reclaimed_tokens);
+            }
+            PendingEvent::ContextItemPinned {
+                item_id,
+                effective_after_agent_turn,
+            } => context_surgery.push(ContextSurgeryAction {
+                item_id: item_id.clone(),
+                pinned: true,
+                effective_after_agent_turn: *effective_after_agent_turn,
+            }),
+            PendingEvent::ContextItemEvicted {
+                item_id,
+                effective_after_agent_turn,
+            } => context_surgery.push(ContextSurgeryAction {
+                item_id: item_id.clone(),
+                pinned: false,
+                effective_after_agent_turn: *effective_after_agent_turn,
+            }),
             PendingEvent::QuestionAsked {
                 turn,
                 question_id,
@@ -1127,6 +1691,7 @@ pub fn project_session_events(
             });
         }
     }
+    let interrupted_compaction = compacted_conversation.is_some();
     Ok(SessionRecoveredState {
         conversation,
         queued_messages: queued.into_iter().collect(),
@@ -1139,6 +1704,11 @@ pub fn project_session_events(
         interrupted_tool_repairs,
         interrupted_tool_turn,
         pending_questions,
+        context_surgery,
+        pruned_tool_outputs,
+        accounting,
+        budgeter,
+        interrupted_compaction,
     })
 }
 
@@ -1185,6 +1755,15 @@ pub trait SessionEventSink: Send + Sync {
             .last()
             .and_then(EngineEvent::meta)
             .map(|meta| meta.sequence_id))
+    }
+
+    /// Returns reconciled session, UTC-day, and trailing-minute spend totals.
+    /// Ephemeral sinks have no cross-session ledger and therefore return zero.
+    async fn budget_totals(
+        &self,
+        _query: BudgetLedgerQuery,
+    ) -> Result<BudgetLedgerTotals, AgentLoopError> {
+        Ok(BudgetLedgerTotals::default())
     }
 }
 
@@ -1426,6 +2005,17 @@ pub enum SessionCommandAction {
     Rewind {
         to_turn: u64,
     },
+    Context,
+    PinContext {
+        item_id: ContextItemId,
+    },
+    EvictContext {
+        item_id: ContextItemId,
+    },
+    Cost,
+    Compact {
+        instructions: Option<String>,
+    },
 }
 
 struct StatusCommand;
@@ -1473,8 +2063,109 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for HelpCommand
         _invocation: CommandInvocation,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
         Ok(SessionCommandOutput {
-            message: "/help, /status, /interrupt, /rewind <turn>".to_owned(),
+            message: "/help, /status, /interrupt, /rewind <turn>, /context [pin|evict <item-id>], /cost, /compact [instructions]".to_owned(),
             action: SessionCommandAction::None,
+        })
+    }
+}
+
+struct ContextCommand;
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ContextCommand {
+    async fn execute(
+        &self,
+        context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        let arguments = invocation.arguments().trim();
+        let action = if arguments.is_empty() {
+            SessionCommandAction::Context
+        } else {
+            if context.running() {
+                return Err(CommandExecutionError::new(
+                    "turn_running",
+                    "context surgery requires an idle session",
+                ));
+            }
+            let Some((operation, item_id)) = arguments.split_once(char::is_whitespace) else {
+                return Err(CommandExecutionError::new(
+                    "invalid_context_command",
+                    "usage: /context [pin <item-id> | evict <item-id>]",
+                ));
+            };
+            let item_id = item_id.trim();
+            if item_id.is_empty() {
+                return Err(CommandExecutionError::new(
+                    "invalid_context_command",
+                    "usage: /context [pin <item-id> | evict <item-id>]",
+                ));
+            }
+            match operation {
+                "pin" => SessionCommandAction::PinContext {
+                    item_id: ContextItemId(item_id.to_owned()),
+                },
+                "evict" => SessionCommandAction::EvictContext {
+                    item_id: ContextItemId(item_id.to_owned()),
+                },
+                _ => {
+                    return Err(CommandExecutionError::new(
+                        "invalid_context_command",
+                        "usage: /context [pin <item-id> | evict <item-id>]",
+                    ));
+                }
+            }
+        };
+        Ok(SessionCommandOutput {
+            message: String::new(),
+            action,
+        })
+    }
+}
+
+struct CostCommand;
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CostCommand {
+    async fn execute(
+        &self,
+        _context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        if !invocation.arguments().trim().is_empty() {
+            return Err(CommandExecutionError::new(
+                "invalid_cost_command",
+                "usage: /cost",
+            ));
+        }
+        Ok(SessionCommandOutput {
+            message: String::new(),
+            action: SessionCommandAction::Cost,
+        })
+    }
+}
+
+struct CompactCommand;
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CompactCommand {
+    async fn execute(
+        &self,
+        context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        if context.running() {
+            return Err(CommandExecutionError::new(
+                "turn_running",
+                "manual compaction requires an idle session",
+            ));
+        }
+        let instructions = invocation.arguments().trim();
+        Ok(SessionCommandOutput {
+            message: "compaction started".to_owned(),
+            action: SessionCommandAction::Compact {
+                instructions: (!instructions.is_empty()).then(|| instructions.to_owned()),
+            },
         })
     }
 }
@@ -1536,6 +2227,26 @@ pub fn builtin_command_registry()
         .register(
             CommandDescriptor::new("interrupt", "Interrupt the active turn"),
             InterruptCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
+            CommandDescriptor::new("context", "Inspect, pin, or evict context items")
+                .with_argument_hint("[pin|evict <item-id>]"),
+            ContextCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
+            CommandDescriptor::new("cost", "Show usage, cost, and budget accounting"),
+            CostCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
+            CommandDescriptor::new("compact", "Compact conversation context")
+                .with_argument_hint("[instructions]"),
+            CompactCommand,
         )
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
     Ok(registry)
@@ -1943,7 +2654,7 @@ impl SessionHandle {
             .await?
         {
             ProtocolCompletion::Message(disposition) => Ok(disposition),
-            ProtocolCompletion::Rewind(_) => Err(AgentLoopError::Closed),
+            _ => Err(AgentLoopError::Closed),
         }
     }
 
@@ -2036,6 +2747,121 @@ impl SessionHandle {
         receive.await.map_err(|_| AgentLoopError::Closed)
     }
 
+    /// Returns the exact actor-consistent context inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns actor, persistence, or assembly failures.
+    pub async fn context_snapshot(&self) -> Result<ContextSnapshot, AgentLoopError> {
+        match self
+            .dispatch_wait(ClientCommand::GetContext {
+                meta: self.local_meta(),
+                session_id: self.session_id.clone(),
+            })
+            .await?
+        {
+            ProtocolCompletion::Context(snapshot) => Ok(snapshot),
+            _ => Err(AgentLoopError::Closed),
+        }
+    }
+
+    /// Returns reconciled usage, cost, and budget state without requiring a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns actor or accounting-ledger failures.
+    pub async fn cost_snapshot(&self) -> Result<CostSnapshot, AgentLoopError> {
+        match self
+            .dispatch_wait(ClientCommand::GetCost {
+                meta: self.local_meta(),
+                session_id: self.session_id.clone(),
+            })
+            .await?
+        {
+            ProtocolCompletion::Cost(snapshot) => Ok(snapshot),
+            _ => Err(AgentLoopError::Closed),
+        }
+    }
+
+    /// Returns the exact provider-neutral assembled prompt for offline inspection.
+    ///
+    /// # Errors
+    ///
+    /// Returns actor, historical projection, or assembly failures.
+    pub async fn dump_prompt(&self, turn_id: Option<TurnId>) -> Result<PromptDump, AgentLoopError> {
+        match self
+            .dispatch_wait(ClientCommand::DumpPrompt {
+                meta: self.local_meta(),
+                session_id: self.session_id.clone(),
+                turn_id,
+            })
+            .await?
+        {
+            ProtocolCompletion::Prompt(dump) => Ok(dump),
+            _ => Err(AgentLoopError::Closed),
+        }
+    }
+
+    /// Pins an assembled context item for future provider turns.
+    ///
+    /// # Errors
+    ///
+    /// Returns actor, validation, or persistence failures.
+    pub async fn pin_context(&self, item_id: ContextItemId) -> Result<(), AgentLoopError> {
+        self.ensure_local_driver().await?;
+        match self
+            .dispatch_wait(ClientCommand::PinContext {
+                meta: self.local_meta(),
+                session_id: self.session_id.clone(),
+                item_id,
+            })
+            .await?
+        {
+            ProtocolCompletion::Unit => Ok(()),
+            _ => Err(AgentLoopError::Closed),
+        }
+    }
+
+    /// Evicts an assembled context item from future provider turns.
+    ///
+    /// # Errors
+    ///
+    /// Returns actor, validation, or persistence failures.
+    pub async fn evict_context(&self, item_id: ContextItemId) -> Result<(), AgentLoopError> {
+        self.ensure_local_driver().await?;
+        match self
+            .dispatch_wait(ClientCommand::EvictContext {
+                meta: self.local_meta(),
+                session_id: self.session_id.clone(),
+                item_id,
+            })
+            .await?
+        {
+            ProtocolCompletion::Unit => Ok(()),
+            _ => Err(AgentLoopError::Closed),
+        }
+    }
+
+    /// Runs manual compaction while the session is idle.
+    ///
+    /// # Errors
+    ///
+    /// Returns actor, budget, provider, hook, or persistence failures.
+    pub async fn compact(&self, instructions: Option<String>) -> Result<(), AgentLoopError> {
+        self.ensure_local_driver().await?;
+        match self
+            .dispatch_wait(ClientCommand::Compact {
+                meta: self.local_meta(),
+                session_id: self.session_id.clone(),
+                instructions,
+            })
+            .await?
+        {
+            ProtocolCompletion::Unit => Ok(()),
+            _ => Err(AgentLoopError::Closed),
+        }
+    }
+
     /// Rewinds workspace and conversation state to a completed agent turn.
     ///
     /// # Errors
@@ -2055,7 +2881,7 @@ impl SessionHandle {
             .await?
         {
             ProtocolCompletion::Rewind(_unrestorable) => Ok(()),
-            ProtocolCompletion::Message(_) => Err(AgentLoopError::Closed),
+            _ => Err(AgentLoopError::Closed),
         }
     }
 }
@@ -2084,6 +2910,10 @@ enum ActorCommand {
 enum ProtocolCompletion {
     Message(MessageDisposition),
     Rewind(Vec<UnrestorablePath>),
+    Context(ContextSnapshot),
+    Cost(CostSnapshot),
+    Prompt(PromptDump),
+    Unit,
 }
 
 struct RunningTurn {
@@ -2111,6 +2941,13 @@ enum TurnSignal {
         respond: oneshot::Sender<String>,
     },
     Complete(TurnOutcome),
+    ManualCompactionComplete {
+        turn: u64,
+        conversation: Vec<Turn>,
+        context_surgery: Vec<ContextSurgeryAction>,
+        result: Result<(), AgentLoopError>,
+        completion: Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>,
+    },
 }
 
 struct TurnOutcome {
@@ -2118,8 +2955,12 @@ struct TurnOutcome {
     conversation: Vec<Turn>,
     status: AgentTurnStatus,
     usage: SessionUsage,
+    cost: Cost,
     deferred_terminal_delta: Option<String>,
     deferred_terminal_turn: Option<Turn>,
+    context_surgery: Vec<ContextSurgeryAction>,
+    pruned_tool_outputs: BTreeMap<String, u64>,
+    budgeter: Budgeter,
 }
 
 struct ActorState {
@@ -2140,6 +2981,10 @@ struct ActorState {
     client_roles: BTreeMap<String, ClientRole>,
     pending_questions: BTreeMap<String, PendingQuestion>,
     next_question: u64,
+    context_surgery: Vec<ContextSurgeryAction>,
+    pruned_tool_outputs: BTreeMap<String, u64>,
+    accounting: Vec<TurnAccounting>,
+    budgeter: Budgeter,
 }
 
 struct PendingQuestion {
@@ -2174,6 +3019,10 @@ impl ActorState {
             client_roles: BTreeMap::new(),
             pending_questions: BTreeMap::new(),
             next_question: 0,
+            context_surgery: recovered.context_surgery.clone(),
+            pruned_tool_outputs: recovered.pruned_tool_outputs.clone(),
+            accounting: recovered.accounting.clone(),
+            budgeter: recovered.budgeter,
         }
     }
 
@@ -2243,6 +3092,21 @@ async fn run_actor(
         let _ = dispatch_lifecycle_hook(HookEvent::SessionEnd, &mut state, &config, &events).await;
         return;
     }
+    if config.recovered.interrupted_compaction
+        && emit(
+            &mut state,
+            &events,
+            &config.event_sink,
+            PendingEvent::Error {
+                message: "interrupted compaction was aborted during recovery".to_owned(),
+            },
+        )
+        .await
+        .is_err()
+    {
+        let _ = dispatch_lifecycle_hook(HookEvent::SessionEnd, &mut state, &config, &events).await;
+        return;
+    }
     if let Some(turn) = interrupted_turn {
         let mut recovery_events = config
             .recovered
@@ -2266,6 +3130,7 @@ async fn run_actor(
             turn,
             status: AgentTurnStatus::Interrupted,
             usage: SessionUsage::default(),
+            cost: unavailable_cost(),
         });
         if emit_batch(&mut state, &events, &config.event_sink, recovery_events)
             .await
@@ -2355,7 +3220,10 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::UserShellStarted { meta, .. }
         | ClientCommand::UserShellEnded { meta, .. }
         | ClientCommand::PinContext { meta, .. }
-        | ClientCommand::EvictContext { meta, .. } => meta,
+        | ClientCommand::EvictContext { meta, .. }
+        | ClientCommand::GetContext { meta, .. }
+        | ClientCommand::GetCost { meta, .. }
+        | ClientCommand::DumpPrompt { meta, .. } => meta,
     }
 }
 
@@ -2376,7 +3244,10 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::UserShellStarted { session_id, .. }
         | ClientCommand::UserShellEnded { session_id, .. }
         | ClientCommand::PinContext { session_id, .. }
-        | ClientCommand::EvictContext { session_id, .. } => Some(session_id),
+        | ClientCommand::EvictContext { session_id, .. }
+        | ClientCommand::GetContext { session_id, .. }
+        | ClientCommand::GetCost { session_id, .. }
+        | ClientCommand::DumpPrompt { session_id, .. } => Some(session_id),
     }
 }
 
@@ -2414,12 +3285,684 @@ fn send_ack(
     });
 }
 
+fn send_connection_event(
+    events: &broadcast::Sender<RoutedEvent>,
+    client_id: &ClientId,
+    event: EngineEvent,
+) {
+    let _ = events.send(RoutedEvent {
+        target: Some(client_id.clone()),
+        event,
+    });
+}
+
+fn query_meta(state: &ActorState, meta: &CommandMeta) -> CommandAckMeta {
+    CommandAckMeta {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: meta.client_id.clone(),
+        request_id: meta.request_id.clone(),
+        emitted_at: state.event_clock.emitted_at(),
+    }
+}
+
+fn add_usage(total: &mut Usage, usage: &Usage) {
+    total.input_tokens = total.input_tokens.saturating_add(usage.input_tokens);
+    total.output_tokens = total.output_tokens.saturating_add(usage.output_tokens);
+    total.cache_read_tokens = total
+        .cache_read_tokens
+        .saturating_add(usage.cache_read_tokens);
+    total.cache_write_tokens = total
+        .cache_write_tokens
+        .saturating_add(usage.cache_write_tokens);
+    total.reasoning_tokens = total
+        .reasoning_tokens
+        .saturating_add(usage.reasoning_tokens);
+}
+
+fn cost_units(cost: &Cost) -> (u64, u64) {
+    match cost {
+        Cost::Monetary {
+            amount_micros,
+            currency,
+        } if currency.eq_ignore_ascii_case("USD") => (*amount_micros, 0),
+        Cost::AiCredits { credits_micros, .. } => (0, *credits_micros),
+        Cost::Monetary { .. } | Cost::SubscriptionQuota { .. } | Cost::Unavailable { .. } => (0, 0),
+    }
+}
+
+fn dollar_accounting_complete(cost: &Cost) -> bool {
+    matches!(cost, Cost::Monetary { currency, .. } if currency.eq_ignore_ascii_case("USD"))
+}
+
+async fn persist_incomplete_dollar_caps(
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    turn: u64,
+    budget: &BudgetConfig,
+    current: u64,
+) -> Result<bool, AgentLoopError> {
+    let mut hard_stop = false;
+    for (scope, limit) in [
+        (BudgetScope::Session, budget.session_cost_cap_micros_usd),
+        (BudgetScope::Daily, budget.daily_cost_cap_micros_usd),
+    ] {
+        let Some(limit) = limit else {
+            continue;
+        };
+        persist_event(
+            signals,
+            PendingEvent::BudgetStatus {
+                turn,
+                level: BudgetLevel::HardCap,
+                scope,
+                unit: BudgetUnit::MicrosUsd,
+                current,
+                limit,
+            },
+        )
+        .await?;
+        hard_stop = true;
+    }
+    Ok(hard_stop)
+}
+
+async fn persist_incomplete_budget_caps(
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    turn: u64,
+    budget: &BudgetConfig,
+    cost: &Cost,
+    current_cost_micros: u64,
+    current_credit_micros: u64,
+) -> Result<bool, AgentLoopError> {
+    let mut hard_stop = false;
+    if !dollar_accounting_complete(cost) {
+        hard_stop |=
+            persist_incomplete_dollar_caps(signals, turn, budget, current_cost_micros).await?;
+    }
+    if matches!(cost, Cost::Unavailable { .. }) {
+        for (scope, limit) in [
+            (BudgetScope::Session, budget.session_ai_credit_cap_micros),
+            (BudgetScope::Daily, budget.daily_ai_credit_cap_micros),
+        ] {
+            let Some(limit) = limit else {
+                continue;
+            };
+            persist_event(
+                signals,
+                PendingEvent::BudgetStatus {
+                    turn,
+                    level: BudgetLevel::HardCap,
+                    scope,
+                    unit: BudgetUnit::AiCreditMicros,
+                    current: current_credit_micros,
+                    limit,
+                },
+            )
+            .await?;
+            hard_stop = true;
+        }
+    }
+    Ok(hard_stop)
+}
+
+fn combine_cost(total: Option<Cost>, next: Cost) -> Cost {
+    let Some(total) = total else {
+        return next;
+    };
+    match (total, next) {
+        (
+            Cost::Monetary {
+                amount_micros: left,
+                currency: left_currency,
+            },
+            Cost::Monetary {
+                amount_micros: right,
+                currency: right_currency,
+            },
+        ) if left_currency == right_currency => Cost::Monetary {
+            amount_micros: left.saturating_add(right),
+            currency: left_currency,
+        },
+        (
+            Cost::AiCredits {
+                credits_micros: left,
+                nominal_amount_micros: left_nominal,
+                currency: left_currency,
+            },
+            Cost::AiCredits {
+                credits_micros: right,
+                nominal_amount_micros: right_nominal,
+                currency: right_currency,
+            },
+        ) if left_currency == right_currency => Cost::AiCredits {
+            credits_micros: left.saturating_add(right),
+            nominal_amount_micros: left_nominal
+                .and_then(|value| value.parse::<u64>().ok())
+                .zip(right_nominal.and_then(|value| value.parse::<u64>().ok()))
+                .map(|(left, right)| left.saturating_add(right).to_string()),
+            currency: left_currency,
+        },
+        (
+            Cost::SubscriptionQuota {
+                used: left,
+                unit: left_unit,
+            },
+            Cost::SubscriptionQuota {
+                used: right,
+                unit: right_unit,
+            },
+        ) if left_unit == right_unit => Cost::SubscriptionQuota {
+            used: left
+                .and_then(|value| value.parse::<u64>().ok())
+                .zip(right.and_then(|value| value.parse::<u64>().ok()))
+                .map(|(left, right)| left.saturating_add(right).to_string()),
+            unit: left_unit,
+        },
+        (Cost::Unavailable { reason }, _) | (_, Cost::Unavailable { reason }) => {
+            Cost::Unavailable { reason }
+        }
+        _ => Cost::Unavailable {
+            reason: "mixed accounting units cannot be aggregated".to_owned(),
+        },
+    }
+}
+
+struct BudgetCheck {
+    events: Vec<PendingEvent>,
+    hard_stop: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SessionAccountingFallback {
+    cost_micros_usd: u64,
+    ai_credit_micros: u64,
+    subscription_quota_entries: u64,
+    cost_unavailable_entries: u64,
+    non_usd_monetary_entries: u64,
+}
+
+fn session_accounting_fallback(accounting: &[TurnAccounting]) -> SessionAccountingFallback {
+    let mut fallback = SessionAccountingFallback::default();
+    for turn in accounting {
+        match &turn.cost {
+            Cost::Monetary {
+                amount_micros,
+                currency,
+            } if currency.eq_ignore_ascii_case("USD") => {
+                fallback.cost_micros_usd = fallback.cost_micros_usd.saturating_add(*amount_micros);
+            }
+            Cost::AiCredits { credits_micros, .. } => {
+                fallback.ai_credit_micros =
+                    fallback.ai_credit_micros.saturating_add(*credits_micros);
+            }
+            Cost::SubscriptionQuota { .. } => {
+                fallback.subscription_quota_entries =
+                    fallback.subscription_quota_entries.saturating_add(1);
+            }
+            Cost::Unavailable { .. } => {
+                fallback.cost_unavailable_entries =
+                    fallback.cost_unavailable_entries.saturating_add(1);
+            }
+            Cost::Monetary { .. } => {
+                fallback.non_usd_monetary_entries =
+                    fallback.non_usd_monetary_entries.saturating_add(1);
+            }
+        }
+    }
+    fallback
+}
+
+fn push_cap_event(
+    events: &mut Vec<PendingEvent>,
+    turn: u64,
+    scope: BudgetScope,
+    unit: BudgetUnit,
+    current: u64,
+    limit: Option<u64>,
+    warn_at_percent: u8,
+) -> bool {
+    let Some(limit) = limit else {
+        return false;
+    };
+    if current >= limit {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::HardCap,
+            scope,
+            unit,
+            current,
+            limit,
+        });
+        return true;
+    }
+    let warning = u128::from(limit)
+        .saturating_mul(u128::from(warn_at_percent))
+        .div_ceil(100);
+    if u128::from(current) >= warning {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::Warning,
+            scope,
+            unit,
+            current,
+            limit,
+        });
+    }
+    false
+}
+
+#[allow(clippy::too_many_lines)]
+async fn evaluate_budget(
+    turn: u64,
+    state_clock: &dyn EventClock,
+    sink: &Arc<dyn SessionEventSink>,
+    budget: &BudgetConfig,
+    local_session: SessionAccountingFallback,
+    current_turn_cost: u64,
+    current_turn_credits: u64,
+) -> Result<BudgetCheck, AgentLoopError> {
+    if budget.session_cost_cap_micros_usd.is_none()
+        && budget.daily_cost_cap_micros_usd.is_none()
+        && budget.session_ai_credit_cap_micros.is_none()
+        && budget.daily_ai_credit_cap_micros.is_none()
+        && budget.spend_rate_alarm_micros_usd_per_minute.is_none()
+        && budget.ai_credit_rate_alarm_micros_per_minute.is_none()
+    {
+        return Ok(BudgetCheck {
+            events: Vec::new(),
+            hard_stop: false,
+        });
+    }
+    let now = state_clock.unix_time_millis();
+    let ledger = sink
+        .budget_totals(BudgetLedgerQuery {
+            now_unix_ms: now,
+            utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
+            trailing_minute_start_unix_ms: now.saturating_sub(60_000),
+        })
+        .await?;
+    let session_cost = if ledger.authoritative {
+        ledger.session_cost_micros_usd
+    } else {
+        local_session.cost_micros_usd
+    }
+    .saturating_add(current_turn_cost);
+    let session_credits = if ledger.authoritative {
+        ledger.session_ai_credit_micros
+    } else {
+        local_session.ai_credit_micros
+    }
+    .saturating_add(current_turn_credits);
+    let daily_cost = ledger
+        .daily_cost_micros_usd
+        .saturating_add(current_turn_cost);
+    let daily_credits = ledger
+        .daily_ai_credit_micros
+        .saturating_add(current_turn_credits);
+    let trailing_cost = ledger
+        .trailing_minute_cost_micros_usd
+        .saturating_add(current_turn_cost);
+    let trailing_credits = ledger
+        .trailing_minute_ai_credit_micros
+        .saturating_add(current_turn_credits);
+    let mut events = Vec::new();
+    let mut hard_stop = false;
+    if !ledger.authoritative {
+        for (unit, current, limit) in [
+            (
+                BudgetUnit::MicrosUsd,
+                daily_cost,
+                budget.daily_cost_cap_micros_usd,
+            ),
+            (
+                BudgetUnit::AiCreditMicros,
+                daily_credits,
+                budget.daily_ai_credit_cap_micros,
+            ),
+        ] {
+            if let Some(limit) = limit {
+                events.push(PendingEvent::BudgetStatus {
+                    turn,
+                    level: BudgetLevel::HardCap,
+                    scope: BudgetScope::Daily,
+                    unit,
+                    current,
+                    limit,
+                });
+                hard_stop = true;
+            }
+        }
+    }
+    let session_accounting_incomplete = if ledger.authoritative {
+        ledger.session_subscription_quota_entries > 0
+            || ledger.session_cost_unavailable_entries > 0
+            || ledger.session_non_usd_monetary_entries > 0
+    } else {
+        local_session.subscription_quota_entries > 0
+            || local_session.cost_unavailable_entries > 0
+            || local_session.non_usd_monetary_entries > 0
+    };
+    if let Some(limit) = budget.session_cost_cap_micros_usd
+        && session_accounting_incomplete
+    {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::HardCap,
+            scope: BudgetScope::Session,
+            unit: BudgetUnit::MicrosUsd,
+            current: session_cost,
+            limit,
+        });
+        hard_stop = true;
+    }
+    let session_credit_accounting_incomplete = if ledger.authoritative {
+        ledger.session_cost_unavailable_entries > 0
+    } else {
+        local_session.cost_unavailable_entries > 0
+    };
+    if let Some(limit) = budget.session_ai_credit_cap_micros
+        && session_credit_accounting_incomplete
+    {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::HardCap,
+            scope: BudgetScope::Session,
+            unit: BudgetUnit::AiCreditMicros,
+            current: session_credits,
+            limit,
+        });
+        hard_stop = true;
+    }
+    let daily_accounting_incomplete = ledger.daily_subscription_quota_entries > 0
+        || ledger.daily_cost_unavailable_entries > 0
+        || ledger.daily_non_usd_monetary_entries > 0;
+    if ledger.authoritative
+        && let Some(limit) = budget.daily_cost_cap_micros_usd
+        && daily_accounting_incomplete
+    {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::HardCap,
+            scope: BudgetScope::Daily,
+            unit: BudgetUnit::MicrosUsd,
+            current: daily_cost,
+            limit,
+        });
+        hard_stop = true;
+    }
+    if ledger.authoritative
+        && let Some(limit) = budget.daily_ai_credit_cap_micros
+        && ledger.daily_cost_unavailable_entries > 0
+    {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::HardCap,
+            scope: BudgetScope::Daily,
+            unit: BudgetUnit::AiCreditMicros,
+            current: daily_credits,
+            limit,
+        });
+        hard_stop = true;
+    }
+    hard_stop |= push_cap_event(
+        &mut events,
+        turn,
+        BudgetScope::Session,
+        BudgetUnit::MicrosUsd,
+        session_cost,
+        budget.session_cost_cap_micros_usd,
+        budget.warn_at_percent,
+    );
+    if ledger.authoritative {
+        hard_stop |= push_cap_event(
+            &mut events,
+            turn,
+            BudgetScope::Daily,
+            BudgetUnit::MicrosUsd,
+            daily_cost,
+            budget.daily_cost_cap_micros_usd,
+            budget.warn_at_percent,
+        );
+    }
+    hard_stop |= push_cap_event(
+        &mut events,
+        turn,
+        BudgetScope::Session,
+        BudgetUnit::AiCreditMicros,
+        session_credits,
+        budget.session_ai_credit_cap_micros,
+        budget.warn_at_percent,
+    );
+    if ledger.authoritative {
+        hard_stop |= push_cap_event(
+            &mut events,
+            turn,
+            BudgetScope::Daily,
+            BudgetUnit::AiCreditMicros,
+            daily_credits,
+            budget.daily_ai_credit_cap_micros,
+            budget.warn_at_percent,
+        );
+    }
+    if budget
+        .spend_rate_alarm_micros_usd_per_minute
+        .is_some_and(|limit| trailing_cost >= limit)
+    {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::SpendRateAlarm,
+            scope: BudgetScope::TrailingMinute,
+            unit: BudgetUnit::MicrosUsd,
+            current: trailing_cost,
+            limit: budget
+                .spend_rate_alarm_micros_usd_per_minute
+                .unwrap_or_default(),
+        });
+    }
+    if budget
+        .ai_credit_rate_alarm_micros_per_minute
+        .is_some_and(|limit| trailing_credits >= limit)
+    {
+        events.push(PendingEvent::BudgetStatus {
+            turn,
+            level: BudgetLevel::SpendRateAlarm,
+            scope: BudgetScope::TrailingMinute,
+            unit: BudgetUnit::AiCreditMicros,
+            current: trailing_credits,
+            limit: budget
+                .ai_credit_rate_alarm_micros_per_minute
+                .unwrap_or_default(),
+        });
+    }
+    Ok(BudgetCheck { events, hard_stop })
+}
+
+#[allow(clippy::too_many_lines)]
+async fn build_cost_snapshot(
+    state: &ActorState,
+    config: &SessionActorConfig,
+) -> Result<CostSnapshot, AgentLoopError> {
+    let now = state.event_clock.unix_time_millis();
+    let day_start = now.saturating_sub(now % 86_400_000);
+    let ledger = config
+        .event_sink
+        .budget_totals(BudgetLedgerQuery {
+            now_unix_ms: now,
+            utc_day_start_unix_ms: day_start,
+            trailing_minute_start_unix_ms: now.saturating_sub(60_000),
+        })
+        .await?;
+    let mut usage = Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        reasoning_tokens: 0,
+    };
+    let mut local_cost = 0_u64;
+    let mut local_credits = 0_u64;
+    let mut local_subscription = 0_u64;
+    let mut local_unavailable = 0_u64;
+    let mut local_non_usd = 0_u64;
+    for turn in &state.accounting {
+        add_usage(&mut usage, &turn.usage);
+        match &turn.cost {
+            Cost::Monetary {
+                amount_micros,
+                currency,
+            } if currency.eq_ignore_ascii_case("USD") => {
+                local_cost = local_cost.saturating_add(*amount_micros);
+            }
+            Cost::AiCredits { credits_micros, .. } => {
+                local_credits = local_credits.saturating_add(*credits_micros);
+            }
+            Cost::Monetary { .. } => local_non_usd = local_non_usd.saturating_add(1),
+            Cost::SubscriptionQuota { .. } => {
+                local_subscription = local_subscription.saturating_add(1);
+            }
+            Cost::Unavailable { .. } => {
+                local_unavailable = local_unavailable.saturating_add(1);
+            }
+        }
+    }
+    let session_cost = ledger.session_cost_micros_usd.max(local_cost);
+    let session_credits = ledger.session_ai_credit_micros.max(local_credits);
+    // UTC-day/trailing windows are storage-authoritative. Session totals are
+    // safely recoverable from this session's durable events; day membership is not.
+    let daily_cost = ledger.daily_cost_micros_usd;
+    let daily_credits = ledger.daily_ai_credit_micros;
+    let session_subscription = ledger
+        .session_subscription_quota_entries
+        .max(local_subscription);
+    let session_unavailable = ledger
+        .session_cost_unavailable_entries
+        .max(local_unavailable);
+    let session_non_usd = ledger.session_non_usd_monetary_entries.max(local_non_usd);
+    let budget = config.model.budget_config();
+    let hard_cap_reached = budget
+        .session_cost_cap_micros_usd
+        .is_some_and(|limit| session_cost >= limit)
+        || budget
+            .daily_cost_cap_micros_usd
+            .is_some_and(|limit| daily_cost >= limit)
+        || budget
+            .session_ai_credit_cap_micros
+            .is_some_and(|limit| session_credits >= limit)
+        || budget
+            .daily_ai_credit_cap_micros
+            .is_some_and(|limit| daily_credits >= limit);
+    let input_total = usage
+        .input_tokens
+        .saturating_add(usage.cache_read_tokens)
+        .saturating_add(usage.cache_write_tokens);
+    let cache_hit_basis_points = if input_total == 0 {
+        0
+    } else {
+        u16::try_from(
+            u128::from(usage.cache_read_tokens).saturating_mul(10_000) / u128::from(input_total),
+        )
+        .unwrap_or(10_000)
+    };
+    let date = format_unix_rfc3339(now / 1_000, 0);
+    Ok(CostSnapshot {
+        utc_day: date.get(..10).unwrap_or("1970-01-01").to_owned(),
+        turns: state.accounting.clone(),
+        session_usage: usage,
+        session_cost_micros_usd: session_cost,
+        session_ai_credit_micros: session_credits,
+        daily_cost_micros_usd: daily_cost,
+        daily_ai_credit_micros: daily_credits,
+        trailing_minute_cost_micros_usd: ledger.trailing_minute_cost_micros_usd,
+        trailing_minute_ai_credit_micros: ledger.trailing_minute_ai_credit_micros,
+        cache_hit_basis_points,
+        session_cost_cap_micros_usd: budget.session_cost_cap_micros_usd,
+        daily_cost_cap_micros_usd: budget.daily_cost_cap_micros_usd,
+        session_ai_credit_cap_micros: budget.session_ai_credit_cap_micros,
+        daily_ai_credit_cap_micros: budget.daily_ai_credit_cap_micros,
+        spend_rate_alarm_micros_usd_per_minute: budget.spend_rate_alarm_micros_usd_per_minute,
+        ai_credit_rate_alarm_micros_per_minute: budget.ai_credit_rate_alarm_micros_per_minute,
+        hard_cap_reached,
+        session_monetary_accounting_complete: session_subscription == 0
+            && session_unavailable == 0
+            && session_non_usd == 0,
+        daily_monetary_accounting_complete: ledger.daily_subscription_quota_entries == 0
+            && ledger.daily_cost_unavailable_entries == 0
+            && ledger.daily_non_usd_monetary_entries == 0,
+        session_subscription_quota_entries: session_subscription,
+        session_cost_unavailable_entries: session_unavailable,
+        session_non_usd_monetary_entries: session_non_usd,
+        daily_subscription_quota_entries: ledger.daily_subscription_quota_entries,
+        daily_cost_unavailable_entries: ledger.daily_cost_unavailable_entries,
+        daily_non_usd_monetary_entries: ledger.daily_non_usd_monetary_entries,
+    })
+}
+
+async fn apply_context_surgery(
+    state: &mut ActorState,
+    events: &broadcast::Sender<RoutedEvent>,
+    sink: &Arc<dyn SessionEventSink>,
+    item_id: ContextItemId,
+    pinned: bool,
+) -> Result<(), AgentLoopError> {
+    let effective_after_agent_turn = state.next_turn;
+    let pending = if pinned {
+        PendingEvent::ContextItemPinned {
+            item_id: item_id.clone(),
+            effective_after_agent_turn,
+        }
+    } else {
+        PendingEvent::ContextItemEvicted {
+            item_id: item_id.clone(),
+            effective_after_agent_turn,
+        }
+    };
+    emit(state, events, sink, pending).await?;
+    state.context_surgery.push(ContextSurgeryAction {
+        item_id,
+        pinned,
+        effective_after_agent_turn,
+    });
+    Ok(())
+}
+
+async fn apply_registered_context_surgery(
+    state: &mut ActorState,
+    config: &SessionActorConfig,
+    events: &broadcast::Sender<RoutedEvent>,
+    item_id: ContextItemId,
+    pinned: bool,
+) -> Result<(), AgentLoopError> {
+    if !item_id.0.starts_with("conversation:") {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "protected_context_item: only conversation-resident context items support pin or eviction"
+                .to_owned(),
+        ));
+    }
+    let known = assemble_session_context(
+        config,
+        &state.conversation,
+        &state.queued,
+        &state.context_surgery,
+        &state.pruned_tool_outputs,
+        false,
+    )
+    .is_ok_and(|assembled| assembled.items.iter().any(|item| item.id.0 == item_id.0));
+    if !known {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "unknown_context_item: context item is not present in the current inventory".to_owned(),
+        ));
+    }
+    apply_context_surgery(state, events, &config.event_sink, item_id, pinned).await
+}
+
 fn requires_driver(command: &ClientCommand) -> bool {
     !matches!(
         command,
         ClientCommand::CreateSession { .. }
             | ClientCommand::AttachSession { .. }
             | ClientCommand::TakeDriver { .. }
+            | ClientCommand::GetContext { .. }
+            | ClientCommand::GetCost { .. }
+            | ClientCommand::DumpPrompt { .. }
     )
 }
 
@@ -2429,13 +3972,87 @@ fn unsupported_in_m2(command: &ClientCommand) -> bool {
         ClientCommand::CreateSession { .. }
             | ClientCommand::SwitchMode { .. }
             | ClientCommand::SwitchModel { .. }
-            | ClientCommand::Compact { .. }
             | ClientCommand::Fork { .. }
             | ClientCommand::UserShellStarted { .. }
             | ClientCommand::UserShellEnded { .. }
-            | ClientCommand::PinContext { .. }
-            | ClientCommand::EvictContext { .. }
     )
+}
+
+fn start_manual_compaction(
+    state: &mut ActorState,
+    config: &Arc<SessionActorConfig>,
+    turn_signals: &mpsc::UnboundedSender<TurnSignal>,
+    active_turn: &Arc<AtomicU64>,
+    instructions: Option<String>,
+    completion: Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>,
+) {
+    let summary_turn = state.next_turn;
+    let cancellation = CancellationToken::default();
+    state.running = Some(RunningTurn {
+        id: summary_turn,
+        cancellation: cancellation.clone(),
+        caused_by: state.transient_cause.clone(),
+    });
+    active_turn.store(summary_turn, Ordering::Release);
+    let mut conversation = state.conversation.clone();
+    let mut context_surgery = state.context_surgery.clone();
+    let local_session_accounting = session_accounting_fallback(&state.accounting);
+    let config = Arc::clone(config);
+    let signals = turn_signals.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let pre_budget = evaluate_budget(
+                summary_turn,
+                config.event_clock.as_ref(),
+                &config.event_sink,
+                &config.model.budget_config(),
+                local_session_accounting,
+                0,
+                0,
+            )
+            .await?;
+            for event in pre_budget.events {
+                persist_event(&signals, event).await?;
+            }
+            if pre_budget.hard_stop {
+                return Err(AgentLoopError::InvalidConfiguration(
+                    "budget hard cap prevents compaction model call".to_owned(),
+                ));
+            }
+            compact_during_turn(
+                summary_turn,
+                &mut conversation,
+                &mut context_surgery,
+                CompactionReason::Manual,
+                &config,
+                &cancellation,
+                &signals,
+                local_session_accounting,
+                0,
+                0,
+                instructions,
+            )
+            .await
+            .map(|_| ())
+        }
+        .await;
+        if let Err(error) = &result {
+            let _ = persist_event(
+                &signals,
+                PendingEvent::Error {
+                    message: error.to_string(),
+                },
+            )
+            .await;
+        }
+        let _ = signals.send(TurnSignal::ManualCompactionComplete {
+            turn: summary_turn,
+            conversation,
+            context_surgery,
+            result,
+            completion,
+        });
+    });
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2595,6 +4212,74 @@ async fn handle_actor_command(
                     let outcome = protocol_rejection(
                         "invalid_question_answer",
                         "question is not pending or its answer is empty",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::Compact { .. } if state.running.is_some() => {
+                    let outcome = protocol_rejection(
+                        "turn_running",
+                        "manual compaction requires an idle session",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::PinContext { item_id, .. }
+                | ClientCommand::EvictContext { item_id, .. } => {
+                    if state.running.is_some() {
+                        let outcome = protocol_rejection(
+                            "turn_running",
+                            "context surgery requires an idle session",
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
+                    if !item_id.0.starts_with("conversation:") {
+                        let outcome = protocol_rejection(
+                            "protected_context_item",
+                            "only conversation-resident context items support pin or eviction",
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
+                    let known = assemble_session_context(
+                        config,
+                        &state.conversation,
+                        &state.queued,
+                        &state.context_surgery,
+                        &state.pruned_tool_outputs,
+                        false,
+                    )
+                    .is_ok_and(|assembled| {
+                        assembled.items.iter().any(|item| item.id.0 == item_id.0)
+                    });
+                    if !known {
+                        let outcome = protocol_rejection(
+                            "unknown_context_item",
+                            "context item is not present in the current inventory",
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
+                }
+                ClientCommand::DumpPrompt {
+                    turn_id: Some(turn_id),
+                    ..
+                } if parse_turn_id(turn_id).is_err()
+                    || (!state
+                        .turn_ends
+                        .contains_key(&turn_id.0.parse::<u64>().unwrap_or(u64::MAX))
+                        && state.running.as_ref().map(|running| running.id)
+                            != turn_id.0.parse::<u64>().ok()) =>
+                {
+                    let outcome = protocol_rejection(
+                        "unknown_prompt_turn",
+                        "prompt dump turn must identify a known completed or active turn",
                     );
                     send_ack(state, events, &meta, session, outcome.clone());
                     let _ = respond.send(outcome);
@@ -2884,15 +4569,149 @@ async fn handle_actor_command(
                         let _ = complete.send(result.map(ProtocolCompletion::Rewind));
                     }
                 }
+                ClientCommand::PinContext { item_id, .. } => {
+                    let result =
+                        apply_context_surgery(state, events, &config.event_sink, item_id, true)
+                            .await;
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
+                    }
+                }
+                ClientCommand::EvictContext { item_id, .. } => {
+                    let result =
+                        apply_context_surgery(state, events, &config.event_sink, item_id, false)
+                            .await;
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
+                    }
+                }
+                ClientCommand::GetContext { .. } => {
+                    let result = assemble_session_context(
+                        config,
+                        &state.conversation,
+                        &state.queued,
+                        &state.context_surgery,
+                        &state.pruned_tool_outputs,
+                        false,
+                    )
+                    .map(|assembled| {
+                        context_snapshot(
+                            &assembled,
+                            &state.conversation,
+                            &state.pruned_tool_outputs,
+                            config.model.context_metadata(&config.model_alias),
+                            &config.model.compaction_config(),
+                            state
+                                .running
+                                .as_ref()
+                                .map(|running| wire_turn_id(running.id)),
+                        )
+                    });
+                    if let Ok(snapshot) = &result {
+                        send_connection_event(
+                            events,
+                            &meta.client_id,
+                            EngineEvent::ContextSnapshotReady {
+                                meta: query_meta(state, &meta),
+                                session_id: state.session_id.clone(),
+                                snapshot: snapshot.clone(),
+                            },
+                        );
+                    }
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(ProtocolCompletion::Context));
+                    }
+                }
+                ClientCommand::GetCost { .. } => {
+                    let result = build_cost_snapshot(state, config).await;
+                    if let Ok(snapshot) = &result {
+                        send_connection_event(
+                            events,
+                            &meta.client_id,
+                            EngineEvent::CostSnapshotReady {
+                                meta: query_meta(state, &meta),
+                                session_id: state.session_id.clone(),
+                                snapshot: snapshot.clone(),
+                            },
+                        );
+                    }
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(ProtocolCompletion::Cost));
+                    }
+                }
+                ClientCommand::DumpPrompt { turn_id, .. } => {
+                    let historical = if let Some(requested) = &turn_id {
+                        let events = config.event_sink.read_after(None).await;
+                        events.and_then(|events| {
+                            let boundary = events.iter().position(|event| {
+                                matches!(
+                                    event,
+                                    EngineEvent::ContextUsageUpdated { turn_id, .. }
+                                        if turn_id == requested
+                                )
+                            });
+                            let boundary = boundary.ok_or_else(|| {
+                                AgentLoopError::InvalidConfiguration(format!(
+                                    "no assembled prompt was recorded for turn {}",
+                                    requested.0
+                                ))
+                            })?;
+                            project_session_events(&events[..=boundary])
+                                .map_err(|error| AgentLoopError::Persistence(error.to_string()))
+                        })
+                    } else {
+                        Ok(SessionRecoveredState {
+                            conversation: state.conversation.clone(),
+                            queued_messages: state.queued.iter().cloned().collect(),
+                            context_surgery: state.context_surgery.clone(),
+                            pruned_tool_outputs: state.pruned_tool_outputs.clone(),
+                            accounting: state.accounting.clone(),
+                            ..SessionRecoveredState::default()
+                        })
+                    };
+                    let result = historical.and_then(|historical| {
+                        assemble_session_context(
+                            config,
+                            &historical.conversation,
+                            &historical.queued_messages.iter().cloned().collect(),
+                            &historical.context_surgery,
+                            &historical.pruned_tool_outputs,
+                            true,
+                        )
+                        .map(|assembled| prompt_dump(&assembled, &config.model_alias, turn_id))
+                    });
+                    if let Ok(dump) = &result {
+                        send_connection_event(
+                            events,
+                            &meta.client_id,
+                            EngineEvent::PromptDumpReady {
+                                meta: query_meta(state, &meta),
+                                session_id: state.session_id.clone(),
+                                dump: dump.clone(),
+                            },
+                        );
+                    }
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(ProtocolCompletion::Prompt));
+                    }
+                }
+                ClientCommand::Compact { instructions, .. } => {
+                    let completion = completion.take();
+                    start_manual_compaction(
+                        state,
+                        config,
+                        turn_signals,
+                        active_turn,
+                        instructions,
+                        completion,
+                    );
+                }
                 ClientCommand::CreateSession { .. }
                 | ClientCommand::SwitchMode { .. }
                 | ClientCommand::SwitchModel { .. }
-                | ClientCommand::Compact { .. }
                 | ClientCommand::Fork { .. }
                 | ClientCommand::UserShellStarted { .. }
                 | ClientCommand::UserShellEnded { .. }
-                | ClientCommand::PinContext { .. }
-                | ClientCommand::EvictContext { .. }
                 | ClientCommand::Rewind {
                     target: RewindTarget::Checkpoint { .. },
                     ..
@@ -2917,7 +4736,7 @@ async fn handle_actor_command(
                 };
                 let result = config.commands.dispatch_line(&mut context, &content).await;
                 let disposition = match result {
-                    Ok(output) => {
+                    Ok(mut output) => {
                         let mut unrestorable_paths = Vec::new();
                         match output.action {
                             SessionCommandAction::Interrupt => {
@@ -2935,6 +4754,95 @@ async fn handle_actor_command(
                                         return;
                                     }
                                 }
+                            }
+                            SessionCommandAction::Context => {
+                                let snapshot = assemble_session_context(
+                                    config,
+                                    &state.conversation,
+                                    &state.queued,
+                                    &state.context_surgery,
+                                    &state.pruned_tool_outputs,
+                                    false,
+                                )
+                                .map(|assembled| {
+                                    context_snapshot(
+                                        &assembled,
+                                        &state.conversation,
+                                        &state.pruned_tool_outputs,
+                                        config.model.context_metadata(&config.model_alias),
+                                        &config.model.compaction_config(),
+                                        state
+                                            .running
+                                            .as_ref()
+                                            .map(|running| wire_turn_id(running.id)),
+                                    )
+                                });
+                                match snapshot.and_then(|snapshot| {
+                                    serde_json::to_string_pretty(&snapshot).map_err(|error| {
+                                        AgentLoopError::InvalidConfiguration(error.to_string())
+                                    })
+                                }) {
+                                    Ok(message) => output.message = message,
+                                    Err(error) => {
+                                        let _ = respond.send(Err(error));
+                                        return;
+                                    }
+                                }
+                            }
+                            SessionCommandAction::PinContext { item_id } => {
+                                if let Err(error) = apply_registered_context_surgery(
+                                    state,
+                                    config,
+                                    events,
+                                    item_id.clone(),
+                                    true,
+                                )
+                                .await
+                                {
+                                    let _ = respond.send(Err(error));
+                                    return;
+                                }
+                                output.message = format!("pinned {}", item_id.0);
+                            }
+                            SessionCommandAction::EvictContext { item_id } => {
+                                if let Err(error) = apply_registered_context_surgery(
+                                    state,
+                                    config,
+                                    events,
+                                    item_id.clone(),
+                                    false,
+                                )
+                                .await
+                                {
+                                    let _ = respond.send(Err(error));
+                                    return;
+                                }
+                                output.message = format!("evicted {}", item_id.0);
+                            }
+                            SessionCommandAction::Cost => {
+                                match build_cost_snapshot(state, config).await.and_then(
+                                    |snapshot| {
+                                        serde_json::to_string_pretty(&snapshot).map_err(|error| {
+                                            AgentLoopError::InvalidConfiguration(error.to_string())
+                                        })
+                                    },
+                                ) {
+                                    Ok(message) => output.message = message,
+                                    Err(error) => {
+                                        let _ = respond.send(Err(error));
+                                        return;
+                                    }
+                                }
+                            }
+                            SessionCommandAction::Compact { instructions } => {
+                                start_manual_compaction(
+                                    state,
+                                    config,
+                                    turn_signals,
+                                    active_turn,
+                                    instructions,
+                                    None,
+                                );
                             }
                             SessionCommandAction::None => {}
                         }
@@ -3061,6 +4969,20 @@ async fn rewind_state(
             "turn {to_turn} is not a completed rewind target"
         )));
     };
+    let historical = config
+        .event_sink
+        .read_after(None)
+        .await?
+        .into_iter()
+        .collect::<Vec<_>>();
+    let historical = historical
+        .iter()
+        .rposition(|event| {
+            matches!(event, EngineEvent::TurnFinished { turn_id, .. } if parse_turn_id(turn_id) == Ok(to_turn))
+        })
+        .map(|boundary| project_session_events(&historical[..=boundary]))
+        .transpose()
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
     let operation_id = format!(
         "rewind-{}-{to_turn}",
         state
@@ -3086,7 +5008,17 @@ async fn rewind_state(
         state.poisoned = true;
         return Err(error);
     }
-    state.conversation.truncate(conversation_len);
+    if let Some(historical) = historical {
+        state.conversation = historical.conversation;
+        state.context_surgery = historical.context_surgery;
+        state.pruned_tool_outputs = historical.pruned_tool_outputs;
+        state.budgeter = historical.budgeter;
+    } else {
+        state.conversation.truncate(conversation_len);
+        state
+            .context_surgery
+            .retain(|action| action.effective_after_agent_turn <= to_turn);
+    }
     state.turn_ends.retain(|turn, _| *turn <= to_turn);
     state.completed_turns = u64::try_from(state.turn_ends.len()).unwrap_or(u64::MAX);
     state.queued.clear();
@@ -3114,7 +5046,31 @@ async fn handle_turn_signal(
             emit(state, events, &config.event_sink, event).await?;
         }
         TurnSignal::DurableEvent { kind, respond } => {
+            let compaction_accounting = match &kind {
+                PendingEvent::CompactionAttemptFinished {
+                    summary_turn,
+                    usage,
+                    cost,
+                }
+                | PendingEvent::CompactionFinished {
+                    summary_turn,
+                    usage: Some(usage),
+                    cost: Some(cost),
+                    ..
+                } => Some(TurnAccounting {
+                    turn_id: wire_turn_id(*summary_turn),
+                    attribution: AccountingAttribution::Compaction,
+                    usage: (*usage).into(),
+                    cost: cost.clone(),
+                }),
+                _ => None,
+            };
             let result = emit(state, events, &config.event_sink, kind).await;
+            if result.is_ok()
+                && let Some(accounting) = compaction_accounting
+            {
+                state.accounting.push(accounting);
+            }
             let _ = respond.send(result.clone());
             result?;
         }
@@ -3189,6 +5145,15 @@ async fn handle_turn_signal(
                 let _ = pending.respond.send(String::new());
             }
             state.conversation = outcome.conversation;
+            state.context_surgery = outcome.context_surgery;
+            state.pruned_tool_outputs = outcome.pruned_tool_outputs;
+            state.budgeter = outcome.budgeter;
+            state.accounting.push(TurnAccounting {
+                turn_id: wire_turn_id(outcome.turn),
+                attribution: AccountingAttribution::Main,
+                usage: outcome.usage.into(),
+                cost: outcome.cost.clone(),
+            });
             state.completed_turns = state.completed_turns.saturating_add(1);
             state
                 .turn_ends
@@ -3210,9 +5175,42 @@ async fn handle_turn_signal(
                 turn: outcome.turn,
                 status: outcome.status,
                 usage: outcome.usage,
+                cost: outcome.cost,
             });
             emit_batch(state, events, &config.event_sink, terminal_events).await?;
             if !state.queued.is_empty() {
+                let messages = state.queued.drain(..).collect();
+                start_turn(
+                    state,
+                    config,
+                    tool_context,
+                    turn_signals,
+                    events,
+                    messages,
+                    active_turn,
+                )
+                .await?;
+            }
+        }
+        TurnSignal::ManualCompactionComplete {
+            turn,
+            conversation,
+            context_surgery,
+            result,
+            completion,
+        } => {
+            if state.running.as_ref().map(|running| running.id) == Some(turn) {
+                state.running = None;
+                active_turn.store(0, Ordering::Release);
+                if result.is_ok() {
+                    state.conversation = conversation;
+                    state.context_surgery = context_surgery;
+                }
+            }
+            if let Some(completion) = completion {
+                let _ = completion.send(result.map(|()| ProtocolCompletion::Unit));
+            }
+            if state.running.is_none() && !state.queued.is_empty() {
                 let messages = state.queued.drain(..).collect();
                 start_turn(
                     state,
@@ -3230,6 +5228,7 @@ async fn handle_turn_signal(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 async fn start_turn(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
@@ -3304,6 +5303,12 @@ async fn start_turn(
         .with_cancellation(cancellation.clone())
         .with_question_asker(protocol_asker);
     let signals = signals.clone();
+    let state_context_surgery = state.context_surgery.clone();
+    let state_pruned_tool_outputs = state.pruned_tool_outputs.clone();
+    let panic_context_surgery = state_context_surgery.clone();
+    let panic_pruned_tool_outputs = state_pruned_tool_outputs.clone();
+    let state_budgeter = state.budgeter;
+    let local_session_accounting = session_accounting_fallback(&state.accounting);
     tokio::spawn(async move {
         let outcome = AssertUnwindSafe(run_turn(
             turn,
@@ -3313,6 +5318,10 @@ async fn start_turn(
             tool_context,
             cancellation,
             signals.clone(),
+            state_context_surgery,
+            state_pruned_tool_outputs,
+            state_budgeter,
+            local_session_accounting,
         ))
         .catch_unwind()
         .await
@@ -3321,8 +5330,12 @@ async fn start_turn(
             conversation: panic_conversation,
             status: AgentTurnStatus::Failed,
             usage: SessionUsage::default(),
+            cost: unavailable_cost(),
             deferred_terminal_delta: None,
             deferred_terminal_turn: None,
+            context_surgery: panic_context_surgery,
+            pruned_tool_outputs: panic_pruned_tool_outputs,
+            budgeter: state_budgeter,
         });
         let _ = signals.send(TurnSignal::Complete(outcome));
     });
@@ -3730,6 +5743,385 @@ fn tool_definition(descriptor: ToolDescriptor) -> ToolDefinition {
         name: descriptor.name,
         description: descriptor.description,
         input_schema: descriptor.input_schema,
+    }
+}
+
+fn context_action_state(actions: &[ContextSurgeryAction], item_id: &ContextItemId) -> (bool, bool) {
+    actions
+        .iter()
+        .rev()
+        .find(|action| &action.item_id == item_id)
+        .map_or((false, false), |action| {
+            if action.pinned {
+                (true, false)
+            } else {
+                (false, true)
+            }
+        })
+}
+
+fn prompt_tool_output(
+    output: &ToolOutput,
+    is_pruned: bool,
+    toon: &mut ToonPromptEncoder,
+) -> ToolOutput {
+    if is_pruned {
+        return ToolOutput::Text {
+            text: PRUNED_TOOL_OUTPUT_REPLACEMENT.to_owned(),
+        };
+    }
+    match output {
+        ToolOutput::Text { .. } => output.clone(),
+        ToolOutput::Structured { value } => toon.encode(value).map_or_else(
+            |_| output.clone(),
+            |encoded| ToolOutput::Text {
+                text: encoded.prompt_text,
+            },
+        ),
+        ToolOutput::Mixed { parts } => ToolOutput::Mixed {
+            parts: parts
+                .iter()
+                .map(|part| match part {
+                    ToolOutputPart::Structured { value } => toon.encode(value).map_or_else(
+                        |_| part.clone(),
+                        |encoded| ToolOutputPart::Text {
+                            text: encoded.prompt_text,
+                        },
+                    ),
+                    ToolOutputPart::Text { .. } | ToolOutputPart::Image { .. } => part.clone(),
+                })
+                .collect(),
+        },
+    }
+}
+
+fn prompt_turn(
+    turn: &Turn,
+    pruned_tool_outputs: &BTreeMap<String, u64>,
+    toon: &mut ToonPromptEncoder,
+) -> Turn {
+    let mut prompt = turn.clone();
+    prompt.blocks = prompt
+        .blocks
+        .into_iter()
+        .map(|block| match block {
+            Block::ToolResult {
+                id,
+                output,
+                is_error,
+            } => {
+                let is_pruned = pruned_tool_outputs.contains_key(&id.0);
+                Block::ToolResult {
+                    id,
+                    output: prompt_tool_output(&output, is_pruned, toon),
+                    is_error,
+                }
+            }
+            other => other,
+        })
+        .collect();
+    prompt
+}
+
+fn assemble_session_context(
+    config: &SessionActorConfig,
+    conversation: &[Turn],
+    queued: &VecDeque<String>,
+    surgery: &[ContextSurgeryAction],
+    pruned_tool_outputs: &BTreeMap<String, u64>,
+    include_prompt_dump: bool,
+) -> Result<AssembledContext, AgentLoopError> {
+    let stable_prefix = config
+        .initial_session_context
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| AssemblyContextItem {
+            id: AssemblyContextItemId(format!("system:{index}")),
+            kind: if index == 0 {
+                AssemblyContextItemKind::System
+            } else {
+                AssemblyContextItemKind::ProjectInstructions
+            },
+            label: if index == 0 {
+                "Base system instructions".to_owned()
+            } else {
+                format!("Project instructions {index}")
+            },
+            provenance: ContextProvenance::BuiltIn,
+            turn: turn.clone(),
+            pinned: false,
+            evicted: false,
+            summarized: false,
+            pruned: false,
+        })
+        .collect();
+    let mut toon = ToonPromptEncoder::default();
+    let conversation = conversation
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| {
+            let item_id = ContextItemId(format!("conversation:{index}"));
+            let (pinned, evicted) = context_action_state(surgery, &item_id);
+            let pruned = turn.blocks.iter().any(|block| {
+                matches!(block, Block::ToolResult { id, .. } if pruned_tool_outputs.contains_key(&id.0))
+            });
+            AssemblyContextItem {
+                id: AssemblyContextItemId(item_id.0),
+                kind: if pinned {
+                    AssemblyContextItemKind::Pin
+                } else {
+                    AssemblyContextItemKind::Conversation
+                },
+                label: format!("{:?} turn {}", turn.role, index.saturating_add(1)),
+                provenance: if pinned {
+                    ContextProvenance::UserPin
+                } else {
+                    ContextProvenance::Conversation {
+                        sequence: u64::try_from(index).unwrap_or(u64::MAX),
+                    }
+                },
+                turn: prompt_turn(turn, pruned_tool_outputs, &mut toon),
+                pinned,
+                evicted,
+                summarized: turn.meta.summary,
+                pruned,
+            }
+        })
+        .collect();
+    let queued = queued
+        .iter()
+        .enumerate()
+        .map(|(index, content)| AssemblyContextItem {
+            id: AssemblyContextItemId(format!("queued:{index}")),
+            kind: AssemblyContextItemKind::Queued,
+            label: format!("Queued message {}", index.saturating_add(1)),
+            provenance: ContextProvenance::ClientQueue,
+            turn: Turn {
+                role: Role::User,
+                blocks: vec![Block::Text {
+                    text: content.clone(),
+                }],
+                meta: TurnMeta::default(),
+            },
+            pinned: false,
+            evicted: false,
+            summarized: false,
+            pruned: false,
+        })
+        .collect();
+    let metadata = config.model.context_metadata(&config.model_alias);
+    ContextAssembler::assemble(AssemblyInput {
+        stable_prefix,
+        conversation,
+        pins: Vec::new(),
+        queued,
+        tools: config
+            .tools
+            .descriptors()
+            .into_iter()
+            .map(tool_definition)
+            .collect(),
+        cache_support: metadata
+            .cache_breakpoints
+            .unwrap_or(CacheBreakpointSupport::None),
+        include_prompt_dump,
+    })
+    .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))
+}
+
+fn protocol_context_kind(kind: AssemblyContextItemKind, role: Option<&Role>) -> ContextItemKind {
+    match kind {
+        AssemblyContextItemKind::System => ContextItemKind::System,
+        AssemblyContextItemKind::ProjectInstructions => ContextItemKind::ProjectInstructions,
+        AssemblyContextItemKind::SkillIndex => ContextItemKind::ToolDefinitions,
+        AssemblyContextItemKind::Pin => ContextItemKind::Pinned,
+        AssemblyContextItemKind::Queued => ContextItemKind::QueuedMessage,
+        AssemblyContextItemKind::Conversation => {
+            if role == Some(&Role::Tool) {
+                ContextItemKind::ToolResult
+            } else {
+                ContextItemKind::Conversation
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn context_snapshot(
+    assembled: &AssembledContext,
+    durable_conversation: &[Turn],
+    pruned_tool_outputs: &BTreeMap<String, u64>,
+    metadata: ModelContextMetadata,
+    compaction: &CompactionConfig,
+    turn_id: Option<TurnId>,
+) -> ContextSnapshot {
+    let (usable_tokens, reserved_tokens) = metadata.max_context_tokens.map_or((0, 0), |window| {
+        let policy = OverflowPolicy {
+            context_window_tokens: window,
+            max_output_tokens: metadata.max_output_tokens.unwrap_or(0),
+            reserved_tokens_override: compaction.reserved_tokens,
+            automatic_compaction: compaction.auto,
+        };
+        let reserved = policy.reserved_tokens();
+        (window.saturating_sub(reserved), reserved)
+    });
+    let mut items = assembled
+        .items
+        .iter()
+        .filter(|item| {
+            let Some(index) = item
+                .id
+                .0
+                .strip_prefix("conversation:")
+                .and_then(|index| index.parse::<usize>().ok())
+            else {
+                return true;
+            };
+            durable_conversation
+                .get(index)
+                .is_none_or(|turn| turn.role != Role::Tool)
+        })
+        .map(|item| {
+            let (source, machine_local_path) = match &item.provenance {
+                ContextProvenance::BuiltIn => ("built_in".to_owned(), None),
+                ContextProvenance::ProjectFile { path } => {
+                    ("project_file".to_owned(), Some(path.clone()))
+                }
+                ContextProvenance::Extension { extension_id } => {
+                    (format!("extension:{extension_id}"), None)
+                }
+                ContextProvenance::Conversation { sequence } => {
+                    (format!("conversation:{sequence}"), None)
+                }
+                ContextProvenance::UserPin => ("user_pin".to_owned(), None),
+                ContextProvenance::ClientQueue => ("client_queue".to_owned(), None),
+            };
+            let role = item
+                .assembled_turn_index
+                .and_then(|index| assembled.turns.get(index))
+                .map(|turn| &turn.role);
+            ContextItemSnapshot {
+                item_id: ContextItemId(item.id.0.clone()),
+                kind: protocol_context_kind(item.kind, role),
+                label: item.label.clone(),
+                source,
+                machine_local_path,
+                estimated_tokens: item.tokens,
+                state: ContextItemState {
+                    pinned: item.pinned,
+                    evicted: item.evicted,
+                    summarized: item.summarized,
+                    pruned: item.pruned,
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    items.extend(assembled.tools.iter().map(|tool| ContextItemSnapshot {
+        item_id: ContextItemId(format!("tool:{}", tool.name)),
+        kind: ContextItemKind::ToolDefinitions,
+        label: tool.name.clone(),
+        source: "tool_registry".to_owned(),
+        machine_local_path: None,
+        estimated_tokens: LocalTokenEstimator::tools(std::slice::from_ref(tool)),
+        state: ContextItemState {
+            pinned: true,
+            evicted: false,
+            summarized: false,
+            pruned: false,
+        },
+    }));
+    for (index, turn) in durable_conversation.iter().enumerate() {
+        if turn.role != Role::Tool {
+            continue;
+        }
+        let context_item_id = format!("conversation:{index}");
+        let parent = assembled
+            .items
+            .iter()
+            .find(|item| item.id.0 == context_item_id);
+        let prompt_turn = parent
+            .and_then(|item| item.assembled_turn_index)
+            .and_then(|index| assembled.turns.get(index));
+        for block in &turn.blocks {
+            if let Block::ToolResult { id, .. } = block {
+                let prompt_block = prompt_turn
+                    .and_then(|turn| {
+                        turn.blocks.iter().find(|block| {
+                            matches!(block, Block::ToolResult { id: prompt_id, .. } if prompt_id == id)
+                        })
+                    })
+                    .unwrap_or(block);
+                items.push(ContextItemSnapshot {
+                    item_id: ContextItemId(format!("tool_result:{}", id.0)),
+                    kind: ContextItemKind::ToolResult,
+                    label: format!("Tool result {}", id.0),
+                    source: "conversation_tool_result".to_owned(),
+                    machine_local_path: None,
+                    estimated_tokens: LocalTokenEstimator::turn(&Turn {
+                        role: Role::Tool,
+                        blocks: vec![prompt_block.clone()],
+                        meta: TurnMeta::default(),
+                    }),
+                    state: ContextItemState {
+                        pinned: parent.is_some_and(|item| item.pinned),
+                        evicted: parent.is_some_and(|item| item.evicted),
+                        summarized: parent.is_some_and(|item| item.summarized),
+                        pruned: pruned_tool_outputs.contains_key(&id.0),
+                    },
+                });
+            }
+        }
+    }
+    ContextSnapshot {
+        turn_id,
+        stable_prefix_hash: assembled.stable_prefix_hash.clone(),
+        used_tokens: assembled.token_totals.total,
+        usable_tokens,
+        reserved_tokens,
+        cache_breakpoints: assembled
+            .cache_breakpoints
+            .iter()
+            .map(|breakpoint| CacheBreakpoint {
+                after_item_id: breakpoint
+                    .after_item_id
+                    .as_ref()
+                    .map(|id| ContextItemId(id.0.clone())),
+            })
+            .collect(),
+        items,
+    }
+}
+
+fn prompt_dump(
+    assembled: &AssembledContext,
+    model_alias: &str,
+    turn_id: Option<TurnId>,
+) -> PromptDump {
+    PromptDump {
+        turn_id,
+        model_alias: ModelAlias(model_alias.to_owned()),
+        turns: assembled.turns.clone(),
+        tools: assembled
+            .tools
+            .iter()
+            .map(|tool| PromptTool {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                input_schema: tool.input_schema.clone(),
+            })
+            .collect(),
+        stable_prefix_hash: assembled.stable_prefix_hash.clone(),
+        cache_breakpoints: assembled
+            .cache_breakpoints
+            .iter()
+            .map(|breakpoint| CacheBreakpoint {
+                after_item_id: breakpoint
+                    .after_item_id
+                    .as_ref()
+                    .map(|id| ContextItemId(id.0.clone())),
+            })
+            .collect(),
+        estimated_tokens: assembled.token_totals.total,
     }
 }
 
@@ -4412,7 +6804,587 @@ async fn execute_tool_calls(
     ordered
 }
 
-#[allow(clippy::too_many_lines)]
+async fn prune_before_provider_request(
+    conversation: &[Turn],
+    context_surgery: &[ContextSurgeryAction],
+    pruned_tool_outputs: &mut BTreeMap<String, u64>,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+) -> Result<(), AgentLoopError> {
+    let mut tool_names = BTreeMap::<String, String>::new();
+    for conversation_turn in conversation {
+        for block in &conversation_turn.blocks {
+            if let Block::ToolCall { id, name, .. } = block {
+                tool_names.insert(id.0.clone(), name.clone());
+            }
+        }
+    }
+    let mut records = Vec::new();
+    let mut toon = ToonPromptEncoder::default();
+    let prompt_conversation = conversation
+        .iter()
+        .map(|turn| prompt_turn(turn, pruned_tool_outputs, &mut toon))
+        .collect::<Vec<_>>();
+    for (turn_index, (conversation_turn, prompt_conversation_turn)) in
+        conversation.iter().zip(&prompt_conversation).enumerate()
+    {
+        let context_id = ContextItemId(format!("conversation:{turn_index}"));
+        let (pinned, evicted) = context_action_state(context_surgery, &context_id);
+        if evicted {
+            records.push(PruneRecord {
+                item_id: context_id.0,
+                transcript_index: records.len(),
+                kind: PruneRecordKind::PrunedMarker,
+                tokens: 0,
+                pinned: false,
+            });
+            continue;
+        }
+        if conversation_turn.meta.summary {
+            records.push(PruneRecord {
+                item_id: context_id.0.clone(),
+                transcript_index: records.len(),
+                kind: PruneRecordKind::SummaryMarker,
+                tokens: LocalTokenEstimator::turn(prompt_conversation_turn),
+                pinned,
+            });
+            continue;
+        }
+        if conversation_turn.role == Role::User {
+            records.push(PruneRecord {
+                item_id: context_id.0.clone(),
+                transcript_index: records.len(),
+                kind: PruneRecordKind::User,
+                tokens: LocalTokenEstimator::turn(prompt_conversation_turn),
+                pinned,
+            });
+        }
+        for (block, prompt_block) in conversation_turn
+            .blocks
+            .iter()
+            .zip(&prompt_conversation_turn.blocks)
+        {
+            let Block::ToolResult { id, .. } = block else {
+                continue;
+            };
+            let tokens = LocalTokenEstimator::turn(&Turn {
+                role: Role::Tool,
+                blocks: vec![prompt_block.clone()],
+                meta: TurnMeta::default(),
+            });
+            let already_pruned = pruned_tool_outputs.contains_key(&id.0);
+            records.push(PruneRecord {
+                item_id: format!("{}:tool:{}", context_id.0, id.0),
+                transcript_index: records.len(),
+                kind: if already_pruned {
+                    PruneRecordKind::PrunedMarker
+                } else {
+                    PruneRecordKind::ToolOutput {
+                        tool_call_id: id.0.clone(),
+                        tool_name: tool_names
+                            .get(&id.0)
+                            .cloned()
+                            .unwrap_or_else(|| "unknown".to_owned()),
+                        completed: true,
+                    }
+                },
+                tokens,
+                pinned,
+            });
+        }
+    }
+    let plan = Pruner::plan(&records, &PruneConfig::default());
+    for decision in plan.decisions {
+        persist_event(
+            signals,
+            PendingEvent::ToolOutputPruned {
+                tool_call_id: decision.tool_call_id.clone(),
+                reclaimed_tokens: decision.original_tokens,
+            },
+        )
+        .await?;
+        pruned_tool_outputs.insert(decision.tool_call_id, decision.original_tokens);
+    }
+    Ok(())
+}
+
+struct CompactionExecution {
+    conversation: Vec<Turn>,
+    usage: SessionUsage,
+    cost: Cost,
+    reclaimed_tokens: u64,
+    remapped_pins: Vec<ContextItemId>,
+    hard_stop: bool,
+    failed_attempt_cost_micros: u64,
+    failed_attempt_credit_micros: u64,
+}
+
+fn context_compaction_reason(reason: &CompactionReason) -> ContextCompactionReason {
+    match reason {
+        CompactionReason::Automatic => ContextCompactionReason::AutomaticOverflow,
+        CompactionReason::Manual => ContextCompactionReason::Manual,
+        CompactionReason::ProviderOverflow => ContextCompactionReason::ProviderOverflow,
+    }
+}
+
+async fn persist_failed_compaction_attempt(
+    config: &SessionActorConfig,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    turn: u64,
+    alias: &str,
+    selected_route: Option<&str>,
+    reported_model: Option<&str>,
+    usage: SessionUsage,
+) -> Result<Option<(Cost, bool)>, AgentLoopError> {
+    if usage == SessionUsage::default() {
+        return Ok(None);
+    }
+    let cost = config
+        .model
+        .cost_for_route(alias, selected_route, reported_model, usage.into());
+    persist_event(
+        signals,
+        PendingEvent::CompactionAttemptFinished {
+            summary_turn: turn,
+            usage,
+            cost: cost.clone(),
+        },
+    )
+    .await?;
+    let now = config.event_clock.unix_time_millis();
+    let ledger = config
+        .event_sink
+        .budget_totals(BudgetLedgerQuery {
+            now_unix_ms: now,
+            utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
+            trailing_minute_start_unix_ms: now.saturating_sub(60_000),
+        })
+        .await?;
+    Ok(Some((cost, ledger.authoritative)))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn execute_compaction(
+    conversation: &[Turn],
+    surgery: &[ContextSurgeryAction],
+    reason: CompactionReason,
+    instructions: Option<String>,
+    config: &SessionActorConfig,
+    local_session_accounting: SessionAccountingFallback,
+    cancellation: &CancellationToken,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    turn: u64,
+    current_turn_cost_micros: u64,
+    current_turn_credit_micros: u64,
+    enforce_budget_via_signals: bool,
+) -> Result<CompactionExecution, AgentLoopError> {
+    let hook_result = dispatch_hook(
+        &config.hooks,
+        HookEvent::PreCompact,
+        json!({
+            "reason": format!("{reason:?}"),
+            "conversation_turns": conversation.len(),
+        }),
+        cancellation,
+    )
+    .await?;
+    report_hook_failures(HookEvent::PreCompact, hook_result.failures(), signals);
+    if !hook_result.completed() {
+        return Err(AgentLoopError::Extension(
+            "pre_compact hook blocked compaction".to_owned(),
+        ));
+    }
+    let hook = PreCompactHook {
+        injected_context: hook_result
+            .payload()
+            .get("injected_context")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        replacement_prompt: hook_result
+            .payload()
+            .get("replacement_prompt")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    };
+    let automatic_continue = !hook_result
+        .payload()
+        .get("suppress_auto_continue")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut latest = BTreeMap::<String, &ContextSurgeryAction>::new();
+    for action in surgery {
+        latest.insert(action.item_id.0.clone(), action);
+    }
+    let pins = latest
+        .values()
+        .filter(|action| action.pinned)
+        .filter_map(|action| {
+            let index = action
+                .item_id
+                .0
+                .strip_prefix("conversation:")?
+                .parse::<usize>()
+                .ok()?;
+            let pinned_turn = conversation.get(index)?.clone();
+            Some(ConversationPin {
+                item_id: action.item_id.0.clone(),
+                order: action.effective_after_agent_turn,
+                turn: pinned_turn,
+            })
+        })
+        .collect();
+    let compaction_config = config.model.compaction_config();
+    let plan = Compactor::plan(CompactionInput {
+        conversation: conversation.to_vec(),
+        pins,
+        reason: context_compaction_reason(&reason),
+        instructions,
+        hook,
+        session_model_alias: config.model_alias.clone(),
+        compaction_model_alias: compaction_config.model_alias,
+        automatic_continue,
+    })
+    .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+    let mut summary_request_turns = plan.history.clone();
+    summary_request_turns.push(Turn {
+        role: Role::User,
+        blocks: vec![Block::Text {
+            text: plan.summary_prompt.clone(),
+        }],
+        meta: TurnMeta {
+            synthetic: true,
+            ..TurnMeta::default()
+        },
+    });
+    let aliases = if plan.model_alias == config.model_alias {
+        vec![plan.model_alias.clone()]
+    } else {
+        vec![plan.model_alias.clone(), config.model_alias.clone()]
+    };
+    let mut last_error = None;
+    let mut completed = None;
+    let mut failed_attempt_cost_micros = 0_u64;
+    let mut failed_attempt_credit_micros = 0_u64;
+    for alias in aliases {
+        if enforce_budget_via_signals {
+            let budget = evaluate_budget(
+                turn,
+                config.event_clock.as_ref(),
+                &config.event_sink,
+                &config.model.budget_config(),
+                local_session_accounting,
+                current_turn_cost_micros.saturating_add(failed_attempt_cost_micros),
+                current_turn_credit_micros.saturating_add(failed_attempt_credit_micros),
+            )
+            .await?;
+            for event in budget.events {
+                persist_event(signals, event).await?;
+            }
+            if budget.hard_stop {
+                return Err(AgentLoopError::InvalidConfiguration(
+                    "budget hard cap prevents compaction model call".to_owned(),
+                ));
+            }
+        }
+        let request = ProviderRequest {
+            model: alias.clone(),
+            turns: summary_request_turns.clone(),
+            tools: Vec::new(),
+            tool_choice: ToolChoice::None,
+            max_output_tokens: config.max_output_tokens,
+            temperature: None,
+            thinking: config.thinking,
+            cache_hint: None,
+        };
+        let mut stream = match config.model.stream(&alias, request) {
+            Ok(stream) => stream,
+            Err(error) => {
+                last_error = Some(error);
+                continue;
+            }
+        };
+        let mut summary = String::new();
+        let mut usage = SessionUsage::default();
+        let mut reported_model = None;
+        let mut selected_route = None;
+        let mut failed = None;
+        let mut cancelled = false;
+        loop {
+            let event = tokio::select! {
+                () = cancellation.cancelled() => {
+                    cancelled = true;
+                    failed = Some(AgentLoopError::Provider("compaction cancelled".to_owned()));
+                    break;
+                }
+                event = stream.next() => event,
+            };
+            let Some(event) = event else {
+                break;
+            };
+            match event {
+                Ok(ProviderEvent::RouteSelected { route }) => selected_route = Some(route),
+                Ok(ProviderEvent::MessageStart { model }) => reported_model = Some(model),
+                Ok(ProviderEvent::TextDelta { text }) => summary.push_str(&text),
+                Ok(ProviderEvent::Usage { usage: latest }) => usage.update(latest),
+                Ok(
+                    ProviderEvent::ToolCallStart { .. }
+                    | ProviderEvent::ToolCallArgumentsDelta { .. }
+                    | ProviderEvent::ToolCallEnd { .. },
+                ) => {
+                    failed = Some(AgentLoopError::Provider(
+                        "compaction model attempted a tool call".to_owned(),
+                    ));
+                    break;
+                }
+                Ok(
+                    ProviderEvent::ThinkingDelta { .. }
+                    | ProviderEvent::Citation { .. }
+                    | ProviderEvent::Finished { .. },
+                ) => {}
+                Err(error) => {
+                    failed = Some(AgentLoopError::Provider(error.to_string()));
+                    break;
+                }
+            }
+        }
+        if let Some(error) = failed {
+            if let Some((cost, false)) = persist_failed_compaction_attempt(
+                config,
+                signals,
+                turn,
+                &alias,
+                selected_route.as_deref(),
+                reported_model.as_deref(),
+                usage,
+            )
+            .await?
+            {
+                if persist_incomplete_budget_caps(
+                    signals,
+                    turn,
+                    &config.model.budget_config(),
+                    &cost,
+                    current_turn_cost_micros,
+                    current_turn_credit_micros,
+                )
+                .await?
+                {
+                    return Err(AgentLoopError::InvalidConfiguration(
+                        "budget cap cannot price a failed compaction attempt".to_owned(),
+                    ));
+                }
+                let (cost_micros, credit_micros) = cost_units(&cost);
+                failed_attempt_cost_micros = failed_attempt_cost_micros.saturating_add(cost_micros);
+                failed_attempt_credit_micros =
+                    failed_attempt_credit_micros.saturating_add(credit_micros);
+            }
+            if cancelled {
+                return Err(error);
+            }
+            last_error = Some(error);
+            continue;
+        }
+        if summary.trim().is_empty() {
+            if let Some((cost, false)) = persist_failed_compaction_attempt(
+                config,
+                signals,
+                turn,
+                &alias,
+                selected_route.as_deref(),
+                reported_model.as_deref(),
+                usage,
+            )
+            .await?
+            {
+                if persist_incomplete_budget_caps(
+                    signals,
+                    turn,
+                    &config.model.budget_config(),
+                    &cost,
+                    current_turn_cost_micros,
+                    current_turn_credit_micros,
+                )
+                .await?
+                {
+                    return Err(AgentLoopError::InvalidConfiguration(
+                        "budget cap cannot price a failed compaction attempt".to_owned(),
+                    ));
+                }
+                let (cost_micros, credit_micros) = cost_units(&cost);
+                failed_attempt_cost_micros = failed_attempt_cost_micros.saturating_add(cost_micros);
+                failed_attempt_credit_micros =
+                    failed_attempt_credit_micros.saturating_add(credit_micros);
+            }
+            last_error = Some(AgentLoopError::Provider(
+                "compaction model returned an empty summary".to_owned(),
+            ));
+            continue;
+        }
+        let cost = config.model.cost_for_route(
+            &alias,
+            selected_route.as_deref(),
+            reported_model.as_deref(),
+            usage.into(),
+        );
+        let (compaction_cost, compaction_credits) = cost_units(&cost);
+        let hard_stop = if enforce_budget_via_signals {
+            let post_budget = evaluate_budget(
+                turn,
+                config.event_clock.as_ref(),
+                &config.event_sink,
+                &config.model.budget_config(),
+                local_session_accounting,
+                current_turn_cost_micros
+                    .saturating_add(failed_attempt_cost_micros)
+                    .saturating_add(compaction_cost),
+                current_turn_credit_micros
+                    .saturating_add(failed_attempt_credit_micros)
+                    .saturating_add(compaction_credits),
+            )
+            .await?;
+            for event in post_budget.events {
+                persist_event(signals, event).await?;
+            }
+            let incomplete = persist_incomplete_budget_caps(
+                signals,
+                turn,
+                &config.model.budget_config(),
+                &cost,
+                current_turn_cost_micros.saturating_add(failed_attempt_cost_micros),
+                current_turn_credit_micros.saturating_add(failed_attempt_credit_micros),
+            )
+            .await?;
+            post_budget.hard_stop || incomplete
+        } else {
+            false
+        };
+        completed = Some((summary, usage, cost, hard_stop));
+        break;
+    }
+    let Some((summary, usage, cost, hard_stop)) = completed else {
+        return Err(last_error.unwrap_or_else(|| {
+            AgentLoopError::Provider("compaction model was unavailable".to_owned())
+        }));
+    };
+    let old_tokens = conversation.iter().fold(0_u64, |total, turn| {
+        total.saturating_add(LocalTokenEstimator::turn(turn))
+    });
+    let compacted = plan.post_summary_turns(summary);
+    let new_tokens = compacted.iter().fold(0_u64, |total, turn| {
+        total.saturating_add(LocalTokenEstimator::turn(turn))
+    });
+    let remapped_pins = (0..plan.ordered_pins.len())
+        .map(|index| ContextItemId(format!("conversation:{}", index.saturating_add(1))))
+        .collect();
+    Ok(CompactionExecution {
+        conversation: compacted,
+        usage,
+        cost,
+        reclaimed_tokens: old_tokens.saturating_sub(new_tokens),
+        remapped_pins,
+        hard_stop,
+        failed_attempt_cost_micros,
+        failed_attempt_credit_micros,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn compact_during_turn(
+    turn: u64,
+    conversation: &mut Vec<Turn>,
+    surgery: &mut Vec<ContextSurgeryAction>,
+    reason: CompactionReason,
+    config: &SessionActorConfig,
+    cancellation: &CancellationToken,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    local_session_accounting: SessionAccountingFallback,
+    current_turn_cost_micros: u64,
+    current_turn_credit_micros: u64,
+    instructions: Option<String>,
+) -> Result<(u64, u64, bool), AgentLoopError> {
+    persist_event(
+        signals,
+        PendingEvent::CompactionStarted {
+            reason: reason.clone(),
+        },
+    )
+    .await?;
+    let execution = execute_compaction(
+        conversation,
+        surgery,
+        reason,
+        instructions,
+        config,
+        local_session_accounting,
+        cancellation,
+        signals,
+        turn,
+        current_turn_cost_micros,
+        current_turn_credit_micros,
+        true,
+    )
+    .await?;
+    for compacted_turn in &execution.conversation {
+        persist_conversation_turn(signals, turn, compacted_turn).await?;
+    }
+    surgery.clear();
+    for item_id in &execution.remapped_pins {
+        persist_event(
+            signals,
+            PendingEvent::ContextItemPinned {
+                item_id: item_id.clone(),
+                effective_after_agent_turn: turn,
+            },
+        )
+        .await?;
+        surgery.push(ContextSurgeryAction {
+            item_id: item_id.clone(),
+            pinned: true,
+            effective_after_agent_turn: turn,
+        });
+    }
+    let (successful_cost_micros, successful_credit_micros) = cost_units(&execution.cost);
+    let cost_micros = successful_cost_micros.saturating_add(execution.failed_attempt_cost_micros);
+    let credit_micros =
+        successful_credit_micros.saturating_add(execution.failed_attempt_credit_micros);
+    persist_event(
+        signals,
+        PendingEvent::CompactionFinished {
+            summary_turn: turn,
+            reclaimed_tokens: execution.reclaimed_tokens,
+            usage: Some(execution.usage),
+            cost: Some(execution.cost),
+        },
+    )
+    .await?;
+    let now = config.event_clock.unix_time_millis();
+    let ledger = config
+        .event_sink
+        .budget_totals(BudgetLedgerQuery {
+            now_unix_ms: now,
+            utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
+            trailing_minute_start_unix_ms: now.saturating_sub(60_000),
+        })
+        .await?;
+    *conversation = execution.conversation;
+    Ok((
+        if ledger.authoritative { 0 } else { cost_micros },
+        if ledger.authoritative {
+            0
+        } else {
+            credit_micros
+        },
+        execution.hard_stop,
+    ))
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_turn(
     turn: u64,
     messages: Vec<String>,
@@ -4421,6 +7393,10 @@ async fn run_turn(
     tool_context: ToolContext,
     cancellation: CancellationToken,
     signals: mpsc::UnboundedSender<TurnSignal>,
+    mut context_surgery: Vec<ContextSurgeryAction>,
+    mut pruned_tool_outputs: BTreeMap<String, u64>,
+    mut budgeter: Budgeter,
+    local_session_accounting: SessionAccountingFallback,
 ) -> TurnOutcome {
     for content in messages {
         let Ok(hook) = dispatch_hook(
@@ -4436,8 +7412,12 @@ async fn run_turn(
                 conversation,
                 status: AgentTurnStatus::Interrupted,
                 usage: SessionUsage::default(),
+                cost: unavailable_cost(),
                 deferred_terminal_delta: None,
                 deferred_terminal_turn: None,
+                context_surgery,
+                pruned_tool_outputs,
+                budgeter,
             };
         };
         report_hook_failures(HookEvent::UserPromptSubmit, hook.failures(), &signals);
@@ -4447,8 +7427,12 @@ async fn run_turn(
                 conversation,
                 status: AgentTurnStatus::Failed,
                 usage: SessionUsage::default(),
+                cost: unavailable_cost(),
                 deferred_terminal_delta: None,
                 deferred_terminal_turn: None,
+                context_surgery,
+                pruned_tool_outputs,
+                budgeter,
             };
         }
         let content = hook
@@ -4478,8 +7462,12 @@ async fn run_turn(
                 conversation,
                 status: AgentTurnStatus::Failed,
                 usage: SessionUsage::default(),
+                cost: unavailable_cost(),
                 deferred_terminal_delta: None,
                 deferred_terminal_turn: None,
+                context_surgery,
+                pruned_tool_outputs,
+                budgeter,
             };
         }
     }
@@ -4493,30 +7481,196 @@ async fn run_turn(
     let mut status = AgentTurnStatus::MaxTurns;
     let mut deferred_terminal_delta = None;
     let mut deferred_terminal_turn = None;
+    let mut current_turn_cost_micros = 0_u64;
+    let mut current_turn_credit_micros = 0_u64;
+    let budget_config = config.model.budget_config();
+    let mut turn_cost = None;
 
     'iterations: for _ in 0..config.max_turns {
         if cancellation.is_cancelled() {
             status = AgentTurnStatus::Interrupted;
             break;
         }
+        let budget = match evaluate_budget(
+            turn,
+            config.event_clock.as_ref(),
+            &config.event_sink,
+            &budget_config,
+            local_session_accounting,
+            current_turn_cost_micros,
+            current_turn_credit_micros,
+        )
+        .await
+        {
+            Ok(check) => check,
+            Err(error) => {
+                send_event(
+                    &signals,
+                    PendingEvent::Error {
+                        message: error.to_string(),
+                    },
+                );
+                status = AgentTurnStatus::Failed;
+                break;
+            }
+        };
+        for event in budget.events {
+            if persist_event(&signals, event).await.is_err() {
+                status = AgentTurnStatus::Failed;
+                break 'iterations;
+            }
+        }
+        if budget.hard_stop {
+            status = AgentTurnStatus::BudgetExceeded;
+            break;
+        }
+        if prune_before_provider_request(
+            &conversation,
+            &context_surgery,
+            &mut pruned_tool_outputs,
+            &signals,
+        )
+        .await
+        .is_err()
+        {
+            status = AgentTurnStatus::Failed;
+            break;
+        }
+        let mut assembled = match assemble_session_context(
+            &config,
+            &conversation,
+            &VecDeque::new(),
+            &context_surgery,
+            &pruned_tool_outputs,
+            false,
+        ) {
+            Ok(assembled) => assembled,
+            Err(error) => {
+                send_event(
+                    &signals,
+                    PendingEvent::Error {
+                        message: error.to_string(),
+                    },
+                );
+                status = AgentTurnStatus::Failed;
+                break;
+            }
+        };
+        let metadata = config.model.context_metadata(&config.model_alias);
+        let compaction = config.model.compaction_config();
+        let mut input_estimate = budgeter.estimate(&assembled.turns, &assembled.tools);
+        if let Some(context_window_tokens) = metadata.max_context_tokens {
+            let overflow = OverflowPolicy {
+                context_window_tokens,
+                max_output_tokens: metadata.max_output_tokens.unwrap_or(0),
+                reserved_tokens_override: compaction.reserved_tokens,
+                automatic_compaction: compaction.auto,
+            }
+            .calculate(input_estimate.reconciled_tokens);
+            if overflow.should_compact {
+                match compact_during_turn(
+                    turn,
+                    &mut conversation,
+                    &mut context_surgery,
+                    CompactionReason::Automatic,
+                    &config,
+                    &cancellation,
+                    &signals,
+                    local_session_accounting,
+                    current_turn_cost_micros,
+                    current_turn_credit_micros,
+                    None,
+                )
+                .await
+                {
+                    Ok((cost_micros, credit_micros, hard_stop)) => {
+                        current_turn_cost_micros =
+                            current_turn_cost_micros.saturating_add(cost_micros);
+                        current_turn_credit_micros =
+                            current_turn_credit_micros.saturating_add(credit_micros);
+                        if hard_stop {
+                            status = AgentTurnStatus::BudgetExceeded;
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        send_event(
+                            &signals,
+                            PendingEvent::Error {
+                                message: error.to_string(),
+                            },
+                        );
+                        status = AgentTurnStatus::Failed;
+                        break;
+                    }
+                }
+                assembled = match assemble_session_context(
+                    &config,
+                    &conversation,
+                    &VecDeque::new(),
+                    &context_surgery,
+                    &pruned_tool_outputs,
+                    false,
+                ) {
+                    Ok(assembled) => assembled,
+                    Err(error) => {
+                        send_event(
+                            &signals,
+                            PendingEvent::Error {
+                                message: error.to_string(),
+                            },
+                        );
+                        status = AgentTurnStatus::Failed;
+                        break;
+                    }
+                };
+                input_estimate = budgeter.estimate(&assembled.turns, &assembled.tools);
+            }
+        }
+        let mut snapshot = context_snapshot(
+            &assembled,
+            &conversation,
+            &pruned_tool_outputs,
+            metadata,
+            &compaction,
+            Some(wire_turn_id(turn)),
+        );
+        snapshot.used_tokens = input_estimate.reconciled_tokens;
+        let context_metrics = (
+            snapshot.used_tokens,
+            snapshot.usable_tokens,
+            snapshot.reserved_tokens,
+            snapshot.stable_prefix_hash.clone(),
+        );
+        send_event(
+            &signals,
+            PendingEvent::ContextUsage {
+                turn,
+                used_tokens: snapshot.used_tokens,
+                usable_tokens: snapshot.usable_tokens,
+                reserved_tokens: snapshot.reserved_tokens,
+                stable_prefix_hash: snapshot.stable_prefix_hash,
+                cache_hit_basis_points: 0,
+                estimated_input_tokens: input_estimate.local_tokens,
+                provider_input_tokens: 0,
+                correction_millionths: input_estimate.correction_millionths,
+            },
+        );
+        let cache_hint = (assembled.stable_prefix_turn_count > 0 || !assembled.tools.is_empty())
+            .then(|| CacheHint {
+                stable_prefix_turns: u32::try_from(assembled.stable_prefix_turn_count)
+                    .unwrap_or(u32::MAX),
+                tools_in_prefix: !assembled.tools.is_empty(),
+            });
         let request = ProviderRequest {
             model: config.model_alias.clone(),
-            turns: config
-                .initial_session_context
-                .iter()
-                .cloned()
-                .chain(conversation.iter().cloned())
-                .collect(),
-            tools: config
-                .tools
-                .descriptors()
-                .into_iter()
-                .map(tool_definition)
-                .collect(),
+            turns: assembled.turns,
+            tools: assembled.tools,
             tool_choice: ToolChoice::Auto,
             max_output_tokens: config.max_output_tokens,
             temperature: None,
             thinking: config.thinking,
+            cache_hint,
         };
         let mut stream = match config.model.stream(&config.model_alias, request) {
             Ok(stream) => stream,
@@ -4536,10 +7690,12 @@ async fn run_turn(
             blocks: Vec::new(),
             meta: TurnMeta::default(),
         };
+        let mut selected_route = None;
         let mut calls = Vec::<PendingToolCall>::new();
         let mut finish_reason = None;
         let mut iteration_usage = SessionUsage::default();
         let mut stream_failed = false;
+        let mut provider_overflow_recovered = false;
         let mut pending_text_delta = None;
         loop {
             let next = if pending_text_delta.is_some() {
@@ -4579,6 +7735,51 @@ async fn run_turn(
                 Ok(event) => event,
                 Err(error) => {
                     flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
+                    if error.kind == rw_providers::ProviderErrorKind::ContextOverflow
+                        && assistant.blocks.is_empty()
+                        && calls.is_empty()
+                    {
+                        match compact_during_turn(
+                            turn,
+                            &mut conversation,
+                            &mut context_surgery,
+                            CompactionReason::ProviderOverflow,
+                            &config,
+                            &cancellation,
+                            &signals,
+                            local_session_accounting,
+                            current_turn_cost_micros,
+                            current_turn_credit_micros,
+                            None,
+                        )
+                        .await
+                        {
+                            Ok((cost_micros, credit_micros, hard_stop)) => {
+                                current_turn_cost_micros =
+                                    current_turn_cost_micros.saturating_add(cost_micros);
+                                current_turn_credit_micros =
+                                    current_turn_credit_micros.saturating_add(credit_micros);
+                                if hard_stop {
+                                    status = AgentTurnStatus::BudgetExceeded;
+                                    stream_failed = true;
+                                    break;
+                                }
+                                provider_overflow_recovered = true;
+                                break;
+                            }
+                            Err(compaction_error) => {
+                                send_event(
+                                    &signals,
+                                    PendingEvent::Error {
+                                        message: compaction_error.to_string(),
+                                    },
+                                );
+                                status = AgentTurnStatus::Failed;
+                                stream_failed = true;
+                                break;
+                            }
+                        }
+                    }
                     send_event(
                         &signals,
                         PendingEvent::Error {
@@ -4601,6 +7802,7 @@ async fn run_turn(
                 flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
             }
             match event {
+                ProviderEvent::RouteSelected { route } => selected_route = Some(route),
                 ProviderEvent::MessageStart { model } => assistant.meta.model = Some(model),
                 ProviderEvent::TextDelta { text } => {
                     flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
@@ -4690,14 +7892,116 @@ async fn run_turn(
                 }
             }
         }
+        let normalized_iteration_usage: TokenUsage = iteration_usage.into();
+        let reconciliation =
+            budgeter.reconcile(input_estimate.local_tokens, normalized_iteration_usage);
+        let provider_input_tokens = normalized_iteration_usage
+            .input_tokens
+            .saturating_add(normalized_iteration_usage.cache_read_tokens)
+            .saturating_add(normalized_iteration_usage.cache_write_tokens);
+        let cache_hit_basis_points = if provider_input_tokens == 0 {
+            0
+        } else {
+            u16::try_from(
+                u128::from(normalized_iteration_usage.cache_read_tokens).saturating_mul(10_000)
+                    / u128::from(provider_input_tokens),
+            )
+            .unwrap_or(10_000)
+        };
+        send_event(
+            &signals,
+            PendingEvent::ContextUsage {
+                turn,
+                used_tokens: context_metrics.0,
+                usable_tokens: context_metrics.1,
+                reserved_tokens: context_metrics.2,
+                stable_prefix_hash: context_metrics.3.clone(),
+                cache_hit_basis_points,
+                estimated_input_tokens: input_estimate.local_tokens,
+                provider_input_tokens,
+                correction_millionths: reconciliation.correction_millionths,
+            },
+        );
         usage.add(iteration_usage);
+        let iteration_cost = config.model.cost_for_route(
+            &config.model_alias,
+            selected_route.as_deref(),
+            assistant.meta.model.as_deref(),
+            normalized_iteration_usage,
+        );
+        turn_cost = Some(combine_cost(turn_cost.take(), iteration_cost.clone()));
+        let (cost_micros, credit_micros) = cost_units(&iteration_cost);
+        current_turn_cost_micros = current_turn_cost_micros.saturating_add(cost_micros);
+        current_turn_credit_micros = current_turn_credit_micros.saturating_add(credit_micros);
+        let mut budget_stop = false;
+        match evaluate_budget(
+            turn,
+            config.event_clock.as_ref(),
+            &config.event_sink,
+            &budget_config,
+            local_session_accounting,
+            current_turn_cost_micros,
+            current_turn_credit_micros,
+        )
+        .await
+        {
+            Ok(check) => {
+                for event in check.events {
+                    if persist_event(&signals, event).await.is_err() {
+                        status = AgentTurnStatus::Failed;
+                        stream_failed = true;
+                        break;
+                    }
+                }
+                budget_stop = check.hard_stop;
+                if budget_stop {
+                    status = AgentTurnStatus::BudgetExceeded;
+                }
+            }
+            Err(error) => {
+                send_event(
+                    &signals,
+                    PendingEvent::Error {
+                        message: error.to_string(),
+                    },
+                );
+                status = AgentTurnStatus::Failed;
+                stream_failed = true;
+            }
+        }
+        match persist_incomplete_budget_caps(
+            &signals,
+            turn,
+            &budget_config,
+            &iteration_cost,
+            current_turn_cost_micros,
+            current_turn_credit_micros,
+        )
+        .await
+        {
+            Err(_) => {
+                stream_failed = true;
+                status = AgentTurnStatus::Failed;
+            }
+            Ok(true) => {
+                budget_stop = true;
+                status = AgentTurnStatus::BudgetExceeded;
+            }
+            Ok(false) => {}
+        }
+        if budget_stop {
+            flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
+        }
+        if provider_overflow_recovered {
+            continue 'iterations;
+        }
         let assistant_turn = if assistant.blocks.is_empty() {
             None
         } else {
             conversation.push(assistant.clone());
             Some(assistant)
         };
-        if stream_failed || status == AgentTurnStatus::Interrupted {
+        if stream_failed || status == AgentTurnStatus::Interrupted || budget_stop {
             if let Some(assistant) = &assistant_turn
                 && persist_conversation_turn(&signals, turn, assistant)
                     .await
@@ -4864,13 +8168,18 @@ async fn run_turn(
         }
         let _ = persist_conversation_turn(&signals, turn, &assistant).await;
     }
+    let cost = turn_cost.unwrap_or_else(unavailable_cost);
     TurnOutcome {
         turn,
         conversation,
         status,
         usage,
+        cost,
         deferred_terminal_delta,
         deferred_terminal_turn,
+        context_surgery,
+        pruned_tool_outputs,
+        budgeter,
     }
 }
 
@@ -4886,7 +8195,10 @@ mod tests {
 
     use futures_util::stream;
     use rw_ext::{HookError, HookRegistration};
-    use rw_providers::{ProviderError, ProviderErrorKind};
+    use rw_providers::{
+        Capabilities, FixtureRedactor, Provider, ProviderError, ProviderErrorKind, ProviderRouter,
+        Recorder, ReplayProvider, RetryPolicy,
+    };
     use rw_tools::{AskUserTool, CapabilityManifest, Tool, ToolLimits};
     use rw_types::{ToolCapability, ToolOutputStream, config::PermissionDecision};
     use tempfile::TempDir;
@@ -4932,6 +8244,267 @@ mod tests {
         }
     }
 
+    struct M3Model {
+        scripts: Mutex<VecDeque<ProviderScript>>,
+        requests: Mutex<Vec<ProviderRequest>>,
+        metadata: ModelContextMetadata,
+        compaction: CompactionConfig,
+        budget: BudgetConfig,
+        cost_override: Option<Cost>,
+    }
+
+    impl M3Model {
+        fn new(scripts: impl IntoIterator<Item = ProviderScript>) -> Self {
+            Self {
+                scripts: Mutex::new(scripts.into_iter().collect()),
+                requests: Mutex::new(Vec::new()),
+                metadata: ModelContextMetadata::default(),
+                compaction: CompactionConfig::default(),
+                budget: BudgetConfig::default(),
+                cost_override: None,
+            }
+        }
+
+        fn requests(&self) -> Vec<ProviderRequest> {
+            self.requests.lock().expect("request lock").clone()
+        }
+    }
+
+    impl ModelDriver for M3Model {
+        fn stream(
+            &self,
+            _alias: &str,
+            request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            self.requests.lock().expect("request lock").push(request);
+            let script = self
+                .scripts
+                .lock()
+                .expect("script lock")
+                .pop_front()
+                .ok_or_else(|| AgentLoopError::Provider("missing M3 script".to_owned()))?;
+            Ok(Box::pin(stream::iter(script)))
+        }
+
+        fn context_metadata(&self, _alias: &str) -> ModelContextMetadata {
+            self.metadata
+        }
+
+        fn compaction_config(&self) -> CompactionConfig {
+            self.compaction.clone()
+        }
+
+        fn budget_config(&self) -> BudgetConfig {
+            self.budget.clone()
+        }
+
+        fn cost(&self, _alias: &str, usage: TokenUsage) -> Cost {
+            if let Some(cost) = &self.cost_override {
+                return cost.clone();
+            }
+            Cost::Monetary {
+                amount_micros: usage.output_tokens,
+                currency: "USD".to_owned(),
+            }
+        }
+    }
+
+    struct ReplaySourceProvider {
+        scripts: Mutex<VecDeque<ProviderScript>>,
+    }
+
+    #[async_trait]
+    impl Provider for ReplaySourceProvider {
+        fn name(&self) -> &'static str {
+            "context-replay"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                tool_calling: false,
+                vision: false,
+                thinking: false,
+                cache_breakpoints: CacheBreakpointSupport::Explicit,
+                max_context_tokens: Some(2_000),
+                max_output_tokens: Some(256),
+                wire_mode: rw_providers::WireMode::NormalizedReplay,
+            }
+        }
+
+        async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+            let script = self
+                .scripts
+                .lock()
+                .expect("replay source scripts")
+                .pop_front()
+                .ok_or_else(|| {
+                    ProviderError::new(ProviderErrorKind::ReplayMiss, "missing source script")
+                })?;
+            Ok(Box::pin(stream::iter(script)))
+        }
+    }
+
+    struct ReplayHarnessModel {
+        router: ProviderRouter,
+    }
+
+    impl ReplayHarnessModel {
+        fn new(provider: Arc<dyn Provider>) -> Self {
+            let router = ProviderRouter::new(
+                BTreeMap::from([("fast".to_owned(), vec!["context-replay/model".to_owned()])]),
+                [provider],
+                RetryPolicy {
+                    max_attempts: 1,
+                    base_delay: Duration::ZERO,
+                    max_delay: Duration::ZERO,
+                    jitter_fraction: 0.0,
+                },
+            )
+            .expect("replay router");
+            Self { router }
+        }
+    }
+
+    impl ModelDriver for ReplayHarnessModel {
+        fn stream(
+            &self,
+            alias: &str,
+            request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            self.router
+                .stream_alias(alias, request)
+                .map_err(|error| AgentLoopError::Provider(error.to_string()))
+        }
+
+        fn context_metadata(&self, _alias: &str) -> ModelContextMetadata {
+            ModelContextMetadata {
+                max_context_tokens: Some(2_000),
+                max_output_tokens: Some(256),
+                cache_breakpoints: Some(CacheBreakpointSupport::Explicit),
+            }
+        }
+
+        fn budget_config(&self) -> BudgetConfig {
+            BudgetConfig {
+                session_cost_cap_micros_usd: Some(100),
+                ..BudgetConfig::default()
+            }
+        }
+
+        fn cost(&self, _alias: &str, usage: TokenUsage) -> Cost {
+            Cost::Monetary {
+                amount_micros: usage.output_tokens,
+                currency: "USD".to_owned(),
+            }
+        }
+    }
+
+    struct RoutedCostModel {
+        route: &'static str,
+        requests: AtomicUsize,
+        budget: BudgetConfig,
+    }
+
+    impl RoutedCostModel {
+        fn new(route: &'static str) -> Self {
+            Self {
+                route,
+                requests: AtomicUsize::new(0),
+                budget: BudgetConfig {
+                    session_cost_cap_micros_usd: Some(50),
+                    ..BudgetConfig::default()
+                },
+            }
+        }
+    }
+
+    impl ModelDriver for RoutedCostModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(stream::iter([
+                Ok(ProviderEvent::RouteSelected {
+                    route: self.route.to_owned(),
+                }),
+                Ok(ProviderEvent::MessageStart {
+                    model: "shared-model-id".to_owned(),
+                }),
+                Ok(ProviderEvent::TextDelta {
+                    text: "done".to_owned(),
+                }),
+                Ok(ProviderEvent::Usage {
+                    usage: TokenUsage {
+                        output_tokens: 1,
+                        ..TokenUsage::default()
+                    },
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ])))
+        }
+
+        fn budget_config(&self) -> BudgetConfig {
+            self.budget.clone()
+        }
+
+        fn cost_for_route(
+            &self,
+            _alias: &str,
+            route: Option<&str>,
+            _reported_model: Option<&str>,
+            _usage: TokenUsage,
+        ) -> Cost {
+            let amount_micros = match route {
+                Some("__model_cheap") => 10,
+                Some("__model_expensive") => 100,
+                _ => {
+                    return Cost::Unavailable {
+                        reason: "unknown route".to_owned(),
+                    };
+                }
+            };
+            Cost::Monetary {
+                amount_micros,
+                currency: "USD".to_owned(),
+            }
+        }
+    }
+
+    struct DelayedSummaryModel;
+
+    impl ModelDriver for DelayedSummaryModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            Ok(Box::pin(
+                stream::iter([
+                    Ok(ProviderEvent::MessageStart {
+                        model: "fixture-model".to_owned(),
+                    }),
+                    Ok(ProviderEvent::Usage {
+                        usage: TokenUsage {
+                            input_tokens: 11,
+                            output_tokens: 7,
+                            ..TokenUsage::default()
+                        },
+                    }),
+                ])
+                .chain(stream::once(async {
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok(ProviderEvent::TextDelta {
+                        text: "summary".to_owned(),
+                    })
+                })),
+            ))
+        }
+    }
+
     struct PendingModel;
 
     impl ModelDriver for PendingModel {
@@ -4946,6 +8519,38 @@ mod tests {
                 })])
                 .chain(stream::pending::<Result<ProviderEvent, ProviderError>>()),
             ))
+        }
+    }
+
+    struct GatedCompactionModel {
+        calls: AtomicUsize,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl ModelDriver for GatedCompactionModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let started = Arc::clone(&self.started);
+                let release = Arc::clone(&self.release);
+                return Ok(Box::pin(
+                    stream::once(async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(ProviderEvent::TextDelta {
+                            text: "## Goal\ncontinue\n\n## Instructions\n\n## Discoveries\n\n## Accomplished\n\n## Relevant files & directories\n".to_owned(),
+                        })
+                    })
+                    .chain(stream::iter([Ok(ProviderEvent::Finished {
+                        reason: FinishReason::Stop,
+                    })])),
+                ));
+            }
+            Ok(Box::pin(stream::iter(stop_script("queued answer", &[]))))
         }
     }
 
@@ -5302,6 +8907,88 @@ mod tests {
                 (Some(floor), Some(actual)) => Some(floor.max(actual)),
                 (floor, actual) => floor.or(actual),
             })
+        }
+    }
+
+    #[derive(Default)]
+    struct AccountingRecordingSink {
+        inner: RecordingSink,
+    }
+
+    #[async_trait]
+    impl SessionEventSink for AccountingRecordingSink {
+        async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
+            self.inner.append(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<EngineEvent>,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            self.inner.append_batch(events).await
+        }
+
+        async fn read_after(
+            &self,
+            last_seen: Option<SequenceId>,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            self.inner.read_after(last_seen).await
+        }
+
+        async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
+            self.inner.last_sequence().await
+        }
+
+        async fn budget_totals(
+            &self,
+            _query: BudgetLedgerQuery,
+        ) -> Result<BudgetLedgerTotals, AgentLoopError> {
+            let mut totals = BudgetLedgerTotals {
+                authoritative: true,
+                ..BudgetLedgerTotals::default()
+            };
+            for event in self.inner.events.lock().expect("event sink lock").iter() {
+                let cost = match &event.kind {
+                    PendingEvent::TurnFinished { cost, .. }
+                    | PendingEvent::CompactionAttemptFinished { cost, .. }
+                    | PendingEvent::CompactionFinished {
+                        cost: Some(cost), ..
+                    } => Some(cost),
+                    _ => None,
+                };
+                match cost {
+                    Some(Cost::Monetary {
+                        amount_micros,
+                        currency,
+                    }) if currency.eq_ignore_ascii_case("USD") => {
+                        totals.session_cost_micros_usd = totals
+                            .session_cost_micros_usd
+                            .saturating_add(*amount_micros);
+                        totals.daily_cost_micros_usd =
+                            totals.daily_cost_micros_usd.saturating_add(*amount_micros);
+                    }
+                    Some(Cost::Monetary { .. }) => {
+                        totals.session_non_usd_monetary_entries =
+                            totals.session_non_usd_monetary_entries.saturating_add(1);
+                        totals.daily_non_usd_monetary_entries =
+                            totals.daily_non_usd_monetary_entries.saturating_add(1);
+                    }
+                    Some(Cost::SubscriptionQuota { .. }) => {
+                        totals.session_subscription_quota_entries =
+                            totals.session_subscription_quota_entries.saturating_add(1);
+                        totals.daily_subscription_quota_entries =
+                            totals.daily_subscription_quota_entries.saturating_add(1);
+                    }
+                    Some(Cost::Unavailable { .. }) => {
+                        totals.session_cost_unavailable_entries =
+                            totals.session_cost_unavailable_entries.saturating_add(1);
+                        totals.daily_cost_unavailable_entries =
+                            totals.daily_cost_unavailable_entries.saturating_add(1);
+                    }
+                    Some(Cost::AiCredits { .. }) | None => {}
+                }
+            }
+            Ok(totals)
         }
     }
 
@@ -6273,7 +9960,7 @@ mod tests {
         assert_eq!(deltas, ["terminal"]);
         assert_eq!(
             sink.batch_sizes.lock().expect("batch sizes").as_slice(),
-            &[1, 3, 3]
+            &[1, 3, 1, 1, 3]
         );
         let persisted = sink.events.lock().expect("event sink lock");
         assert!(matches!(
@@ -6345,7 +10032,7 @@ mod tests {
 
         assert_eq!(
             sink.batch_sizes.lock().expect("batch sizes").as_slice(),
-            &[5, 3]
+            &[5, 1, 1, 3]
         );
         let persisted = sink.events.lock().expect("event sink lock");
         assert!(matches!(
@@ -6420,7 +10107,7 @@ mod tests {
 
         assert_eq!(
             sink.batch_sizes.lock().expect("batch sizes").as_slice(),
-            &[1, 2, 1, 3]
+            &[1, 2, 1, 1, 1, 3]
         );
         let persisted = sink.events.lock().expect("event sink lock");
         assert!(matches!(
@@ -6483,7 +10170,7 @@ mod tests {
         assert_eq!(deltas, ["first", "second"]);
         assert_eq!(
             sink.batch_sizes.lock().expect("batch sizes").as_slice(),
-            &[1, 3, 1, 3]
+            &[1, 3, 1, 1, 1, 3]
         );
     }
 
@@ -6637,6 +10324,7 @@ mod tests {
                 turn: 1,
                 status: AgentTurnStatus::Completed,
                 usage: SessionUsage::default(),
+                cost: unavailable_cost(),
             },
             PendingEvent::MessageQueued {
                 position: 1,
@@ -6655,6 +10343,7 @@ mod tests {
                 turn: 2,
                 status: AgentTurnStatus::Failed,
                 usage: SessionUsage::default(),
+                cost: unavailable_cost(),
             },
             PendingEvent::MessageQueued {
                 position: 1,
@@ -8799,5 +12488,1490 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn text_turn(role: Role, text: impl Into<String>) -> Turn {
+        Turn {
+            role,
+            blocks: vec![Block::Text { text: text.into() }],
+            meta: TurnMeta::default(),
+        }
+    }
+
+    #[test]
+    fn compaction_projection_is_atomic_across_crash_boundaries() {
+        let old = text_turn(Role::User, "old history");
+        let summary = rw_context::summary_turn("summary");
+        let unfinished = vec![
+            wire_event(
+                0,
+                PendingEvent::ConversationTurnCommitted {
+                    agent_turn: 1,
+                    turn: old.clone(),
+                },
+            ),
+            wire_event(
+                1,
+                PendingEvent::CompactionStarted {
+                    reason: CompactionReason::Manual,
+                },
+            ),
+            wire_event(
+                2,
+                PendingEvent::ConversationTurnCommitted {
+                    agent_turn: 2,
+                    turn: summary.clone(),
+                },
+            ),
+        ];
+        let recovered =
+            project_session_events(&unfinished).expect("unfinished compaction projects");
+        assert_eq!(recovered.conversation, vec![old.clone()]);
+        assert!(recovered.interrupted_compaction);
+
+        let mut finished = unfinished.clone();
+        finished.push(wire_event(
+            3,
+            PendingEvent::CompactionFinished {
+                summary_turn: 2,
+                reclaimed_tokens: 100,
+                usage: None,
+                cost: None,
+            },
+        ));
+        let recovered = project_session_events(&finished).expect("finished compaction projects");
+        assert_eq!(recovered.conversation, vec![summary]);
+        assert!(!recovered.interrupted_compaction);
+
+        let later = text_turn(Role::User, "later after recovery");
+        let mut aborted = unfinished;
+        aborted.push(wire_event(
+            3,
+            PendingEvent::Error {
+                message: "interrupted compaction was aborted during recovery".to_owned(),
+            },
+        ));
+        aborted.push(wire_event(
+            4,
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 3,
+                turn: later.clone(),
+            },
+        ));
+        aborted.push(wire_event(
+            5,
+            PendingEvent::TurnFinished {
+                turn: 3,
+                status: AgentTurnStatus::Completed,
+                usage: SessionUsage::default(),
+                cost: unavailable_cost(),
+            },
+        ));
+        let first_resume = project_session_events(&aborted).expect("first resume");
+        let second_resume = project_session_events(&aborted).expect("second resume");
+        assert_eq!(first_resume.conversation, vec![old.clone(), later.clone()]);
+        assert_eq!(second_resume.conversation, vec![old, later]);
+        assert!(!second_resume.interrupted_compaction);
+    }
+
+    #[test]
+    fn projector_rewind_before_multiple_compactions_restores_original_history() {
+        let original_user = text_turn(Role::User, "original request");
+        let original_assistant = text_turn(Role::Assistant, "original answer");
+        let first_summary = rw_context::summary_turn("first summary");
+        let later_user = text_turn(Role::User, "later request");
+        let second_summary = rw_context::summary_turn("second summary");
+        let kinds = vec![
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: original_user.clone(),
+            },
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 1,
+                turn: original_assistant.clone(),
+            },
+            PendingEvent::TurnFinished {
+                turn: 1,
+                status: AgentTurnStatus::Completed,
+                usage: SessionUsage::default(),
+                cost: unavailable_cost(),
+            },
+            PendingEvent::CompactionStarted {
+                reason: CompactionReason::Manual,
+            },
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 2,
+                turn: first_summary,
+            },
+            PendingEvent::CompactionFinished {
+                summary_turn: 2,
+                reclaimed_tokens: 100,
+                usage: None,
+                cost: None,
+            },
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 2,
+                turn: later_user,
+            },
+            PendingEvent::TurnFinished {
+                turn: 2,
+                status: AgentTurnStatus::Completed,
+                usage: SessionUsage::default(),
+                cost: unavailable_cost(),
+            },
+            PendingEvent::CompactionStarted {
+                reason: CompactionReason::Automatic,
+            },
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 3,
+                turn: second_summary,
+            },
+            PendingEvent::CompactionFinished {
+                summary_turn: 3,
+                reclaimed_tokens: 100,
+                usage: None,
+                cost: None,
+            },
+            PendingEvent::ConversationRewound {
+                to_turn: 1,
+                operation_id: "rewind-before-first-compaction".to_owned(),
+                unrestorable_paths: Vec::new(),
+            },
+        ];
+        let events = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, kind)| {
+                wire_event(u64::try_from(sequence).expect("fixture sequence"), kind)
+            })
+            .collect::<Vec<_>>();
+
+        let recovered = project_session_events(&events).expect("project rewind after compactions");
+        assert_eq!(
+            recovered.conversation,
+            vec![original_user, original_assistant]
+        );
+        assert_eq!(recovered.turn_ends, BTreeMap::from([(1, 2)]));
+        assert_eq!(recovered.completed_turns, 1);
+    }
+
+    #[tokio::test]
+    async fn actor_durably_aborts_interrupted_compaction_before_accepting_new_work() {
+        for reason in [CompactionReason::Manual, CompactionReason::Automatic] {
+            let root = TempDir::new().expect("tempdir");
+            let old = text_turn(Role::User, format!("old history for {reason:?}"));
+            let unfinished_summary = rw_context::summary_turn("must stay uncommitted");
+            let durable_prefix = vec![
+                wire_event(
+                    0,
+                    PendingEvent::ConversationTurnCommitted {
+                        agent_turn: 1,
+                        turn: old.clone(),
+                    },
+                ),
+                wire_event(1, PendingEvent::CompactionStarted { reason }),
+                wire_event(
+                    2,
+                    PendingEvent::ConversationTurnCommitted {
+                        agent_turn: 2,
+                        turn: unfinished_summary,
+                    },
+                ),
+            ];
+            let recovered = project_session_events(&durable_prefix).expect("recover prefix");
+            assert!(recovered.interrupted_compaction);
+            let sink = Arc::new(RecordingSink {
+                events: Mutex::new(
+                    durable_prefix
+                        .into_iter()
+                        .map(|event| observe_event(event).expect("durable prefix event"))
+                        .collect(),
+                ),
+                batch_sizes: Mutex::new(Vec::new()),
+                tail_floor: Mutex::new(None),
+            });
+            let model = Arc::new(ScriptedModel::new([stop_script("new answer", &[])]));
+            let mut actor_config = config(
+                root.path(),
+                model,
+                Arc::new(ToolRegistry::new()),
+                PermissionDecision::Allow,
+                builtin_hook_dispatcher().expect("hooks"),
+            );
+            actor_config.event_sink = sink.clone();
+            actor_config.recovered = recovered;
+
+            let handle = SessionActor::spawn(actor_config).expect("actor");
+            timeout(Duration::from_secs(3), async {
+                loop {
+                    let abort_persisted = sink.events.lock().expect("sink lock").iter().any(
+                        |event| {
+                            matches!(
+                                &event.kind,
+                                PendingEvent::Error { message }
+                                    if message == "interrupted compaction was aborted during recovery"
+                            )
+                        },
+                    );
+                    if abort_persisted {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("recovery abort must be persisted before commands are accepted");
+
+            let mut subscription = handle.subscribe();
+            handle
+                .send_message("later after recovery")
+                .await
+                .expect("later turn");
+            collect_turn(&mut subscription).await;
+
+            let durable_log = sink
+                .events
+                .lock()
+                .expect("sink lock")
+                .iter()
+                .map(|event| event.wire.clone())
+                .collect::<Vec<_>>();
+            let first = project_session_events(&durable_log).expect("first reconstruction");
+            let second = project_session_events(&durable_log).expect("second reconstruction");
+            let mut assistant = text_turn(Role::Assistant, "new answer");
+            assistant.meta.model = Some("fixture-model".to_owned());
+            let expected = vec![
+                old,
+                text_turn(Role::User, "later after recovery"),
+                assistant,
+            ];
+            assert_eq!(first.conversation, expected);
+            assert_eq!(second.conversation, expected);
+            assert!(!first.interrupted_compaction);
+            assert!(!second.interrupted_compaction);
+        }
+    }
+
+    #[tokio::test]
+    async fn context_queries_and_surgery_are_offline_and_actor_consistent() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(ScriptedModel::default());
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.recovered.conversation = vec![text_turn(Role::User, "inspect me")];
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let snapshot = handle.context_snapshot().await.expect("context snapshot");
+        assert_eq!(snapshot.items.len(), 1);
+        let item_id = snapshot.items[0].item_id.clone();
+        handle.pin_context(item_id.clone()).await.expect("pin");
+        let pinned = handle.context_snapshot().await.expect("pinned snapshot");
+        assert!(pinned.items[0].state.pinned);
+        handle.evict_context(item_id).await.expect("evict");
+        let evicted = handle.context_snapshot().await.expect("evicted snapshot");
+        assert!(evicted.items[0].state.evicted);
+        let dump = handle.dump_prompt(None).await.expect("offline prompt dump");
+        assert!(dump.turns.is_empty());
+        assert_eq!(model.request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn context_inventory_exposes_tools_and_rejects_protected_item_surgery() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(ScriptedModel::default());
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(StubTool::new(
+                "inspect",
+                vec![],
+                StubOutcome::Success(ToolResult::new("unused", Value::Null)),
+            )))
+            .expect("register tool");
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.initial_session_context = vec![text_turn(Role::System, "protected policy")];
+        actor_config.recovered.conversation = vec![Turn {
+            role: Role::Tool,
+            blocks: vec![
+                Block::ToolResult {
+                    id: ToolCallId("call-inspect".to_owned()),
+                    output: ToolOutput::Structured {
+                        value: json!({"answer": 42}),
+                    },
+                    is_error: false,
+                },
+                Block::ToolResult {
+                    id: ToolCallId("call-second".to_owned()),
+                    output: ToolOutput::Text {
+                        text: "second result".to_owned(),
+                    },
+                    is_error: false,
+                },
+            ],
+            meta: TurnMeta::default(),
+        }];
+        actor_config.recovered.context_surgery = vec![ContextSurgeryAction {
+            item_id: ContextItemId("conversation:0".to_owned()),
+            pinned: true,
+            effective_after_agent_turn: 0,
+        }];
+        actor_config
+            .recovered
+            .pruned_tool_outputs
+            .insert("call-inspect".to_owned(), 100);
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+
+        let snapshot = handle.context_snapshot().await.expect("context snapshot");
+        let system = snapshot
+            .items
+            .iter()
+            .find(|item| item.kind == ContextItemKind::System)
+            .expect("system inventory item");
+        assert!(snapshot.items.iter().any(|item| {
+            item.item_id.0 == "tool:inspect" && item.kind == ContextItemKind::ToolDefinitions
+        }));
+        let tool_results = snapshot
+            .items
+            .iter()
+            .filter(|item| item.kind == ContextItemKind::ToolResult)
+            .collect::<Vec<_>>();
+        assert_eq!(tool_results.len(), 2, "no aggregate tool-turn duplicate");
+        let pruned = tool_results
+            .iter()
+            .find(|item| item.item_id.0 == "tool_result:call-inspect")
+            .expect("first tool result");
+        assert!(pruned.state.pinned);
+        assert!(pruned.state.pruned);
+        let second = tool_results
+            .iter()
+            .find(|item| item.item_id.0 == "tool_result:call-second")
+            .expect("second tool result");
+        assert!(second.state.pinned);
+        assert!(!second.state.pruned);
+
+        let error = handle
+            .evict_context(system.item_id.clone())
+            .await
+            .expect_err("system policy must not be evictable");
+        assert!(
+            error
+                .to_string()
+                .contains("only conversation-resident context items")
+        );
+        let error = handle
+            .pin_context(ContextItemId("tool:inspect".to_owned()))
+            .await
+            .expect_err("tool definitions must not be mutable through conversation surgery");
+        assert!(
+            error
+                .to_string()
+                .contains("only conversation-resident context items")
+        );
+        assert_eq!(model.request_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_budget_cap_stops_before_any_provider_or_compaction_call() {
+        let root = TempDir::new().expect("tempdir");
+        let mut model = M3Model::new([stop_script("must not run", &[])]);
+        model.budget.session_cost_cap_micros_usd = Some(0);
+        let model = Arc::new(model);
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .send_message("blocked")
+            .await
+            .expect("message accepted");
+        let events = collect_turn(&mut events).await;
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::BudgetStatus {
+                level: BudgetLevel::HardCap,
+                ..
+            }
+        )));
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::BudgetExceeded,
+                ..
+            })
+        ));
+        assert!(model.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn non_authoritative_sink_accumulates_session_cost_across_turns() {
+        let root = TempDir::new().expect("tempdir");
+        let billed_usage = TokenUsage {
+            output_tokens: 600_000,
+            ..TokenUsage::default()
+        };
+        let mut model = M3Model::new([
+            stop_script("first billed response", &[billed_usage]),
+            stop_script("second billed response", &[billed_usage]),
+            stop_script("must remain unused", &[]),
+        ]);
+        model.budget.session_cost_cap_micros_usd = Some(1_000_000);
+        let model = Arc::new(model);
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+
+        handle.send_message("first").await.expect("first message");
+        let first = collect_turn(&mut events).await;
+        assert!(matches!(
+            first.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::Completed,
+                ..
+            })
+        ));
+        assert_eq!(model.requests().len(), 1);
+
+        handle.send_message("second").await.expect("second message");
+        let second = collect_turn(&mut events).await;
+        assert_eq!(
+            model.requests().len(),
+            2,
+            "the first turn must not be counted twice before the second dispatch"
+        );
+        assert!(second.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::BudgetStatus {
+                level: BudgetLevel::HardCap,
+                scope: BudgetScope::Session,
+                unit: BudgetUnit::MicrosUsd,
+                current: 1_200_000,
+                limit: 1_000_000,
+                ..
+            }
+        )));
+        assert!(matches!(
+            second.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::BudgetExceeded,
+                ..
+            })
+        ));
+
+        handle.send_message("third").await.expect("third message");
+        let third = collect_turn(&mut events).await;
+        assert_eq!(
+            model.requests().len(),
+            2,
+            "two completed $0.60 turns must block later dispatch under a $1.00 cap"
+        );
+        assert!(matches!(
+            third.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::BudgetExceeded,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn authoritative_sink_does_not_double_count_local_session_cost() {
+        let root = TempDir::new().expect("tempdir");
+        let billed_usage = TokenUsage {
+            output_tokens: 600_000,
+            ..TokenUsage::default()
+        };
+        let mut model = M3Model::new([
+            stop_script("first billed response", &[billed_usage]),
+            stop_script("second billed response", &[billed_usage]),
+        ]);
+        model.budget.session_cost_cap_micros_usd = Some(1_000_000);
+        let model = Arc::new(model);
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.event_sink = Arc::new(AccountingRecordingSink::default());
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+
+        handle.send_message("first").await.expect("first message");
+        collect_turn(&mut events).await;
+        handle.send_message("second").await.expect("second message");
+        let second = collect_turn(&mut events).await;
+
+        assert_eq!(
+            model.requests().len(),
+            2,
+            "authoritative ledger totals must replace, not add to, local history"
+        );
+        assert!(matches!(
+            second.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::BudgetExceeded,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn daily_cap_fails_closed_without_an_authoritative_ledger() {
+        let root = TempDir::new().expect("tempdir");
+        let mut model = M3Model::new([stop_script("must remain unused", &[])]);
+        model.budget.daily_cost_cap_micros_usd = Some(1_000_000);
+        let model = Arc::new(model);
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+
+        handle.send_message("blocked").await.expect("message");
+        let events = collect_turn(&mut events).await;
+
+        assert!(model.requests().is_empty());
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::BudgetStatus {
+                level: BudgetLevel::HardCap,
+                scope: BudgetScope::Daily,
+                unit: BudgetUnit::MicrosUsd,
+                current: 0,
+                limit: 1_000_000,
+                ..
+            }
+        )));
+        assert!(matches!(
+            events.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::BudgetExceeded,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn incomplete_dollar_accounting_blocks_every_later_turn_before_provider_work() {
+        for expected_scope in [BudgetScope::Session, BudgetScope::Daily] {
+            let root = TempDir::new().expect("tempdir");
+            let mut model = M3Model::new([
+                stop_script("first billed response", &[]),
+                stop_script("must remain unused", &[]),
+            ]);
+            model.cost_override = Some(Cost::Unavailable {
+                reason: "fixture has no price".to_owned(),
+            });
+            match expected_scope {
+                BudgetScope::Session => model.budget.session_cost_cap_micros_usd = Some(100),
+                BudgetScope::Daily => model.budget.daily_cost_cap_micros_usd = Some(100),
+                BudgetScope::TrailingMinute => unreachable!("fixture scope"),
+            }
+            let model = Arc::new(model);
+            let sink = Arc::new(AccountingRecordingSink::default());
+            let mut actor_config = config(
+                root.path(),
+                model.clone(),
+                Arc::new(ToolRegistry::new()),
+                PermissionDecision::Allow,
+                builtin_hook_dispatcher().expect("hooks"),
+            );
+            actor_config.event_sink = sink;
+            let handle = SessionActor::spawn(actor_config).expect("actor");
+            let mut events = handle.subscribe();
+
+            handle.send_message("first").await.expect("first message");
+            collect_turn(&mut events).await;
+            assert_eq!(model.requests().len(), 1);
+
+            handle.send_message("second").await.expect("second message");
+            let second = collect_turn(&mut events).await;
+            assert_eq!(
+                model.requests().len(),
+                1,
+                "an active dollar cap must fail closed after unpriced accounting"
+            );
+            assert!(second.iter().any(|event| matches!(
+                &event.kind,
+                PendingEvent::BudgetStatus {
+                    level: BudgetLevel::HardCap,
+                    scope,
+                    unit: BudgetUnit::MicrosUsd,
+                    ..
+                } if scope == &expected_scope
+            )));
+            assert!(matches!(
+                second.last().map(|event| &event.kind),
+                Some(PendingEvent::TurnFinished {
+                    status: AgentTurnStatus::BudgetExceeded,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn unavailable_credit_cost_preserves_response_and_blocks_later_dispatch() {
+        for authoritative in [false, true] {
+            let root = TempDir::new().expect("tempdir");
+            let mut model = M3Model::new([
+                stop_script("visible credit-billed response", &[]),
+                stop_script("must remain unused", &[]),
+            ]);
+            model.cost_override = Some(Cost::Unavailable {
+                reason: "credit burn unavailable".to_owned(),
+            });
+            model.budget.session_ai_credit_cap_micros = Some(100);
+            let model = Arc::new(model);
+            let mut actor_config = config(
+                root.path(),
+                model.clone(),
+                Arc::new(ToolRegistry::new()),
+                PermissionDecision::Allow,
+                builtin_hook_dispatcher().expect("hooks"),
+            );
+            if authoritative {
+                actor_config.event_sink = Arc::new(AccountingRecordingSink::default());
+            }
+            let handle = SessionActor::spawn(actor_config).expect("actor");
+            let mut events = handle.subscribe();
+
+            handle.send_message("first").await.expect("first message");
+            let first = collect_turn(&mut events).await;
+            assert_eq!(model.requests().len(), 1);
+            assert!(first.iter().any(|event| matches!(
+                &event.kind,
+                PendingEvent::TextDelta { text, .. }
+                    if text == "visible credit-billed response"
+            )));
+            assert!(first.iter().any(|event| matches!(
+                event.kind,
+                PendingEvent::BudgetStatus {
+                    level: BudgetLevel::HardCap,
+                    scope: BudgetScope::Session,
+                    unit: BudgetUnit::AiCreditMicros,
+                    current: 0,
+                    limit: 100,
+                    ..
+                }
+            )));
+            assert!(matches!(
+                first.last().map(|event| &event.kind),
+                Some(PendingEvent::TurnFinished {
+                    status: AgentTurnStatus::BudgetExceeded,
+                    ..
+                })
+            ));
+
+            handle.send_message("second").await.expect("second message");
+            let second = collect_turn(&mut events).await;
+            assert_eq!(
+                model.requests().len(),
+                1,
+                "unknown credit burn must block later provider dispatch"
+            );
+            assert!(matches!(
+                second.last().map(|event| &event.kind),
+                Some(PendingEvent::TurnFinished {
+                    status: AgentTurnStatus::BudgetExceeded,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn opaque_route_cost_controls_post_response_hard_cap_with_shared_model_ids() {
+        async fn run(route: &'static str) -> (Vec<SessionEvent>, usize) {
+            let root = TempDir::new().expect("tempdir");
+            let model = Arc::new(RoutedCostModel::new(route));
+            let handle = SessionActor::spawn(config(
+                root.path(),
+                model.clone(),
+                Arc::new(ToolRegistry::new()),
+                PermissionDecision::Allow,
+                builtin_hook_dispatcher().expect("hooks"),
+            ))
+            .expect("actor");
+            let mut events = handle.subscribe();
+            handle.send_message("route me").await.expect("message");
+            let events = collect_turn(&mut events).await;
+            (events, model.requests.load(Ordering::SeqCst))
+        }
+
+        let (cheap, cheap_requests) = run("__model_cheap").await;
+        assert_eq!(cheap_requests, 1);
+        assert!(matches!(
+            cheap.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::Completed,
+                cost: Cost::Monetary {
+                    amount_micros: 10,
+                    ..
+                },
+                ..
+            })
+        ));
+
+        let (expensive, expensive_requests) = run("__model_expensive").await;
+        assert_eq!(expensive_requests, 1);
+        assert!(expensive.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::BudgetStatus {
+                level: BudgetLevel::HardCap,
+                current: 100,
+                limit: 50,
+                ..
+            }
+        )));
+        assert!(matches!(
+            expensive.last().map(|event| &event.kind),
+            Some(PendingEvent::TurnFinished {
+                status: AgentTurnStatus::BudgetExceeded,
+                cost: Cost::Monetary {
+                    amount_micros: 100,
+                    ..
+                },
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn provider_usage_reconciles_next_meter_and_surfaces_cache_hits() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(M3Model::new([
+            tool_script(
+                &[("call-1", "ok", json!({}))],
+                &[TokenUsage {
+                    input_tokens: 500,
+                    cache_read_tokens: 500,
+                    ..TokenUsage::default()
+                }],
+            ),
+            stop_script("done", &[]),
+        ]));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(StubTool::new(
+                "ok",
+                vec![],
+                StubOutcome::Success(ToolResult::new("ok", Value::Null)),
+            )))
+            .expect("register tool");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        let events = collect_turn(&mut events).await;
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::ContextUsage {
+                cache_hit_basis_points: 5_000,
+                provider_input_tokens: 1_000,
+                ..
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::ContextUsage {
+                provider_input_tokens: 0,
+                correction_millionths: 4_000_000,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn one_hundred_fifty_turn_overflow_compacts_and_continues_through_actor() {
+        let root = TempDir::new().expect("tempdir");
+        let mut model = M3Model::new([
+            stop_script(
+                "## Goal\ncontinue\n\n## Instructions\nkeep intent\n\n## Discoveries\nsrc/lib.rs checksum amber-42\n\n## Accomplished\n150 turns\n\n## Relevant files & directories\nsrc/lib.rs\nPROJECT.md",
+                &[TokenUsage {
+                    input_tokens: 2_000,
+                    output_tokens: 60,
+                    ..TokenUsage::default()
+                }],
+            ),
+            stop_script("amber-42", &[]),
+        ]);
+        model.metadata = ModelContextMetadata {
+            max_context_tokens: Some(2_000),
+            max_output_tokens: Some(256),
+            cache_breakpoints: Some(CacheBreakpointSupport::Explicit),
+        };
+        model.budget.session_cost_cap_micros_usd = Some(100);
+        let model = Arc::new(model);
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.recovered.conversation = (0..150)
+            .map(|index| {
+                text_turn(
+                    if index % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    if index == 0 {
+                        "src/lib.rs checksum amber-42".to_owned()
+                    } else {
+                        format!("turn {index}: {}", "context ".repeat(20))
+                    },
+                )
+            })
+            .collect();
+        let sink = Arc::new(NoopSessionEventSink::default());
+        actor_config.event_sink = sink.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .send_message("What is the src/lib.rs checksum?")
+            .await
+            .expect("message");
+        let events = collect_turn(&mut events).await;
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::CompactionStarted {
+                reason: CompactionReason::Automatic
+            }
+        )));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.kind, PendingEvent::CompactionFinished { .. }))
+        );
+        let requests = model.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].tools.is_empty());
+        assert!(requests[1].turns.iter().any(|turn| {
+            turn.role == Role::User
+                && matches!(turn.blocks.as_slice(), [Block::Text { text }] if text == rw_context::AUTO_CONTINUE_TEXT)
+        }));
+        let final_prompt = serde_json::to_string(&requests[1].turns).expect("serialize prompt");
+        assert!(final_prompt.contains("amber-42"));
+        assert!(!final_prompt.contains("turn 149:"));
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            PendingEvent::TextDelta { text, .. } if text == "amber-42"
+        )));
+        assert!(requests[1].cache_hint.is_none());
+        let durable = sink.read_after(None).await.expect("durable events");
+        let resumed = project_session_events(&durable).expect("resume projection");
+        assert!(
+            resumed
+                .conversation
+                .first()
+                .is_some_and(|turn| turn.meta.summary)
+        );
+        assert!(resumed.conversation.len() < 10);
+    }
+
+    #[tokio::test]
+    async fn one_hundred_fifty_turn_compaction_quality_replays_from_recorded_provider_fixtures() {
+        async fn run(
+            root: &Path,
+            model: Arc<dyn ModelDriver>,
+        ) -> (Vec<SessionEvent>, SessionHandle) {
+            let mut actor_config = config(
+                root,
+                model,
+                Arc::new(ToolRegistry::new()),
+                PermissionDecision::Allow,
+                builtin_hook_dispatcher().expect("hooks"),
+            );
+            actor_config.recovered.conversation = (0..150)
+                .map(|index| {
+                    text_turn(
+                        if index % 2 == 0 {
+                            Role::User
+                        } else {
+                            Role::Assistant
+                        },
+                        if index == 0 {
+                            "src/lib.rs checksum amber-42".to_owned()
+                        } else {
+                            format!("turn {index}: {}", "context ".repeat(20))
+                        },
+                    )
+                })
+                .collect();
+            let handle = SessionActor::spawn(actor_config).expect("actor");
+            let mut events = handle.subscribe();
+            handle
+                .send_message("What is the src/lib.rs checksum?")
+                .await
+                .expect("message");
+            (collect_turn(&mut events).await, handle)
+        }
+
+        let fixture_directory = TempDir::new().expect("fixture directory");
+        let source = Arc::new(ReplaySourceProvider {
+            scripts: Mutex::new(
+                [
+                    stop_script(
+                        "## Goal\ncontinue\n\n## Instructions\nkeep intent\n\n## Discoveries\nsrc/lib.rs checksum amber-42\n\n## Accomplished\n150 turns\n\n## Relevant files & directories\nsrc/lib.rs\nPROJECT.md",
+                        &[TokenUsage {
+                            input_tokens: 2_000,
+                            output_tokens: 60,
+                            ..TokenUsage::default()
+                        }],
+                    ),
+                    stop_script("amber-42", &[]),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        });
+        let recorder = Arc::new(Recorder::new(
+            source,
+            fixture_directory.path(),
+            FixtureRedactor::default(),
+        ));
+        let recording_root = TempDir::new().expect("recording workspace");
+        let (_recorded_events, recorded_handle) = run(
+            recording_root.path(),
+            Arc::new(ReplayHarnessModel::new(recorder.clone())),
+        )
+        .await;
+        drop(recorded_handle);
+        recorder.flush().await.expect("provider fixtures flush");
+
+        let replay = Arc::new(
+            ReplayProvider::load("context-replay", fixture_directory.path())
+                .await
+                .expect("replay fixtures load"),
+        );
+        let replay_root = TempDir::new().expect("replay workspace");
+        let (events, handle) = run(
+            replay_root.path(),
+            Arc::new(ReplayHarnessModel::new(replay)),
+        )
+        .await;
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::CompactionStarted {
+                reason: CompactionReason::Automatic
+            }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            PendingEvent::TextDelta { text, .. } if text == "amber-42"
+        )));
+        let dump = handle
+            .dump_prompt(None)
+            .await
+            .expect("post-replay prompt dump");
+        let prompt = serde_json::to_string(&dump.turns).expect("serialize replay prompt");
+        assert!(prompt.contains("amber-42"));
+        assert!(!prompt.contains("turn 149:"));
+    }
+
+    #[tokio::test]
+    async fn typed_provider_overflow_compacts_then_replays_last_real_user() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(M3Model::new([
+            vec![Err(ProviderError::new(
+                ProviderErrorKind::ContextOverflow,
+                "sanitized overflow",
+            ))],
+            stop_script(
+                "## Goal\nrecover\n\n## Instructions\n\n## Discoveries\n\n## Accomplished\n\n## Relevant files & directories\n",
+                &[],
+            ),
+            stop_script("recovered answer", &[]),
+        ]));
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .send_message("keep me intact")
+            .await
+            .expect("message");
+        let events = collect_turn(&mut events).await;
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::CompactionStarted {
+                reason: CompactionReason::ProviderOverflow
+            }
+        )));
+        let requests = model.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].turns.iter().any(|turn| {
+            !turn.meta.synthetic
+                && turn.role == Role::User
+                && matches!(turn.blocks.as_slice(), [Block::Text { text }] if text == "keep me intact")
+        }));
+        assert!(!requests[2].turns.iter().any(|turn| {
+            matches!(turn.blocks.as_slice(), [Block::Text { text }] if text == rw_context::AUTO_CONTINUE_TEXT)
+        }));
+    }
+
+    #[tokio::test]
+    async fn structured_tool_output_is_toon_only_at_provider_boundary() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(M3Model::new([
+            tool_script(&[("call-1", "structured", json!({}))], &[]),
+            tool_script(&[("call-2", "structured", json!({}))], &[]),
+            stop_script("done", &[]),
+        ]));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(StubTool::new(
+                "structured",
+                vec![],
+                StubOutcome::Success(ToolResult::new(
+                    "plain prose",
+                    json!({"rows": [{"id": 1}, {"id": 2}]}),
+                )),
+            )))
+            .expect("register tool");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model.clone(),
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        let events = collect_turn(&mut events).await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    &event.kind,
+                    PendingEvent::ToolCallFinished {
+                        output: ToolOutput::Mixed { parts },
+                        ..
+                    } if parts.iter().any(|part| matches!(part, ToolOutputPart::Structured { .. }))
+                ))
+                .count(),
+            2
+        );
+        let requests = model.requests();
+        assert_eq!(requests.len(), 3);
+        for request in &requests[1..] {
+            let prompt_json = serde_json::to_string(&request.turns).expect("prompt JSON");
+            assert_eq!(prompt_json.matches(rw_context::TOON_FORMAT_NOTE).count(), 1);
+            assert!(prompt_json.contains("plain prose"));
+            assert!(!prompt_json.contains("\"Structured\""));
+        }
+    }
+
+    #[tokio::test]
+    async fn pruning_uses_provider_visible_toon_size_and_persists_that_reclamation() {
+        let root = TempDir::new().expect("tempdir");
+        let structured_value = json!({
+            "rows": (0..30_000)
+                .map(|index| json!({"id": index, "state": "candidate-sentinel"}))
+                .collect::<Vec<_>>()
+        });
+        let candidate = Turn {
+            role: Role::Tool,
+            blocks: vec![Block::ToolResult {
+                id: ToolCallId("candidate-call".to_owned()),
+                output: ToolOutput::Structured {
+                    value: structured_value,
+                },
+                is_error: false,
+            }],
+            meta: TurnMeta::default(),
+        };
+        let mut toon = ToonPromptEncoder::default();
+        let provider_candidate = prompt_turn(&candidate, &BTreeMap::new(), &mut toon);
+        let provider_visible_tokens = LocalTokenEstimator::turn(&provider_candidate);
+        let durable_json_tokens = LocalTokenEstimator::turn(&candidate);
+        assert!(provider_visible_tokens > 20_000);
+        assert_ne!(provider_visible_tokens, durable_json_tokens);
+
+        let assistant_call = |id: &str, name: &str| Turn {
+            role: Role::Assistant,
+            blocks: vec![Block::ToolCall {
+                id: ToolCallId(id.to_owned()),
+                name: name.to_owned(),
+                args: json!({}),
+            }],
+            meta: TurnMeta::default(),
+        };
+        let recent = Turn {
+            role: Role::Tool,
+            blocks: vec![Block::ToolResult {
+                id: ToolCallId("recent-call".to_owned()),
+                output: ToolOutput::Text {
+                    text: "r".repeat(200_000),
+                },
+                is_error: false,
+            }],
+            meta: TurnMeta::default(),
+        };
+        let model = Arc::new(M3Model::new([stop_script("done", &[])]));
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.recovered.conversation = vec![
+            assistant_call("candidate-call", "shell"),
+            candidate,
+            text_turn(Role::User, "older user boundary"),
+            assistant_call("recent-call", "shell"),
+            recent,
+            text_turn(Role::User, "newer user boundary"),
+        ];
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run pruning").await.expect("message");
+        let events = collect_turn(&mut events).await;
+
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            PendingEvent::ToolOutputPruned {
+                tool_call_id,
+                reclaimed_tokens,
+            } if tool_call_id == "candidate-call" && *reclaimed_tokens == provider_visible_tokens
+        )));
+        let requests = model.requests();
+        assert_eq!(requests.len(), 1);
+        let prompt = serde_json::to_string(&requests[0].turns).expect("provider prompt");
+        assert!(prompt.contains(PRUNED_TOOL_OUTPUT_REPLACEMENT));
+        assert!(!prompt.contains("candidate-sentinel"));
+    }
+
+    #[tokio::test]
+    async fn stable_prefix_hash_and_hint_remain_identical_across_twenty_turns() {
+        let root = TempDir::new().expect("tempdir");
+        let mut model = M3Model::new((0..20).map(|_| stop_script("ok", &[])));
+        model.metadata.cache_breakpoints = Some(CacheBreakpointSupport::Automatic);
+        let model = Arc::new(model);
+        let sink = Arc::new(NoopSessionEventSink::default());
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.initial_session_context = vec![text_turn(Role::System, "stable policy")];
+        actor_config.event_sink = sink.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut subscription = handle.subscribe();
+        for index in 0..20 {
+            handle
+                .send_message(format!("message {index}"))
+                .await
+                .expect("message");
+            collect_turn(&mut subscription).await;
+        }
+        let durable = sink.read_after(None).await.expect("durable events");
+        let hashes = durable
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::ContextUsageUpdated {
+                    stable_prefix_hash,
+                    provider_input_tokens: 0,
+                    ..
+                } => Some(stable_prefix_hash.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(hashes.len(), 40);
+        assert!(hashes.windows(2).all(|pair| pair[0] == pair[1]));
+        let hints = model
+            .requests()
+            .into_iter()
+            .map(|request| request.cache_hint)
+            .collect::<Vec<_>>();
+        assert!(hints.iter().all(|hint| *hint == hints[0]));
+        assert_eq!(hints[0].map(|hint| hint.stable_prefix_turns), Some(1));
+    }
+
+    #[tokio::test]
+    async fn running_turn_rejects_context_surgery_without_losing_durable_state() {
+        let root = TempDir::new().expect("tempdir");
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(PendingModel),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.recovered.conversation = vec![text_turn(Role::User, "stable item")];
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        handle.ensure_local_driver().await.expect("driver");
+        let mut subscription = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        next_matching(&mut subscription, |event| {
+            matches!(event, PendingEvent::TurnStarted { .. })
+        })
+        .await;
+        let error = handle
+            .pin_context(ContextItemId("conversation:0".to_owned()))
+            .await
+            .expect_err("running surgery must reject");
+        assert!(
+            error
+                .to_string()
+                .contains("context surgery requires an idle session")
+        );
+        let snapshot = handle
+            .context_snapshot()
+            .await
+            .expect("snapshot remains responsive");
+        assert!(!snapshot.items[0].state.pinned);
+        assert!(handle.interrupt().await.expect("interrupt"));
+        collect_turn(&mut subscription).await;
+    }
+
+    #[tokio::test]
+    async fn manual_compaction_keeps_queries_and_interrupt_responsive() {
+        let root = TempDir::new().expect("tempdir");
+        let sink = Arc::new(RecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(DelayedSummaryModel),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.event_sink = sink.clone();
+        actor_config.recovered.conversation = vec![text_turn(Role::User, "compact me")];
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        handle.ensure_local_driver().await.expect("driver");
+        let compact_handle = handle.clone();
+        let compact = tokio::spawn(async move { compact_handle.compact(None).await });
+        timeout(Duration::from_millis(100), async {
+            loop {
+                if handle.active_turn.load(Ordering::Acquire) != 0 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("manual compaction must start");
+        timeout(Duration::from_millis(100), handle.context_snapshot())
+            .await
+            .expect("query must remain responsive")
+            .expect("context query");
+        assert!(handle.interrupt().await.expect("interrupt"));
+        let result = timeout(Duration::from_secs(1), compact)
+            .await
+            .expect("compaction cancellation timeout")
+            .expect("compaction task join");
+        assert!(result.is_err());
+        let cost = handle
+            .cost_snapshot()
+            .await
+            .expect("cancelled compaction cost");
+        let cancelled = cost
+            .turns
+            .iter()
+            .filter(|entry| entry.attribution == AccountingAttribution::Compaction)
+            .collect::<Vec<_>>();
+        assert_eq!(cancelled.len(), 1);
+        assert_eq!(cancelled[0].usage.input_tokens, 11);
+        assert_eq!(cancelled[0].usage.output_tokens, 7);
+        let durable = sink
+            .read_after(None)
+            .await
+            .expect("durable cancellation events");
+        let first = project_session_events(&durable).expect("first cancellation resume");
+        let second = project_session_events(&durable).expect("second cancellation resume");
+        assert_eq!(first.accounting, second.accounting);
+        assert_eq!(first.accounting.len(), 1);
+        assert!(!first.interrupted_compaction);
+    }
+
+    #[tokio::test]
+    async fn messages_queued_during_manual_compaction_resume_in_fifo_order() {
+        let root = TempDir::new().expect("tempdir");
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let model = Arc::new(GatedCompactionModel {
+            calls: AtomicUsize::new(0),
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        });
+        let mut actor_config = config(
+            root.path(),
+            model,
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.recovered.conversation = vec![text_turn(Role::User, "compact me")];
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        let compact_handle = handle.clone();
+        let compact = tokio::spawn(async move { compact_handle.compact(None).await });
+        timeout(Duration::from_secs(1), started.notified())
+            .await
+            .expect("compaction provider started");
+
+        assert_eq!(
+            handle
+                .send_message("queued first")
+                .await
+                .expect("first queue"),
+            MessageDisposition::Queued
+        );
+        assert_eq!(
+            handle
+                .send_message("queued second")
+                .await
+                .expect("second queue"),
+            MessageDisposition::Queued
+        );
+        release.notify_one();
+        compact
+            .await
+            .expect("compaction join")
+            .expect("compaction completion");
+        collect_turn(&mut events).await;
+
+        let snapshot = handle.snapshot().await.expect("conversation snapshot");
+        let queued = snapshot
+            .conversation
+            .iter()
+            .filter_map(|turn| {
+                if turn.role != Role::User {
+                    return None;
+                }
+                match turn.blocks.as_slice() {
+                    [Block::Text { text }] => Some(text.as_str()),
+                    _ => None,
+                }
+            })
+            .filter(|text| text.starts_with("queued "))
+            .collect::<Vec<_>>();
+        assert_eq!(queued, ["queued first", "queued second"]);
+    }
+
+    #[tokio::test]
+    async fn failed_compaction_alias_usage_is_accounted_before_successful_fallback() {
+        let root = TempDir::new().expect("tempdir");
+        let first_attempt = vec![
+            Ok(ProviderEvent::MessageStart {
+                model: "failed-compaction-model".to_owned(),
+            }),
+            Ok(ProviderEvent::Usage {
+                usage: TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 60,
+                    ..TokenUsage::default()
+                },
+            }),
+            Err(ProviderError::new(
+                ProviderErrorKind::Network,
+                "sanitized failed compaction alias",
+            )),
+        ];
+        let mut model = M3Model::new([
+            first_attempt,
+            stop_script(
+                "## Goal\ncontinue\n\n## Instructions\n\n## Discoveries\nfallback worked\n\n## Accomplished\n\n## Relevant files & directories\n",
+                &[TokenUsage {
+                    input_tokens: 80,
+                    output_tokens: 20,
+                    ..TokenUsage::default()
+                }],
+            ),
+        ]);
+        model.compaction.model_alias = Some("compact-first".to_owned());
+        model.budget.session_cost_cap_micros_usd = Some(100);
+        let model = Arc::new(model);
+        let sink = Arc::new(AccountingRecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            model,
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.event_sink = sink.clone();
+        actor_config.recovered.conversation = vec![text_turn(Role::User, "retain this")];
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        handle.compact(None).await.expect("fallback compaction");
+
+        let snapshot = handle
+            .cost_snapshot()
+            .await
+            .expect("compaction cost snapshot");
+        let compaction = snapshot
+            .turns
+            .iter()
+            .filter(|entry| entry.attribution == AccountingAttribution::Compaction)
+            .collect::<Vec<_>>();
+        assert_eq!(compaction.len(), 2);
+        assert_eq!(compaction[0].usage.output_tokens, 60);
+        assert_eq!(compaction[1].usage.output_tokens, 20);
+        assert_eq!(snapshot.session_cost_micros_usd, 80);
+
+        let durable = sink
+            .read_after(None)
+            .await
+            .expect("durable fallback events");
+        assert_eq!(
+            durable
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::CompactionAttemptFinished { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            durable
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::CompactionFinished { .. }))
+                .count(),
+            1
+        );
+        let resumed = project_session_events(&durable).expect("fallback resume");
+        assert_eq!(resumed.accounting.len(), 2);
     }
 }

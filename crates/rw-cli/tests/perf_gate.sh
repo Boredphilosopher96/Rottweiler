@@ -14,6 +14,7 @@ python3 - "$repo" "$root" <<'PY'
 import math
 import os
 import pathlib
+import shutil
 import statistics
 import subprocess
 import sys
@@ -21,7 +22,10 @@ import time
 
 repo = pathlib.Path(sys.argv[1])
 root = pathlib.Path(sys.argv[2])
-binary = repo / "target/release/rw"
+built_binary = repo / "target/release/rw"
+binary = root / "rw"
+shutil.copyfile(built_binary, binary)
+binary.chmod(0o700)
 script = repo / "crates/rw-cli/tests/fixtures/perf-script.json"
 
 def one(index):
@@ -88,6 +92,6 @@ if start_p99 >= 80:
     raise SystemExit(f"headless print-mode p99 {start_p99:.3f}ms exceeds 80ms")
 if turn_p99 >= 20:
     raise SystemExit(f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds 20ms")
-if binary.stat().st_size >= 25_000_000:
-    raise SystemExit(f"release binary size {binary.stat().st_size} exceeds 25MB")
+if built_binary.stat().st_size >= 25_000_000:
+    raise SystemExit(f"release binary size {built_binary.stat().st_size} exceeds 25MB")
 PY

@@ -153,6 +153,7 @@ fn tool_request(model: String) -> ProviderRequest {
         max_output_tokens: 64,
         temperature: None,
         thinking: ThinkingLevel::Off,
+        cache_hint: None,
     }
 }
 

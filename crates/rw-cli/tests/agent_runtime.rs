@@ -242,6 +242,425 @@ fn print_mode_auto_answers_structured_ask_user_without_a_third_channel() {
 }
 
 #[test]
+fn print_mode_slash_command_finishes_without_waiting_for_a_turn() {
+    let root = tempdir().expect("root");
+    let script = root.path().join("unused-provider.json");
+    write_script(&script, Vec::new());
+    let run = TestRun::new(&root, "headless-command");
+    run.write_agents();
+
+    let output = base_command(&run.workspace, &run.home)
+        .args([
+            "-p",
+            "/status",
+            "--output-format",
+            "stream-json",
+            "--in-memory-replay-script",
+            script.to_str().expect("script path"),
+        ])
+        .output()
+        .expect("headless slash command");
+    assert!(
+        output.status.success(),
+        "headless command stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = parse_stream(&output.stdout);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        EngineEvent::CommandFinished { name, .. } if name == "status"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        EngineEvent::TurnStarted { .. } | EngineEvent::TurnFinished { .. }
+    )));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn m3_context_cost_compaction_and_prompt_dump_use_the_headless_protocol() {
+    let root = tempdir().expect("root");
+    let run = TestRun::new(&root, "m3-headless");
+    run.write_agents();
+    let first_script = root.path().join("first-turn.json");
+    write_script(&first_script, text_script("FIRST_CONTEXT_TOKEN"));
+    let first = base_command(&run.workspace, &run.home)
+        .args([
+            "-p",
+            "FIRST_USER_PROMPT_TOKEN",
+            "--output-format",
+            "stream-json",
+            "--in-memory-replay-script",
+            first_script.to_str().expect("first script"),
+        ])
+        .output()
+        .expect("first turn");
+    assert!(
+        first.status.success(),
+        "first stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let session_id = only_session_id(&run.home);
+
+    let second_script = root.path().join("second-turn.json");
+    write_script(&second_script, text_script("SECOND_CONTEXT_TOKEN"));
+    let second = base_command(&run.workspace, &run.home)
+        .args([
+            "-p",
+            "SECOND_USER_PROMPT_TOKEN",
+            "--resume",
+            &session_id,
+            "--output-format",
+            "stream-json",
+            "--in-memory-replay-script",
+            second_script.to_str().expect("second script"),
+        ])
+        .output()
+        .expect("second turn");
+    assert!(
+        second.status.success(),
+        "second stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let historical = base_command(&run.workspace, &run.home)
+        .args(["prompt", "dump", "--turn", "1", "--resume", &session_id])
+        .output()
+        .expect("historical prompt dump");
+    assert!(
+        historical.status.success(),
+        "historical dump stderr: {}",
+        String::from_utf8_lossy(&historical.stderr)
+    );
+    let historical_text = String::from_utf8(historical.stdout).expect("historical UTF-8");
+    assert!(historical_text.contains("FIRST_USER_PROMPT_TOKEN"));
+    assert!(!historical_text.contains("SECOND_USER_PROMPT_TOKEN"));
+    let prompt_shapes = run
+        .home
+        .join("sessions")
+        .join(&session_id)
+        .join("prompt-shapes.json");
+    let prompt_shapes_backup = prompt_shapes.with_extension("json.backup");
+    fs::rename(&prompt_shapes, &prompt_shapes_backup).expect("hide prompt-shape metadata");
+    let missing_shape = base_command(&run.workspace, &run.home)
+        .args(["prompt", "dump", "--turn", "1", "--resume", &session_id])
+        .output()
+        .expect("missing-shape prompt dump");
+    assert!(!missing_shape.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing_shape.stderr)
+            .contains("exact request shape is unavailable for historical turn 1")
+    );
+    fs::rename(&prompt_shapes_backup, &prompt_shapes).expect("restore prompt-shape metadata");
+    let latest = base_command(&run.workspace, &run.home)
+        .args(["prompt", "dump"])
+        .output()
+        .expect("latest prompt dump");
+    assert!(
+        latest.status.success(),
+        "latest dump stderr: {}",
+        String::from_utf8_lossy(&latest.stderr)
+    );
+    assert!(
+        String::from_utf8(latest.stdout)
+            .expect("latest UTF-8")
+            .contains("SECOND_USER_PROMPT_TOKEN")
+    );
+
+    let empty_script = root.path().join("no-provider.json");
+    write_script(&empty_script, Vec::new());
+    let context = run_m3_command(&run, &session_id, "/context", &empty_script);
+    let context_events = parse_stream(&context.stdout);
+    let snapshot = context_events
+        .iter()
+        .find_map(|event| match event {
+            EngineEvent::CommandFinished { name, message, .. } if name == "context" => Some(
+                serde_json::from_str::<rw_core::ContextSnapshot>(message)
+                    .expect("registered context command JSON"),
+            ),
+            _ => None,
+        })
+        .expect("context snapshot");
+    let user_item = snapshot
+        .items
+        .iter()
+        .find(|item| item.label.starts_with("User") && !item.state.evicted)
+        .expect("user context item")
+        .item_id
+        .0
+        .clone();
+    let assistant_item = snapshot
+        .items
+        .iter()
+        .find(|item| item.label.starts_with("Assistant") && !item.state.evicted)
+        .expect("assistant context item")
+        .item_id
+        .0
+        .clone();
+
+    let evict = run_m3_command(
+        &run,
+        &session_id,
+        &format!("/context evict {user_item}"),
+        &empty_script,
+    );
+    assert!(
+        evict.status.success(),
+        "evict stderr: {}",
+        String::from_utf8_lossy(&evict.stderr)
+    );
+    assert_ack_precedes_cause(&parse_stream(&evict.stdout), |event| {
+        matches!(event, EngineEvent::ContextItemEvicted { .. })
+    });
+    let pin = run_m3_command(
+        &run,
+        &session_id,
+        &format!("/context pin {assistant_item}"),
+        &empty_script,
+    );
+    assert!(
+        pin.status.success(),
+        "pin stderr: {}",
+        String::from_utf8_lossy(&pin.stderr)
+    );
+    assert_ack_precedes_cause(&parse_stream(&pin.stdout), |event| {
+        matches!(event, EngineEvent::ContextItemPinned { .. })
+    });
+
+    let surgically_changed = base_command(&run.workspace, &run.home)
+        .args(["prompt", "dump", "--resume", &session_id])
+        .output()
+        .expect("prompt dump after surgery");
+    assert!(surgically_changed.status.success());
+    let changed_text = String::from_utf8(surgically_changed.stdout).expect("changed UTF-8");
+    assert!(!changed_text.contains("FIRST_USER_PROMPT_TOKEN"));
+    assert!(changed_text.contains("FIRST_CONTEXT_TOKEN"));
+
+    let cost = run_m3_command(&run, &session_id, "/cost", &empty_script);
+    assert!(
+        cost.status.success(),
+        "cost stderr: {}",
+        String::from_utf8_lossy(&cost.stderr)
+    );
+    let cost_events = parse_stream(&cost.stdout);
+    let costs = cost_events
+        .iter()
+        .find_map(|event| match event {
+            EngineEvent::CommandFinished { name, message, .. } if name == "cost" => Some(
+                serde_json::from_str::<rw_core::CostSnapshot>(message)
+                    .expect("registered cost command JSON"),
+            ),
+            _ => None,
+        })
+        .expect("cost snapshot");
+    assert_eq!(costs.turns.len(), 2);
+    assert!(
+        costs
+            .turns
+            .iter()
+            .all(|turn| matches!(&turn.cost, rw_core::Cost::Unavailable { .. }))
+    );
+    assert!(!costs.session_monetary_accounting_complete);
+    assert!(!costs.daily_monetary_accounting_complete);
+    assert_eq!(costs.session_cost_unavailable_entries, 2);
+    assert_eq!(costs.daily_cost_unavailable_entries, 2);
+
+    let rewind = run_m3_command(&run, &session_id, "/rewind 2", &empty_script);
+    assert!(
+        rewind.status.success(),
+        "rewind stderr: {}",
+        String::from_utf8_lossy(&rewind.stderr)
+    );
+    let rewound_dump = base_command(&run.workspace, &run.home)
+        .args(["prompt", "dump", "--resume", &session_id])
+        .output()
+        .expect("rewound prompt dump");
+    assert!(rewound_dump.status.success());
+    assert!(
+        String::from_utf8(rewound_dump.stdout)
+            .expect("rewound UTF-8")
+            .contains("FIRST_USER_PROMPT_TOKEN")
+    );
+
+    let compact_script = root.path().join("compact.json");
+    write_script(
+        &compact_script,
+        text_script("Goal\nInstructions\nDiscoveries\nAccomplished\nRelevant files"),
+    );
+    let compact = run_m3_command(
+        &run,
+        &session_id,
+        "/compact retain the test intent",
+        &compact_script,
+    );
+    assert!(
+        compact.status.success(),
+        "compact stderr: {}",
+        String::from_utf8_lossy(&compact.stderr)
+    );
+    let compact_events = parse_stream(&compact.stdout);
+    assert_ack_precedes_cause(&compact_events, |event| {
+        matches!(event, EngineEvent::CompactionStarted { .. })
+    });
+    assert!(compact_events.iter().any(|event| matches!(
+        event,
+        EngineEvent::CompactionFinished {
+            usage: Some(_),
+            cost: Some(rw_core::Cost::Unavailable { .. }),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn zero_turn_anthropic_prompt_dump_uses_static_cache_shape_without_auth() {
+    let root = tempdir().expect("root");
+    let run = TestRun::new(&root, "anthropic-prompt-dump");
+    run.write_agents();
+    fs::write(
+        run.home.join("config.toml"),
+        "[models]\n\
+         default = \"fast\"\n\
+         [models.aliases]\n\
+         fast = [\"anthropic/claude-fixture\"]\n\
+         [providers.anthropic]\n\
+         kind = \"anthropic\"\n",
+    )
+    .expect("Anthropic inspection config");
+    let output = base_command(&run.workspace, &run.home)
+        .args(["prompt", "dump"])
+        .output()
+        .expect("zero-turn Anthropic prompt dump");
+    assert!(
+        output.status.success(),
+        "prompt dump stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dump: rw_core::PromptDump =
+        serde_json::from_slice(&output.stdout).expect("prompt dump JSON");
+    assert_eq!(dump.model_alias.0, "fast");
+    assert_eq!(dump.cache_breakpoints.len(), 1);
+    assert!(
+        dump.tools
+            .iter()
+            .any(|tool| { tool.name == "read" && tool.input_schema.get("properties").is_some() })
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn budget_warning_rate_alarm_and_hard_cap_are_enforced_before_provider_dispatch() {
+    let root = tempdir().expect("root");
+    let run = TestRun::new(&root, "m3-budget");
+    run.write_agents();
+    let initial_script = root.path().join("budget-initial.json");
+    write_script(&initial_script, text_script("initial billed turn"));
+    let initial = base_command(&run.workspace, &run.home)
+        .args([
+            "-p",
+            "create a billed history entry",
+            "--in-memory-replay-script",
+            initial_script.to_str().expect("initial script"),
+        ])
+        .output()
+        .expect("initial budget turn");
+    assert!(initial.status.success());
+    let session_id = only_session_id(&run.home);
+    rewrite_turn_cost(&run.home, &session_id, 100);
+    remove_derived_index(&run.home);
+
+    fs::write(
+        run.home.join("config.toml"),
+        "[budget]\n\
+         session_cost_cap_micros_usd = 125\n\
+         spend_rate_alarm_micros_usd_per_minute = 50\n\
+         warn_at_percent = 80\n",
+    )
+    .expect("warning budget config");
+    let warning_script = root.path().join("budget-warning.json");
+    write_script(&warning_script, text_script("PROVIDER_RAN_AFTER_WARNING"));
+    let warning = base_command(&run.workspace, &run.home)
+        .args([
+            "-p",
+            "continue below the cap",
+            "--resume",
+            &session_id,
+            "--output-format",
+            "stream-json",
+            "--in-memory-replay-script",
+            warning_script.to_str().expect("warning script"),
+        ])
+        .output()
+        .expect("warning turn");
+    assert!(
+        !warning.status.success(),
+        "unpriced current-turn usage must fail closed under a dollar cap"
+    );
+    assert!(
+        String::from_utf8_lossy(&warning.stderr).contains("BudgetExceeded"),
+        "warning stderr: {}",
+        String::from_utf8_lossy(&warning.stderr)
+    );
+    let warning_events = parse_stream(&warning.stdout);
+    assert!(warning_events.iter().any(|event| matches!(
+        event,
+        EngineEvent::BudgetStatusChanged { level, .. }
+            if format!("{level:?}") == "Warning"
+    )));
+    assert!(warning_events.iter().any(|event| matches!(
+        event,
+        EngineEvent::BudgetStatusChanged { level, .. }
+            if format!("{level:?}") == "SpendRateAlarm"
+    )));
+    assert!(warning_events.iter().any(|event| matches!(
+        event,
+        EngineEvent::TextDelta { text, .. } if text.contains("PROVIDER_RAN_AFTER_WARNING")
+    )));
+
+    fs::write(
+        run.home.join("config.toml"),
+        "[budget]\n\
+         session_cost_cap_micros_usd = 100\n\
+         spend_rate_alarm_micros_usd_per_minute = 50\n\
+         warn_at_percent = 80\n",
+    )
+    .expect("hard-cap budget config");
+    let blocked_script = root.path().join("budget-blocked.json");
+    write_script(&blocked_script, text_script("PROVIDER_MUST_NOT_RUN_AT_CAP"));
+    let blocked = base_command(&run.workspace, &run.home)
+        .args([
+            "-p",
+            "must stop before provider dispatch",
+            "--resume",
+            &session_id,
+            "--output-format",
+            "stream-json",
+            "--in-memory-replay-script",
+            blocked_script.to_str().expect("blocked script"),
+        ])
+        .output()
+        .expect("hard-cap turn");
+    assert!(!blocked.status.success(), "hard cap must fail print mode");
+    let blocked_events = parse_stream(&blocked.stdout);
+    assert!(blocked_events.iter().any(|event| matches!(
+        event,
+        EngineEvent::BudgetStatusChanged { level, .. }
+            if format!("{level:?}") == "HardCap"
+    )));
+    assert!(blocked_events.iter().any(|event| matches!(
+        event,
+        EngineEvent::TurnFinished {
+            status: TurnStatus::BudgetExceeded,
+            ..
+        }
+    )));
+    assert!(!blocked_events.iter().any(|event| matches!(
+        event,
+        EngineEvent::TextDelta { text, .. } if text.contains("PROVIDER_MUST_NOT_RUN_AT_CAP")
+    )));
+}
+
+#[test]
 fn resume_repairs_a_killed_tail_and_reuses_the_original_agents_prefix() {
     let root = tempdir().expect("root");
     let fixtures = root.path().join("fixtures");
@@ -449,7 +868,6 @@ fn simultaneous_resume_rejects_the_second_writer_before_startup_mutation() {
             .is_some_and(|log| log.contains(unique_prompt))
     });
 
-    let before = fs::read(&log_path).expect("log before second writer");
     let started = Instant::now();
     let second = base_command(&run.workspace, &run.home)
         .args([
@@ -479,11 +897,15 @@ fn simultaneous_resume_rejects_the_second_writer_before_startup_mutation() {
         "unexpected second-writer stderr: {}",
         String::from_utf8_lossy(&second.stderr)
     );
-    assert_eq!(
-        fs::read(&log_path).expect("log after second writer"),
-        before,
-        "losing writer mutated the authoritative log"
+    let after = fs::read_to_string(&log_path).expect("log after second writer");
+    assert!(
+        !after.contains("SECOND_WRITER_MUST_NOT_PERSIST"),
+        "losing writer persisted its prompt in the authoritative log"
     );
+    for line in after.lines().filter(|line| !line.trim().is_empty()) {
+        serde_json::from_str::<serde_json::Value>(line)
+            .expect("authoritative log remains valid JSONL while the winner appends");
+    }
 
     assert!(
         Command::new("kill")
@@ -871,6 +1293,101 @@ fn base_command(workspace: &Path, home: &Path) -> Command {
         .env("ROTTWEILER_HOME", home)
         .env("ROTTWEILER_CREDENTIAL_BACKEND", "file");
     command
+}
+
+fn run_m3_command(
+    run: &TestRun,
+    session_id: &str,
+    prompt: &str,
+    script: &Path,
+) -> std::process::Output {
+    base_command(&run.workspace, &run.home)
+        .args([
+            "-p",
+            prompt,
+            "--resume",
+            session_id,
+            "--output-format",
+            "stream-json",
+            "--in-memory-replay-script",
+            script.to_str().expect("M3 script path"),
+        ])
+        .output()
+        .expect("M3 command")
+}
+
+fn assert_ack_precedes_cause(events: &[EngineEvent], is_target: impl Fn(&EngineEvent) -> bool) {
+    let (target_index, cause) = events
+        .iter()
+        .enumerate()
+        .find_map(|(index, event)| {
+            is_target(event).then(|| {
+                (
+                    index,
+                    event
+                        .meta()
+                        .and_then(|meta| meta.caused_by.clone())
+                        .expect("durable command event cause"),
+                )
+            })
+        })
+        .expect("target command event");
+    let ack_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                EngineEvent::CommandAcknowledged { meta, .. } if meta.request_id == cause
+            )
+        })
+        .unwrap_or_else(|| panic!("matching command acknowledgement in {events:#?}"));
+    assert!(
+        ack_index < target_index,
+        "acknowledgement must precede cause"
+    );
+}
+
+fn text_script(text: &str) -> Vec<Vec<ProviderEvent>> {
+    vec![vec![
+        ProviderEvent::TextDelta {
+            text: text.to_owned(),
+        },
+        ProviderEvent::Finished {
+            reason: FinishReason::Stop,
+        },
+    ]]
+}
+
+fn rewrite_turn_cost(home: &Path, session_id: &str, amount_micros: u64) {
+    let path = home.join("sessions").join(session_id).join("events.jsonl");
+    let source = fs::read_to_string(&path).expect("event log before cost rewrite");
+    let mut rewritten = String::new();
+    let mut found = false;
+    for line in source.lines() {
+        let mut envelope: serde_json::Value = serde_json::from_str(line).expect("event envelope");
+        if envelope["event"]["type"] == "turn_finished" {
+            envelope["event"]["cost"] = json!({
+                "kind": "monetary",
+                "amount_micros": amount_micros.to_string(),
+                "currency": "USD"
+            });
+            found = true;
+        }
+        rewritten.push_str(&serde_json::to_string(&envelope).expect("rewritten envelope"));
+        rewritten.push('\n');
+    }
+    assert!(found, "fixture must contain a completed turn");
+    fs::write(path, rewritten).expect("rewritten event log");
+}
+
+fn remove_derived_index(home: &Path) {
+    for name in ["index.sqlite", "index.sqlite-wal", "index.sqlite-shm"] {
+        match fs::remove_file(home.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("derived index removal failed: {error}"),
+        }
+    }
 }
 
 fn hello_script() -> Vec<Vec<ProviderEvent>> {

@@ -323,6 +323,17 @@ impl Provider for GitHubCopilotProvider {
         }))
     }
 
+    fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
+        let resolved = self.resolved.get()?;
+        Some(ProviderModelMetadata {
+            capabilities: discovered_capabilities(&resolved.model),
+            pricing: resolved.model.model_pricing().ok()?,
+            accounting: UsageAccounting::AiCredits {
+                micros_usd_per_credit: 10_000,
+            },
+        })
+    }
+
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         self.stream_impl(request, None).await
     }

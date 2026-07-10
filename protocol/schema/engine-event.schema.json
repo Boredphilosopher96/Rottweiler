@@ -37,6 +37,78 @@
       "type": "object",
       "properties": {
         "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/ContextSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "context_snapshot_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/CostSnapshot"
+        },
+        "type": {
+          "type": "string",
+          "const": "cost_snapshot_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "snapshot"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "dump": {
+          "$ref": "#/$defs/PromptDump"
+        },
+        "type": {
+          "type": "string",
+          "const": "prompt_dump_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "dump"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
           "$ref": "#/$defs/EventMeta"
         },
         "driver_client_id": {
@@ -534,6 +606,101 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "used_tokens": {
+          "type": "string"
+        },
+        "usable_tokens": {
+          "type": "string"
+        },
+        "reserved_tokens": {
+          "type": "string"
+        },
+        "stable_prefix_hash": {
+          "type": "string"
+        },
+        "cache_hit_basis_points": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "estimated_input_tokens": {
+          "type": "string",
+          "default": "0"
+        },
+        "provider_input_tokens": {
+          "type": "string",
+          "default": "0"
+        },
+        "correction_millionths": {
+          "type": "string",
+          "default": "0"
+        },
+        "type": {
+          "type": "string",
+          "const": "context_usage_updated"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "used_tokens",
+        "usable_tokens",
+        "reserved_tokens",
+        "stable_prefix_hash",
+        "cache_hit_basis_points"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "level": {
+          "$ref": "#/$defs/BudgetLevel"
+        },
+        "scope": {
+          "$ref": "#/$defs/BudgetScope"
+        },
+        "unit": {
+          "$ref": "#/$defs/BudgetUnit"
+        },
+        "current": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "budget_status_changed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "level",
+        "scope",
+        "unit",
+        "current",
+        "limit"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
         "reason": {
           "$ref": "#/$defs/CompactionReason"
         },
@@ -549,6 +716,35 @@
       ]
     },
     {
+      "description": "Accounting for one billed compaction provider attempt that did not\nproduce the committed summary. This event is deliberately non-terminal:\nfallback attempts continue inside the same compaction transaction.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "summary_turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "cost": {
+          "$ref": "#/$defs/Cost"
+        },
+        "type": {
+          "type": "string",
+          "const": "compaction_attempt_finished"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "summary_turn_id",
+        "usage",
+        "cost"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "meta": {
@@ -559,6 +755,28 @@
         },
         "reclaimed_tokens": {
           "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cost"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "type": {
           "type": "string",
@@ -697,6 +915,10 @@
         "item_id": {
           "$ref": "#/$defs/ContextItemId"
         },
+        "effective_after_agent_turn": {
+          "type": "string",
+          "default": "0"
+        },
         "type": {
           "type": "string",
           "const": "context_item_pinned"
@@ -716,6 +938,10 @@
         },
         "item_id": {
           "$ref": "#/$defs/ContextItemId"
+        },
+        "effective_after_agent_turn": {
+          "type": "string",
+          "default": "0"
         },
         "type": {
           "type": "string",
@@ -978,103 +1204,494 @@
         "internal"
       ]
     },
-    "EventMeta": {
-      "description": "Metadata common to persisted and streamed events.",
+    "ContextSnapshot": {
+      "description": "Exact engine-side context breakdown for one assembled request.",
       "type": "object",
       "properties": {
-        "protocol_version": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
-        "session_id": {
-          "$ref": "#/$defs/SessionId"
-        },
-        "sequence_id": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "emitted_at": {
-          "type": "string"
-        },
-        "caused_by": {
+        "turn_id": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RequestId"
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "stable_prefix_hash": {
+          "type": "string"
+        },
+        "used_tokens": {
+          "type": "string"
+        },
+        "usable_tokens": {
+          "type": "string"
+        },
+        "reserved_tokens": {
+          "type": "string"
+        },
+        "cache_breakpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CacheBreakpoint"
+          }
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContextItemSnapshot"
+          }
+        }
+      },
+      "required": [
+        "stable_prefix_hash",
+        "used_tokens",
+        "usable_tokens",
+        "reserved_tokens",
+        "cache_breakpoints",
+        "items"
+      ]
+    },
+    "TurnId": {
+      "description": "Stable identifier of a conversation turn.",
+      "type": "string"
+    },
+    "CacheBreakpoint": {
+      "description": "One explicit cache boundary after an assembled item.",
+      "type": "object",
+      "properties": {
+        "after_item_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContextItemId"
             },
             {
               "type": "null"
             }
           ]
         }
-      },
-      "required": [
-        "protocol_version",
-        "session_id",
-        "sequence_id",
-        "emitted_at"
-      ]
+      }
     },
-    "SequenceId": {
-      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+    "ContextItemId": {
+      "description": "Stable identifier of one assembled context item.",
       "type": "string"
     },
-    "Attachment": {
-      "description": "User-provided content attached to a message.",
+    "ContextItemSnapshot": {
+      "description": "Per-item token and surgery state shown by context inspectors.",
       "type": "object",
       "properties": {
-        "name": {
+        "item_id": {
+          "$ref": "#/$defs/ContextItemId"
+        },
+        "kind": {
+          "$ref": "#/$defs/ContextItemKind"
+        },
+        "label": {
           "type": "string"
         },
-        "media_type": {
+        "source": {
           "type": "string"
         },
-        "data": {
-          "$ref": "#/$defs/AttachmentData"
+        "machine_local_path": {
+          "description": "Machine-local provenance only; remote clients must not dereference it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "estimated_tokens": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/ContextItemState"
         }
       },
       "required": [
-        "name",
-        "media_type",
-        "data"
+        "item_id",
+        "kind",
+        "label",
+        "source",
+        "estimated_tokens",
+        "state"
       ]
     },
-    "AttachmentData": {
-      "description": "In-band attachment data; protocol messages never require shared files.",
+    "ContextItemKind": {
+      "description": "Semantic class of one assembled prompt item.",
+      "type": "string",
+      "enum": [
+        "system",
+        "tool_definitions",
+        "project_instructions",
+        "conversation",
+        "tool_result",
+        "pinned",
+        "queued_message"
+      ]
+    },
+    "ContextItemState": {
+      "description": "Orthogonal surgery markers for one context item.",
+      "type": "object",
+      "properties": {
+        "pinned": {
+          "type": "boolean"
+        },
+        "evicted": {
+          "type": "boolean"
+        },
+        "summarized": {
+          "type": "boolean"
+        },
+        "pruned": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pinned",
+        "evicted",
+        "summarized",
+        "pruned"
+      ]
+    },
+    "CostSnapshot": {
+      "description": "Session-level cost, token, cache, and burn-rate snapshot.",
+      "type": "object",
+      "properties": {
+        "utc_day": {
+          "type": "string"
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TurnAccounting"
+          }
+        },
+        "session_usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "session_cost_micros_usd": {
+          "type": "string"
+        },
+        "session_ai_credit_micros": {
+          "type": "string"
+        },
+        "daily_cost_micros_usd": {
+          "type": "string"
+        },
+        "daily_ai_credit_micros": {
+          "type": "string"
+        },
+        "trailing_minute_cost_micros_usd": {
+          "type": "string"
+        },
+        "trailing_minute_ai_credit_micros": {
+          "type": "string"
+        },
+        "cache_hit_basis_points": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "session_cost_cap_micros_usd": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "daily_cost_cap_micros_usd": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "session_ai_credit_cap_micros": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "daily_ai_credit_cap_micros": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "spend_rate_alarm_micros_usd_per_minute": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "ai_credit_rate_alarm_micros_per_minute": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "hard_cap_reached": {
+          "type": "boolean"
+        },
+        "session_monetary_accounting_complete": {
+          "type": "boolean"
+        },
+        "daily_monetary_accounting_complete": {
+          "type": "boolean"
+        },
+        "session_subscription_quota_entries": {
+          "type": "string",
+          "default": "0"
+        },
+        "session_cost_unavailable_entries": {
+          "type": "string",
+          "default": "0"
+        },
+        "session_non_usd_monetary_entries": {
+          "type": "string",
+          "default": "0"
+        },
+        "daily_subscription_quota_entries": {
+          "type": "string",
+          "default": "0"
+        },
+        "daily_cost_unavailable_entries": {
+          "type": "string",
+          "default": "0"
+        },
+        "daily_non_usd_monetary_entries": {
+          "type": "string",
+          "default": "0"
+        }
+      },
+      "required": [
+        "utc_day",
+        "turns",
+        "session_usage",
+        "session_cost_micros_usd",
+        "session_ai_credit_micros",
+        "daily_cost_micros_usd",
+        "daily_ai_credit_micros",
+        "trailing_minute_cost_micros_usd",
+        "trailing_minute_ai_credit_micros",
+        "cache_hit_basis_points",
+        "hard_cap_reached",
+        "session_monetary_accounting_complete",
+        "daily_monetary_accounting_complete"
+      ]
+    },
+    "TurnAccounting": {
+      "description": "Usage and billing attributed to one completed agent turn.",
+      "type": "object",
+      "properties": {
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "attribution": {
+          "$ref": "#/$defs/AccountingAttribution"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "cost": {
+          "$ref": "#/$defs/Cost"
+        }
+      },
+      "required": [
+        "turn_id",
+        "attribution",
+        "usage",
+        "cost"
+      ]
+    },
+    "AccountingAttribution": {
+      "description": "Runtime role to which usage and cost are attributed.",
+      "type": "string",
+      "enum": [
+        "main",
+        "compaction",
+        "subagent"
+      ]
+    },
+    "Usage": {
+      "description": "Provider-reported token accounting normalized by the router.",
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "string"
+        },
+        "output_tokens": {
+          "type": "string"
+        },
+        "cache_read_tokens": {
+          "type": "string"
+        },
+        "cache_write_tokens": {
+          "type": "string"
+        },
+        "reasoning_tokens": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens"
+      ]
+    },
+    "Cost": {
+      "description": "Provider-neutral billing/quota disposition for a completed turn. A missing\nprice is never represented as a zero-dollar API charge.",
       "oneOf": [
         {
           "type": "object",
           "properties": {
-            "content": {
+            "amount_micros": {
               "type": "string"
             },
-            "type": {
+            "currency": {
+              "type": "string"
+            },
+            "kind": {
               "type": "string",
-              "const": "text"
+              "const": "monetary"
             }
           },
           "required": [
-            "type",
-            "content"
+            "kind",
+            "amount_micros",
+            "currency"
           ]
         },
         {
           "type": "object",
           "properties": {
-            "data": {
+            "credits_micros": {
               "type": "string"
             },
-            "type": {
+            "nominal_amount_micros": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "currency": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
               "type": "string",
-              "const": "inline_base64"
+              "const": "ai_credits"
             }
           },
           "required": [
-            "type",
-            "data"
+            "kind",
+            "credits_micros"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "used": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "subscription_quota"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "unavailable"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
           ]
         }
       ]
+    },
+    "PromptDump": {
+      "description": "Exact assembled model request exposed for prompt transparency.",
+      "type": "object",
+      "properties": {
+        "turn_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model_alias": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "turns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Turn"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PromptTool"
+          }
+        },
+        "stable_prefix_hash": {
+          "type": "string"
+        },
+        "cache_breakpoints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CacheBreakpoint"
+          }
+        },
+        "estimated_tokens": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "model_alias",
+        "turns",
+        "tools",
+        "stable_prefix_hash",
+        "cache_breakpoints",
+        "estimated_tokens"
+      ]
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
+      "type": "string"
     },
     "Turn": {
       "description": "One conversation turn in the internal message representation.",
@@ -1424,6 +2041,122 @@
         }
       }
     },
+    "PromptTool": {
+      "description": "Provider-neutral tool definition included in a prompt dump.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "input_schema": true
+      },
+      "required": [
+        "name",
+        "description",
+        "input_schema"
+      ]
+    },
+    "EventMeta": {
+      "description": "Metadata common to persisted and streamed events.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "sequence_id": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "emitted_at": {
+          "type": "string"
+        },
+        "caused_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "sequence_id",
+        "emitted_at"
+      ]
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "Attachment": {
+      "description": "User-provided content attached to a message.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "data": {
+          "$ref": "#/$defs/AttachmentData"
+        }
+      },
+      "required": [
+        "name",
+        "media_type",
+        "data"
+      ]
+    },
+    "AttachmentData": {
+      "description": "In-band attachment data; protocol messages never require shared files.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "inline_base64"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ]
+        }
+      ]
+    },
     "UnrestorablePath": {
       "description": "A workspace path that a rewind could not restore exactly.",
       "type": "object",
@@ -1439,10 +2172,6 @@
         "path",
         "reason"
       ]
-    },
-    "TurnId": {
-      "description": "Stable identifier of a conversation turn.",
-      "type": "string"
     },
     "ToolCapability": {
       "description": "Capabilities used by the permission engine for a tool invocation.",
@@ -1551,128 +2280,34 @@
         "interrupted",
         "failed",
         "max_turns",
-        "doom_loop"
+        "doom_loop",
+        "budget_exceeded"
       ]
     },
-    "Usage": {
-      "description": "Provider-reported token accounting normalized by the router.",
-      "type": "object",
-      "properties": {
-        "input_tokens": {
-          "type": "string"
-        },
-        "output_tokens": {
-          "type": "string"
-        },
-        "cache_read_tokens": {
-          "type": "string"
-        },
-        "cache_write_tokens": {
-          "type": "string"
-        },
-        "reasoning_tokens": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "input_tokens",
-        "output_tokens",
-        "cache_read_tokens",
-        "cache_write_tokens",
-        "reasoning_tokens"
+    "BudgetLevel": {
+      "description": "Severity of a budget transition.",
+      "type": "string",
+      "enum": [
+        "warning",
+        "spend_rate_alarm",
+        "hard_cap"
       ]
     },
-    "Cost": {
-      "description": "Provider-neutral billing/quota disposition for a completed turn. A missing\nprice is never represented as a zero-dollar API charge.",
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "amount_micros": {
-              "type": "string"
-            },
-            "currency": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "monetary"
-            }
-          },
-          "required": [
-            "kind",
-            "amount_micros",
-            "currency"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "credits_micros": {
-              "type": "string"
-            },
-            "nominal_amount_micros": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "currency": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "ai_credits"
-            }
-          },
-          "required": [
-            "kind",
-            "credits_micros"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "used": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "unit": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "kind": {
-              "type": "string",
-              "const": "subscription_quota"
-            }
-          },
-          "required": [
-            "kind"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "reason": {
-              "type": "string"
-            },
-            "kind": {
-              "type": "string",
-              "const": "unavailable"
-            }
-          },
-          "required": [
-            "kind",
-            "reason"
-          ]
-        }
+    "BudgetScope": {
+      "description": "Scope whose spend triggered a budget transition.",
+      "type": "string",
+      "enum": [
+        "session",
+        "daily",
+        "trailing_minute"
+      ]
+    },
+    "BudgetUnit": {
+      "description": "Billing unit evaluated by a budget guardrail.",
+      "type": "string",
+      "enum": [
+        "micros_usd",
+        "ai_credit_micros"
       ]
     },
     "CompactionReason": {
@@ -1686,14 +2321,6 @@
     },
     "SubagentId": {
       "description": "Stable identifier of a child agent session.",
-      "type": "string"
-    },
-    "ModelAlias": {
-      "description": "Provider-blind model alias resolved by the engine router.",
-      "type": "string"
-    },
-    "ContextItemId": {
-      "description": "Stable identifier of one assembled context item.",
       "type": "string"
     }
   }

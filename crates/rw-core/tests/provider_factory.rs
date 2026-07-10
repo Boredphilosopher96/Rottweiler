@@ -10,17 +10,18 @@ use std::{
 };
 
 use futures_util::StreamExt;
-use rw_core::{ModelAccounting, ProviderFactory};
+use rw_core::{ModelAccounting, ModelDriver, ProviderFactory};
 use rw_providers::{
-    ModelPricing, NetworkPolicy, PricingTable, Provider, ProviderErrorKind, ProviderRequest,
-    ProxyEnvironment, Recorder, ReplayProvider, ThinkingLevel, ToolChoice, ToolDefinition,
+    CacheHint, ModelPricing, NetworkPolicy, PricingTable, Provider, ProviderErrorKind,
+    ProviderRequest, ProxyEnvironment, Recorder, ReplayProvider, RetryPolicy, ThinkingLevel,
+    ToolChoice, ToolDefinition,
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
     KEYCHAIN_VAULT_ID, KeychainUnavailable, Secret,
 };
 use rw_types::{
-    Block, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta,
+    Block, Cost, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta,
     config::ProviderConfig,
 };
 use serde_json::json;
@@ -39,6 +40,67 @@ impl CredentialEnvironment for TestEnvironment {
     fn get(&self, name: &str) -> Result<Option<String>, CredentialError> {
         Ok(self.0.get(name).cloned())
     }
+}
+
+#[test]
+fn opaque_router_route_prices_the_actual_failover_candidate() {
+    let mut config = rw_types::config::Config::default();
+    config.models.default = "fast".to_owned();
+    config.models.aliases.insert(
+        "fast".to_owned(),
+        vec!["a/cheap".to_owned(), "b/expensive".to_owned()],
+    );
+    for (provider, port) in [("a", 1), ("b", 2)] {
+        config.providers.insert(
+            provider.to_owned(),
+            ProviderConfig {
+                kind: "openai_compatible".to_owned(),
+                base_url: Some(format!("http://127.0.0.1:{port}/v1/chat/completions")),
+                ..ProviderConfig::default()
+            },
+        );
+    }
+    let mut table = pricing([("a/cheap", false), ("b/expensive", false)]);
+    table
+        .models
+        .get_mut("a/cheap")
+        .unwrap_or_else(|| panic!("cheap pricing"))
+        .output_per_million_micros_usd = 10;
+    table
+        .models
+        .get_mut("b/expensive")
+        .unwrap_or_else(|| panic!("expensive pricing"))
+        .output_per_million_micros_usd = 100;
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestKeychain::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Deny,
+        table,
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("factory must build: {error}"));
+    let usage = rw_providers::TokenUsage {
+        output_tokens: 1_000_000,
+        ..rw_providers::TokenUsage::default()
+    };
+    assert!(matches!(
+        runtime.accounting_for_alias("fast", usage),
+        Cost::Unavailable { .. }
+    ));
+    assert_eq!(
+        runtime.accounting_for_route(Some("__model_00000000"), usage),
+        Cost::Monetary {
+            amount_micros: 10,
+            currency: "USD".to_owned(),
+        }
+    );
+    assert_eq!(
+        runtime.accounting_for_route(Some("__model_00000001"), usage),
+        Cost::Monetary {
+            amount_micros: 100,
+            currency: "USD".to_owned(),
+        }
+    );
 }
 
 #[derive(Clone, Default)]
@@ -170,6 +232,27 @@ fn sse_response(text: &str) -> String {
         "data: {{\"id\":\"chat-1\",\"model\":\"fixture\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":{}}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n",
         serde_json::to_string(text)
             .unwrap_or_else(|error| panic!("fixture text must encode: {error}"))
+    );
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+}
+
+fn anthropic_sse_response() -> String {
+    let body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-fixture\",\"usage\":{\"input_tokens\":1}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"cached fallback\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
     );
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -355,7 +438,158 @@ fn request(model: &str) -> ProviderRequest {
         max_output_tokens: 32,
         temperature: None,
         thinking: ThinkingLevel::Off,
+        cache_hint: None,
     }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn mixed_automatic_to_explicit_fallback_preserves_anthropic_cache_control() {
+    let killed_listener = TcpListener::bind("127.0.0.1:0")
+        .unwrap_or_else(|error| panic!("dead OpenAI listener must bind: {error}"));
+    let killed_address = killed_listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("dead OpenAI address must resolve: {error}"));
+    drop(killed_listener);
+    let anthropic = spawn_server(
+        "/v1/messages",
+        (0..20).map(|_| anthropic_sse_response()).collect(),
+    );
+    let mut config = rw_types::config::Config::default();
+    config.models.default = "fast".to_owned();
+    config.models.aliases.insert(
+        "fast".to_owned(),
+        vec![
+            "automatic/gpt-fixture".to_owned(),
+            "explicit/claude-fixture".to_owned(),
+        ],
+    );
+    config.providers.insert(
+        "automatic".to_owned(),
+        ProviderConfig {
+            kind: "openai".to_owned(),
+            base_url: Some(format!("http://{killed_address}/v1/responses")),
+            api_key_env: Some("OPENAI_FIXTURE_KEY".to_owned()),
+            ..ProviderConfig::default()
+        },
+    );
+    config.providers.insert(
+        "explicit".to_owned(),
+        ProviderConfig {
+            kind: "anthropic".to_owned(),
+            base_url: Some(anthropic.endpoint.clone()),
+            api_key_env: Some("ANTHROPIC_FIXTURE_KEY".to_owned()),
+            ..ProviderConfig::default()
+        },
+    );
+    let runtime = ProviderFactory::with_backends(
+        manager(
+            TestEnvironment(BTreeMap::from([
+                ("OPENAI_FIXTURE_KEY".to_owned(), "openai-fixture".to_owned()),
+                (
+                    "ANTHROPIC_FIXTURE_KEY".to_owned(),
+                    "anthropic-fixture".to_owned(),
+                ),
+            ])),
+            TestKeychain::default(),
+        ),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        pricing([
+            ("openai/gpt-fixture", true),
+            ("anthropic/claude-fixture", true),
+        ]),
+    )
+    .with_retry_policy(RetryPolicy {
+        max_attempts: 1,
+        base_delay: Duration::ZERO,
+        max_delay: Duration::ZERO,
+        jitter_fraction: 0.0,
+    })
+    .build(&config)
+    .unwrap_or_else(|error| panic!("mixed provider factory must build: {error}"));
+    assert_eq!(
+        runtime
+            .resolved_model("automatic/gpt-fixture")
+            .unwrap_or_else(|| panic!("OpenAI model must resolve"))
+            .capabilities()
+            .cache_breakpoints,
+        rw_providers::CacheBreakpointSupport::Automatic
+    );
+    assert_eq!(
+        runtime
+            .resolved_model("explicit/claude-fixture")
+            .unwrap_or_else(|| panic!("Anthropic model must resolve"))
+            .capabilities()
+            .cache_breakpoints,
+        rw_providers::CacheBreakpointSupport::Explicit
+    );
+    for turn in 0..20 {
+        let mut routed = request("fast");
+        for history in 0..turn {
+            routed.turns.extend([
+                Turn {
+                    role: Role::Assistant,
+                    blocks: vec![Block::Text {
+                        text: format!("history answer {history}"),
+                    }],
+                    meta: TurnMeta::default(),
+                },
+                Turn {
+                    role: Role::User,
+                    blocks: vec![Block::Text {
+                        text: format!("history question {history}"),
+                    }],
+                    meta: TurnMeta::default(),
+                },
+            ]);
+        }
+        routed.tools.push(ToolDefinition {
+            name: "read_file".to_owned(),
+            description: "Read a file".to_owned(),
+            input_schema: json!({"type": "object"}),
+        });
+        routed.cache_hint = Some(CacheHint {
+            stable_prefix_turns: 1,
+            tools_in_prefix: true,
+        });
+        let events = runtime
+            .stream_alias("fast", routed)
+            .unwrap_or_else(|error| panic!("mixed alias must route: {error}"))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().all(Result::is_ok));
+    }
+    let captured = anthropic
+        .task
+        .join()
+        .unwrap_or_else(|_| panic!("Anthropic fallback server must join"));
+    assert_eq!(captured.len(), 20);
+    let bodies = captured
+        .iter()
+        .map(|request| {
+            let (_, body) = request
+                .split_once("\r\n\r\n")
+                .unwrap_or_else(|| panic!("Anthropic request must contain a body"));
+            serde_json::from_str::<serde_json::Value>(body)
+                .unwrap_or_else(|error| panic!("Anthropic request body must parse: {error}"))
+        })
+        .collect::<Vec<_>>();
+    let stable_wire_prefix = bodies[0]["messages"][0].clone();
+    let stable_wire_tools = bodies[0]["tools"].clone();
+    for body in &bodies {
+        assert_eq!(body["messages"][0], stable_wire_prefix);
+        assert_eq!(body["tools"], stable_wire_tools);
+        assert_eq!(
+            body["tools"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+    }
+    assert!(
+        bodies[19]["messages"]
+            .as_array()
+            .is_some_and(|messages| messages.len() > 20)
+    );
 }
 
 #[tokio::test]
@@ -1303,6 +1537,9 @@ async fn copilot_dynamic_metadata_exposes_caps_and_nominal_credit_rates() {
     .with_github_copilot_test_origin("github-copilot", origin, "rottweiler-test-client")
     .build(&config)
     .unwrap_or_else(|error| panic!("metadata Copilot factory must build: {error}"));
+    let undiscovered = runtime.context_metadata("fast");
+    assert_eq!(undiscovered.max_context_tokens, None);
+    assert_eq!(undiscovered.max_output_tokens, None);
     let metadata = runtime
         .model_metadata("github-copilot/fixture-model")
         .await
@@ -1312,6 +1549,13 @@ async fn copilot_dynamic_metadata_exposes_caps_and_nominal_credit_rates() {
     assert!(metadata.capabilities.thinking);
     assert_eq!(metadata.capabilities.max_context_tokens, Some(100_000));
     assert_eq!(metadata.capabilities.max_output_tokens, Some(4_096));
+    let discovered = runtime.context_metadata("fast");
+    assert_eq!(discovered.max_context_tokens, Some(100_000));
+    assert_eq!(discovered.max_output_tokens, Some(4_096));
+    assert_eq!(
+        discovered.cache_breakpoints,
+        Some(rw_providers::CacheBreakpointSupport::None)
+    );
     let micros_usd_per_credit = match metadata.accounting {
         ModelAccounting::AiCredits {
             micros_usd_per_credit,
@@ -1342,6 +1586,23 @@ async fn copilot_dynamic_metadata_exposes_caps_and_nominal_credit_rates() {
         .unwrap_or_else(|| panic!("nominal Copilot pricing must resolve"));
     assert_eq!(cost.total_micros_usd, 11_000);
     // 2 input batches * .25 + .5 output batches * 1 + 1 cache batch * .1
+    let runtime_cost = runtime.accounting_for_alias(
+        "fast",
+        rw_providers::TokenUsage {
+            input_tokens: 2_000,
+            output_tokens: 500,
+            cache_read_tokens: 1_000,
+            ..rw_providers::TokenUsage::default()
+        },
+    );
+    assert_eq!(
+        runtime_cost,
+        rw_types::Cost::AiCredits {
+            credits_micros: 1_100_000,
+            nominal_amount_micros: Some("11000".to_owned()),
+            currency: Some("USD".to_owned()),
+        }
+    );
     // = 1.1 AI Credits, expressed exactly as an 11/10 rational.
     assert_eq!(cost.total_micros_usd * 10, micros_usd_per_credit * 11);
     server

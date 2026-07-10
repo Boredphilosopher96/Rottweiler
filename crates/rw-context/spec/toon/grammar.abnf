@@ -1,0 +1,25 @@
+; Core rules from RFC 5234
+ALPHA  = %x41-5A / %x61-7A   ; A-Z / a-z
+DIGIT  = %x30-39             ; 0-9
+DQUOTE = %x22                ; "
+HTAB   = %x09                ; horizontal tab
+LF     = %x0A                ; line feed
+SP     = %x20                ; space
+
+; Header syntax
+bracket-seg   = "[" 1*DIGIT [ delimsym ] "]"
+delimsym      = HTAB / "|"
+; Field names are keys (quoted/unquoted) separated by the active delimiter
+fields-seg    = "{" fieldname *( delim fieldname ) "}"
+delim         = delimsym / ","
+fieldname     = key
+
+header        = [ key ] bracket-seg [ fields-seg ] ":"
+key           = unquoted-key / quoted-key
+
+; Unquoted keys must match identifier pattern
+unquoted-key  = ( ALPHA / "_" ) *( ALPHA / DIGIT / "_" / "." )
+
+; Quoted keys use only escapes from Section 7.1
+; (Exact escaped-char repertoire is defined in Section 7.1)
+; quoted-key   = DQUOTE *(escaped-char / safe-char) DQUOTE

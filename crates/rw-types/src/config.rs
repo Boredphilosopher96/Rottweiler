@@ -13,6 +13,12 @@ pub struct Config {
     pub engine: EngineConfig,
     /// Provider-blind model role configuration.
     pub models: ModelConfig,
+    /// Automatic/manual context compaction settings.
+    #[serde(default)]
+    pub compaction: CompactionConfig,
+    /// Monetary and provider-credit budget guardrails.
+    #[serde(default)]
+    pub budget: BudgetConfig,
     /// User-scoped provider connection settings, keyed by a local provider name.
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Outbound networking configuration.
@@ -25,6 +31,102 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     /// Self-update channel configuration.
     pub updates: UpdateConfig,
+}
+
+/// Provider-blind context compaction settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompactionConfig {
+    /// Whether local overflow estimates trigger automatic compaction.
+    pub auto: bool,
+    /// Explicit token reserve; absent uses `min(20_000, max_output_tokens)`.
+    #[serde(rename = "reserved", alias = "reserved_tokens")]
+    pub reserved_tokens: Option<u64>,
+    /// Optional compaction model alias; absent or unresolved falls back to the
+    /// current session alias.
+    pub model_alias: Option<String>,
+}
+
+impl Default for CompactionConfig {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            reserved_tokens: None,
+            model_alias: None,
+        }
+    }
+}
+
+impl CompactionConfig {
+    /// Validates context-independent compaction invariants.
+    ///
+    /// Resolved model context-window validation remains an engine concern.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a zero reserve or blank model alias.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.reserved_tokens == Some(0) {
+            return Err("compaction.reserved must be greater than zero");
+        }
+        if self
+            .model_alias
+            .as_deref()
+            .is_some_and(|alias| alias.trim().is_empty())
+        {
+            return Err("compaction.model_alias must not be empty");
+        }
+        Ok(())
+    }
+}
+
+/// Session and daily spend guardrails in explicit billing units.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct BudgetConfig {
+    /// Session ordinary API-cost cap in micro-US-dollars.
+    pub session_cost_cap_micros_usd: Option<u64>,
+    /// UTC-day ordinary API-cost cap in micro-US-dollars.
+    pub daily_cost_cap_micros_usd: Option<u64>,
+    /// Session provider-credit cap in micro-credits.
+    pub session_ai_credit_cap_micros: Option<u64>,
+    /// UTC-day provider-credit cap in micro-credits.
+    pub daily_ai_credit_cap_micros: Option<u64>,
+    /// Ordinary API spend-rate alarm over a trailing minute.
+    pub spend_rate_alarm_micros_usd_per_minute: Option<u64>,
+    /// Provider-credit burn-rate alarm over a trailing minute.
+    pub ai_credit_rate_alarm_micros_per_minute: Option<u64>,
+    /// Percentage of a cap at which a warning is emitted.
+    pub warn_at_percent: u8,
+}
+
+impl Default for BudgetConfig {
+    fn default() -> Self {
+        Self {
+            session_cost_cap_micros_usd: None,
+            daily_cost_cap_micros_usd: None,
+            session_ai_credit_cap_micros: None,
+            daily_ai_credit_cap_micros: None,
+            spend_rate_alarm_micros_usd_per_minute: None,
+            ai_credit_rate_alarm_micros_per_minute: None,
+            warn_at_percent: 80,
+        }
+    }
+}
+
+impl BudgetConfig {
+    /// Validates the configured warning threshold. Explicit zero caps remain
+    /// valid and intentionally stop spending immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `warn_at_percent` is outside 1 through 100.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !(1..=100).contains(&self.warn_at_percent) {
+            return Err("budget.warn_at_percent must be between 1 and 100");
+        }
+        Ok(())
+    }
 }
 
 /// Engine runtime settings.
@@ -210,6 +312,10 @@ pub struct ConfigFile {
     pub engine: Option<EngineConfigFile>,
     /// Optional model settings.
     pub models: Option<ModelConfigFile>,
+    /// Optional compaction settings.
+    pub compaction: Option<CompactionConfigFile>,
+    /// Optional budget settings.
+    pub budget: Option<BudgetConfigFile>,
     /// Optional user-scoped provider connection settings.
     pub providers: Option<BTreeMap<String, ProviderConfig>>,
     /// Optional network settings.
@@ -222,6 +328,29 @@ pub struct ConfigFile {
     pub telemetry: Option<TelemetryConfigFile>,
     /// Optional update settings.
     pub updates: Option<UpdateConfigFile>,
+}
+
+/// Partial compaction configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompactionConfigFile {
+    pub auto: Option<bool>,
+    #[serde(rename = "reserved", alias = "reserved_tokens")]
+    pub reserved_tokens: Option<u64>,
+    pub model_alias: Option<String>,
+}
+
+/// Partial spend guardrail configuration.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetConfigFile {
+    pub session_cost_cap_micros_usd: Option<u64>,
+    pub daily_cost_cap_micros_usd: Option<u64>,
+    pub session_ai_credit_cap_micros: Option<u64>,
+    pub daily_ai_credit_cap_micros: Option<u64>,
+    pub spend_rate_alarm_micros_usd_per_minute: Option<u64>,
+    pub ai_credit_rate_alarm_micros_per_minute: Option<u64>,
+    pub warn_at_percent: Option<u8>,
 }
 
 /// Partial engine configuration.

@@ -30,6 +30,7 @@ fn request() -> ProviderRequest {
         max_output_tokens: 32,
         temperature: None,
         thinking: ThinkingLevel::Off,
+        cache_hint: None,
     }
 }
 

@@ -11,13 +11,24 @@ fn config_check_prints_values_and_leaf_provenance() {
     let output = Command::new(env!("CARGO_BIN_EXE_rw"))
         .current_dir(root.path())
         .env("ROTTWEILER_HOME", root.path().join("user"))
-        .args(["config", "check", "--set", "models.default=test-fast"])
+        .args([
+            "config",
+            "check",
+            "--set",
+            "models.default=test-fast",
+            "--set",
+            "compaction.reserved=4096",
+            "--set",
+            "budget.session_cost_cap_micros_usd=250000",
+        ])
         .output()
         .expect("rw config check should run");
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("stdout should be UTF-8");
     assert!(stdout.contains("models.default = \"test-fast\" [cli]"));
+    assert!(stdout.contains("compaction.reserved = 4096 [cli]"));
+    assert!(stdout.contains("budget.session_cost_cap_micros_usd = 250000 [cli]"));
     assert!(stdout.contains("permissions.default = ask [built-in]"));
 }
 

@@ -15,7 +15,7 @@ use std::{
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
-use rw_types::SequenceId;
+use rw_types::{AccountingAttribution, Cost, SequenceId, TurnId, Usage};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
@@ -218,6 +218,753 @@ pub struct SessionProjection {
     pub projected_through: Option<SequenceId>,
 }
 
+/// Validated UTC calendar-day key used by accounting queries and projections.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UtcDayKey(String);
+
+impl UtcDayKey {
+    /// Parses an exact `YYYY-MM-DD` UTC day key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionStoreError::InvalidAccountingTimestamp`] for malformed
+    /// or impossible calendar dates.
+    pub fn parse(value: impl Into<String>) -> Result<Self, SessionStoreError> {
+        let value = value.into();
+        validate_utc_day(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Returns the validated wire representation.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for UtcDayKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Validated millisecond-precision UTC timestamp used as an injected budget
+/// and spend-rate clock boundary.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UtcTimestamp(String);
+
+impl UtcTimestamp {
+    /// Parses an exact `YYYY-MM-DDTHH:MM:SS.mmmZ` UTC timestamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionStoreError::InvalidAccountingTimestamp`] for malformed
+    /// or impossible timestamps.
+    pub fn parse(value: impl Into<String>) -> Result<Self, SessionStoreError> {
+        let value = value.into();
+        validate_utc_timestamp(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Converts milliseconds since the Unix epoch to the normalized UTC wire
+    /// representation used by event metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionStoreError::InvalidAccountingTimestamp`] when the
+    /// instant is outside the four-digit year range supported by the schema.
+    pub fn from_unix_millis(unix_millis: u64) -> Result<Self, SessionStoreError> {
+        let seconds = unix_millis / 1_000;
+        let millis = unix_millis % 1_000;
+        let days = i64::try_from(seconds / 86_400)
+            .map_err(|_| SessionStoreError::InvalidAccountingTimestamp)?;
+        let second_of_day = seconds % 86_400;
+        let (year, month, day) = civil_from_days(days);
+        if !(1..=9_999).contains(&year) {
+            return Err(SessionStoreError::InvalidAccountingTimestamp);
+        }
+        let hour = second_of_day / 3_600;
+        let minute = (second_of_day % 3_600) / 60;
+        let second = second_of_day % 60;
+        Self::parse(format!(
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z"
+        ))
+    }
+
+    /// Returns the validated wire representation.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Derives the UTC calendar day from this already-validated timestamp.
+    #[must_use]
+    pub fn utc_day(&self) -> UtcDayKey {
+        UtcDayKey(self.0[..10].to_owned())
+    }
+}
+
+impl std::fmt::Display for UtcTimestamp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i64, i64, i64) {
+    let shifted = days_since_epoch.saturating_add(719_468);
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    (year, month, day)
+}
+
+/// One authoritative per-turn accounting fact projected from a durable
+/// `TurnFinished` engine event.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TurnAccountingEntry {
+    /// Session whose turn incurred the cost or quota usage.
+    pub session_id: String,
+    /// Stable engine turn identifier.
+    pub turn_id: TurnId,
+    /// Sequence of the authoritative `TurnFinished` event.
+    pub sequence_id: SequenceId,
+    /// Normalized UTC event timestamp (`YYYY-MM-DDTHH:MM:SS.mmmZ`).
+    pub emitted_at_utc: UtcTimestamp,
+    /// UTC calendar day (`YYYY-MM-DD`) derived from the injected event clock.
+    pub utc_day: UtcDayKey,
+    /// Runtime role which incurred this usage and cost.
+    pub attribution: AccountingAttribution,
+    /// Provider-normalized token usage for this accounting fact.
+    pub usage: Usage,
+    /// Provider-neutral accounting disposition. Subscription and unavailable
+    /// values remain typed instead of becoming zero-cost monetary entries.
+    pub cost: Cost,
+}
+
+/// Durable totals used by session and calendar-day budget decisions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountingTotals {
+    /// Session selected by the query.
+    pub session_id: String,
+    /// UTC calendar day selected by the query.
+    pub utc_day: UtcDayKey,
+    /// Inclusive start of the selected UTC day.
+    pub utc_day_start_utc: UtcTimestamp,
+    /// Inclusive start of the injected trailing spend-rate window.
+    pub trailing_window_start_utc: UtcTimestamp,
+    /// Inclusive end of the injected trailing spend-rate window.
+    pub trailing_window_end_utc: UtcTimestamp,
+    /// All-time USD micro-cost for the selected session.
+    pub session_micros_usd: u64,
+    /// USD micro-cost across all sessions during the selected UTC day.
+    pub day_micros_usd: u64,
+    /// USD micro-cost for the selected session inside the trailing window.
+    pub trailing_session_micros_usd: u64,
+    /// USD micro-cost across all sessions inside the trailing window.
+    pub trailing_all_sessions_micros_usd: u64,
+    /// All-time AI-credit micro-units for the selected session.
+    pub session_ai_credit_micros: u64,
+    /// AI-credit micro-units across all sessions during the selected UTC day.
+    pub day_ai_credit_micros: u64,
+    /// AI-credit micro-units for the selected session inside the trailing window.
+    pub trailing_session_ai_credit_micros: u64,
+    /// AI-credit micro-units across all sessions inside the trailing window.
+    pub trailing_all_sessions_ai_credit_micros: u64,
+    /// Subscription-quota turns in the selected session.
+    pub session_subscription_quota_turns: u64,
+    /// Subscription-quota turns during the selected UTC day.
+    pub day_subscription_quota_turns: u64,
+    /// Cost-unavailable turns in the selected session.
+    pub session_unavailable_turns: u64,
+    /// Cost-unavailable turns during the selected UTC day.
+    pub day_unavailable_turns: u64,
+    /// Non-USD monetary turns retained for the selected session but excluded
+    /// from USD caps.
+    pub session_non_usd_monetary_turns: u64,
+    /// Non-USD monetary turns during the selected UTC day.
+    pub day_non_usd_monetary_turns: u64,
+}
+
+/// Rebuildable `SQLite` accounting projection. Session JSONL logs remain the
+/// authority; every method is idempotent so startup reconciliation is safe.
+#[derive(Clone, Debug)]
+pub struct AccountingLedger {
+    path: PathBuf,
+}
+
+impl AccountingLedger {
+    /// Opens the shared derived index and installs the accounting schema when
+    /// migrating an older M0-M2 index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O or `SQLite` schema error.
+    pub fn open(root: &Path) -> Result<Self, SessionStoreError> {
+        fs::create_dir_all(root)?;
+        let ledger = Self {
+            path: root.join("index.sqlite"),
+        };
+        ledger.connection()?;
+        Ok(ledger)
+    }
+
+    /// Idempotently records one event-log-derived turn entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid identity/time fields, conflicting event
+    /// identities, serialization failure, or `SQLite` failure.
+    pub fn record(&self, entry: &TurnAccountingEntry) -> Result<(), SessionStoreError> {
+        validate_accounting_entry(entry)?;
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        insert_accounting_entry(&transaction, entry)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Reconciles a projected event-log prefix without deleting rows written by
+    /// concurrently active sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-entry, conflict, serialization, or transaction error.
+    pub fn reconcile(&self, entries: &[TurnAccountingEntry]) -> Result<(), SessionStoreError> {
+        for entry in entries {
+            validate_accounting_entry(entry)?;
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        for entry in entries {
+            insert_accounting_entry(&transaction, entry)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Atomically replaces the accounting projection from authoritative event
+    /// logs. Callers must first quiesce session writers; ordinary startup should
+    /// prefer [`Self::reconcile`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-entry, conflict, serialization, or transaction error.
+    pub fn replace_all(&self, entries: &[TurnAccountingEntry]) -> Result<(), SessionStoreError> {
+        for entry in entries {
+            validate_accounting_entry(entry)?;
+        }
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        transaction.execute("DELETE FROM turn_accounting", [])?;
+        for entry in entries {
+            insert_accounting_entry(&transaction, entry)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Returns typed entries for one session in numeric event-sequence order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-id, corrupt-row, JSON, or `SQLite` error.
+    pub fn entries_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<TurnAccountingEntry>, SessionStoreError> {
+        validate_session_id(session_id)?;
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT session_id,turn_id,sequence_id,emitted_at_utc,utc_day,\
+                    attribution_json,usage_json,cost_json \
+             FROM turn_accounting WHERE session_id=?1 \
+             ORDER BY length(sequence_id),sequence_id",
+        )?;
+        let rows = statement.query_map([session_id], accounting_entry_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(SessionStoreError::from)
+    }
+
+    /// Returns every typed entry in stable session and numeric sequence order.
+    /// This is primarily useful for validating or copying a derived projection;
+    /// rebuild callers should prefer entries projected directly from JSONL.
+    ///
+    /// # Errors
+    ///
+    /// Returns a corrupt-row, JSON, or `SQLite` error.
+    pub fn entries(&self) -> Result<Vec<TurnAccountingEntry>, SessionStoreError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT session_id,turn_id,sequence_id,emitted_at_utc,utc_day,\
+                    attribution_json,usage_json,cost_json \
+             FROM turn_accounting \
+             ORDER BY session_id,length(sequence_id),sequence_id",
+        )?;
+        let rows = statement.query_map([], accounting_entry_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(SessionStoreError::from)
+    }
+
+    /// Computes session, UTC-day, and trailing-window totals as of the injected
+    /// window end. The caller supplies every boundary so replay never reads a
+    /// clock and future-dated rows cannot affect a current budget decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid query, corrupt-row, overflow, JSON, or `SQLite` error.
+    #[allow(clippy::too_many_lines)]
+    pub fn totals(
+        &self,
+        session_id: &str,
+        utc_day: &UtcDayKey,
+        trailing_window_start_utc: &UtcTimestamp,
+        trailing_window_end_utc: &UtcTimestamp,
+    ) -> Result<AccountingTotals, SessionStoreError> {
+        validate_session_id(session_id)?;
+        if trailing_window_start_utc > trailing_window_end_utc {
+            return Err(SessionStoreError::InvalidAccountingTimestamp);
+        }
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT session_id,utc_day,emitted_at_utc,cost_json FROM turn_accounting \
+             WHERE emitted_at_utc<=?4 \
+               AND (session_id=?1 OR utc_day=?2 OR emitted_at_utc>=?3)",
+        )?;
+        let rows = statement.query_map(
+            params![
+                session_id,
+                utc_day.as_str(),
+                trailing_window_start_utc.as_str(),
+                trailing_window_end_utc.as_str()
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )?;
+        let mut totals = AccountingTotals::empty(
+            session_id,
+            utc_day,
+            trailing_window_start_utc,
+            trailing_window_end_utc,
+        );
+        for row in rows {
+            let (row_session, row_day, emitted_at, cost_json) = row?;
+            let cost: Cost = serde_json::from_str(&cost_json)?;
+            let in_session = row_session == session_id;
+            let in_day = row_day == utc_day.as_str();
+            let in_window = emitted_at.as_str() >= trailing_window_start_utc.as_str()
+                && emitted_at.as_str() <= trailing_window_end_utc.as_str();
+            if in_session {
+                add_accounting_cost(&cost, &mut totals, AccountingScope::Session)?;
+                if in_window {
+                    add_accounting_cost(&cost, &mut totals, AccountingScope::TrailingSession)?;
+                }
+            }
+            if in_day {
+                add_accounting_cost(&cost, &mut totals, AccountingScope::Day)?;
+            }
+            if in_window {
+                add_accounting_cost(&cost, &mut totals, AccountingScope::TrailingAllSessions)?;
+            }
+        }
+        Ok(totals)
+    }
+
+    fn connection(&self) -> Result<Connection, SessionStoreError> {
+        let connection = Connection::open(&self.path)?;
+        configure_connection(&connection)?;
+        ensure_accounting_schema(&connection)?;
+        Ok(connection)
+    }
+}
+
+impl AccountingTotals {
+    fn empty(
+        session_id: &str,
+        utc_day: &UtcDayKey,
+        trailing_window_start_utc: &UtcTimestamp,
+        trailing_window_end_utc: &UtcTimestamp,
+    ) -> Self {
+        Self {
+            session_id: session_id.to_owned(),
+            utc_day: utc_day.clone(),
+            utc_day_start_utc: UtcTimestamp(format!("{utc_day}T00:00:00.000Z")),
+            trailing_window_start_utc: trailing_window_start_utc.clone(),
+            trailing_window_end_utc: trailing_window_end_utc.clone(),
+            session_micros_usd: 0,
+            day_micros_usd: 0,
+            trailing_session_micros_usd: 0,
+            trailing_all_sessions_micros_usd: 0,
+            session_ai_credit_micros: 0,
+            day_ai_credit_micros: 0,
+            trailing_session_ai_credit_micros: 0,
+            trailing_all_sessions_ai_credit_micros: 0,
+            session_subscription_quota_turns: 0,
+            day_subscription_quota_turns: 0,
+            session_unavailable_turns: 0,
+            day_unavailable_turns: 0,
+            session_non_usd_monetary_turns: 0,
+            day_non_usd_monetary_turns: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AccountingScope {
+    Session,
+    Day,
+    TrailingSession,
+    TrailingAllSessions,
+}
+
+fn add_accounting_cost(
+    cost: &Cost,
+    totals: &mut AccountingTotals,
+    scope: AccountingScope,
+) -> Result<(), SessionStoreError> {
+    match cost {
+        Cost::Monetary {
+            amount_micros,
+            currency,
+        } if currency.eq_ignore_ascii_case("USD") => match scope {
+            AccountingScope::Session => checked_add(&mut totals.session_micros_usd, *amount_micros),
+            AccountingScope::Day => checked_add(&mut totals.day_micros_usd, *amount_micros),
+            AccountingScope::TrailingSession => {
+                checked_add(&mut totals.trailing_session_micros_usd, *amount_micros)
+            }
+            AccountingScope::TrailingAllSessions => {
+                checked_add(&mut totals.trailing_all_sessions_micros_usd, *amount_micros)
+            }
+        },
+        Cost::Monetary { .. } => match scope {
+            AccountingScope::Session => checked_add(&mut totals.session_non_usd_monetary_turns, 1),
+            AccountingScope::Day => checked_add(&mut totals.day_non_usd_monetary_turns, 1),
+            AccountingScope::TrailingSession | AccountingScope::TrailingAllSessions => Ok(()),
+        },
+        Cost::AiCredits { credits_micros, .. } => match scope {
+            AccountingScope::Session => {
+                checked_add(&mut totals.session_ai_credit_micros, *credits_micros)
+            }
+            AccountingScope::Day => checked_add(&mut totals.day_ai_credit_micros, *credits_micros),
+            AccountingScope::TrailingSession => checked_add(
+                &mut totals.trailing_session_ai_credit_micros,
+                *credits_micros,
+            ),
+            AccountingScope::TrailingAllSessions => checked_add(
+                &mut totals.trailing_all_sessions_ai_credit_micros,
+                *credits_micros,
+            ),
+        },
+        Cost::SubscriptionQuota { .. } => match scope {
+            AccountingScope::Session => {
+                checked_add(&mut totals.session_subscription_quota_turns, 1)
+            }
+            AccountingScope::Day => checked_add(&mut totals.day_subscription_quota_turns, 1),
+            AccountingScope::TrailingSession | AccountingScope::TrailingAllSessions => Ok(()),
+        },
+        Cost::Unavailable { .. } => match scope {
+            AccountingScope::Session => checked_add(&mut totals.session_unavailable_turns, 1),
+            AccountingScope::Day => checked_add(&mut totals.day_unavailable_turns, 1),
+            AccountingScope::TrailingSession | AccountingScope::TrailingAllSessions => Ok(()),
+        },
+    }
+}
+
+fn checked_add(total: &mut u64, value: u64) -> Result<(), SessionStoreError> {
+    *total = total
+        .checked_add(value)
+        .ok_or(SessionStoreError::AccountingOverflow)?;
+    Ok(())
+}
+
+fn validate_accounting_entry(entry: &TurnAccountingEntry) -> Result<(), SessionStoreError> {
+    validate_session_id(&entry.session_id)?;
+    if entry.turn_id.0.is_empty() || entry.turn_id.0.len() > 128 {
+        return Err(SessionStoreError::InvalidAccountingIdentity);
+    }
+    if entry.emitted_at_utc.utc_day() != entry.utc_day {
+        return Err(SessionStoreError::InvalidAccountingTimestamp);
+    }
+    Ok(())
+}
+
+fn validate_utc_day(value: &str) -> Result<(), SessionStoreError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| !matches!(index, 4 | 7) && !byte.is_ascii_digit())
+    {
+        return Err(SessionStoreError::InvalidAccountingTimestamp);
+    }
+    let year = value[0..4]
+        .parse::<u32>()
+        .map_err(|_| SessionStoreError::InvalidAccountingTimestamp)?;
+    let month = value[5..7]
+        .parse::<u32>()
+        .map_err(|_| SessionStoreError::InvalidAccountingTimestamp)?;
+    let day = value[8..10]
+        .parse::<u32>()
+        .map_err(|_| SessionStoreError::InvalidAccountingTimestamp)?;
+    let leap_year =
+        year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => return Err(SessionStoreError::InvalidAccountingTimestamp),
+    };
+    if year == 0 || !(1..=days_in_month).contains(&day) {
+        return Err(SessionStoreError::InvalidAccountingTimestamp);
+    }
+    Ok(())
+}
+
+fn validate_utc_timestamp(value: &str) -> Result<(), SessionStoreError> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 24
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'.'
+        || bytes[23] != b'Z'
+        || bytes.iter().enumerate().any(|(index, byte)| {
+            !matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) && !byte.is_ascii_digit()
+        })
+    {
+        return Err(SessionStoreError::InvalidAccountingTimestamp);
+    }
+    validate_utc_day(&value[..10])?;
+    let hour = value[11..13]
+        .parse::<u32>()
+        .map_err(|_| SessionStoreError::InvalidAccountingTimestamp)?;
+    let minute = value[14..16]
+        .parse::<u32>()
+        .map_err(|_| SessionStoreError::InvalidAccountingTimestamp)?;
+    let second = value[17..19]
+        .parse::<u32>()
+        .map_err(|_| SessionStoreError::InvalidAccountingTimestamp)?;
+    let millis = value[20..23]
+        .parse::<u32>()
+        .map_err(|_| SessionStoreError::InvalidAccountingTimestamp)?;
+    if hour > 23 || minute > 59 || second > 59 || millis > 999 {
+        return Err(SessionStoreError::InvalidAccountingTimestamp);
+    }
+    Ok(())
+}
+
+fn insert_accounting_entry(
+    connection: &Connection,
+    entry: &TurnAccountingEntry,
+) -> Result<(), SessionStoreError> {
+    let sequence = entry.sequence_id.0.to_string();
+    let attribution_json = serde_json::to_string(&entry.attribution)?;
+    let usage_json = serde_json::to_string(&entry.usage)?;
+    let cost_json = serde_json::to_string(&entry.cost)?;
+    let inserted = connection.execute(
+        "INSERT OR IGNORE INTO turn_accounting(\
+           session_id,turn_id,sequence_id,emitted_at_utc,utc_day,\
+           attribution_json,usage_json,cost_json\
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![
+            entry.session_id,
+            entry.turn_id.0,
+            sequence,
+            entry.emitted_at_utc.as_str(),
+            entry.utc_day.as_str(),
+            attribution_json,
+            usage_json,
+            cost_json,
+        ],
+    )?;
+    if inserted == 1 {
+        return Ok(());
+    }
+    let existing = connection
+        .query_row(
+            "SELECT session_id,turn_id,sequence_id,emitted_at_utc,utc_day,\
+                    attribution_json,usage_json,cost_json \
+             FROM turn_accounting WHERE session_id=?1 AND sequence_id=?2 \
+             LIMIT 1",
+            params![entry.session_id, entry.sequence_id.0.to_string()],
+            accounting_entry_from_row,
+        )
+        .optional()?;
+    if existing.as_ref() == Some(entry) {
+        Ok(())
+    } else {
+        Err(SessionStoreError::AccountingConflict)
+    }
+}
+
+fn accounting_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TurnAccountingEntry> {
+    let sequence = row.get::<_, String>(2)?;
+    let attribution_json = row.get::<_, String>(5)?;
+    let usage_json = row.get::<_, String>(6)?;
+    let cost_json = row.get::<_, String>(7)?;
+    let sequence_id = sequence.parse::<u64>().map(SequenceId).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let attribution =
+        serde_json::from_str::<AccountingAttribution>(&attribution_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+    let usage = serde_json::from_str::<Usage>(&usage_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    let cost = serde_json::from_str::<Cost>(&cost_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(error))
+    })?;
+    Ok(TurnAccountingEntry {
+        session_id: row.get(0)?,
+        turn_id: TurnId(row.get(1)?),
+        sequence_id,
+        emitted_at_utc: UtcTimestamp::parse(row.get::<_, String>(3)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                3,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        utc_day: UtcDayKey::parse(row.get::<_, String>(4)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                4,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?,
+        attribution,
+        usage,
+        cost,
+    })
+}
+
+fn configure_connection(connection: &Connection) -> Result<(), SessionStoreError> {
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+    Ok(())
+}
+
+fn ensure_accounting_schema(connection: &Connection) -> Result<(), SessionStoreError> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS turn_accounting(
+           session_id TEXT NOT NULL,
+           turn_id TEXT NOT NULL,
+           sequence_id TEXT NOT NULL,
+           emitted_at_utc TEXT NOT NULL,
+           utc_day TEXT NOT NULL,
+           attribution_json TEXT NOT NULL,
+           usage_json TEXT NOT NULL,
+           cost_json TEXT NOT NULL,
+           PRIMARY KEY(session_id,sequence_id)
+         );",
+    )?;
+    ensure_accounting_columns(connection)?;
+    remove_legacy_turn_uniqueness(connection)?;
+    connection.execute_batch(
+        "CREATE INDEX IF NOT EXISTS turn_accounting_session_time
+           ON turn_accounting(session_id,emitted_at_utc);
+         CREATE INDEX IF NOT EXISTS turn_accounting_day_time
+           ON turn_accounting(utc_day,emitted_at_utc);
+         CREATE INDEX IF NOT EXISTS turn_accounting_time
+           ON turn_accounting(emitted_at_utc);",
+    )?;
+    Ok(())
+}
+
+fn remove_legacy_turn_uniqueness(connection: &Connection) -> Result<(), SessionStoreError> {
+    let schema = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='turn_accounting'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    let normalized = schema
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    if !normalized.contains("unique(session_id,turn_id)") {
+        return Ok(());
+    }
+    connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         ALTER TABLE turn_accounting RENAME TO turn_accounting_legacy_turn_unique;
+         CREATE TABLE turn_accounting(
+           session_id TEXT NOT NULL,
+           turn_id TEXT NOT NULL,
+           sequence_id TEXT NOT NULL,
+           emitted_at_utc TEXT NOT NULL,
+           utc_day TEXT NOT NULL,
+           attribution_json TEXT NOT NULL,
+           usage_json TEXT NOT NULL,
+           cost_json TEXT NOT NULL,
+           PRIMARY KEY(session_id,sequence_id)
+         );
+         INSERT INTO turn_accounting(
+           session_id,turn_id,sequence_id,emitted_at_utc,utc_day,
+           attribution_json,usage_json,cost_json
+         ) SELECT
+           session_id,turn_id,sequence_id,emitted_at_utc,utc_day,
+           attribution_json,usage_json,cost_json
+         FROM turn_accounting_legacy_turn_unique;
+         DROP TABLE turn_accounting_legacy_turn_unique;
+         COMMIT;",
+    )?;
+    Ok(())
+}
+
+fn ensure_accounting_columns(connection: &Connection) -> Result<(), SessionStoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(turn_accounting)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    if !columns.iter().any(|column| column == "attribution_json") {
+        connection.execute(
+            "ALTER TABLE turn_accounting ADD COLUMN attribution_json TEXT NOT NULL \
+             DEFAULT '\"main\"'",
+            [],
+        )?;
+    }
+    if !columns.iter().any(|column| column == "usage_json") {
+        connection.execute(
+            "ALTER TABLE turn_accounting ADD COLUMN usage_json TEXT NOT NULL DEFAULT \
+             '{\"input_tokens\":\"0\",\"output_tokens\":\"0\",\
+               \"cache_read_tokens\":\"0\",\"cache_write_tokens\":\"0\",\
+               \"reasoning_tokens\":\"0\"}'",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 /// Whether a derived index row agrees with the authoritative event log.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectionStatus {
@@ -298,10 +1045,14 @@ impl SessionIndex {
     pub fn rebuild(
         root: &Path,
         projections: &[SessionProjection],
+        accounting_entries: &[TurnAccountingEntry],
     ) -> Result<Self, SessionStoreError> {
         fs::create_dir_all(root)?;
         for projection in projections {
             validate_session_id(&projection.summary.id)?;
+        }
+        for entry in accounting_entries {
+            validate_accounting_entry(entry)?;
         }
         let temporary = root.join(format!(
             ".index-{}-{}.sqlite",
@@ -315,6 +1066,10 @@ impl SessionIndex {
         remove_if_exists(&sidecar_path(&temporary, "-wal"))?;
         remove_if_exists(&sidecar_path(&temporary, "-shm"))?;
         temporary_index.replace_all(projections)?;
+        AccountingLedger {
+            path: temporary.clone(),
+        }
+        .replace_all(accounting_entries)?;
         {
             let connection = temporary_index.connection()?;
             connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -378,11 +1133,9 @@ impl SessionIndex {
 
     fn connection(&self) -> Result<Connection, SessionStoreError> {
         let connection = Connection::open(&self.path)?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        configure_connection(&connection)?;
         connection.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=FULL;
-             CREATE TABLE IF NOT EXISTS sessions(
+            "CREATE TABLE IF NOT EXISTS sessions(
                id TEXT NOT NULL UNIQUE,
                title TEXT NOT NULL,
                updated_unix_ms INTEGER NOT NULL,
@@ -392,6 +1145,7 @@ impl SessionIndex {
              );",
         )?;
         ensure_projection_column(&connection)?;
+        ensure_accounting_schema(&connection)?;
         connection.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
                title,transcript,content='sessions',content_rowid='rowid'
@@ -815,6 +1569,18 @@ pub enum SessionStoreError {
     /// A derived index row stored a malformed decimal watermark.
     #[error("session index projection watermark is corrupt")]
     CorruptProjectionWatermark,
+    /// Turn/sequence identity in an accounting projection is malformed.
+    #[error("accounting entry identity is invalid")]
+    InvalidAccountingIdentity,
+    /// Accounting timestamps must be normalized UTC values with a matching day key.
+    #[error("accounting timestamp or UTC day key is invalid")]
+    InvalidAccountingTimestamp,
+    /// The same durable turn or sequence was projected with different accounting data.
+    #[error("accounting projection conflicts with an existing durable event identity")]
+    AccountingConflict,
+    /// Accumulated accounting values exceeded their lossless representation.
+    #[error("accounting total overflow")]
+    AccountingOverflow,
     /// A pre-sequenced event did not match the durable log tail.
     #[error("session event sequence mismatch: expected {expected:?}, got {actual:?}")]
     UnexpectedEventSequence {
@@ -848,17 +1614,54 @@ mod tests {
     use serde::{Deserialize, Serialize, Serializer, ser::Error as _};
     use tempfile::tempdir;
 
-    use rw_types::SequenceId;
+    use rw_types::{AccountingAttribution, Cost, SequenceId, TurnId, Usage};
 
     use super::{
-        EventEnvelope, ProjectionStatus, SessionEventLog, SessionIndex, SessionProjection,
-        SessionSummary,
+        AccountingLedger, EventEnvelope, ProjectionStatus, SessionEventLog, SessionIndex,
+        SessionProjection, SessionStoreError, SessionSummary, TurnAccountingEntry, UtcDayKey,
+        UtcTimestamp,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
     struct FixtureEvent {
         kind: String,
         text: String,
+    }
+
+    fn accounting_entry(
+        session_id: &str,
+        turn: u64,
+        sequence: u64,
+        emitted_at_utc: &str,
+        cost: Cost,
+    ) -> TurnAccountingEntry {
+        let emitted_at_utc = UtcTimestamp::parse(emitted_at_utc)
+            .unwrap_or_else(|error| panic!("fixture timestamp must parse: {error}"));
+        TurnAccountingEntry {
+            session_id: session_id.to_owned(),
+            turn_id: TurnId(turn.to_string()),
+            sequence_id: SequenceId(sequence),
+            utc_day: emitted_at_utc.utc_day(),
+            emitted_at_utc,
+            attribution: AccountingAttribution::Main,
+            usage: Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            cost,
+        }
+    }
+
+    fn utc_day(value: &str) -> UtcDayKey {
+        UtcDayKey::parse(value).unwrap_or_else(|error| panic!("fixture day must parse: {error}"))
+    }
+
+    fn utc_timestamp(value: &str) -> UtcTimestamp {
+        UtcTimestamp::parse(value)
+            .unwrap_or_else(|error| panic!("fixture timestamp must parse: {error}"))
     }
 
     struct FailableEvent {
@@ -1100,6 +1903,441 @@ mod tests {
     }
 
     #[test]
+    fn accounting_schema_migrates_an_existing_index_without_losing_rows() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let path = root.path().join("index.sqlite");
+        let connection = rusqlite::Connection::open(&path)
+            .unwrap_or_else(|error| panic!("legacy index must open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE legacy_marker(value TEXT NOT NULL); \
+                 INSERT INTO legacy_marker(value) VALUES ('preserved'); \
+                 CREATE TABLE turn_accounting( \
+                   session_id TEXT NOT NULL, turn_id TEXT NOT NULL, \
+                   sequence_id TEXT NOT NULL, emitted_at_utc TEXT NOT NULL, \
+                   utc_day TEXT NOT NULL, cost_json TEXT NOT NULL, \
+                   PRIMARY KEY(session_id,sequence_id), UNIQUE(session_id,turn_id) \
+                 ); \
+                 INSERT INTO turn_accounting( \
+                   session_id,turn_id,sequence_id,emitted_at_utc,utc_day,cost_json \
+                 ) VALUES ( \
+                   'legacy-accounting','1','0','2026-01-01T00:00:00.000Z', \
+                   '2026-01-01', \
+                   '{\"kind\":\"monetary\",\"amount_micros\":\"5\",\"currency\":\"USD\"}' \
+                 );",
+            )
+            .unwrap_or_else(|error| panic!("legacy schema must create: {error}"));
+        drop(connection);
+
+        let ledger = AccountingLedger::open(root.path())
+            .unwrap_or_else(|error| panic!("accounting migration must open: {error}"));
+        let legacy = ledger
+            .entries_for_session("legacy-accounting")
+            .unwrap_or_else(|error| panic!("legacy accounting must migrate: {error}"));
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].attribution, AccountingAttribution::Main);
+        assert_eq!(
+            legacy[0].usage,
+            Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            }
+        );
+        let mut repeated_turn_charge = accounting_entry(
+            "legacy-accounting",
+            1,
+            1,
+            "2026-01-01T00:00:01.000Z",
+            Cost::Monetary {
+                amount_micros: 6,
+                currency: "USD".to_owned(),
+            },
+        );
+        repeated_turn_charge.attribution = AccountingAttribution::Compaction;
+        ledger
+            .record(&repeated_turn_charge)
+            .unwrap_or_else(|error| panic!("same turn may carry another charge: {error}"));
+        assert_eq!(
+            ledger
+                .entries_for_session("legacy-accounting")
+                .unwrap_or_else(|error| panic!("repeated charges must query: {error}"))
+                .len(),
+            2
+        );
+        ledger
+            .record(&accounting_entry(
+                "migrated",
+                1,
+                0,
+                "2026-01-01T00:00:00.000Z",
+                Cost::Monetary {
+                    amount_micros: 7,
+                    currency: "USD".to_owned(),
+                },
+            ))
+            .unwrap_or_else(|error| panic!("migrated ledger must record: {error}"));
+        let connection = rusqlite::Connection::open(&path)
+            .unwrap_or_else(|error| panic!("migrated index must reopen: {error}"));
+        let marker = connection
+            .query_row("SELECT value FROM legacy_marker", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap_or_else(|error| panic!("legacy marker must remain: {error}"));
+        assert_eq!(marker, "preserved");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn accounting_totals_cross_utc_day_without_erasing_nonpriced_costs() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let ledger = AccountingLedger::open(root.path())
+            .unwrap_or_else(|error| panic!("ledger must open: {error}"));
+        let entries = vec![
+            accounting_entry(
+                "session-a",
+                1,
+                0,
+                "2026-01-01T23:59:30.000Z",
+                Cost::Monetary {
+                    amount_micros: 100,
+                    currency: "USD".to_owned(),
+                },
+            ),
+            accounting_entry(
+                "session-a",
+                2,
+                1,
+                "2026-01-02T00:00:10.000Z",
+                Cost::AiCredits {
+                    credits_micros: 200,
+                    nominal_amount_micros: None,
+                    currency: None,
+                },
+            ),
+            accounting_entry(
+                "session-b",
+                1,
+                0,
+                "2026-01-02T00:00:20.000Z",
+                Cost::Monetary {
+                    amount_micros: 300,
+                    currency: "USD".to_owned(),
+                },
+            ),
+            accounting_entry(
+                "session-a",
+                3,
+                2,
+                "2026-01-02T00:00:30.000Z",
+                Cost::SubscriptionQuota {
+                    used: Some("1".to_owned()),
+                    unit: Some("request".to_owned()),
+                },
+            ),
+            accounting_entry(
+                "session-a",
+                4,
+                3,
+                "2026-01-02T00:00:40.000Z",
+                Cost::Unavailable {
+                    reason: "subscription pricing unavailable".to_owned(),
+                },
+            ),
+            accounting_entry(
+                "session-a",
+                5,
+                4,
+                "2026-01-02T00:00:50.000Z",
+                Cost::Monetary {
+                    amount_micros: 999,
+                    currency: "EUR".to_owned(),
+                },
+            ),
+            accounting_entry(
+                "session-b",
+                2,
+                1,
+                "2026-01-02T00:02:00.000Z",
+                Cost::Monetary {
+                    amount_micros: 5_000,
+                    currency: "USD".to_owned(),
+                },
+            ),
+        ];
+        ledger
+            .reconcile(&entries)
+            .unwrap_or_else(|error| panic!("entries must reconcile: {error}"));
+        let totals = ledger
+            .totals(
+                "session-a",
+                &utc_day("2026-01-02"),
+                &utc_timestamp("2026-01-01T23:59:45.000Z"),
+                &utc_timestamp("2026-01-02T00:00:59.999Z"),
+            )
+            .unwrap_or_else(|error| panic!("totals must query: {error}"));
+
+        assert_eq!(
+            totals.utc_day_start_utc.as_str(),
+            "2026-01-02T00:00:00.000Z"
+        );
+        assert_eq!(totals.session_micros_usd, 100);
+        assert_eq!(totals.day_micros_usd, 300);
+        assert_eq!(totals.trailing_session_micros_usd, 0);
+        assert_eq!(totals.trailing_all_sessions_micros_usd, 300);
+        assert_eq!(totals.session_ai_credit_micros, 200);
+        assert_eq!(totals.day_ai_credit_micros, 200);
+        assert_eq!(totals.trailing_session_ai_credit_micros, 200);
+        assert_eq!(totals.trailing_all_sessions_ai_credit_micros, 200);
+        assert_eq!(totals.session_subscription_quota_turns, 1);
+        assert_eq!(totals.day_subscription_quota_turns, 1);
+        assert_eq!(totals.session_unavailable_turns, 1);
+        assert_eq!(totals.day_unavailable_turns, 1);
+        assert_eq!(totals.session_non_usd_monetary_turns, 1);
+        assert_eq!(totals.day_non_usd_monetary_turns, 1);
+    }
+
+    #[test]
+    fn accounting_rebuild_is_idempotent_conflict_checked_and_rewind_independent() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let ledger = AccountingLedger::open(root.path())
+            .unwrap_or_else(|error| panic!("ledger must open: {error}"));
+        let paid = accounting_entry(
+            "paid-session",
+            1,
+            4,
+            "2026-02-03T04:05:06.007Z",
+            Cost::Monetary {
+                amount_micros: 41,
+                currency: "USD".to_owned(),
+            },
+        );
+        ledger
+            .record(&paid)
+            .and_then(|()| ledger.record(&paid))
+            .unwrap_or_else(|error| panic!("duplicate projection must be idempotent: {error}"));
+        assert_eq!(
+            ledger
+                .entries_for_session("paid-session")
+                .unwrap_or_else(|error| panic!("entries must query: {error}")),
+            vec![paid.clone()]
+        );
+
+        let mut conflicting = paid.clone();
+        conflicting.cost = Cost::Monetary {
+            amount_micros: 42,
+            currency: "USD".to_owned(),
+        };
+        assert!(matches!(
+            ledger.record(&conflicting),
+            Err(SessionStoreError::AccountingConflict)
+        ));
+
+        let replacement = accounting_entry(
+            "other-session",
+            1,
+            0,
+            "2026-02-03T04:05:07.000Z",
+            Cost::AiCredits {
+                credits_micros: 9,
+                nominal_amount_micros: None,
+                currency: None,
+            },
+        );
+        ledger
+            .reconcile(&[])
+            .unwrap_or_else(|error| panic!("empty rewind reconciliation must succeed: {error}"));
+        assert_eq!(
+            ledger
+                .entries_for_session("paid-session")
+                .unwrap_or_else(|error| panic!("paid history must query: {error}")),
+            vec![paid.clone()]
+        );
+
+        ledger
+            .replace_all(&[paid.clone(), replacement.clone()])
+            .unwrap_or_else(|error| panic!("authoritative rebuild must replace rows: {error}"));
+        assert_eq!(
+            ledger
+                .entries_for_session("paid-session")
+                .unwrap_or_else(|error| panic!("rebuilt paid history must query: {error}")),
+            vec![paid]
+        );
+        assert_eq!(
+            ledger
+                .entries_for_session("other-session")
+                .unwrap_or_else(|error| panic!("replacement must query: {error}")),
+            vec![replacement]
+        );
+    }
+
+    #[test]
+    fn accounting_rejects_invalid_dates_future_window_rows_and_overflow() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let ledger = AccountingLedger::open(root.path())
+            .unwrap_or_else(|error| panic!("ledger must open: {error}"));
+        assert_eq!(
+            UtcTimestamp::from_unix_millis(0)
+                .unwrap_or_else(|error| panic!("epoch must convert: {error}"))
+                .as_str(),
+            "1970-01-01T00:00:00.000Z"
+        );
+        assert_eq!(
+            UtcTimestamp::from_unix_millis(1_709_164_800_123)
+                .unwrap_or_else(|error| panic!("leap day must convert: {error}"))
+                .as_str(),
+            "2024-02-29T00:00:00.123Z"
+        );
+        for timestamp in [
+            "2025-02-29T00:00:00.000Z",
+            "2024-02-30T00:00:00.000Z",
+            "2024-13-01T00:00:00.000Z",
+            "2024-01-01T24:00:00.000Z",
+            "2024-01-01T00:60:00.000Z",
+        ] {
+            assert!(matches!(
+                UtcTimestamp::parse(timestamp),
+                Err(SessionStoreError::InvalidAccountingTimestamp)
+            ));
+        }
+
+        let entries = [
+            accounting_entry(
+                "overflow",
+                1,
+                0,
+                "2026-03-01T00:00:00.000Z",
+                Cost::Monetary {
+                    amount_micros: u64::MAX,
+                    currency: "USD".to_owned(),
+                },
+            ),
+            accounting_entry(
+                "overflow",
+                2,
+                1,
+                "2026-03-01T00:00:01.000Z",
+                Cost::Monetary {
+                    amount_micros: 1,
+                    currency: "USD".to_owned(),
+                },
+            ),
+        ];
+        ledger
+            .reconcile(&entries)
+            .unwrap_or_else(|error| panic!("valid rows must reconcile: {error}"));
+        assert!(matches!(
+            ledger.totals(
+                "overflow",
+                &utc_day("2026-03-01"),
+                &utc_timestamp("2026-03-01T00:00:00.000Z"),
+                &utc_timestamp("2026-03-01T00:00:59.999Z"),
+            ),
+            Err(SessionStoreError::AccountingOverflow)
+        ));
+
+        let future_root =
+            tempdir().unwrap_or_else(|error| panic!("future fixture tempdir must create: {error}"));
+        let future_ledger = AccountingLedger::open(future_root.path())
+            .unwrap_or_else(|error| panic!("future ledger must open: {error}"));
+        future_ledger
+            .record(&accounting_entry(
+                "future",
+                1,
+                0,
+                "2026-03-01T00:10:00.000Z",
+                Cost::Monetary {
+                    amount_micros: 999,
+                    currency: "USD".to_owned(),
+                },
+            ))
+            .unwrap_or_else(|error| panic!("future row must record: {error}"));
+        let future_totals = future_ledger
+            .totals(
+                "future",
+                &utc_day("2026-03-01"),
+                &utc_timestamp("2026-03-01T00:00:00.000Z"),
+                &utc_timestamp("2026-03-01T00:00:59.999Z"),
+            )
+            .unwrap_or_else(|error| panic!("future totals must query: {error}"));
+        assert_eq!(future_totals.trailing_session_micros_usd, 0);
+        assert_eq!(future_totals.trailing_all_sessions_micros_usd, 0);
+        assert_eq!(future_totals.session_micros_usd, 0);
+    }
+
+    #[test]
+    fn accounting_serializes_concurrent_session_writers() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        drop(
+            AccountingLedger::open(root.path())
+                .unwrap_or_else(|error| panic!("ledger schema must initialize: {error}")),
+        );
+        let first_root = root.path().to_owned();
+        let second_root = root.path().to_owned();
+        let first = std::thread::spawn(move || {
+            let ledger = AccountingLedger::open(&first_root)
+                .unwrap_or_else(|error| panic!("first ledger must open: {error}"));
+            for sequence in 0..32 {
+                ledger
+                    .record(&accounting_entry(
+                        "concurrent-a",
+                        sequence + 1,
+                        sequence,
+                        "2026-04-01T00:00:00.000Z",
+                        Cost::Monetary {
+                            amount_micros: 1,
+                            currency: "USD".to_owned(),
+                        },
+                    ))
+                    .unwrap_or_else(|error| panic!("first writer must record: {error}"));
+            }
+        });
+        let second = std::thread::spawn(move || {
+            let ledger = AccountingLedger::open(&second_root)
+                .unwrap_or_else(|error| panic!("second ledger must open: {error}"));
+            for sequence in 0..32 {
+                ledger
+                    .record(&accounting_entry(
+                        "concurrent-b",
+                        sequence + 1,
+                        sequence,
+                        "2026-04-01T00:00:01.000Z",
+                        Cost::AiCredits {
+                            credits_micros: 2,
+                            nominal_amount_micros: None,
+                            currency: None,
+                        },
+                    ))
+                    .unwrap_or_else(|error| panic!("second writer must record: {error}"));
+            }
+        });
+        first
+            .join()
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+        second
+            .join()
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+
+        let totals = AccountingLedger::open(root.path())
+            .and_then(|ledger| {
+                ledger.totals(
+                    "concurrent-a",
+                    &utc_day("2026-04-01"),
+                    &utc_timestamp("2026-04-01T00:00:00.000Z"),
+                    &utc_timestamp("2026-04-01T00:00:59.999Z"),
+                )
+            })
+            .unwrap_or_else(|error| panic!("concurrent totals must query: {error}"));
+        assert_eq!(totals.session_micros_usd, 32);
+        assert_eq!(totals.day_micros_usd, 32);
+        assert_eq!(totals.day_ai_credit_micros, 64);
+        assert_eq!(totals.trailing_all_sessions_micros_usd, 32);
+        assert_eq!(totals.trailing_all_sessions_ai_credit_micros, 64);
+    }
+
+    #[test]
     fn event_envelope_tolerates_additive_fields() {
         let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
         let log = SessionEventLog::open(root.path(), "future-fields")
@@ -1276,8 +2514,22 @@ mod tests {
             transcript: "authoritative".to_owned(),
             projected_through: Some(SequenceId(u64::MAX)),
         };
-        let rebuilt = SessionIndex::rebuild(root.path(), std::slice::from_ref(&current))
-            .unwrap_or_else(|error| panic!("index must rebuild: {error}"));
+        let accounting = accounting_entry(
+            "current",
+            1,
+            u64::MAX,
+            "2026-07-10T00:00:00.000Z",
+            Cost::Monetary {
+                amount_micros: 17,
+                currency: "USD".to_owned(),
+            },
+        );
+        let rebuilt = SessionIndex::rebuild(
+            root.path(),
+            std::slice::from_ref(&current),
+            std::slice::from_ref(&accounting),
+        )
+        .unwrap_or_else(|error| panic!("index must rebuild: {error}"));
         assert!(rebuilt.get("stale").unwrap_or(None).is_none());
         assert_eq!(
             rebuilt.get("current").unwrap_or(None),
@@ -1288,6 +2540,12 @@ mod tests {
                 .projection_status("current", Some(SequenceId(u64::MAX)))
                 .unwrap_or_else(|error| panic!("watermark must survive: {error}")),
             ProjectionStatus::Current
+        );
+        assert_eq!(
+            AccountingLedger::open(root.path())
+                .and_then(|ledger| ledger.entries_for_session("current"))
+                .unwrap_or_else(|error| panic!("rebuilt accounting must query: {error}")),
+            vec![accounting]
         );
     }
 

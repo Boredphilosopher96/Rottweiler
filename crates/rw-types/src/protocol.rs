@@ -25,6 +25,27 @@ mod decimal_u64 {
     }
 }
 
+mod decimal_option_u64 {
+    use serde::{Deserialize, Deserializer, Serialize as _, Serializer, de::Error as _};
+
+    #[allow(clippy::ref_option, clippy::trivially_copy_pass_by_ref)]
+    pub fn serialize<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.map(|value| value.to_string()).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<String>::deserialize(deserializer)?
+            .map(|value| value.parse().map_err(D::Error::custom))
+            .transpose()
+    }
+}
+
 macro_rules! string_id {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
@@ -176,6 +197,199 @@ pub struct Answer {
     pub values: Vec<String>,
 }
 
+/// Semantic class of one assembled prompt item.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ContextItemKind {
+    System,
+    ToolDefinitions,
+    ProjectInstructions,
+    Conversation,
+    ToolResult,
+    Pinned,
+    QueuedMessage,
+}
+
+/// Per-item token and surgery state shown by context inspectors.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ContextItemSnapshot {
+    pub item_id: ContextItemId,
+    pub kind: ContextItemKind,
+    pub label: String,
+    pub source: String,
+    /// Machine-local provenance only; remote clients must not dereference it.
+    pub machine_local_path: Option<String>,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub estimated_tokens: u64,
+    pub state: ContextItemState,
+}
+
+/// Orthogonal surgery markers for one context item.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ContextItemState {
+    pub pinned: bool,
+    pub evicted: bool,
+    pub summarized: bool,
+    pub pruned: bool,
+}
+
+/// One explicit cache boundary after an assembled item.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct CacheBreakpoint {
+    pub after_item_id: Option<ContextItemId>,
+}
+
+/// Exact engine-side context breakdown for one assembled request.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ContextSnapshot {
+    pub turn_id: Option<TurnId>,
+    pub stable_prefix_hash: String,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub used_tokens: u64,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub usable_tokens: u64,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub reserved_tokens: u64,
+    pub cache_breakpoints: Vec<CacheBreakpoint>,
+    pub items: Vec<ContextItemSnapshot>,
+}
+
+/// Usage and billing attributed to one completed agent turn.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct TurnAccounting {
+    pub turn_id: TurnId,
+    pub attribution: AccountingAttribution,
+    pub usage: Usage,
+    pub cost: Cost,
+}
+
+/// Runtime role to which usage and cost are attributed.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum AccountingAttribution {
+    Main,
+    Compaction,
+    Subagent,
+}
+
+/// Session-level cost, token, cache, and burn-rate snapshot.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct CostSnapshot {
+    pub utc_day: String,
+    pub turns: Vec<TurnAccounting>,
+    pub session_usage: Usage,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub session_cost_micros_usd: u64,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub session_ai_credit_micros: u64,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub daily_cost_micros_usd: u64,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub daily_ai_credit_micros: u64,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub trailing_minute_cost_micros_usd: u64,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub trailing_minute_ai_credit_micros: u64,
+    pub cache_hit_basis_points: u16,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub session_cost_cap_micros_usd: Option<u64>,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub daily_cost_cap_micros_usd: Option<u64>,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub session_ai_credit_cap_micros: Option<u64>,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub daily_ai_credit_cap_micros: Option<u64>,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub spend_rate_alarm_micros_usd_per_minute: Option<u64>,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub ai_credit_rate_alarm_micros_per_minute: Option<u64>,
+    pub hard_cap_reached: bool,
+    pub session_monetary_accounting_complete: bool,
+    pub daily_monetary_accounting_complete: bool,
+    #[serde(default, with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub session_subscription_quota_entries: u64,
+    #[serde(default, with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub session_cost_unavailable_entries: u64,
+    #[serde(default, with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub session_non_usd_monetary_entries: u64,
+    #[serde(default, with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub daily_subscription_quota_entries: u64,
+    #[serde(default, with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub daily_cost_unavailable_entries: u64,
+    #[serde(default, with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub daily_non_usd_monetary_entries: u64,
+}
+
+/// Provider-neutral tool definition included in a prompt dump.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct PromptTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+/// Exact assembled model request exposed for prompt transparency.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct PromptDump {
+    pub turn_id: Option<TurnId>,
+    pub model_alias: ModelAlias,
+    pub turns: Vec<crate::Turn>,
+    pub tools: Vec<PromptTool>,
+    pub stable_prefix_hash: String,
+    pub cache_breakpoints: Vec<CacheBreakpoint>,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub estimated_tokens: u64,
+}
+
 /// Commands accepted by the headless engine from any client.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -263,6 +477,19 @@ pub enum ClientCommand {
         session_id: SessionId,
         item_id: ContextItemId,
     },
+    GetContext {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    GetCost {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    DumpPrompt {
+        meta: CommandMeta,
+        session_id: SessionId,
+        turn_id: Option<TurnId>,
+    },
 }
 
 /// Capabilities used by the permission engine for a tool invocation.
@@ -295,6 +522,7 @@ pub enum TurnStatus {
     Failed,
     MaxTurns,
     DoomLoop,
+    BudgetExceeded,
 }
 
 /// Why a context compaction began.
@@ -305,6 +533,35 @@ pub enum CompactionReason {
     Automatic,
     Manual,
     ProviderOverflow,
+}
+
+/// Billing unit evaluated by a budget guardrail.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum BudgetUnit {
+    MicrosUsd,
+    AiCreditMicros,
+}
+
+/// Severity of a budget transition.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum BudgetLevel {
+    Warning,
+    SpendRateAlarm,
+    HardCap,
+}
+
+/// Scope whose spend triggered a budget transition.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum BudgetScope {
+    Session,
+    Daily,
+    TrailingMinute,
 }
 
 /// Provider-reported token accounting normalized by the router.
@@ -412,6 +669,21 @@ pub enum EngineEvent {
         meta: CommandAckMeta,
         session_id: Option<SessionId>,
         outcome: CommandOutcome,
+    },
+    ContextSnapshotReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        snapshot: ContextSnapshot,
+    },
+    CostSnapshotReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        snapshot: CostSnapshot,
+    },
+    PromptDumpReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        dump: PromptDump,
     },
     SessionCreated {
         meta: EventMeta,
@@ -527,9 +799,63 @@ pub enum EngineEvent {
         usage: Usage,
         cost: Cost,
     },
+    ContextUsageUpdated {
+        meta: EventMeta,
+        turn_id: TurnId,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        used_tokens: u64,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        usable_tokens: u64,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        reserved_tokens: u64,
+        stable_prefix_hash: String,
+        cache_hit_basis_points: u16,
+        #[serde(default, with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        estimated_input_tokens: u64,
+        #[serde(default, with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        provider_input_tokens: u64,
+        #[serde(default, with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        correction_millionths: u64,
+    },
+    BudgetStatusChanged {
+        meta: EventMeta,
+        turn_id: TurnId,
+        level: BudgetLevel,
+        scope: BudgetScope,
+        unit: BudgetUnit,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        current: u64,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        limit: u64,
+    },
     CompactionStarted {
         meta: EventMeta,
         reason: CompactionReason,
+    },
+    /// Accounting for one billed compaction provider attempt that did not
+    /// produce the committed summary. This event is deliberately non-terminal:
+    /// fallback attempts continue inside the same compaction transaction.
+    CompactionAttemptFinished {
+        meta: EventMeta,
+        summary_turn_id: TurnId,
+        usage: Usage,
+        cost: Cost,
     },
     CompactionFinished {
         meta: EventMeta,
@@ -538,6 +864,10 @@ pub enum EngineEvent {
         #[schemars(with = "String")]
         #[ts(type = "string")]
         reclaimed_tokens: u64,
+        #[serde(default)]
+        usage: Option<Usage>,
+        #[serde(default)]
+        cost: Option<Cost>,
     },
     SubagentSpawned {
         meta: EventMeta,
@@ -569,10 +899,18 @@ pub enum EngineEvent {
     ContextItemPinned {
         meta: EventMeta,
         item_id: ContextItemId,
+        #[serde(default, with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        effective_after_agent_turn: u64,
     },
     ContextItemEvicted {
         meta: EventMeta,
         item_id: ContextItemId,
+        #[serde(default, with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        effective_after_agent_turn: u64,
     },
     UserShellStateChanged {
         meta: EventMeta,
@@ -610,7 +948,10 @@ impl EngineEvent {
     #[must_use]
     pub fn meta(&self) -> Option<&EventMeta> {
         match self {
-            Self::CommandAcknowledged { .. } => None,
+            Self::CommandAcknowledged { .. }
+            | Self::ContextSnapshotReady { .. }
+            | Self::CostSnapshotReady { .. }
+            | Self::PromptDumpReady { .. } => None,
             Self::SessionCreated { meta, .. }
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
@@ -628,7 +969,10 @@ impl EngineEvent {
             | Self::QuestionAsked { meta, .. }
             | Self::QuestionAnswered { meta, .. }
             | Self::TurnFinished { meta, .. }
+            | Self::ContextUsageUpdated { meta, .. }
+            | Self::BudgetStatusChanged { meta, .. }
             | Self::CompactionStarted { meta, .. }
+            | Self::CompactionAttemptFinished { meta, .. }
             | Self::CompactionFinished { meta, .. }
             | Self::SubagentSpawned { meta, .. }
             | Self::SubagentFinished { meta, .. }
@@ -650,7 +994,10 @@ impl EngineEvent {
     #[must_use]
     pub fn meta_mut(&mut self) -> Option<&mut EventMeta> {
         match self {
-            Self::CommandAcknowledged { .. } => None,
+            Self::CommandAcknowledged { .. }
+            | Self::ContextSnapshotReady { .. }
+            | Self::CostSnapshotReady { .. }
+            | Self::PromptDumpReady { .. } => None,
             Self::SessionCreated { meta, .. }
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
@@ -668,7 +1015,10 @@ impl EngineEvent {
             | Self::QuestionAsked { meta, .. }
             | Self::QuestionAnswered { meta, .. }
             | Self::TurnFinished { meta, .. }
+            | Self::ContextUsageUpdated { meta, .. }
+            | Self::BudgetStatusChanged { meta, .. }
             | Self::CompactionStarted { meta, .. }
+            | Self::CompactionAttemptFinished { meta, .. }
             | Self::CompactionFinished { meta, .. }
             | Self::SubagentSpawned { meta, .. }
             | Self::SubagentFinished { meta, .. }

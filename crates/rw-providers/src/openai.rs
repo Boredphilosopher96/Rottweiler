@@ -138,8 +138,12 @@ impl OpenAiCompatibleProvider {
             .send()
             .await
             .map_err(transport_error)?;
-        if let Some(error) = response_error(&response) {
-            return Err(error);
+        if let Some(generic) = response_error(&response) {
+            let classified = bounded_error_json(response)
+                .await
+                .map(|value| openai_stream_error(&value))
+                .filter(|error| error.kind == ProviderErrorKind::ContextOverflow);
+            return Err(classified.unwrap_or(generic));
         }
         let chunks = response.bytes_stream();
         let wire_mode = self.config.wire_mode;
@@ -1004,18 +1008,46 @@ fn openai_stream_error(value: &Value) -> ProviderError {
                 .and_then(|response| response.get("error"))
         })
         .unwrap_or(value);
-    let code = error["code"]
-        .as_str()
-        .or_else(|| error["type"].as_str())
-        .unwrap_or("unknown");
-    ProviderError::new(
-        [error["code"].as_str(), error["type"].as_str()]
-            .into_iter()
-            .flatten()
-            .find_map(classify_openai_error_code)
-            .unwrap_or(ProviderErrorKind::Protocol),
-        format!("OpenAI-compatible stream error: {code}"),
-    )
+    let kind = [error["code"].as_str(), error["type"].as_str()]
+        .into_iter()
+        .flatten()
+        .find_map(classify_openai_error_code)
+        .unwrap_or(ProviderErrorKind::Protocol);
+    let message = match kind {
+        ProviderErrorKind::ContextOverflow => "OpenAI context window exceeded",
+        ProviderErrorKind::Authentication => "OpenAI-compatible authentication error",
+        ProviderErrorKind::InvalidRequest => "OpenAI-compatible invalid request",
+        ProviderErrorKind::RateLimited => "OpenAI-compatible rate limit exceeded",
+        ProviderErrorKind::Server => "OpenAI-compatible server error",
+        ProviderErrorKind::Protocol
+        | ProviderErrorKind::Unsupported
+        | ProviderErrorKind::ReplayMiss
+        | ProviderErrorKind::Cancelled => "OpenAI-compatible protocol error",
+        ProviderErrorKind::Timeout => "OpenAI-compatible request timed out",
+        ProviderErrorKind::Network => "OpenAI-compatible network error",
+        ProviderErrorKind::NetworkDisabled => "OpenAI-compatible network access disabled",
+    };
+    ProviderError::new(kind, message)
+}
+
+async fn bounded_error_json(response: reqwest::Response) -> Option<Value> {
+    const MAX_ERROR_BYTES: usize = 64 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ERROR_BYTES as u64)
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_ERROR_BYTES {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn classify_openai_error_code(code: &str) -> Option<ProviderErrorKind> {
@@ -1030,13 +1062,13 @@ fn classify_openai_error_code(code: &str) -> Option<ProviderErrorKind> {
         "invalid_request_error"
         | "bad_request"
         | "bad_request_error"
-        | "context_length_exceeded"
         | "model_not_found"
         | "invalid_prompt"
         | "invalid_value"
         | "unknown_parameter"
         | "unsupported_parameter"
         | "missing_required_parameter" => Some(ProviderErrorKind::InvalidRequest),
+        "context_length_exceeded" => Some(ProviderErrorKind::ContextOverflow),
         "rate_limit_error" | "rate_limit_exceeded" => Some(ProviderErrorKind::RateLimited),
         "server_error" | "internal_server_error" | "overloaded_error" => {
             Some(ProviderErrorKind::Server)
@@ -1233,6 +1265,7 @@ mod tests {
             max_output_tokens: 128,
             temperature: None,
             thinking: ThinkingLevel::Medium,
+            cache_hint: None,
         };
 
         let body = build_responses_request(&request, true);
@@ -1275,6 +1308,7 @@ mod tests {
             max_output_tokens: 32,
             temperature: None,
             thinking: ThinkingLevel::Off,
+            cache_hint: None,
         };
 
         assert_eq!(
@@ -1335,6 +1369,7 @@ mod tests {
             max_output_tokens: 321,
             temperature: None,
             thinking: ThinkingLevel::Medium,
+            cache_hint: None,
         };
         let mut body = build_responses_request(&request, true);
         apply_subscription_request_shape(&mut body, "rw-session-fixture")
@@ -1445,6 +1480,10 @@ mod tests {
         let fixtures = [
             ("invalid_api_key", ProviderErrorKind::Authentication),
             ("invalid_request_error", ProviderErrorKind::InvalidRequest),
+            (
+                "context_length_exceeded",
+                ProviderErrorKind::ContextOverflow,
+            ),
             ("rate_limit_exceeded", ProviderErrorKind::RateLimited),
             ("server_error", ProviderErrorKind::Server),
             ("future_error_type", ProviderErrorKind::Protocol),
@@ -1473,6 +1512,7 @@ mod tests {
             max_output_tokens: 512,
             temperature: None,
             thinking: ThinkingLevel::Off,
+            cache_hint: None,
         };
         let mut copilot = build_responses_request(&request, false);
         apply_auth_request_shape(
@@ -1573,6 +1613,7 @@ mod tests {
             max_output_tokens: 32,
             temperature: None,
             thinking: ThinkingLevel::Off,
+            cache_hint: None,
         };
         let Err(error) = provider.validate_request_capabilities(&request) else {
             panic!("nested image must be rejected");

@@ -1,0 +1,25 @@
+name = "Token-Oriented Object Notation specification"
+spec_version = "3.0"
+release_tag = "v3.0.0"
+release_date = "2025-11-24"
+repository = "https://github.com/toon-format/spec"
+tag_object = "6ab149ad1de13f77570dd8980dec87ecc72f3494"
+commit = "c09f73b267323190f61de5b91563fa579b3b7c5e"
+license = "MIT"
+implementation_crate = "toon-format =0.5.0"
+complete_spec = "SPEC.md"
+fixture_manifest = "MANIFEST.sha256"
+official_fixture_root = "tests/fixtures"
+
+# SPEC.md, LICENSE, tests/README.md, tests/fixtures.schema.json, and the complete
+# tests/fixtures tree are byte-for-byte copies from the immutable commit above.
+# MANIFEST.sha256 covers every official artifact. grammar.abnf is retained only
+# as a convenient verbatim extract; SPEC.md is authoritative. vectors/ contains
+# the exact users conversion pair plus the official tabular encoder fixture.
+
+[sha256]
+license = "2d0d2dd26bee672a2981c6d94ae71506011fdabbc54796a126476556c0b71875"
+spec = "66e79375b5403806c51f8f76b8211abf15912d3a66e8d849836d3d692e455903"
+users_json = "f7cefbc9959c458f1d26fab68a5fc34456da4a6a6192f1336bbdf24339654c7f"
+users_toon = "ee2efc11922081c0d6d3315469b1fc2a8141b69ef293a72e0ce4da94abe8f2ae"
+arrays_tabular_fixture = "d9df5ceaf01c0c3956aac396260a45d911adbb70f59be8ccef0f7c73249564fe"

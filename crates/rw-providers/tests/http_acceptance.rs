@@ -116,6 +116,7 @@ fn request() -> ProviderRequest {
         max_output_tokens: 128,
         temperature: None,
         thinking: ThinkingLevel::Off,
+        cache_hint: None,
     }
 }
 
@@ -623,7 +624,13 @@ async fn unreachable_primary_routes_to_live_http_fallback() {
         .unwrap_or_else(|error| panic!("fixture alias must resolve: {error}"))
         .collect::<Vec<_>>()
         .await;
-    assert_eq!(events, openai_expected());
+    assert_eq!(
+        events.first(),
+        Some(&Ok(ProviderEvent::RouteSelected {
+            route: "fallback".to_owned(),
+        }))
+    );
+    assert_eq!(&events[1..], openai_expected().as_slice());
     let fallback_requests = join_requests(fallback_server.task).await;
     assert_eq!(fallback_requests.len(), 1);
     assert!(String::from_utf8_lossy(&fallback_requests[0].body).contains("live-model"));
@@ -663,6 +670,82 @@ async fn semantic_output_prevents_retryable_stream_failover() {
     assert_eq!(fallback_server.requests.load(Ordering::SeqCst), 0);
     fallback_server.task.abort();
     let _ = join_requests(primary_server.task).await;
+}
+
+#[tokio::test]
+async fn non_success_json_bodies_classify_only_exact_context_overflow_without_leaks() {
+    let anthropic_body = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 120001 tokens > 100000 maximum"}}"#;
+    let anthropic_server = spawn_json_error_origin("/anthropic", 400, anthropic_body).await;
+    let anthropic = anthropic_provider("anthropic", anthropic_server.endpoint.clone(), None);
+    let directory = unique_temp_directory("anthropic-context-overflow");
+    let recorder = Recorder::new(anthropic, &directory, FixtureRedactor::default());
+    let error = recorder
+        .stream(request())
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("Anthropic 400 must fail"));
+    assert_eq!(error.kind, ProviderErrorKind::ContextOverflow);
+    assert!(!error.to_string().contains("120001"));
+    join_requests(anthropic_server.task).await;
+    let replay = ReplayProvider::load("anthropic", &directory)
+        .await
+        .unwrap_or_else(|error| panic!("Anthropic error replay must load: {error}"));
+    let replay_error = replay
+        .stream(request())
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("Anthropic error replay must preserve the start error"));
+    assert_eq!(replay_error, error);
+    remove_temp_directory(directory).await;
+
+    let near_miss = r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long; SECRET_CANARY"}}"#;
+    let near_server = spawn_json_error_origin("/anthropic", 400, near_miss).await;
+    let anthropic = anthropic_provider("anthropic", near_server.endpoint.clone(), None);
+    let error = anthropic
+        .stream(request())
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("Anthropic near miss must fail"));
+    assert_eq!(error.kind, ProviderErrorKind::InvalidRequest);
+    assert!(!error.to_string().contains("SECRET_CANARY"));
+    join_requests(near_server.task).await;
+
+    let request_too_large = r#"{"type":"error","error":{"type":"request_too_large","message":"SECRET_REQUEST_TOO_LARGE"}}"#;
+    let too_large_server = spawn_json_error_origin("/anthropic", 400, request_too_large).await;
+    let anthropic = anthropic_provider("anthropic", too_large_server.endpoint.clone(), None);
+    let error = anthropic
+        .stream(request())
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("Anthropic request_too_large must fail"));
+    assert_eq!(error.kind, ProviderErrorKind::InvalidRequest);
+    assert!(!error.to_string().contains("SECRET_REQUEST_TOO_LARGE"));
+    join_requests(too_large_server.task).await;
+
+    let openai_body = r#"{"error":{"code":"context_length_exceeded","message":"SECRET_CANARY"}}"#;
+    let openai_server = spawn_json_error_origin("/openai", 400, openai_body).await;
+    let openai = openai_provider("openai", openai_server.endpoint.clone(), None);
+    let error = openai
+        .stream(request())
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("OpenAI 400 must fail"));
+    assert_eq!(error.kind, ProviderErrorKind::ContextOverflow);
+    assert!(!error.to_string().contains("SECRET_CANARY"));
+    join_requests(openai_server.task).await;
+
+    let openai_near_miss = r#"{"error":{"code":"context_length_exceeded.SECRET_OPENAI_NEAR_MISS","type":"invalid_request_error","message":"SECRET_OPENAI_MESSAGE"}}"#;
+    let openai_near_server = spawn_json_error_origin("/openai", 400, openai_near_miss).await;
+    let openai = openai_provider("openai", openai_near_server.endpoint.clone(), None);
+    let error = openai
+        .stream(request())
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("OpenAI near miss must fail"));
+    assert_eq!(error.kind, ProviderErrorKind::InvalidRequest);
+    assert!(!error.to_string().contains("SECRET_OPENAI_NEAR_MISS"));
+    assert!(!error.to_string().contains("SECRET_OPENAI_MESSAGE"));
+    join_requests(openai_near_server.task).await;
 }
 
 fn one_attempt_retry_policy() -> RetryPolicy {
@@ -759,6 +842,39 @@ async fn spawn_sse_origin(path: &str, body: &str, expected_requests: usize) -> T
             write_sse_response(&mut socket, &body).await;
         }
         captured
+    });
+    TestServer { endpoint, task }
+}
+
+async fn spawn_json_error_origin(path: &str, status: u16, body: &str) -> TestServer {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("error origin must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("error origin address must resolve: {error}"));
+    let endpoint = parse_url(&format!("http://{address}{path}"));
+    let body = body.to_owned();
+    let task = tokio::spawn(async move {
+        let (mut socket, _) = listener
+            .accept()
+            .await
+            .unwrap_or_else(|error| panic!("error origin must accept: {error}"));
+        let captured = read_http_request(&mut socket).await;
+        let reason = if status == 400 {
+            "Bad Request"
+        } else {
+            "Error"
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket
+            .write_all(response.as_bytes())
+            .await
+            .unwrap_or_else(|error| panic!("error response must write: {error}"));
+        vec![captured]
     });
     TestServer { endpoint, task }
 }

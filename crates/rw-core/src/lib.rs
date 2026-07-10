@@ -8,6 +8,11 @@ mod permission;
 mod provider_factory;
 mod subscription_credentials;
 
+pub use rw_types::config::{BudgetConfig, CompactionConfig};
+pub use rw_types::{
+    AccountingAttribution, ContextItemId, ContextSnapshot, CostSnapshot, PromptDump,
+};
+
 pub use admin::{
     AdminError, DEFAULT_MODEL_CATALOG_URL, GitHubCopilotLogin, GitHubCopilotLoginResult,
     ModelCatalogRefresh, OAuthLogin, OAuthLoginResult, ProviderApiKey, ProviderLogin,
@@ -16,8 +21,9 @@ pub use admin::{
     store_provider_api_key,
 };
 pub use engine::{
-    AgentLoopError, AgentTurnStatus, EventClock, InterruptedToolRepair, MessageDisposition,
-    ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
+    AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals, ContextSurgeryAction,
+    EventClock, InterruptedToolRepair, MessageDisposition, ModelContextMetadata, ModelDriver,
+    MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
     NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink, RecoveredQuestion,
     RewindCheckpoint, SESSION_EVENT_VERSION, SecretRedactor, SessionActor, SessionActorConfig,
     SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,
@@ -33,8 +39,12 @@ pub use permission::{
     HeadlessPermissionMode, PermissionApprover, PermissionGate, PermissionOutcome,
     PermissionRequest,
 };
-pub use provider_factory::{ProviderFactory, ProviderFactoryError, ProviderRuntime, ResolvedModel};
-pub use rw_providers::{ProviderModelMetadata, UsageAccounting as ModelAccounting};
+pub use provider_factory::{
+    ProviderFactory, ProviderFactoryError, ProviderRuntime, ResolvedModel, cost_from_model_metadata,
+};
+pub use rw_providers::{
+    ProviderModelMetadata, TokenUsage as ModelTokenUsage, UsageAccounting as ModelAccounting,
+};
 pub use rw_types::{
     Answer, ClientCommand, ClientId, CommandOutcome, Cost, EngineError, EngineErrorCategory,
     EngineEvent, EventMeta, QuestionId, SequenceId, ToolOutputStream, TurnId, TurnStatus,
@@ -49,18 +59,18 @@ pub use rw_types::{
 /// remain in their lower architectural layers.
 pub mod runtime_support {
     pub use rw_providers::{
-        BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason, FixtureRedactor,
-        GuardedHttpFetchError, GuardedHttpFetchRequest, GuardedHttpFetchResponse, PricingTable,
-        Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
-        ProxyEnvironment, ProxySettings, Recorder, ReplayProvider, ThinkingLevel, WireMode,
-        deny_outbound_network_for_process, guarded_http_fetch,
+        BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,
+        FixtureRedactor, GuardedHttpFetchError, GuardedHttpFetchRequest, GuardedHttpFetchResponse,
+        PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
+        ProxyEnvironment, ProxySettings, Recorder, ReplayProvider, ThinkingLevel, ToolChoice,
+        ToolDefinition, WireMode, deny_outbound_network_for_process, guarded_http_fetch,
     };
     pub use rw_tools::{
-        AskUserInput, AskUserTool, BashTool, CancellationToken, CommandExecutor,
-        CommandFixtureRedactor, EditTool, ExecutionLease, FetchRequest, FetchResponse, GlobTool,
-        GrepTool, LsTool, MultiEditTool, MutationScope, QuestionAsker, ReadTool,
-        RecordingCommandExecutor, ReplayCommandExecutor, SymbolIndex, SymbolsTool, TodoTool,
-        TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits,
+        AskUserInput, AskUserTool, BashTool, CancellationToken, CapabilityManifest,
+        CommandExecutor, CommandFixtureRedactor, EditTool, ExecutionLease, FetchRequest,
+        FetchResponse, GlobTool, GrepTool, LsTool, MultiEditTool, MutationScope, QuestionAsker,
+        ReadTool, RecordingCommandExecutor, ReplayCommandExecutor, SymbolIndex, SymbolsTool,
+        TodoTool, TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits,
         ToolRegistry, ToolResult, WebFetchTool, WebFetcher, WriteTool,
     };
     pub use rw_types::{

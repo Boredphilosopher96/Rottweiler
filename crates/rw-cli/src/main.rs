@@ -20,7 +20,7 @@ struct Cli {
     #[arg(short = 'p', long, value_name = "PROMPT")]
     prompt: Option<String>,
     /// Rendering contract for print mode.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text, global = true)]
     output_format: OutputFormat,
     /// Non-interactive permission policy. Omitted means the loaded config policy.
     #[arg(long, value_enum)]
@@ -29,10 +29,15 @@ struct Cli {
     #[arg(long, default_value_t = 32)]
     max_turns: usize,
     /// Resume an exact durable session id.
-    #[arg(long, value_name = "SESSION", conflicts_with = "continue_latest")]
+    #[arg(
+        long,
+        value_name = "SESSION",
+        conflicts_with = "continue_latest",
+        global = true
+    )]
     resume: Option<String>,
     /// Continue the most recently updated durable session.
-    #[arg(long = "continue", conflicts_with = "resume")]
+    #[arg(long = "continue", conflicts_with = "resume", global = true)]
     continue_latest: bool,
     /// Network-free provider recording directory used by deterministic tests.
     #[arg(long, hide = true, value_name = "DIRECTORY")]
@@ -58,7 +63,7 @@ struct Cli {
     #[arg(long, hide = true, default_value = "cli-replay")]
     replay_provider: String,
     /// Override the active provider-neutral model alias.
-    #[arg(long, value_name = "ALIAS")]
+    #[arg(long, value_name = "ALIAS", global = true)]
     model: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -81,6 +86,11 @@ enum PermissionMode {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Inspect an assembled model prompt without calling a provider.
+    Prompt {
+        #[command(subcommand)]
+        command: PromptCommand,
+    },
     /// Inspect Rottweiler configuration.
     Config {
         #[command(subcommand)]
@@ -95,6 +105,16 @@ enum Command {
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PromptCommand {
+    /// Print the exact provider-neutral request for the latest or selected turn.
+    Dump {
+        /// Historical agent turn to assemble; omitted selects the latest state.
+        #[arg(long, value_name = "N")]
+        turn: Option<u64>,
     },
 }
 
@@ -144,6 +164,27 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
+        Some(Command::Prompt {
+            command: PromptCommand::Dump { turn },
+        }) => {
+            runtime::run(runtime::RunOptions {
+                prompt: None,
+                output_format: cli.output_format,
+                permission_mode: cli.permission_mode,
+                max_turns: cli.max_turns,
+                resume: cli.resume.clone(),
+                continue_latest: cli.resume.is_none(),
+                replay_dir: None,
+                record_replay_script: None,
+                in_memory_replay_script: None,
+                record_script_delay_ms: 0,
+                perf_markers: false,
+                replay_provider: "prompt-dump-offline".to_owned(),
+                model: cli.model,
+                action: runtime::RunAction::PromptDump { turn },
+            })
+            .await?;
+        }
         Some(Command::Config {
             command: ConfigCommand::Check { overrides },
         }) => {
@@ -194,6 +235,7 @@ async fn main() -> Result<()> {
                 perf_markers: cli.perf_markers,
                 replay_provider: cli.replay_provider,
                 model: cli.model,
+                action: runtime::RunAction::Agent,
             })
             .await?;
         }

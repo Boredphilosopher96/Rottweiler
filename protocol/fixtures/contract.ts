@@ -300,6 +300,34 @@ export const contractFixture = {
       },
       "session_id": "session-fixture",
       "item_id": "context-2"
+    },
+    {
+      "type": "get_context",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture"
+    },
+    {
+      "type": "get_cost",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture"
+    },
+    {
+      "type": "dump_prompt",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "turn_id": "turn-fixture"
     }
   ],
   "engine_events": [
@@ -574,7 +602,9 @@ export const contractFixture = {
         "caused_by": null
       },
       "summary_turn_id": "summary-turn",
-      "reclaimed_tokens": "25000"
+      "reclaimed_tokens": "25000",
+      "usage": null,
+      "cost": null
     },
     {
       "type": "subagent_spawned",
@@ -665,7 +695,8 @@ export const contractFixture = {
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
-      "item_id": "context-1"
+      "item_id": "context-1",
+      "effective_after_agent_turn": "3"
     },
     {
       "type": "context_item_evicted",
@@ -676,7 +707,8 @@ export const contractFixture = {
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
-      "item_id": "context-2"
+      "item_id": "context-2",
+      "effective_after_agent_turn": "3"
     },
     {
       "type": "user_shell_state_changed",

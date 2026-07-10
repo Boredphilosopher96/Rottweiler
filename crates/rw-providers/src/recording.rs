@@ -447,6 +447,10 @@ impl Provider for Recorder {
         self.inner.model_metadata().await
     }
 
+    fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
+        self.inner.cached_model_metadata()
+    }
+
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         // Reserving bounded writer capacity happens before assigning an
         // occurrence or contacting the provider. Backpressure therefore
@@ -842,6 +846,10 @@ impl Provider for ReplayProvider {
 
     async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
         Ok(self.model_metadata.clone())
+    }
+
+    fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
+        self.model_metadata.clone()
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
@@ -1417,7 +1425,8 @@ mod tests {
     };
 
     use super::{
-        FixtureRedactor, RecordFixture, Recorder, ReplayProvider, fixture_path, request_hash,
+        FixtureRedactor, RecordFixture, Recorder, ReplayProvider, canonicalize, fixture_path,
+        request_hash,
     };
 
     struct FixtureProvider {
@@ -1866,6 +1875,7 @@ mod tests {
             temperature: None,
             thinking: ThinkingLevel::Off,
             tool_choice: ToolChoice::Auto,
+            cache_hint: None,
         }
     }
 
@@ -1879,6 +1889,32 @@ mod tests {
             max_output_tokens: None,
             wire_mode: WireMode::NormalizedReplay,
         }
+    }
+
+    #[test]
+    fn pre_m3_request_without_cache_hint_keeps_its_fixture_hash() {
+        let legacy_request = serde_json::json!({
+            "model": "fixture-model",
+            "turns": [],
+            "tools": [],
+            "tool_choice": {"mode": "auto"},
+            "max_output_tokens": 10,
+            "temperature": null,
+            "thinking": "off"
+        });
+        let legacy_bytes = serde_json::to_vec(&canonicalize(legacy_request))
+            .unwrap_or_else(|error| panic!("legacy request must encode: {error}"));
+        let legacy_hash = blake3::hash(&legacy_bytes).to_hex().to_string();
+
+        let current = request();
+        let serialized = serde_json::to_value(&current)
+            .unwrap_or_else(|error| panic!("current request must serialize: {error}"));
+        assert!(serialized.get("cache_hint").is_none());
+        assert_eq!(
+            request_hash(&current)
+                .unwrap_or_else(|error| panic!("current request must hash: {error}")),
+            legacy_hash
+        );
     }
 
     #[tokio::test]

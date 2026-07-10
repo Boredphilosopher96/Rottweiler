@@ -290,7 +290,9 @@ impl ProviderRouter {
                             return;
                         }
                     };
-                    let mut pre_semantic = Vec::new();
+                    let mut pre_semantic = vec![ProviderEvent::RouteSelected {
+                        route: candidate.provider.clone(),
+                    }];
                     let mut semantic_emitted = false;
                     while let Some(item) = provider_stream.next().await {
                         match item {
@@ -505,6 +507,7 @@ mod tests {
             max_output_tokens: 100,
             temperature: None,
             thinking: crate::ThinkingLevel::Off,
+            cache_hint: None,
         }
     }
 

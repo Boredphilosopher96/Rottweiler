@@ -30,6 +30,9 @@ pedantic = { level = "warn", priority = -1 }
 expect_used = "warn"
 unwrap_used = "warn"
 
+[profile.release]
+strip = true
+
 [workspace.dependencies]
 base64 = "0.22.1"
 blake3 = "1.8.2"

@@ -60,10 +60,10 @@ pub use retry::{
 };
 pub use router::{ModelCandidate, ProviderRouter, RouterError};
 pub use types::{
-    BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason, NetworkPolicy, Provider,
-    ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest,
-    ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition, UsageAccounting, WireFrameSink,
-    WireMode,
+    BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason, NetworkPolicy,
+    Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata,
+    ProviderRequest, ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition, UsageAccounting,
+    WireFrameSink, WireMode,
 };
 
 /// Identifies this workspace component in diagnostics.

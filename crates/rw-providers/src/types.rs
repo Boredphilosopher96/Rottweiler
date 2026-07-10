@@ -28,6 +28,18 @@ pub struct ProviderRequest {
     pub temperature: Option<f32>,
     /// Provider-independent reasoning control.
     pub thinking: ThinkingLevel,
+    /// Stable-prefix boundary assembled by the provider-neutral context engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_hint: Option<CacheHint>,
+}
+
+/// Provider-neutral stable prompt prefix eligible for adapter cache mapping.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CacheHint {
+    /// Count of leading turns in the stable prefix.
+    pub stable_prefix_turns: u32,
+    /// Whether all tool definitions are part of that stable prefix.
+    pub tools_in_prefix: bool,
 }
 
 /// Provider-neutral tool selection policy.
@@ -223,6 +235,9 @@ pub enum FinishReason {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderEvent {
+    /// Opaque router-owned identity for the candidate that served this stream.
+    /// It is consumed by accounting and never exposed as a provider name.
+    RouteSelected { route: String },
     /// Provider accepted the message and selected a concrete model.
     MessageStart { model: String },
     /// Visible assistant text.
@@ -265,6 +280,8 @@ pub enum ProviderErrorKind {
     Server,
     /// Request was rejected as invalid.
     InvalidRequest,
+    /// Request exceeded the selected model's context window.
+    ContextOverflow,
     /// Provider response did not match its documented stream protocol.
     Protocol,
     /// Connection or transport failure.
@@ -356,6 +373,12 @@ pub trait Provider: Send + Sync {
     /// Returns a sanitized discovery or validation error.
     async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
         Ok(None)
+    }
+
+    /// Returns already-resolved dynamic metadata without performing I/O.
+    /// Providers with lazy catalogs expose `None` until discovery succeeds.
+    fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
+        None
     }
 
     /// Starts a normalized streaming response.

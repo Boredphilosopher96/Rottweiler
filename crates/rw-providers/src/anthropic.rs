@@ -101,8 +101,12 @@ impl AnthropicProvider {
             .send()
             .await
             .map_err(transport_error)?;
-        if let Some(error) = response_error(&response) {
-            return Err(error);
+        if let Some(generic) = response_error(&response) {
+            let classified = bounded_error_json(response)
+                .await
+                .map(|value| anthropic_stream_error(&value))
+                .filter(|error| error.kind == ProviderErrorKind::ContextOverflow);
+            return Err(classified.unwrap_or(generic));
         }
         let chunks = response.bytes_stream();
         let stream = async_stream::try_stream! {
@@ -170,6 +174,7 @@ impl Provider for AnthropicProvider {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_request(
     request: &ProviderRequest,
     thinking_strategy: Option<AnthropicThinkingStrategy>,
@@ -187,19 +192,26 @@ fn build_request(
         ));
     }
     let mut system = Vec::new();
+    let mut last_stable_system = None;
     let mut messages = Vec::new();
-    for turn in &request.turns {
+    let stable_prefix_turns = request
+        .cache_hint
+        .map_or(0, |hint| hint.stable_prefix_turns as usize);
+    for (turn_index, turn) in request.turns.iter().enumerate() {
         if turn.role == Role::System {
             for block in &turn.blocks {
                 if let Block::Text { text } = block {
                     system.push(json!({ "type": "text", "text": text }));
+                    if turn_index < stable_prefix_turns {
+                        last_stable_system = Some(system.len().saturating_sub(1));
+                    }
                 }
             }
         } else {
             messages.push(anthropic_message(turn));
         }
     }
-    let tools = request
+    let mut tools = request
         .tools
         .iter()
         .map(|tool| {
@@ -210,6 +222,16 @@ fn build_request(
             })
         })
         .collect::<Vec<_>>();
+    let tools_marked = request
+        .cache_hint
+        .is_some_and(|hint| hint.tools_in_prefix && !tools.is_empty());
+    if tools_marked {
+        if let Some(tool) = tools.last_mut() {
+            tool["cache_control"] = json!({ "type": "ephemeral" });
+        }
+    } else if let Some(index) = last_stable_system {
+        system[index]["cache_control"] = json!({ "type": "ephemeral" });
+    }
     let mut body = json!({
         "model": request.model,
         "max_tokens": request.max_output_tokens,
@@ -500,18 +522,81 @@ impl AnthropicState {
 
 fn anthropic_stream_error(value: &Value) -> ProviderError {
     let error_type = value["error"]["type"].as_str().unwrap_or("unknown");
-    let kind = match error_type {
-        "authentication_error" | "billing_error" | "permission_error" => {
-            ProviderErrorKind::Authentication
+    let prompt_too_long = error_type == "invalid_request_error"
+        && value["error"]["message"]
+            .as_str()
+            .is_some_and(is_prompt_too_long);
+    let kind = if prompt_too_long {
+        ProviderErrorKind::ContextOverflow
+    } else {
+        match error_type {
+            "authentication_error" | "billing_error" | "permission_error" => {
+                ProviderErrorKind::Authentication
+            }
+            "invalid_request_error"
+            | "not_found_error"
+            | "conflict_error"
+            | "request_too_large" => ProviderErrorKind::InvalidRequest,
+            "rate_limit_error" => ProviderErrorKind::RateLimited,
+            "api_error" | "timeout_error" | "overloaded_error" => ProviderErrorKind::Server,
+            _ => ProviderErrorKind::Protocol,
         }
-        "invalid_request_error" | "not_found_error" | "conflict_error" | "request_too_large" => {
-            ProviderErrorKind::InvalidRequest
-        }
-        "rate_limit_error" => ProviderErrorKind::RateLimited,
-        "api_error" | "timeout_error" | "overloaded_error" => ProviderErrorKind::Server,
-        _ => ProviderErrorKind::Protocol,
     };
-    ProviderError::new(kind, format!("Anthropic stream error: {error_type}"))
+    let message = match kind {
+        ProviderErrorKind::ContextOverflow => "Anthropic context window exceeded",
+        ProviderErrorKind::Authentication => "Anthropic authentication error",
+        ProviderErrorKind::InvalidRequest => "Anthropic invalid request",
+        ProviderErrorKind::RateLimited => "Anthropic rate limit exceeded",
+        ProviderErrorKind::Server => "Anthropic server error",
+        ProviderErrorKind::Timeout => "Anthropic request timed out",
+        ProviderErrorKind::Network => "Anthropic network error",
+        ProviderErrorKind::NetworkDisabled => "Anthropic network access disabled",
+        ProviderErrorKind::Protocol
+        | ProviderErrorKind::Unsupported
+        | ProviderErrorKind::ReplayMiss
+        | ProviderErrorKind::Cancelled => "Anthropic protocol error",
+    };
+    ProviderError::new(kind, message)
+}
+
+fn is_prompt_too_long(message: &str) -> bool {
+    let normalized = message.trim().to_ascii_lowercase();
+    if normalized == "prompt is too long" {
+        return true;
+    }
+    let Some(suffix) = normalized.strip_prefix("prompt is too long: ") else {
+        return false;
+    };
+    let Some((actual, maximum)) = suffix.split_once(" tokens > ") else {
+        return false;
+    };
+    let Some(maximum) = maximum.strip_suffix(" maximum") else {
+        return false;
+    };
+    !actual.is_empty()
+        && actual.bytes().all(|byte| byte.is_ascii_digit())
+        && !maximum.is_empty()
+        && maximum.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+async fn bounded_error_json(response: reqwest::Response) -> Option<Value> {
+    const MAX_ERROR_BYTES: usize = 64 * 1024;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ERROR_BYTES as u64)
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_ERROR_BYTES {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn u64_at(value: &Value, path: &[&str]) -> u64 {
@@ -571,11 +656,11 @@ pub(crate) fn replay_sse_frames(
 
 #[cfg(test)]
 mod tests {
-    use rw_types::{Role, Turn, TurnMeta};
+    use rw_types::{Block, Role, Turn, TurnMeta};
     use serde_json::json;
 
     use crate::{
-        ProviderErrorKind, ProviderRequest, ThinkingLevel, ToolChoice, ToolDefinition,
+        CacheHint, ProviderErrorKind, ProviderRequest, ThinkingLevel, ToolChoice, ToolDefinition,
         sse::SseEvent,
     };
 
@@ -598,6 +683,7 @@ mod tests {
             max_output_tokens: 32,
             temperature: None,
             thinking: ThinkingLevel::Off,
+            cache_hint: None,
         }
     }
 
@@ -659,6 +745,64 @@ mod tests {
             }));
             assert_eq!(error.kind, expected, "classification for {error_type}");
         }
+    }
+
+    #[test]
+    fn documented_prompt_too_long_is_typed_without_echoing_provider_text() {
+        let overflow = anthropic_stream_error(&json!({
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": "prompt is too long"}
+        }));
+        assert_eq!(overflow.kind, ProviderErrorKind::ContextOverflow);
+        assert_eq!(overflow.message, "Anthropic context window exceeded");
+
+        let near_miss = anthropic_stream_error(&json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "prompt is too long; SECRET_CANARY"
+            }
+        }));
+        assert_eq!(near_miss.kind, ProviderErrorKind::InvalidRequest);
+        assert!(!near_miss.message.contains("SECRET_CANARY"));
+    }
+
+    #[test]
+    fn explicit_cache_hint_marks_last_stable_tool_else_last_system_block() {
+        let mut request = tool_request(ToolChoice::Auto);
+        request.turns.insert(
+            0,
+            Turn {
+                role: Role::System,
+                blocks: vec![Block::Text {
+                    text: "stable system".to_owned(),
+                }],
+                meta: TurnMeta::default(),
+            },
+        );
+        request.cache_hint = Some(CacheHint {
+            stable_prefix_turns: 1,
+            tools_in_prefix: true,
+        });
+        let body = build_request(&request, None)
+            .unwrap_or_else(|error| panic!("cache request failed: {error}"));
+        assert_eq!(
+            body["tools"][0]["cache_control"],
+            json!({"type":"ephemeral"})
+        );
+        assert!(body["system"][0].get("cache_control").is_none());
+
+        request.tools.clear();
+        request.cache_hint = Some(CacheHint {
+            stable_prefix_turns: 1,
+            tools_in_prefix: false,
+        });
+        let body = build_request(&request, None)
+            .unwrap_or_else(|error| panic!("system cache request failed: {error}"));
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type":"ephemeral"})
+        );
     }
 
     #[test]

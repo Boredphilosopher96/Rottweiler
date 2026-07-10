@@ -3,12 +3,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rw_types::{
-    Answer, ApprovalDecision, Attachment, AttachmentData, Block, ClientCommand, ClientId,
-    ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId, Cost,
-    EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias, Question,
-    QuestionId, QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId,
-    SessionId, SubagentId, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
-    ToolOutputStream, Turn, TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
+    AccountingAttribution, Answer, ApprovalDecision, Attachment, AttachmentData, Block,
+    BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId, ClientRole,
+    CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId, ContextItemKind,
+    ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot, EngineError,
+    EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias, PromptDump, PromptTool,
+    Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role,
+    SequenceId, SessionId, SubagentId, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
+    ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -162,11 +164,24 @@ fn generate_typescript() -> String {
     declaration!(QuestionOption);
     declaration!(Question);
     declaration!(Answer);
+    declaration!(ContextItemKind);
+    declaration!(ContextItemState);
+    declaration!(ContextItemSnapshot);
+    declaration!(CacheBreakpoint);
+    declaration!(ContextSnapshot);
+    declaration!(AccountingAttribution);
+    declaration!(TurnAccounting);
+    declaration!(CostSnapshot);
+    declaration!(PromptTool);
+    declaration!(PromptDump);
     declaration!(ClientCommand);
     declaration!(ToolCapability);
     declaration!(ToolOutputStream);
     declaration!(TurnStatus);
     declaration!(CompactionReason);
+    declaration!(BudgetUnit);
+    declaration!(BudgetLevel);
+    declaration!(BudgetScope);
     declaration!(Usage);
     declaration!(Cost);
     declaration!(UnrestorablePath);
@@ -174,10 +189,13 @@ fn generate_typescript() -> String {
     declaration!(EngineError);
     declaration!(CommandOutcome);
     declaration!(EngineEvent);
-    let content_len = output.trim_end().len();
-    output.truncate(content_len);
-    output.push('\n');
     output
+        .trim_end()
+        .lines()
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
 }
 
 fn generate_schema<T: JsonSchema>() -> Result<String, serde_json::Error> {
@@ -399,9 +417,22 @@ fn contract_fixture() -> ContractFixture {
                 item_id: ContextItemId("context-1".to_owned()),
             },
             ClientCommand::EvictContext {
-                meta: command_meta,
+                meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
                 item_id: ContextItemId("context-2".to_owned()),
+            },
+            ClientCommand::GetContext {
+                meta: command_meta.clone(),
+                session_id: SessionId("session-fixture".to_owned()),
+            },
+            ClientCommand::GetCost {
+                meta: command_meta.clone(),
+                session_id: SessionId("session-fixture".to_owned()),
+            },
+            ClientCommand::DumpPrompt {
+                meta: command_meta,
+                session_id: SessionId("session-fixture".to_owned()),
+                turn_id: Some(TurnId("turn-fixture".to_owned())),
             },
         ],
         engine_events: vec![
@@ -536,6 +567,8 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(13),
                 summary_turn_id: TurnId("summary-turn".to_owned()),
                 reclaimed_tokens: 25_000,
+                usage: None,
+                cost: None,
             },
             EngineEvent::SubagentSpawned {
                 meta: event_meta(14),
@@ -574,10 +607,12 @@ fn contract_fixture() -> ContractFixture {
             EngineEvent::ContextItemPinned {
                 meta: event_meta(20),
                 item_id: ContextItemId("context-1".to_owned()),
+                effective_after_agent_turn: 3,
             },
             EngineEvent::ContextItemEvicted {
                 meta: event_meta(21),
                 item_id: ContextItemId("context-2".to_owned()),
+                effective_after_agent_turn: 3,
             },
             EngineEvent::UserShellStateChanged {
                 meta: event_meta(22),

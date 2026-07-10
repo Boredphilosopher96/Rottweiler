@@ -14,6 +14,17 @@ use url::{Host, Url};
 
 const ENV_ENGINE_SESSIONS: &str = "RW_ENGINE_MAX_CONCURRENT_SESSIONS";
 const ENV_MODEL_DEFAULT: &str = "RW_MODEL_DEFAULT";
+const ENV_COMPACTION_AUTO: &str = "RW_COMPACTION_AUTO";
+const ENV_COMPACTION_RESERVED: &str = "RW_COMPACTION_RESERVED";
+const ENV_COMPACTION_RESERVED_TOKENS: &str = "RW_COMPACTION_RESERVED_TOKENS";
+const ENV_COMPACTION_MODEL_ALIAS: &str = "RW_COMPACTION_MODEL_ALIAS";
+const ENV_BUDGET_SESSION_COST_CAP: &str = "RW_BUDGET_SESSION_COST_CAP_MICROS_USD";
+const ENV_BUDGET_DAILY_COST_CAP: &str = "RW_BUDGET_DAILY_COST_CAP_MICROS_USD";
+const ENV_BUDGET_SESSION_CREDIT_CAP: &str = "RW_BUDGET_SESSION_AI_CREDIT_CAP_MICROS";
+const ENV_BUDGET_DAILY_CREDIT_CAP: &str = "RW_BUDGET_DAILY_AI_CREDIT_CAP_MICROS";
+const ENV_BUDGET_SPEND_RATE: &str = "RW_BUDGET_SPEND_RATE_ALARM_MICROS_USD_PER_MINUTE";
+const ENV_BUDGET_CREDIT_RATE: &str = "RW_BUDGET_AI_CREDIT_RATE_ALARM_MICROS_PER_MINUTE";
+const ENV_BUDGET_WARN_PERCENT: &str = "RW_BUDGET_WARN_AT_PERCENT";
 const ENV_NETWORK_PROXY: &str = "RW_NETWORK_PROXY";
 const ENV_NETWORK_PROXY_USERNAME: &str = "RW_NETWORK_PROXY_USERNAME";
 const ENV_NETWORK_PROXY_PASSWORD_CREDENTIAL: &str = "RW_NETWORK_PROXY_PASSWORD_CREDENTIAL";
@@ -120,6 +131,55 @@ impl LoadedConfig {
                 ));
             }
         }
+
+        lines.push(self.render_leaf("compaction.auto", &self.config.compaction.auto.to_string()));
+        lines.push(self.render_leaf(
+            "compaction.reserved",
+            &optional_u64(self.config.compaction.reserved_tokens),
+        ));
+        lines.push(
+            self.render_leaf(
+                "compaction.model_alias",
+                &self
+                    .config
+                    .compaction
+                    .model_alias
+                    .as_deref()
+                    .map_or_else(|| "<unset>".to_owned(), quoted),
+            ),
+        );
+        for (key, value) in [
+            (
+                "budget.session_cost_cap_micros_usd",
+                self.config.budget.session_cost_cap_micros_usd,
+            ),
+            (
+                "budget.daily_cost_cap_micros_usd",
+                self.config.budget.daily_cost_cap_micros_usd,
+            ),
+            (
+                "budget.session_ai_credit_cap_micros",
+                self.config.budget.session_ai_credit_cap_micros,
+            ),
+            (
+                "budget.daily_ai_credit_cap_micros",
+                self.config.budget.daily_ai_credit_cap_micros,
+            ),
+            (
+                "budget.spend_rate_alarm_micros_usd_per_minute",
+                self.config.budget.spend_rate_alarm_micros_usd_per_minute,
+            ),
+            (
+                "budget.ai_credit_rate_alarm_micros_per_minute",
+                self.config.budget.ai_credit_rate_alarm_micros_per_minute,
+            ),
+        ] {
+            lines.push(self.render_leaf(key, &optional_u64(value)));
+        }
+        lines.push(self.render_leaf(
+            "budget.warn_at_percent",
+            &self.config.budget.warn_at_percent.to_string(),
+        ));
 
         if self.config.providers.is_empty() {
             lines.push(self.render_leaf("providers", "{}"));
@@ -467,6 +527,16 @@ fn defaults_with_provenance() -> LoadedConfig {
         "models.default",
         "models.aliases",
         "models.thinking",
+        "compaction.auto",
+        "compaction.reserved",
+        "compaction.model_alias",
+        "budget.session_cost_cap_micros_usd",
+        "budget.daily_cost_cap_micros_usd",
+        "budget.session_ai_credit_cap_micros",
+        "budget.daily_ai_credit_cap_micros",
+        "budget.spend_rate_alarm_micros_usd_per_minute",
+        "budget.ai_credit_rate_alarm_micros_per_minute",
+        "budget.warn_at_percent",
         "providers",
         "network.proxy",
         "network.proxy_username",
@@ -532,6 +602,40 @@ fn apply_file(
                 loaded.config.models.thinking.insert(alias, level);
                 set_source(loaded, &key, source);
             }
+        }
+    }
+    if let Some(compaction) = file.compaction.take() {
+        if let Some(value) = compaction.auto {
+            loaded.config.compaction.auto = value;
+            set_source(loaded, "compaction.auto", source);
+        }
+        if let Some(value) = compaction.reserved_tokens {
+            loaded.config.compaction.reserved_tokens = Some(value);
+            set_source(loaded, "compaction.reserved", source);
+        }
+        if let Some(value) = compaction.model_alias {
+            loaded.config.compaction.model_alias = Some(value);
+            set_source(loaded, "compaction.model_alias", source);
+        }
+    }
+    if let Some(budget) = file.budget.take() {
+        macro_rules! apply_budget {
+            ($field:ident) => {
+                if let Some(value) = budget.$field {
+                    loaded.config.budget.$field = Some(value);
+                    set_source(loaded, concat!("budget.", stringify!($field)), source);
+                }
+            };
+        }
+        apply_budget!(session_cost_cap_micros_usd);
+        apply_budget!(daily_cost_cap_micros_usd);
+        apply_budget!(session_ai_credit_cap_micros);
+        apply_budget!(daily_ai_credit_cap_micros);
+        apply_budget!(spend_rate_alarm_micros_usd_per_minute);
+        apply_budget!(ai_credit_rate_alarm_micros_per_minute);
+        if let Some(value) = budget.warn_at_percent {
+            loaded.config.budget.warn_at_percent = value;
+            set_source(loaded, "budget.warn_at_percent", source);
         }
     }
     if scope == FileScope::User {
@@ -622,6 +726,37 @@ fn apply_environment(
     for (name, key) in [
         (ENV_ENGINE_SESSIONS, "engine.max_concurrent_sessions"),
         (ENV_MODEL_DEFAULT, "models.default"),
+        (ENV_COMPACTION_AUTO, "compaction.auto"),
+        // Retain the pre-M3 spelling as a compatibility alias. The canonical
+        // environment variable is applied last so it wins when both are set.
+        (ENV_COMPACTION_RESERVED_TOKENS, "compaction.reserved"),
+        (ENV_COMPACTION_RESERVED, "compaction.reserved"),
+        (ENV_COMPACTION_MODEL_ALIAS, "compaction.model_alias"),
+        (
+            ENV_BUDGET_SESSION_COST_CAP,
+            "budget.session_cost_cap_micros_usd",
+        ),
+        (
+            ENV_BUDGET_DAILY_COST_CAP,
+            "budget.daily_cost_cap_micros_usd",
+        ),
+        (
+            ENV_BUDGET_SESSION_CREDIT_CAP,
+            "budget.session_ai_credit_cap_micros",
+        ),
+        (
+            ENV_BUDGET_DAILY_CREDIT_CAP,
+            "budget.daily_ai_credit_cap_micros",
+        ),
+        (
+            ENV_BUDGET_SPEND_RATE,
+            "budget.spend_rate_alarm_micros_usd_per_minute",
+        ),
+        (
+            ENV_BUDGET_CREDIT_RATE,
+            "budget.ai_credit_rate_alarm_micros_per_minute",
+        ),
+        (ENV_BUDGET_WARN_PERCENT, "budget.warn_at_percent"),
         (ENV_NETWORK_PROXY, "network.proxy"),
         (ENV_NETWORK_PROXY_USERNAME, "network.proxy_username"),
         (
@@ -660,6 +795,17 @@ fn apply_override(
             reason: "expected KEY=VALUE".to_owned(),
         });
     };
+    // Accept the earlier draft spelling without exposing it in provenance or
+    // `config check`; M3's public key is `compaction.reserved`.
+    let key = if key == "compaction.reserved_tokens" {
+        "compaction.reserved"
+    } else {
+        key
+    };
+    if apply_m3_override(loaded, key, value, raw)? {
+        set_source(loaded, key, source);
+        return Ok(());
+    }
     match key {
         "engine.max_concurrent_sessions" => {
             loaded.config.engine.max_concurrent_sessions =
@@ -746,6 +892,58 @@ fn apply_override(
     Ok(())
 }
 
+fn apply_m3_override(
+    loaded: &mut LoadedConfig,
+    key: &str,
+    value: &str,
+    raw: &str,
+) -> Result<bool, ConfigError> {
+    match key {
+        "compaction.auto" => {
+            loaded.config.compaction.auto =
+                value.parse().map_err(|_| ConfigError::CliOverride {
+                    override_value: raw.to_owned(),
+                    reason: "expected true or false".to_owned(),
+                })?;
+        }
+        "compaction.reserved" => {
+            loaded.config.compaction.reserved_tokens = parse_optional_u64(value, raw)?;
+        }
+        "compaction.model_alias" => {
+            loaded.config.compaction.model_alias = optional_string(value);
+        }
+        "budget.session_cost_cap_micros_usd" => {
+            loaded.config.budget.session_cost_cap_micros_usd = parse_optional_u64(value, raw)?;
+        }
+        "budget.daily_cost_cap_micros_usd" => {
+            loaded.config.budget.daily_cost_cap_micros_usd = parse_optional_u64(value, raw)?;
+        }
+        "budget.session_ai_credit_cap_micros" => {
+            loaded.config.budget.session_ai_credit_cap_micros = parse_optional_u64(value, raw)?;
+        }
+        "budget.daily_ai_credit_cap_micros" => {
+            loaded.config.budget.daily_ai_credit_cap_micros = parse_optional_u64(value, raw)?;
+        }
+        "budget.spend_rate_alarm_micros_usd_per_minute" => {
+            loaded.config.budget.spend_rate_alarm_micros_usd_per_minute =
+                parse_optional_u64(value, raw)?;
+        }
+        "budget.ai_credit_rate_alarm_micros_per_minute" => {
+            loaded.config.budget.ai_credit_rate_alarm_micros_per_minute =
+                parse_optional_u64(value, raw)?;
+        }
+        "budget.warn_at_percent" => {
+            loaded.config.budget.warn_at_percent =
+                value.parse().map_err(|_| ConfigError::CliOverride {
+                    override_value: raw.to_owned(),
+                    reason: "expected an integer from 1 through 100".to_owned(),
+                })?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn set_source(loaded: &mut LoadedConfig, key: &str, source: &ConfigSource) {
     loaded.provenance.insert(key.to_owned(), source.clone());
 }
@@ -805,6 +1003,24 @@ fn apply_provider_override(
 
 fn nonempty_override(value: &str) -> Option<String> {
     (!value.trim().is_empty()).then(|| value.to_owned())
+}
+
+fn optional_string(value: &str) -> Option<String> {
+    (!value.trim().is_empty() && !matches!(value.trim(), "none" | "unset"))
+        .then(|| value.to_owned())
+}
+
+fn parse_optional_u64(value: &str, raw: &str) -> Result<Option<u64>, ConfigError> {
+    if value.trim().is_empty() || matches!(value.trim(), "none" | "unset") {
+        return Ok(None);
+    }
+    value
+        .parse()
+        .map(Some)
+        .map_err(|_| ConfigError::CliOverride {
+            override_value: raw.to_owned(),
+            reason: "expected a non-negative integer or unset".to_owned(),
+        })
 }
 
 fn set_provider_sources(
@@ -875,6 +1091,14 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             ));
         }
     }
+    config
+        .compaction
+        .validate()
+        .map_err(|message| ConfigError::Validation(message.to_owned()))?;
+    config
+        .budget
+        .validate()
+        .map_err(|message| ConfigError::Validation(message.to_owned()))?;
     if let Some(proxy) = &config.network.proxy {
         validate_proxy("network.proxy", proxy)?;
     }
@@ -1152,6 +1376,10 @@ fn quoted(value: &str) -> String {
     format!("{value:?}")
 }
 
+fn optional_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "<unset>".to_owned(), |value| value.to_string())
+}
+
 fn redacted_proxy(value: &str) -> String {
     Url::parse(value).map_or_else(
         |_| "<invalid proxy>".to_owned(),
@@ -1337,6 +1565,259 @@ channel = "stable"
                 .render_with_provenance()
                 .contains("providers.gateway.api_key_credential = \"gateway-api-key\"")
         );
+    }
+
+    #[test]
+    fn m3_controls_deep_merge_across_files_environment_and_cli() {
+        let root = tempdir().expect("temporary directory should be created");
+        let user = root.path().join("user.toml");
+        let project = root.path().join("project.toml");
+        fs::write(
+            &user,
+            r#"
+[compaction]
+auto = false
+reserved = 100
+model_alias = "user-compact"
+
+[budget]
+session_cost_cap_micros_usd = 10
+daily_cost_cap_micros_usd = 11
+session_ai_credit_cap_micros = 12
+daily_ai_credit_cap_micros = 13
+spend_rate_alarm_micros_usd_per_minute = 14
+ai_credit_rate_alarm_micros_per_minute = 15
+warn_at_percent = 50
+"#,
+        )
+        .expect("user M3 config");
+        fs::write(
+            &project,
+            r#"
+[compaction]
+auto = true
+model_alias = "project-compact"
+
+[budget]
+daily_cost_cap_micros_usd = 20
+daily_ai_credit_cap_micros = 40
+warn_at_percent = 60
+"#,
+        )
+        .expect("project M3 config");
+        let environment = BTreeMap::from([
+            ("RW_COMPACTION_RESERVED".to_owned(), "300".to_owned()),
+            (
+                "RW_BUDGET_SESSION_COST_CAP_MICROS_USD".to_owned(),
+                "30".to_owned(),
+            ),
+            (
+                "RW_BUDGET_SPEND_RATE_ALARM_MICROS_USD_PER_MINUTE".to_owned(),
+                "70".to_owned(),
+            ),
+        ]);
+        let loaded = ConfigLoader::new(user, project.clone())
+            .with_environment(environment)
+            .with_cli_overrides(vec![
+                "compaction.model_alias=unset".to_owned(),
+                "budget.session_ai_credit_cap_micros=80".to_owned(),
+                "budget.ai_credit_rate_alarm_micros_per_minute=unset".to_owned(),
+                "budget.warn_at_percent=90".to_owned(),
+            ])
+            .load()
+            .expect("M3 controls should merge");
+
+        assert!(loaded.config.compaction.auto);
+        assert_eq!(loaded.config.compaction.reserved_tokens, Some(300));
+        assert_eq!(loaded.config.compaction.model_alias, None);
+        assert_eq!(loaded.config.budget.session_cost_cap_micros_usd, Some(30));
+        assert_eq!(loaded.config.budget.daily_cost_cap_micros_usd, Some(20));
+        assert_eq!(loaded.config.budget.session_ai_credit_cap_micros, Some(80));
+        assert_eq!(loaded.config.budget.daily_ai_credit_cap_micros, Some(40));
+        assert_eq!(
+            loaded.config.budget.spend_rate_alarm_micros_usd_per_minute,
+            Some(70)
+        );
+        assert_eq!(
+            loaded.config.budget.ai_credit_rate_alarm_micros_per_minute,
+            None
+        );
+        assert_eq!(loaded.config.budget.warn_at_percent, 90);
+        assert_eq!(
+            loaded.provenance("compaction.auto"),
+            Some(&ConfigSource::ProjectFile(project.clone()))
+        );
+        assert_eq!(
+            loaded.provenance("compaction.reserved"),
+            Some(&ConfigSource::Environment(
+                "RW_COMPACTION_RESERVED".to_owned()
+            ))
+        );
+        assert_eq!(
+            loaded.provenance("budget.warn_at_percent"),
+            Some(&ConfigSource::Cli)
+        );
+        let rendered = loaded.render_with_provenance();
+        assert!(rendered.contains("compaction.model_alias = <unset> [cli]"));
+        assert!(rendered.contains("budget.session_cost_cap_micros_usd = 30"));
+        assert!(rendered.contains("budget.daily_cost_cap_micros_usd = 20"));
+    }
+
+    #[test]
+    fn invalid_m3_controls_fail_after_precedence_is_resolved() {
+        let root = tempdir().expect("temporary directory should be created");
+        let user = root.path().join("user.toml");
+        fs::write(&user, "[compaction]\nreserved = 0\n").expect("invalid compaction config");
+        let compaction = ConfigLoader::new(user, root.path().join("missing-project.toml"))
+            .load()
+            .expect_err("zero compaction reserve must fail");
+        assert!(
+            matches!(compaction, ConfigError::Validation(message) if message.contains("compaction.reserved"))
+        );
+
+        let budget = ConfigLoader::new(
+            root.path().join("missing-user.toml"),
+            root.path().join("missing-project.toml"),
+        )
+        .with_environment(BTreeMap::from([(
+            "RW_BUDGET_WARN_AT_PERCENT".to_owned(),
+            "101".to_owned(),
+        )]))
+        .load()
+        .expect_err("warning percentage above 100 must fail");
+        assert!(
+            matches!(budget, ConfigError::Validation(message) if message.contains("warn_at_percent"))
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn every_m3_environment_key_and_cli_override_is_wired() {
+        let root = tempdir().expect("temporary directory should be created");
+        let environment = BTreeMap::from([
+            ("RW_COMPACTION_AUTO".to_owned(), "false".to_owned()),
+            ("RW_COMPACTION_RESERVED".to_owned(), "101".to_owned()),
+            (
+                "RW_COMPACTION_MODEL_ALIAS".to_owned(),
+                "env-compact".to_owned(),
+            ),
+            (
+                "RW_BUDGET_SESSION_COST_CAP_MICROS_USD".to_owned(),
+                "102".to_owned(),
+            ),
+            (
+                "RW_BUDGET_DAILY_COST_CAP_MICROS_USD".to_owned(),
+                "103".to_owned(),
+            ),
+            (
+                "RW_BUDGET_SESSION_AI_CREDIT_CAP_MICROS".to_owned(),
+                "104".to_owned(),
+            ),
+            (
+                "RW_BUDGET_DAILY_AI_CREDIT_CAP_MICROS".to_owned(),
+                "105".to_owned(),
+            ),
+            (
+                "RW_BUDGET_SPEND_RATE_ALARM_MICROS_USD_PER_MINUTE".to_owned(),
+                "106".to_owned(),
+            ),
+            (
+                "RW_BUDGET_AI_CREDIT_RATE_ALARM_MICROS_PER_MINUTE".to_owned(),
+                "107".to_owned(),
+            ),
+            ("RW_BUDGET_WARN_AT_PERCENT".to_owned(), "88".to_owned()),
+        ]);
+        let base = ConfigLoader::new(
+            root.path().join("missing-user.toml"),
+            root.path().join("missing-project.toml"),
+        );
+        let from_environment = base
+            .clone()
+            .with_environment(environment)
+            .load()
+            .expect("every M3 environment key must load");
+        assert!(!from_environment.config.compaction.auto);
+        assert_eq!(
+            from_environment.config.compaction.reserved_tokens,
+            Some(101)
+        );
+        assert_eq!(
+            from_environment.config.compaction.model_alias.as_deref(),
+            Some("env-compact")
+        );
+        assert_eq!(
+            (
+                from_environment.config.budget.session_cost_cap_micros_usd,
+                from_environment.config.budget.daily_cost_cap_micros_usd,
+                from_environment.config.budget.session_ai_credit_cap_micros,
+                from_environment.config.budget.daily_ai_credit_cap_micros,
+                from_environment
+                    .config
+                    .budget
+                    .spend_rate_alarm_micros_usd_per_minute,
+                from_environment
+                    .config
+                    .budget
+                    .ai_credit_rate_alarm_micros_per_minute,
+                from_environment.config.budget.warn_at_percent,
+            ),
+            (
+                Some(102),
+                Some(103),
+                Some(104),
+                Some(105),
+                Some(106),
+                Some(107),
+                88,
+            )
+        );
+
+        let from_cli = base
+            .with_cli_overrides(vec![
+                "compaction.auto=true".to_owned(),
+                "compaction.reserved=201".to_owned(),
+                "compaction.model_alias=cli-compact".to_owned(),
+                "budget.session_cost_cap_micros_usd=202".to_owned(),
+                "budget.daily_cost_cap_micros_usd=203".to_owned(),
+                "budget.session_ai_credit_cap_micros=204".to_owned(),
+                "budget.daily_ai_credit_cap_micros=205".to_owned(),
+                "budget.spend_rate_alarm_micros_usd_per_minute=206".to_owned(),
+                "budget.ai_credit_rate_alarm_micros_per_minute=207".to_owned(),
+                "budget.warn_at_percent=89".to_owned(),
+            ])
+            .load()
+            .expect("every M3 CLI key must load");
+        assert!(from_cli.config.compaction.auto);
+        assert_eq!(from_cli.config.compaction.reserved_tokens, Some(201));
+        assert_eq!(
+            from_cli.config.compaction.model_alias.as_deref(),
+            Some("cli-compact")
+        );
+        assert_eq!(
+            from_cli.config.budget.session_cost_cap_micros_usd,
+            Some(202)
+        );
+        assert_eq!(from_cli.config.budget.daily_cost_cap_micros_usd, Some(203));
+        assert_eq!(
+            from_cli.config.budget.session_ai_credit_cap_micros,
+            Some(204)
+        );
+        assert_eq!(from_cli.config.budget.daily_ai_credit_cap_micros, Some(205));
+        assert_eq!(
+            from_cli
+                .config
+                .budget
+                .spend_rate_alarm_micros_usd_per_minute,
+            Some(206)
+        );
+        assert_eq!(
+            from_cli
+                .config
+                .budget
+                .ai_credit_rate_alarm_micros_per_minute,
+            Some(207)
+        );
+        assert_eq!(from_cli.config.budget.warn_at_percent, 89);
     }
 
     #[test]
