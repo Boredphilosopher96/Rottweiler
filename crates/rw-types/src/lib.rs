@@ -17,7 +17,7 @@ pub use protocol::{
     CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId, Cost,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, ModelAlias, Question, QuestionId,
     QuestionOption, QuestionResponseKind, RequestId, RewindTarget, SequenceId, SessionId,
-    SubagentId, ToolCapability, ToolOutputStream, TurnId, TurnStatus, Usage,
+    SubagentId, ToolCapability, ToolOutputStream, TurnId, TurnStatus, UnrestorablePath, Usage,
 };
 
 /// Version of the protocol emitted by these types.

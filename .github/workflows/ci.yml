@@ -12,6 +12,8 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +45,18 @@ jobs:
         working-directory: packages/tui
       - run: bun run build
         working-directory: packages/tui
+
+  performance:
+    name: M2 performance budgets
+    runs-on: macos-15
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - run: crates/rw-cli/tests/perf_gate.sh
 
   supply-chain:
     name: Supply chain

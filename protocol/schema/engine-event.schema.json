@@ -79,6 +79,116 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
+        "position": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "message_queued"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "position",
+        "content"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "agent_turn": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "user_message_accepted"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "agent_turn",
+        "content",
+        "attachments"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "agent_turn": {
+          "type": "string"
+        },
+        "turn": {
+          "$ref": "#/$defs/Turn"
+        },
+        "type": {
+          "type": "string",
+          "const": "conversation_turn_committed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "agent_turn",
+        "turn"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "to_agent_turn": {
+          "type": "string"
+        },
+        "operation_id": {
+          "type": "string"
+        },
+        "unrestorable_paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UnrestorablePath"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "conversation_rewound"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "to_agent_turn",
+        "operation_id",
+        "unrestorable_paths"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
         "turn_id": {
           "$ref": "#/$defs/TurnId"
         },
@@ -129,6 +239,12 @@
         "text": {
           "type": "string"
         },
+        "signature": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "type": {
           "type": "string",
           "const": "thinking_delta"
@@ -139,6 +255,36 @@
         "meta",
         "turn_id",
         "text"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "citation_delta"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "uri"
       ]
     },
     {
@@ -189,6 +335,10 @@
         "tool_call_id": {
           "$ref": "#/$defs/ToolCallId"
         },
+        "name": {
+          "type": "string"
+        },
+        "args": true,
         "capabilities": {
           "type": "array",
           "items": {
@@ -208,6 +358,8 @@
         "meta",
         "turn_id",
         "tool_call_id",
+        "name",
+        "args",
         "capabilities",
         "rationale"
       ]
@@ -262,6 +414,11 @@
         "is_error": {
           "type": "boolean"
         },
+        "call_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
         "type": {
           "type": "string",
           "const": "tool_call_finished"
@@ -273,7 +430,8 @@
         "turn_id",
         "tool_call_id",
         "output",
-        "is_error"
+        "is_error",
+        "call_index"
       ]
     },
     {
@@ -281,6 +439,9 @@
       "properties": {
         "meta": {
           "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
         },
         "question_id": {
           "$ref": "#/$defs/QuestionId"
@@ -299,8 +460,40 @@
       "required": [
         "type",
         "meta",
+        "turn_id",
         "question_id",
         "questions"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Answer"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "question_answered"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "question_id",
+        "answers"
       ]
     },
     {
@@ -568,6 +761,97 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
+        "event": {
+          "type": "string"
+        },
+        "hook_id": {
+          "type": "string"
+        },
+        "fail_closed": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "hook_failed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "event",
+        "hook_id",
+        "fail_closed",
+        "message"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "name": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "unrestorable_paths": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UnrestorablePath"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "command_finished"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "name",
+        "message",
+        "unrestorable_paths"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "guard": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "guard_triggered"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "guard",
+        "message"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
         "error": {
           "$ref": "#/$defs/EngineError"
         },
@@ -735,31 +1019,236 @@
       "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
       "type": "string"
     },
-    "TurnId": {
-      "description": "Stable identifier of a conversation turn.",
-      "type": "string"
+    "Attachment": {
+      "description": "User-provided content attached to a message.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "data": {
+          "$ref": "#/$defs/AttachmentData"
+        }
+      },
+      "required": [
+        "name",
+        "media_type",
+        "data"
+      ]
+    },
+    "AttachmentData": {
+      "description": "In-band attachment data; protocol messages never require shared files.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "inline_base64"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ]
+        }
+      ]
+    },
+    "Turn": {
+      "description": "One conversation turn in the internal message representation.",
+      "type": "object",
+      "properties": {
+        "role": {
+          "$ref": "#/$defs/Role"
+        },
+        "blocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Block"
+          }
+        },
+        "meta": {
+          "$ref": "#/$defs/TurnMeta"
+        }
+      },
+      "required": [
+        "role",
+        "blocks",
+        "meta"
+      ]
+    },
+    "Role": {
+      "description": "A provider-neutral role in the conversation IR.",
+      "type": "string",
+      "enum": [
+        "system",
+        "user",
+        "assistant",
+        "tool"
+      ]
+    },
+    "Block": {
+      "description": "A provider-neutral content block.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "signature": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "thinking"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "name": {
+              "type": "string"
+            },
+            "args": true,
+            "type": {
+              "type": "string",
+              "const": "tool_call"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "name",
+            "args"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/ToolCallId"
+            },
+            "output": {
+              "$ref": "#/$defs/ToolOutput"
+            },
+            "is_error": {
+              "type": "boolean"
+            },
+            "type": {
+              "type": "string",
+              "const": "tool_result"
+            }
+          },
+          "required": [
+            "type",
+            "id",
+            "output",
+            "is_error"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "media_type": {
+              "type": "string"
+            },
+            "data": {
+              "$ref": "#/$defs/ImageRef"
+            },
+            "type": {
+              "type": "string",
+              "const": "image"
+            }
+          },
+          "required": [
+            "type",
+            "media_type",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "uri": {
+              "type": "string"
+            },
+            "title": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "excerpt": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "type": "string",
+              "const": "citation"
+            }
+          },
+          "required": [
+            "type",
+            "uri"
+          ]
+        }
+      ]
     },
     "ToolCallId": {
       "description": "Stable identifier assigned to a model tool call.",
       "type": "string"
-    },
-    "ToolCapability": {
-      "description": "Capabilities used by the permission engine for a tool invocation.",
-      "type": "string",
-      "enum": [
-        "read_filesystem",
-        "write_filesystem",
-        "network",
-        "execute"
-      ]
-    },
-    "ToolOutputStream": {
-      "description": "A stream associated with partial output from a running tool.",
-      "type": "string",
-      "enum": [
-        "stdout",
-        "stderr"
-      ]
     },
     "ToolOutput": {
       "description": "Provider-neutral output produced by a tool.",
@@ -907,6 +1396,72 @@
         }
       ]
     },
+    "TurnMeta": {
+      "description": "Metadata whose meaning is independent of a provider adapter.",
+      "type": "object",
+      "properties": {
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "synthetic": {
+          "type": "boolean",
+          "default": false
+        },
+        "summary": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "UnrestorablePath": {
+      "description": "A workspace path that a rewind could not restore exactly.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "reason"
+      ]
+    },
+    "TurnId": {
+      "description": "Stable identifier of a conversation turn.",
+      "type": "string"
+    },
+    "ToolCapability": {
+      "description": "Capabilities used by the permission engine for a tool invocation.",
+      "type": "string",
+      "enum": [
+        "read_filesystem",
+        "write_filesystem",
+        "network",
+        "execute"
+      ]
+    },
+    "ToolOutputStream": {
+      "description": "A stream associated with partial output from a running tool.",
+      "type": "string",
+      "enum": [
+        "stdout",
+        "stderr"
+      ]
+    },
     "QuestionId": {
       "description": "Stable identifier of an interactive question.",
       "type": "string"
@@ -969,13 +1524,34 @@
         "label"
       ]
     },
+    "Answer": {
+      "description": "One answer returned for a question entry.",
+      "type": "object",
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "question_id",
+        "values"
+      ]
+    },
     "TurnStatus": {
       "description": "Terminal state of an agent turn.",
       "type": "string",
       "enum": [
         "completed",
         "interrupted",
-        "failed"
+        "failed",
+        "max_turns",
+        "doom_loop"
       ]
     },
     "Usage": {
@@ -993,29 +1569,110 @@
         },
         "cache_write_tokens": {
           "type": "string"
+        },
+        "reasoning_tokens": {
+          "type": "string"
         }
       },
       "required": [
         "input_tokens",
         "output_tokens",
         "cache_read_tokens",
-        "cache_write_tokens"
+        "cache_write_tokens",
+        "reasoning_tokens"
       ]
     },
     "Cost": {
-      "description": "Exact fixed-point monetary amount.",
-      "type": "object",
-      "properties": {
-        "amount_micros": {
-          "type": "string"
+      "description": "Provider-neutral billing/quota disposition for a completed turn. A missing\nprice is never represented as a zero-dollar API charge.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "amount_micros": {
+              "type": "string"
+            },
+            "currency": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "monetary"
+            }
+          },
+          "required": [
+            "kind",
+            "amount_micros",
+            "currency"
+          ]
         },
-        "currency": {
-          "type": "string"
+        {
+          "type": "object",
+          "properties": {
+            "credits_micros": {
+              "type": "string"
+            },
+            "nominal_amount_micros": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "currency": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "ai_credits"
+            }
+          },
+          "required": [
+            "kind",
+            "credits_micros"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "used": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "unit": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "const": "subscription_quota"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "unavailable"
+            }
+          },
+          "required": [
+            "kind",
+            "reason"
+          ]
         }
-      },
-      "required": [
-        "amount_micros",
-        "currency"
       ]
     },
     "CompactionReason": {

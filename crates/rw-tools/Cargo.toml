@@ -7,9 +7,26 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = "0.1.89"
+globset = "0.4.16"
+grep-matcher = "0.1.8"
+grep-regex = "0.1.14"
+grep-searcher = "0.1.14"
+h2m = "0.7.1"
+ignore = "0.4.23"
 rw-intel.workspace = true
 rw-sandbox.workspace = true
 rw-types.workspace = true
+rustix.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "process", "test-util", "time"] }
+url.workspace = true
+
+[dev-dependencies]
+tempfile = "3.23"
 
 [lints]
 workspace = true

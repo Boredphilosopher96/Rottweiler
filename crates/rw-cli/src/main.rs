@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result};
 use rw_core::{
     DEFAULT_MODEL_CATALOG_URL, GitHubCopilotLogin, OAuthLogin, ProviderApiKey, ProviderLogin,
@@ -11,11 +11,72 @@ use rw_core::{
 };
 use tracing_subscriber::EnvFilter;
 
+mod runtime;
+
 #[derive(Debug, Parser)]
 #[command(name = "rw", version, about = "Rottweiler coding-agent harness")]
 struct Cli {
+    /// Run one prompt without starting the interactive line-mode client.
+    #[arg(short = 'p', long, value_name = "PROMPT")]
+    prompt: Option<String>,
+    /// Rendering contract for print mode.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    output_format: OutputFormat,
+    /// Non-interactive permission policy. Omitted means the loaded config policy.
+    #[arg(long, value_enum)]
+    permission_mode: Option<PermissionMode>,
+    /// Maximum provider iterations permitted in one user turn.
+    #[arg(long, default_value_t = 32)]
+    max_turns: usize,
+    /// Resume an exact durable session id.
+    #[arg(long, value_name = "SESSION", conflicts_with = "continue_latest")]
+    resume: Option<String>,
+    /// Continue the most recently updated durable session.
+    #[arg(long = "continue", conflicts_with = "resume")]
+    continue_latest: bool,
+    /// Network-free provider recording directory used by deterministic tests.
+    #[arg(long, hide = true, value_name = "DIRECTORY")]
+    replay_dir: Option<PathBuf>,
+    /// Record a deterministic provider-event script for CLI acceptance tests.
+    #[arg(long, hide = true, value_name = "SCRIPT", requires = "replay_dir")]
+    record_replay_script: Option<PathBuf>,
+    /// Use a deterministic in-memory provider-event script without fixture I/O.
+    #[arg(
+        long,
+        hide = true,
+        value_name = "SCRIPT",
+        conflicts_with = "record_replay_script"
+    )]
+    in_memory_replay_script: Option<PathBuf>,
+    /// Delay each scripted provider event for crash/interrupt acceptance tests.
+    #[arg(long, hide = true, default_value_t = 0)]
+    record_script_delay_ms: u64,
+    /// Emit deterministic timing markers for the release performance smoke.
+    #[arg(long, hide = true)]
+    perf_markers: bool,
+    /// Provider name stored in the deterministic replay directory.
+    #[arg(long, hide = true, default_value = "cli-replay")]
+    replay_provider: String,
+    /// Override the active provider-neutral model alias.
+    #[arg(long, value_name = "ALIAS")]
+    model: Option<String>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum OutputFormat {
+    #[default]
+    Text,
+    Json,
+    StreamJson,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum PermissionMode {
+    Strict,
+    AutoSafe,
+    Yolo,
 }
 
 #[derive(Debug, Subcommand)]
@@ -81,10 +142,11 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    match Cli::parse().command {
-        Command::Config {
+    let cli = Cli::parse();
+    match cli.command {
+        Some(Command::Config {
             command: ConfigCommand::Check { overrides },
-        } => {
+        }) => {
             let loaded = rw_store::config::ConfigLoader::from_environment()
                 .into_diagnostic()?
                 .with_cli_overrides(overrides)
@@ -95,9 +157,9 @@ async fn main() -> Result<()> {
             }
             print!("{}", loaded.render_with_provenance());
         }
-        Command::Models {
+        Some(Command::Models {
             command: ModelsCommand::Refresh { source, output },
-        } => {
+        }) => {
             let report = refresh_model_catalog(&source, output)
                 .await
                 .into_diagnostic()?;
@@ -111,12 +173,30 @@ async fn main() -> Result<()> {
                 report.path.display()
             );
         }
-        Command::Auth {
+        Some(Command::Auth {
             command: AuthCommand::Login { provider },
-        } => auth_login(&provider).await?,
-        Command::Auth {
+        }) => auth_login(&provider).await?,
+        Some(Command::Auth {
             command: AuthCommand::SetKey { provider },
-        } => auth_set_key(&provider)?,
+        }) => auth_set_key(&provider)?,
+        None => {
+            runtime::run(runtime::RunOptions {
+                prompt: cli.prompt,
+                output_format: cli.output_format,
+                permission_mode: cli.permission_mode,
+                max_turns: cli.max_turns,
+                resume: cli.resume,
+                continue_latest: cli.continue_latest,
+                replay_dir: cli.replay_dir,
+                record_replay_script: cli.record_replay_script,
+                in_memory_replay_script: cli.in_memory_replay_script,
+                record_script_delay_ms: cli.record_script_delay_ms,
+                perf_markers: cli.perf_markers,
+                replay_provider: cli.replay_provider,
+                model: cli.model,
+            })
+            .await?;
+        }
     }
 
     Ok(())

@@ -8,7 +8,7 @@ use rw_types::{
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias, Question,
     QuestionId, QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId,
     SessionId, SubagentId, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
-    ToolOutputStream, Turn, TurnId, TurnMeta, TurnStatus, Usage,
+    ToolOutputStream, Turn, TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -169,6 +169,7 @@ fn generate_typescript() -> String {
     declaration!(CompactionReason);
     declaration!(Usage);
     declaration!(Cost);
+    declaration!(UnrestorablePath);
     declaration!(EngineErrorCategory);
     declaration!(EngineError);
     declaration!(CommandOutcome);
@@ -453,6 +454,7 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(4),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 text: "checking".to_owned(),
+                signature: None,
             },
             EngineEvent::ToolCallStarted {
                 meta: event_meta(5),
@@ -466,6 +468,8 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(6),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
+                name: "bash".to_owned(),
+                args: json!({"command": "cargo test"}),
                 capabilities: vec![ToolCapability::Execute],
                 rationale: "runs a local command".to_owned(),
             },
@@ -482,9 +486,11 @@ fn contract_fixture() -> ContractFixture {
                 tool_call_id: ToolCallId("tool-1".to_owned()),
                 output: mixed_output,
                 is_error: false,
+                call_index: 0,
             },
             EngineEvent::QuestionAsked {
                 meta: event_meta(9),
+                turn_id: TurnId("turn-fixture".to_owned()),
                 question_id: QuestionId("question-1".to_owned()),
                 questions: vec![Question {
                     id: QuestionId("question-1".to_owned()),
@@ -497,8 +503,17 @@ fn contract_fixture() -> ContractFixture {
                     }],
                 }],
             },
-            EngineEvent::TurnFinished {
+            EngineEvent::QuestionAnswered {
                 meta: event_meta(10),
+                turn_id: TurnId("turn-fixture".to_owned()),
+                question_id: QuestionId("question-1".to_owned()),
+                answers: vec![Answer {
+                    question_id: QuestionId("question-1".to_owned()),
+                    values: vec!["yes".to_owned()],
+                }],
+            },
+            EngineEvent::TurnFinished {
+                meta: event_meta(11),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 status: TurnStatus::Completed,
                 usage: Usage {
@@ -506,28 +521,29 @@ fn contract_fixture() -> ContractFixture {
                     output_tokens: 20,
                     cache_read_tokens: 80,
                     cache_write_tokens: 0,
+                    reasoning_tokens: 5,
                 },
-                cost: Cost {
+                cost: Cost::Monetary {
                     amount_micros: 125,
                     currency: "USD".to_owned(),
                 },
             },
             EngineEvent::CompactionStarted {
-                meta: event_meta(11),
+                meta: event_meta(12),
                 reason: CompactionReason::Automatic,
             },
             EngineEvent::CompactionFinished {
-                meta: event_meta(12),
+                meta: event_meta(13),
                 summary_turn_id: TurnId("summary-turn".to_owned()),
                 reclaimed_tokens: 25_000,
             },
             EngineEvent::SubagentSpawned {
-                meta: event_meta(13),
+                meta: event_meta(14),
                 subagent_id: SubagentId("subagent-1".to_owned()),
                 task: "inspect protocol".to_owned(),
             },
             EngineEvent::SubagentFinished {
-                meta: event_meta(14),
+                meta: event_meta(15),
                 subagent_id: SubagentId("subagent-1".to_owned()),
                 output: ToolOutput::Text {
                     text: "done".to_owned(),
@@ -535,7 +551,7 @@ fn contract_fixture() -> ContractFixture {
                 is_error: false,
             },
             EngineEvent::SubagentFinished {
-                meta: event_meta(15),
+                meta: event_meta(16),
                 subagent_id: SubagentId("subagent-2".to_owned()),
                 output: ToolOutput::Structured {
                     value: json!({"files": 3}),
@@ -543,33 +559,33 @@ fn contract_fixture() -> ContractFixture {
                 is_error: false,
             },
             EngineEvent::ToolOutputPruned {
-                meta: event_meta(16),
+                meta: event_meta(17),
                 tool_call_id: ToolCallId("tool-old".to_owned()),
                 reclaimed_tokens: 21_000,
             },
             EngineEvent::ModeChanged {
-                meta: event_meta(17),
+                meta: event_meta(18),
                 mode: "plan".to_owned(),
             },
             EngineEvent::ModelChanged {
-                meta: event_meta(18),
+                meta: event_meta(19),
                 model: ModelAlias("fast".to_owned()),
             },
             EngineEvent::ContextItemPinned {
-                meta: event_meta(19),
+                meta: event_meta(20),
                 item_id: ContextItemId("context-1".to_owned()),
             },
             EngineEvent::ContextItemEvicted {
-                meta: event_meta(20),
+                meta: event_meta(21),
                 item_id: ContextItemId("context-2".to_owned()),
             },
             EngineEvent::UserShellStateChanged {
-                meta: event_meta(21),
+                meta: event_meta(22),
                 active: false,
                 status: None,
             },
             EngineEvent::Error {
-                meta: event_meta(22),
+                meta: event_meta(23),
                 error: EngineError {
                     category: EngineErrorCategory::Protocol,
                     code: "invalid_command".to_owned(),

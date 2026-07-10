@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait = "0.1.89"
 getrandom.workspace = true
+futures-util = "0.3.31"
 rw-context.workspace = true
 rw-ext.workspace = true
 rw-mcp.workspace = true
@@ -18,13 +19,15 @@ rw-tools.workspace = true
 rw-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 thiserror.workspace = true
 tracing.workspace = true
 url.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [dev-dependencies]
-futures-util = "0.3.31"
 tempfile = "3.23"
 
 [lints]

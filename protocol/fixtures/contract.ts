@@ -391,7 +391,8 @@ export const contractFixture = {
         "caused_by": null
       },
       "turn_id": "turn-fixture",
-      "text": "checking"
+      "text": "checking",
+      "signature": null
     },
     {
       "type": "tool_call_started",
@@ -421,6 +422,10 @@ export const contractFixture = {
       },
       "turn_id": "turn-fixture",
       "tool_call_id": "tool-1",
+      "name": "bash",
+      "args": {
+        "command": "cargo test"
+      },
       "capabilities": [
         "execute"
       ],
@@ -475,7 +480,8 @@ export const contractFixture = {
           }
         ]
       },
-      "is_error": false
+      "is_error": false,
+      "call_index": 0
     },
     {
       "type": "question_asked",
@@ -486,6 +492,7 @@ export const contractFixture = {
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
+      "turn_id": "turn-fixture",
       "question_id": "question-1",
       "questions": [
         {
@@ -503,11 +510,31 @@ export const contractFixture = {
       ]
     },
     {
-      "type": "turn_finished",
+      "type": "question_answered",
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
         "sequence_id": "10",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "turn_id": "turn-fixture",
+      "question_id": "question-1",
+      "answers": [
+        {
+          "question_id": "question-1",
+          "values": [
+            "yes"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "turn_finished",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "11",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -517,9 +544,11 @@ export const contractFixture = {
         "input_tokens": "100",
         "output_tokens": "20",
         "cache_read_tokens": "80",
-        "cache_write_tokens": "0"
+        "cache_write_tokens": "0",
+        "reasoning_tokens": "5"
       },
       "cost": {
+        "kind": "monetary",
         "amount_micros": "125",
         "currency": "USD"
       }
@@ -529,7 +558,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "11",
+        "sequence_id": "12",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -540,7 +569,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "12",
+        "sequence_id": "13",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -552,7 +581,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "13",
+        "sequence_id": "14",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -564,7 +593,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "14",
+        "sequence_id": "15",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -580,7 +609,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "15",
+        "sequence_id": "16",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -598,7 +627,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "16",
+        "sequence_id": "17",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -610,7 +639,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "17",
+        "sequence_id": "18",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -621,7 +650,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "18",
+        "sequence_id": "19",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -632,7 +661,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "19",
+        "sequence_id": "20",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -643,7 +672,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "20",
+        "sequence_id": "21",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -654,7 +683,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "21",
+        "sequence_id": "22",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -666,7 +695,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "22",
+        "sequence_id": "23",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },

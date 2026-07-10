@@ -7,9 +7,12 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+blake3.workspace = true
 keyring.workspace = true
+rusqlite.workspace = true
 rw-types.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 tracing.workspace = true

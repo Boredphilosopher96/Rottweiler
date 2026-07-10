@@ -36,7 +36,10 @@ pub use github_copilot::{
     GitHubCopilotProviderConfig, GitHubCopilotRuntime, GitHubDeviceFlowTransport, GitHubDevicePoll,
     github_copilot_ai_credits, github_copilot_micros_usd_per_million, parse_github_copilot_models,
 };
-pub use http::{ProcessNetworkDenyGuard, deny_outbound_network_for_process};
+pub use http::{
+    GuardedHttpFetchError, GuardedHttpFetchRequest, GuardedHttpFetchResponse,
+    ProcessNetworkDenyGuard, deny_outbound_network_for_process, guarded_http_fetch,
+};
 pub use models_dev::{
     DEFAULT_MODELS_DEV_URL, ModelsRefreshReport, default_models_path, refresh_models_dev,
     refresh_models_dev_with_proxy_auth,

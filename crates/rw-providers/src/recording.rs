@@ -204,6 +204,15 @@ impl FixtureRedactor {
         }
     }
 
+    /// Replaces every registered known secret in arbitrary fixture text.
+    ///
+    /// This lets non-provider fixture recorders share the same live secret
+    /// registry before their bytes reach disk.
+    #[must_use]
+    pub fn redact_text(&self, value: &str) -> String {
+        self.redact(value)
+    }
+
     fn redact(&self, value: &str) -> String {
         let redact_with = |secrets: &[String]| {
             secrets.iter().fold(value.to_owned(), |rendered, secret| {

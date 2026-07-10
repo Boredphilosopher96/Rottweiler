@@ -293,6 +293,8 @@ pub enum TurnStatus {
     Completed,
     Interrupted,
     Failed,
+    MaxTurns,
+    DoomLoop,
 }
 
 /// Why a context compaction began.
@@ -324,16 +326,47 @@ pub struct Usage {
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub cache_write_tokens: u64,
-}
-
-/// Exact fixed-point monetary amount.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
-pub struct Cost {
     #[serde(with = "decimal_u64")]
     #[schemars(with = "String")]
     #[ts(type = "string")]
-    pub amount_micros: u64,
-    pub currency: String,
+    pub reasoning_tokens: u64,
+}
+
+/// A workspace path that a rewind could not restore exactly.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct UnrestorablePath {
+    pub path: String,
+    pub reason: String,
+}
+
+/// Provider-neutral billing/quota disposition for a completed turn. A missing
+/// price is never represented as a zero-dollar API charge.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(tag = "kind", rename_all = "snake_case", optional_fields = nullable)]
+pub enum Cost {
+    Monetary {
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        amount_micros: u64,
+        currency: String,
+    },
+    AiCredits {
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        credits_micros: u64,
+        nominal_amount_micros: Option<String>,
+        currency: Option<String>,
+    },
+    SubscriptionQuota {
+        used: Option<String>,
+        unit: Option<String>,
+    },
+    Unavailable {
+        reason: String,
+    },
 }
 
 /// Stable error categories used across engine boundaries.
@@ -388,6 +421,40 @@ pub enum EngineEvent {
         meta: EventMeta,
         driver_client_id: ClientId,
     },
+    MessageQueued {
+        meta: EventMeta,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        position: u64,
+        content: String,
+    },
+    UserMessageAccepted {
+        meta: EventMeta,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        agent_turn: u64,
+        content: String,
+        attachments: Vec<Attachment>,
+    },
+    ConversationTurnCommitted {
+        meta: EventMeta,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        agent_turn: u64,
+        turn: crate::Turn,
+    },
+    ConversationRewound {
+        meta: EventMeta,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        to_agent_turn: u64,
+        operation_id: String,
+        unrestorable_paths: Vec<UnrestorablePath>,
+    },
     TurnStarted {
         meta: EventMeta,
         turn_id: TurnId,
@@ -401,6 +468,13 @@ pub enum EngineEvent {
         meta: EventMeta,
         turn_id: TurnId,
         text: String,
+        signature: Option<String>,
+    },
+    CitationDelta {
+        meta: EventMeta,
+        turn_id: TurnId,
+        uri: String,
+        title: Option<String>,
     },
     ToolCallStarted {
         meta: EventMeta,
@@ -414,6 +488,8 @@ pub enum EngineEvent {
         meta: EventMeta,
         turn_id: TurnId,
         tool_call_id: ToolCallId,
+        name: String,
+        args: Value,
         capabilities: Vec<ToolCapability>,
         rationale: String,
     },
@@ -430,11 +506,19 @@ pub enum EngineEvent {
         tool_call_id: ToolCallId,
         output: ToolOutput,
         is_error: bool,
+        call_index: u32,
     },
     QuestionAsked {
         meta: EventMeta,
+        turn_id: TurnId,
         question_id: QuestionId,
         questions: Vec<Question>,
+    },
+    QuestionAnswered {
+        meta: EventMeta,
+        turn_id: TurnId,
+        question_id: QuestionId,
+        answers: Vec<Answer>,
     },
     TurnFinished {
         meta: EventMeta,
@@ -495,8 +579,109 @@ pub enum EngineEvent {
         active: bool,
         status: Option<i32>,
     },
+    HookFailed {
+        meta: EventMeta,
+        event: String,
+        hook_id: String,
+        fail_closed: bool,
+        message: String,
+    },
+    CommandFinished {
+        meta: EventMeta,
+        name: String,
+        message: String,
+        unrestorable_paths: Vec<UnrestorablePath>,
+    },
+    GuardTriggered {
+        meta: EventMeta,
+        turn_id: TurnId,
+        guard: String,
+        message: String,
+    },
     Error {
         meta: EventMeta,
         error: EngineError,
     },
+}
+
+impl EngineEvent {
+    /// Returns durable session metadata, or `None` for the connection-scoped
+    /// command acknowledgement that is never written to a session log.
+    #[must_use]
+    pub fn meta(&self) -> Option<&EventMeta> {
+        match self {
+            Self::CommandAcknowledged { .. } => None,
+            Self::SessionCreated { meta, .. }
+            | Self::DriverChanged { meta, .. }
+            | Self::MessageQueued { meta, .. }
+            | Self::UserMessageAccepted { meta, .. }
+            | Self::ConversationTurnCommitted { meta, .. }
+            | Self::ConversationRewound { meta, .. }
+            | Self::TurnStarted { meta, .. }
+            | Self::TextDelta { meta, .. }
+            | Self::ThinkingDelta { meta, .. }
+            | Self::CitationDelta { meta, .. }
+            | Self::ToolCallStarted { meta, .. }
+            | Self::ToolApprovalNeeded { meta, .. }
+            | Self::ToolOutputDelta { meta, .. }
+            | Self::ToolCallFinished { meta, .. }
+            | Self::QuestionAsked { meta, .. }
+            | Self::QuestionAnswered { meta, .. }
+            | Self::TurnFinished { meta, .. }
+            | Self::CompactionStarted { meta, .. }
+            | Self::CompactionFinished { meta, .. }
+            | Self::SubagentSpawned { meta, .. }
+            | Self::SubagentFinished { meta, .. }
+            | Self::ToolOutputPruned { meta, .. }
+            | Self::ModeChanged { meta, .. }
+            | Self::ModelChanged { meta, .. }
+            | Self::ContextItemPinned { meta, .. }
+            | Self::ContextItemEvicted { meta, .. }
+            | Self::UserShellStateChanged { meta, .. }
+            | Self::HookFailed { meta, .. }
+            | Self::CommandFinished { meta, .. }
+            | Self::GuardTriggered { meta, .. }
+            | Self::Error { meta, .. } => Some(meta),
+        }
+    }
+
+    /// Mutable durable session metadata for storage adapters and protocol
+    /// validators. Connection-scoped acknowledgements return `None`.
+    #[must_use]
+    pub fn meta_mut(&mut self) -> Option<&mut EventMeta> {
+        match self {
+            Self::CommandAcknowledged { .. } => None,
+            Self::SessionCreated { meta, .. }
+            | Self::DriverChanged { meta, .. }
+            | Self::MessageQueued { meta, .. }
+            | Self::UserMessageAccepted { meta, .. }
+            | Self::ConversationTurnCommitted { meta, .. }
+            | Self::ConversationRewound { meta, .. }
+            | Self::TurnStarted { meta, .. }
+            | Self::TextDelta { meta, .. }
+            | Self::ThinkingDelta { meta, .. }
+            | Self::CitationDelta { meta, .. }
+            | Self::ToolCallStarted { meta, .. }
+            | Self::ToolApprovalNeeded { meta, .. }
+            | Self::ToolOutputDelta { meta, .. }
+            | Self::ToolCallFinished { meta, .. }
+            | Self::QuestionAsked { meta, .. }
+            | Self::QuestionAnswered { meta, .. }
+            | Self::TurnFinished { meta, .. }
+            | Self::CompactionStarted { meta, .. }
+            | Self::CompactionFinished { meta, .. }
+            | Self::SubagentSpawned { meta, .. }
+            | Self::SubagentFinished { meta, .. }
+            | Self::ToolOutputPruned { meta, .. }
+            | Self::ModeChanged { meta, .. }
+            | Self::ModelChanged { meta, .. }
+            | Self::ContextItemPinned { meta, .. }
+            | Self::ContextItemEvicted { meta, .. }
+            | Self::UserShellStateChanged { meta, .. }
+            | Self::HookFailed { meta, .. }
+            | Self::CommandFinished { meta, .. }
+            | Self::GuardTriggered { meta, .. }
+            | Self::Error { meta, .. } => Some(meta),
+        }
+    }
 }
