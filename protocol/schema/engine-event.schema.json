@@ -109,6 +109,200 @@
       "type": "object",
       "properties": {
         "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "through_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "session_replay_completed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionDescriptor"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "sessions_listed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "sessions"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CommandDescriptor"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "command_descriptors_listed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "commands"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "models": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelDescriptor"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "models_listed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "models"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "matches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkspaceFileMatch"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_files_found"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "matches",
+        "truncated"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "preview": {
+          "$ref": "#/$defs/WorkspaceFilePreview"
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_file_preview_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "preview"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/WorkspaceStatus"
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_status_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "status"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "type": {
+          "type": "string",
+          "const": "host_shutdown"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
           "$ref": "#/$defs/EventMeta"
         },
         "driver_client_id": {
@@ -157,6 +351,12 @@
         "content": {
           "type": "string"
         },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StoredAttachment"
+          }
+        },
         "type": {
           "type": "string",
           "const": "message_queued"
@@ -166,7 +366,8 @@
         "type",
         "meta",
         "position",
-        "content"
+        "content",
+        "attachments"
       ]
     },
     {
@@ -184,7 +385,7 @@
         "attachments": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/Attachment"
+            "$ref": "#/$defs/StoredAttachment"
           }
         },
         "type": {
@@ -419,6 +620,16 @@
         },
         "rationale": {
           "type": "string"
+        },
+        "diff": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UnifiedDiff"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "type": {
           "type": "string",
@@ -960,6 +1171,15 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
+        "shell_id": {
+          "$ref": "#/$defs/ShellId"
+        },
+        "command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "active": {
           "type": "boolean"
         },
@@ -970,6 +1190,12 @@
           ],
           "format": "int32"
         },
+        "captured_output": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "type": {
           "type": "string",
           "const": "user_shell_state_changed"
@@ -978,6 +1204,7 @@
       "required": [
         "type",
         "meta",
+        "shell_id",
         "active"
       ]
     },
@@ -2059,52 +2286,134 @@
         "input_schema"
       ]
     },
-    "EventMeta": {
-      "description": "Metadata common to persisted and streamed events.",
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "SessionDescriptor": {
+      "description": "One active or resumable session returned by the engine host.",
       "type": "object",
       "properties": {
-        "protocol_version": {
-          "type": "integer",
-          "format": "uint16",
-          "minimum": 0,
-          "maximum": 65535
-        },
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
-        "sequence_id": {
-          "$ref": "#/$defs/SequenceId"
-        },
-        "emitted_at": {
+        "workspace_name": {
           "type": "string"
         },
-        "caused_by": {
+        "model": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "driver_client_id": {
           "anyOf": [
             {
-              "$ref": "#/$defs/RequestId"
+              "$ref": "#/$defs/ClientId"
             },
             {
               "type": "null"
             }
           ]
+        },
+        "shell_active": {
+          "type": "boolean"
         }
       },
       "required": [
-        "protocol_version",
         "session_id",
-        "sequence_id",
-        "emitted_at"
+        "workspace_name",
+        "model",
+        "shell_active"
       ]
     },
-    "SequenceId": {
-      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
-      "type": "string"
-    },
-    "Attachment": {
-      "description": "User-provided content attached to a message.",
+    "CommandDescriptor": {
+      "description": "One slash command exposed to fuzzy pickers without UI-private metadata.",
       "type": "object",
       "properties": {
         "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "usage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "usage"
+      ]
+    },
+    "ModelDescriptor": {
+      "description": "One configured model alias and its offline-known capabilities.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "capabilities": {
+          "$ref": "#/$defs/ModelCapabilities"
+        }
+      },
+      "required": [
+        "alias",
+        "capabilities"
+      ]
+    },
+    "ModelCapabilities": {
+      "description": "Provider-neutral capabilities used by model pickers and attachment checks.",
+      "type": "object",
+      "properties": {
+        "tool_calling": {
+          "type": "boolean"
+        },
+        "vision": {
+          "type": "boolean"
+        },
+        "thinking": {
+          "type": "boolean"
+        },
+        "cache_behavior": {
+          "$ref": "#/$defs/ModelCacheBehavior"
+        }
+      },
+      "required": [
+        "tool_calling",
+        "vision",
+        "thinking",
+        "cache_behavior"
+      ]
+    },
+    "ModelCacheBehavior": {
+      "description": "Prompt-cache behavior exposed without leaking a provider implementation.",
+      "type": "string",
+      "enum": [
+        "none",
+        "explicit",
+        "provider_managed"
+      ]
+    },
+    "WorkspaceFileMatch": {
+      "description": "Relative workspace path returned by fuzzy file search.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "is_directory": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "is_directory"
+      ]
+    },
+    "WorkspaceFilePreview": {
+      "description": "Remote-safe in-band file preview; paths are always workspace-relative.",
+      "type": "object",
+      "properties": {
+        "path": {
           "type": "string"
         },
         "media_type": {
@@ -2112,12 +2421,20 @@
         },
         "data": {
           "$ref": "#/$defs/AttachmentData"
+        },
+        "total_bytes": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
         }
       },
       "required": [
-        "name",
+        "path",
         "media_type",
-        "data"
+        "data",
+        "total_bytes",
+        "truncated"
       ]
     },
     "AttachmentData": {
@@ -2157,6 +2474,96 @@
         }
       ]
     },
+    "WorkspaceStatus": {
+      "description": "Workspace status for the TUI status line and file picker.",
+      "type": "object",
+      "properties": {
+        "workspace_name": {
+          "type": "string"
+        },
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changed_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "workspace_name",
+        "changed_paths",
+        "truncated"
+      ]
+    },
+    "EventMeta": {
+      "description": "Metadata common to persisted and streamed events.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "sequence_id": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "emitted_at": {
+          "type": "string"
+        },
+        "caused_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "sequence_id",
+        "emitted_at"
+      ]
+    },
+    "StoredAttachment": {
+      "description": "Durable content-addressed attachment metadata persisted in the event log.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "content_hash": {
+          "type": "string"
+        },
+        "byte_len": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "media_type",
+        "content_hash",
+        "byte_len"
+      ]
+    },
     "UnrestorablePath": {
       "description": "A workspace path that a rewind could not restore exactly.",
       "type": "object",
@@ -2181,6 +2588,42 @@
         "write_filesystem",
         "network",
         "execute"
+      ]
+    },
+    "UnifiedDiff": {
+      "description": "Optional structured unified diff attached to a mutating-tool approval.",
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "unified_diff": {
+          "type": "string"
+        },
+        "arguments_hash": {
+          "type": "string"
+        },
+        "base_hash": {
+          "type": "string"
+        },
+        "diff_hash": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "path",
+        "unified_diff",
+        "arguments_hash",
+        "base_hash",
+        "diff_hash",
+        "truncated"
       ]
     },
     "ToolOutputStream": {
@@ -2321,6 +2764,10 @@
     },
     "SubagentId": {
       "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
+    "ShellId": {
+      "description": "Engine-generated identifier of one foreground user shell.",
       "type": "string"
     }
   }

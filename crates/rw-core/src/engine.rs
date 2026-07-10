@@ -35,14 +35,15 @@ use rw_tools::{
 };
 use rw_types::config::{BudgetConfig, CompactionConfig};
 use rw_types::{
-    AccountingAttribution, Answer, ApprovalDecision, Block, BudgetLevel, BudgetScope, BudgetUnit,
-    CacheBreakpoint, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta,
-    CommandOutcome, CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot,
-    ContextItemState, ContextSnapshot, Cost, CostSnapshot, EngineError, EngineErrorCategory,
-    EngineEvent, EventMeta, ModelAlias, PROTOCOL_VERSION, PromptDump, PromptTool, Question,
-    QuestionId, QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId,
-    SessionId, ToolCallId, ToolOutput, ToolOutputPart, ToolOutputStream, Turn, TurnAccounting,
-    TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
+    AccountingAttribution, Answer, ApprovalDecision, Attachment, AttachmentData, Block,
+    BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId, ClientRole,
+    CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId, ContextItemKind,
+    ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot, EngineError,
+    EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias, PROTOCOL_VERSION,
+    PromptDump, PromptTool, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
+    RewindTarget, Role, SequenceId, SessionId, ShellId, StoredAttachment, ToolCallId, ToolOutput,
+    ToolOutputPart, ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
+    UnifiedDiff, UnrestorablePath, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -88,6 +89,75 @@ const TEXT_DELTA_COALESCE_WINDOW: Duration = Duration::from_millis(2);
 const MAX_LIVE_TOOL_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_LIVE_TOOL_OUTPUT_CHUNKS: usize = 1024;
 const MAX_IN_FLIGHT_TOOL_OUTPUT_CHUNKS: usize = 32;
+const MAX_ATTACHMENTS: usize = 16;
+const MAX_TEXT_ATTACHMENT_BYTES: usize = 1024 * 1024;
+const MAX_IMAGE_ATTACHMENT_BYTES: usize = 5 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_CAPTURED_SHELL_OUTPUT_BYTES: usize = 1024 * 1024;
+const MAX_APPROVAL_DIFF_BYTES: usize = 256 * 1024;
+
+#[derive(Clone, Debug)]
+struct PreparedUserMessage {
+    content: String,
+    stored_attachments: Vec<StoredAttachment>,
+    attachment_blocks: Vec<Block>,
+}
+
+impl PreparedUserMessage {
+    fn turn(&self, content: String) -> Turn {
+        let mut blocks = Vec::with_capacity(self.attachment_blocks.len().saturating_add(1));
+        if !content.is_empty() {
+            blocks.push(Block::Text { text: content });
+        }
+        blocks.extend(self.attachment_blocks.clone());
+        Turn {
+            role: Role::User,
+            blocks,
+            meta: TurnMeta::default(),
+        }
+    }
+}
+
+fn permission_diff(request: &PermissionRequest) -> Option<UnifiedDiff> {
+    let path = request.arguments.get("path")?.as_str()?.to_owned();
+    let (before, after) = match request.tool_name.as_str() {
+        "edit" => (
+            request.arguments.get("old")?.as_str()?.to_owned(),
+            request.arguments.get("new")?.as_str()?.to_owned(),
+        ),
+        "write" => (
+            String::new(),
+            request.arguments.get("content")?.as_str()?.to_owned(),
+        ),
+        _ => return None,
+    };
+    let full_diff = format!(
+        "--- a/{path}\n+++ b/{path}\n@@ proposed change @@\n-{}\n+{}\n",
+        before.replace('\n', "\n-"),
+        after.replace('\n', "\n+")
+    );
+    let arguments = serde_json::to_vec(&request.arguments).ok()?;
+    let truncated = full_diff.len() > MAX_APPROVAL_DIFF_BYTES;
+    let unified_diff = if truncated {
+        let boundary = full_diff
+            .char_indices()
+            .take_while(|(index, _)| *index <= MAX_APPROVAL_DIFF_BYTES)
+            .last()
+            .map_or(0, |(index, _)| index);
+        full_diff.get(..boundary).unwrap_or_default().to_owned()
+    } else {
+        full_diff.clone()
+    };
+    Some(UnifiedDiff {
+        proposal_id: request.id.clone(),
+        path,
+        unified_diff,
+        arguments_hash: blake3::hash(&arguments).to_hex().to_string(),
+        base_hash: blake3::hash(before.as_bytes()).to_hex().to_string(),
+        diff_hash: blake3::hash(full_diff.as_bytes()).to_hex().to_string(),
+        truncated,
+    })
+}
 
 /// Shared redaction hook applied before tool text enters persistence,
 /// broadcast, or the next provider request.
@@ -121,6 +191,16 @@ pub trait ModelDriver: Send + Sync {
     /// windows conservatively disable estimate-triggered auto-compaction.
     fn context_metadata(&self, _alias: &str) -> ModelContextMetadata {
         ModelContextMetadata::default()
+    }
+
+    /// Whether an alias is configured without making a provider request.
+    fn has_model_alias(&self, alias: &str) -> bool {
+        !alias.trim().is_empty()
+    }
+
+    /// Whether an alias accepts provider-neutral image blocks.
+    fn supports_vision(&self, _alias: &str) -> bool {
+        false
     }
 
     /// Validated compaction settings associated with this model runtime.
@@ -190,6 +270,15 @@ impl ModelDriver for ProviderRuntime {
                 cache_breakpoints: Some(capabilities.cache_breakpoints),
             },
         )
+    }
+
+    fn has_model_alias(&self, alias: &str) -> bool {
+        self.resolved_alias_capabilities(alias).is_some()
+    }
+
+    fn supports_vision(&self, alias: &str) -> bool {
+        self.resolved_alias_capabilities(alias)
+            .is_some_and(|capabilities| capabilities.vision)
     }
 
     fn compaction_config(&self) -> CompactionConfig {
@@ -279,6 +368,7 @@ enum PendingEvent {
     UserMessageAccepted {
         turn: u64,
         content: String,
+        attachments: Vec<StoredAttachment>,
     },
     ConversationTurnCommitted {
         agent_turn: u64,
@@ -292,6 +382,7 @@ enum PendingEvent {
     MessageQueued {
         position: usize,
         content: String,
+        attachments: Vec<StoredAttachment>,
     },
     TextDelta {
         turn: u64,
@@ -403,6 +494,16 @@ enum PendingEvent {
     },
     DriverChanged {
         driver_client_id: ClientId,
+    },
+    ModelChanged {
+        model: ModelAlias,
+    },
+    UserShellStateChanged {
+        shell_id: ShellId,
+        command: String,
+        active: bool,
+        status: Option<i32>,
+        captured_output: Option<String>,
     },
     QuestionAsked {
         turn: u64,
@@ -528,11 +629,15 @@ impl PendingEvent {
                 meta,
                 turn_id: wire_turn_id(turn),
             },
-            Self::UserMessageAccepted { turn, content } => EngineEvent::UserMessageAccepted {
+            Self::UserMessageAccepted {
+                turn,
+                content,
+                attachments,
+            } => EngineEvent::UserMessageAccepted {
                 meta,
                 agent_turn: turn,
                 content,
-                attachments: Vec::new(),
+                attachments,
             },
             Self::ConversationTurnCommitted { agent_turn, turn } => {
                 EngineEvent::ConversationTurnCommitted {
@@ -551,10 +656,15 @@ impl PendingEvent {
                 operation_id,
                 unrestorable_paths,
             },
-            Self::MessageQueued { position, content } => EngineEvent::MessageQueued {
+            Self::MessageQueued {
+                position,
+                content,
+                attachments,
+            } => EngineEvent::MessageQueued {
                 meta,
                 position: u64::try_from(position).unwrap_or(u64::MAX),
                 content,
+                attachments,
             },
             Self::TextDelta { turn, text } => EngineEvent::TextDelta {
                 meta,
@@ -591,15 +701,19 @@ impl PendingEvent {
                 args: arguments,
                 call_index: u32::try_from(index).unwrap_or(u32::MAX),
             },
-            Self::PermissionRequested { turn, request } => EngineEvent::ToolApprovalNeeded {
-                meta,
-                turn_id: wire_turn_id(turn),
-                tool_call_id: ToolCallId(request.id),
-                name: request.tool_name.clone(),
-                args: request.arguments,
-                capabilities: request.capabilities,
-                rationale: format!("permission required for tool `{}`", request.tool_name),
-            },
+            Self::PermissionRequested { turn, request } => {
+                let diff = permission_diff(&request);
+                EngineEvent::ToolApprovalNeeded {
+                    meta,
+                    turn_id: wire_turn_id(turn),
+                    tool_call_id: ToolCallId(request.id),
+                    name: request.tool_name.clone(),
+                    args: request.arguments,
+                    capabilities: request.capabilities,
+                    rationale: format!("permission required for tool `{}`", request.tool_name),
+                    diff,
+                }
+            }
             Self::ToolOutput {
                 turn,
                 id,
@@ -773,6 +887,21 @@ impl PendingEvent {
                 meta,
                 driver_client_id,
             },
+            Self::ModelChanged { model } => EngineEvent::ModelChanged { meta, model },
+            Self::UserShellStateChanged {
+                shell_id,
+                command,
+                active,
+                status,
+                captured_output,
+            } => EngineEvent::UserShellStateChanged {
+                meta,
+                shell_id,
+                command: Some(command),
+                active,
+                status,
+                captured_output,
+            },
             Self::QuestionAsked {
                 turn,
                 question_id,
@@ -886,6 +1015,8 @@ pub struct SessionSnapshot {
     pub queued_messages: Vec<String>,
     pub running: bool,
     pub completed_turns: u64,
+    pub model_alias: String,
+    pub active_shell: Option<RecoveredUserShell>,
 }
 
 /// Persisted actor state supplied when resuming a session from its event log.
@@ -907,6 +1038,15 @@ pub struct SessionRecoveredState {
     pub accounting: Vec<TurnAccounting>,
     pub budgeter: Budgeter,
     pub interrupted_compaction: bool,
+    pub model_alias: Option<String>,
+    pub active_shell: Option<RecoveredUserShell>,
+}
+
+/// Durable foreground-shell gate reconstructed from the session log.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveredUserShell {
+    pub shell_id: ShellId,
+    pub command: String,
 }
 
 /// Durable context surgery projected from pin/evict events.
@@ -949,6 +1089,8 @@ pub enum SessionProjectionError {
     SessionChanged { expected: String, found: String },
     #[error("invalid decimal turn id `{0}`")]
     InvalidTurnId(String),
+    #[error("invalid durable user-shell transition: {0}")]
+    InvalidShellTransition(String),
 }
 
 fn parse_turn_id(turn_id: &TurnId) -> Result<u64, SessionProjectionError> {
@@ -968,25 +1110,39 @@ fn recovered_pending_event(
         }
         EngineEvent::ContextSnapshotReady { .. }
         | EngineEvent::CostSnapshotReady { .. }
-        | EngineEvent::PromptDumpReady { .. } => {
+        | EngineEvent::PromptDumpReady { .. }
+        | EngineEvent::SessionReplayCompleted { .. }
+        | EngineEvent::SessionsListed { .. }
+        | EngineEvent::CommandDescriptorsListed { .. }
+        | EngineEvent::ModelsListed { .. }
+        | EngineEvent::WorkspaceFilesFound { .. }
+        | EngineEvent::WorkspaceFilePreviewReady { .. }
+        | EngineEvent::WorkspaceStatusReady { .. }
+        | EngineEvent::HostShutdown { .. } => {
             return Err(SessionProjectionError::ConnectionScopedEvent);
         }
         EngineEvent::TurnStarted { turn_id, .. } => PendingEvent::TurnStarted {
             turn: parse_turn_id(turn_id)?,
         },
         EngineEvent::MessageQueued {
-            position, content, ..
+            position,
+            content,
+            attachments,
+            ..
         } => PendingEvent::MessageQueued {
             position: usize::try_from(*position).unwrap_or(usize::MAX),
             content: content.clone(),
+            attachments: attachments.clone(),
         },
         EngineEvent::UserMessageAccepted {
             agent_turn,
             content,
+            attachments,
             ..
         } => PendingEvent::UserMessageAccepted {
             turn: *agent_turn,
             content: content.clone(),
+            attachments: attachments.clone(),
         },
         EngineEvent::ConversationTurnCommitted {
             agent_turn, turn, ..
@@ -1264,6 +1420,23 @@ fn recovered_pending_event(
         } => PendingEvent::SessionCreated {
             driver_client_id: driver_client_id.clone(),
         },
+        EngineEvent::ModelChanged { model, .. } => PendingEvent::ModelChanged {
+            model: model.clone(),
+        },
+        EngineEvent::UserShellStateChanged {
+            shell_id,
+            command,
+            active,
+            status,
+            captured_output,
+            ..
+        } => PendingEvent::UserShellStateChanged {
+            shell_id: shell_id.clone(),
+            command: command.clone().unwrap_or_default(),
+            active: *active,
+            status: *status,
+            captured_output: captured_output.clone(),
+        },
         EngineEvent::QuestionAsked {
             turn_id,
             question_id,
@@ -1279,9 +1452,7 @@ fn recovered_pending_event(
         },
         EngineEvent::SubagentSpawned { .. }
         | EngineEvent::SubagentFinished { .. }
-        | EngineEvent::ModeChanged { .. }
-        | EngineEvent::ModelChanged { .. }
-        | EngineEvent::UserShellStateChanged { .. } => return Ok(None),
+        | EngineEvent::ModeChanged { .. } => return Ok(None),
     };
     Ok(Some(pending))
 }
@@ -1317,6 +1488,8 @@ pub fn project_session_events(
     let mut context_surgery = Vec::new();
     let mut pruned_tool_outputs = BTreeMap::new();
     let mut accounting = Vec::new();
+    let mut model_alias = None;
+    let mut active_shell = None::<RecoveredUserShell>;
     let mut compacted_conversation = None::<Vec<(u64, Turn)>>;
     let mut compaction_surgery_start = None::<usize>;
     let mut budgeter = Budgeter::default();
@@ -1364,7 +1537,7 @@ pub fn project_session_events(
                 next_turn = next_turn.max(turn.saturating_add(1));
             }
             PendingEvent::MessageQueued { content, .. } => queued.push_back(content.clone()),
-            PendingEvent::UserMessageAccepted { turn, content } => {
+            PendingEvent::UserMessageAccepted { turn, content, .. } => {
                 if let Some(position) = queued.iter().position(|queued| queued == content) {
                     queued.remove(position);
                 }
@@ -1625,6 +1798,43 @@ pub fn project_session_events(
             } => {
                 driver_client_id = Some(driver.clone());
             }
+            PendingEvent::ModelChanged { model } => {
+                model_alias = Some(model.0.clone());
+            }
+            PendingEvent::UserShellStateChanged {
+                shell_id,
+                command,
+                active: true,
+                status: None,
+                captured_output: None,
+            } => {
+                if active_shell.is_some() {
+                    return Err(SessionProjectionError::InvalidShellTransition(
+                        "a second shell started while one was already active".to_owned(),
+                    ));
+                }
+                active_shell = Some(RecoveredUserShell {
+                    shell_id: shell_id.clone(),
+                    command: command.clone(),
+                });
+            }
+            PendingEvent::UserShellStateChanged {
+                shell_id,
+                active: false,
+                ..
+            } => {
+                if active_shell.as_ref().map(|shell| &shell.shell_id) != Some(shell_id) {
+                    return Err(SessionProjectionError::InvalidShellTransition(
+                        "shell end did not match the active shell id".to_owned(),
+                    ));
+                }
+                active_shell = None;
+            }
+            PendingEvent::UserShellStateChanged { .. } => {
+                return Err(SessionProjectionError::InvalidShellTransition(
+                    "shell start must not carry terminal fields".to_owned(),
+                ));
+            }
         }
     }
     for messages in uncommitted_users.into_values() {
@@ -1709,6 +1919,8 @@ pub fn project_session_events(
         accounting,
         budgeter,
         interrupted_compaction,
+        model_alias,
+        active_shell,
     })
 }
 
@@ -2337,6 +2549,32 @@ impl fmt::Debug for SessionActorConfig {
     }
 }
 
+impl SessionActorConfig {
+    fn with_model_alias(&self, model_alias: String) -> Self {
+        Self {
+            session_id: self.session_id.clone(),
+            workspace_root: self.workspace_root.clone(),
+            initial_session_context: self.initial_session_context.clone(),
+            model_alias,
+            model: Arc::clone(&self.model),
+            tools: Arc::clone(&self.tools),
+            permissions: Arc::clone(&self.permissions),
+            hooks: Arc::clone(&self.hooks),
+            commands: Arc::clone(&self.commands),
+            event_sink: Arc::clone(&self.event_sink),
+            event_clock: Arc::clone(&self.event_clock),
+            secret_redactor: Arc::clone(&self.secret_redactor),
+            checkpoints: Arc::clone(&self.checkpoints),
+            recovered: self.recovered.clone(),
+            max_turns: self.max_turns,
+            identical_tool_failure_limit: self.identical_tool_failure_limit,
+            max_output_tokens: self.max_output_tokens,
+            thinking: self.thinking,
+            event_capacity: self.event_capacity,
+        }
+    }
+}
+
 /// Starts one single-writer session actor.
 pub struct SessionActor;
 
@@ -2526,6 +2764,21 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
+    /// Stable id of the session routed by this handle.
+    #[must_use]
+    pub const fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    /// Current durable event-log tail used by host reconnect completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the durable sink cannot read its tail.
+    pub async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
+        self.event_sink.last_sequence().await
+    }
+
     fn local_meta(&self) -> CommandMeta {
         let request = self.local_request_sequence.fetch_add(1, Ordering::Relaxed);
         CommandMeta {
@@ -2894,6 +3147,7 @@ enum ActorCommand {
     },
     SendMessage {
         content: String,
+        attachments: Vec<Attachment>,
         observed_turn: u64,
         respond: oneshot::Sender<Result<MessageDisposition, AgentLoopError>>,
     },
@@ -2985,6 +3239,8 @@ struct ActorState {
     pruned_tool_outputs: BTreeMap<String, u64>,
     accounting: Vec<TurnAccounting>,
     budgeter: Budgeter,
+    model_alias: String,
+    active_shell: Option<RecoveredUserShell>,
 }
 
 struct PendingQuestion {
@@ -2996,6 +3252,7 @@ impl ActorState {
     fn recover(
         session_id: SessionId,
         event_clock: Arc<dyn EventClock>,
+        default_model_alias: &str,
         recovered: &SessionRecoveredState,
     ) -> Self {
         Self {
@@ -3023,6 +3280,11 @@ impl ActorState {
             pruned_tool_outputs: recovered.pruned_tool_outputs.clone(),
             accounting: recovered.accounting.clone(),
             budgeter: recovered.budgeter,
+            model_alias: recovered
+                .model_alias
+                .clone()
+                .unwrap_or_else(|| default_model_alias.to_owned()),
+            active_shell: recovered.active_shell.clone(),
         }
     }
 
@@ -3083,6 +3345,7 @@ async fn run_actor(
     let mut state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
+        &config.model_alias,
         &config.recovered,
     );
     let interrupted_turn = config.recovered.interrupted_turn;
@@ -3144,7 +3407,11 @@ async fn run_actor(
         state.turn_ends.insert(turn, state.conversation.len());
     }
     if !state.queued.is_empty() {
-        let messages = state.queued.drain(..).collect();
+        let messages = state
+            .queued
+            .drain(..)
+            .map(|content| (content, Vec::new()))
+            .collect();
         if start_turn(
             &mut state,
             &config,
@@ -3206,6 +3473,7 @@ async fn run_actor(
 fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
     match command {
         ClientCommand::CreateSession { meta, .. }
+        | ClientCommand::ResumeSession { meta, .. }
         | ClientCommand::AttachSession { meta, .. }
         | ClientCommand::SendMessage { meta, .. }
         | ClientCommand::Interrupt { meta, .. }
@@ -3223,14 +3491,26 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::EvictContext { meta, .. }
         | ClientCommand::GetContext { meta, .. }
         | ClientCommand::GetCost { meta, .. }
-        | ClientCommand::DumpPrompt { meta, .. } => meta,
+        | ClientCommand::DumpPrompt { meta, .. }
+        | ClientCommand::ListSessions { meta, .. }
+        | ClientCommand::ListCommands { meta, .. }
+        | ClientCommand::ListModels { meta, .. }
+        | ClientCommand::SearchWorkspaceFiles { meta, .. }
+        | ClientCommand::PreviewWorkspaceFile { meta, .. }
+        | ClientCommand::GetWorkspaceStatus { meta, .. }
+        | ClientCommand::ShutdownHost { meta, .. } => meta,
     }
 }
 
 fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
     match command {
-        ClientCommand::CreateSession { .. } => None,
-        ClientCommand::AttachSession { session_id, .. }
+        ClientCommand::CreateSession { .. }
+        | ClientCommand::ListSessions { .. }
+        | ClientCommand::ListCommands { .. }
+        | ClientCommand::ListModels { .. }
+        | ClientCommand::ShutdownHost { .. } => None,
+        ClientCommand::ResumeSession { session_id, .. }
+        | ClientCommand::AttachSession { session_id, .. }
         | ClientCommand::SendMessage { session_id, .. }
         | ClientCommand::Interrupt { session_id, .. }
         | ClientCommand::ApproveTool { session_id, .. }
@@ -3247,7 +3527,10 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::EvictContext { session_id, .. }
         | ClientCommand::GetContext { session_id, .. }
         | ClientCommand::GetCost { session_id, .. }
-        | ClientCommand::DumpPrompt { session_id, .. } => Some(session_id),
+        | ClientCommand::DumpPrompt { session_id, .. }
+        | ClientCommand::SearchWorkspaceFiles { session_id, .. }
+        | ClientCommand::PreviewWorkspaceFile { session_id, .. }
+        | ClientCommand::GetWorkspaceStatus { session_id, .. } => Some(session_id),
     }
 }
 
@@ -3261,6 +3544,145 @@ fn protocol_rejection(code: &str, message: impl Into<String>) -> CommandOutcome 
             details: None,
         },
     }
+}
+
+#[allow(clippy::too_many_lines)]
+fn prepare_user_message(
+    content: &str,
+    attachments: &[Attachment],
+    model_alias: &str,
+    model: &dyn ModelDriver,
+) -> Result<PreparedUserMessage, String> {
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Err(format!("at most {MAX_ATTACHMENTS} attachments are allowed"));
+    }
+    let mut total_bytes = 0_usize;
+    let mut stored_attachments = Vec::with_capacity(attachments.len());
+    let mut attachment_blocks = Vec::with_capacity(attachments.len());
+    for attachment in attachments {
+        if attachment.name.is_empty()
+            || attachment.name.len() > 255
+            || attachment.name == "."
+            || attachment.name == ".."
+            || attachment
+                .name
+                .chars()
+                .any(|character| character.is_control() || matches!(character, '/' | '\\'))
+        {
+            return Err("attachment names must be safe single path components".to_owned());
+        }
+        if attachment.media_type.trim() != attachment.media_type
+            || attachment.media_type.to_ascii_lowercase() != attachment.media_type
+        {
+            return Err(
+                "attachment media types must be canonical lowercase MIME values".to_owned(),
+            );
+        }
+        let (byte_len, content_hash, block) = match (
+            &attachment.data,
+            attachment.media_type.as_str(),
+        ) {
+            (AttachmentData::Text { content }, media_type)
+                if media_type.starts_with("text/") || media_type == "application/json" =>
+            {
+                if content.len() > MAX_TEXT_ATTACHMENT_BYTES {
+                    return Err(format!(
+                        "text attachment {:?} exceeds {MAX_TEXT_ATTACHMENT_BYTES} bytes",
+                        attachment.name
+                    ));
+                }
+                let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+                let text = format!(
+                    "Attached file {:?} ({media_type}):\n{content}",
+                    attachment.name
+                );
+                (content.len(), hash, Block::Text { text })
+            }
+            (AttachmentData::InlineBase64 { data }, media_type)
+                if matches!(
+                    media_type,
+                    "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+                ) =>
+            {
+                if !model.supports_vision(model_alias) {
+                    return Err(format!(
+                        "model alias {model_alias:?} does not support image attachments"
+                    ));
+                }
+                let decoded_len = canonical_base64_decoded_len(data).ok_or_else(|| {
+                    format!(
+                        "image attachment {:?} is not canonical base64",
+                        attachment.name
+                    )
+                })?;
+                if decoded_len > MAX_IMAGE_ATTACHMENT_BYTES {
+                    return Err(format!(
+                        "image attachment {:?} exceeds {MAX_IMAGE_ATTACHMENT_BYTES} decoded bytes",
+                        attachment.name
+                    ));
+                }
+                let hash = blake3::hash(data.as_bytes()).to_hex().to_string();
+                (
+                    decoded_len,
+                    hash,
+                    Block::Image {
+                        media_type: media_type.to_owned(),
+                        data: ImageRef::InlineBase64 { data: data.clone() },
+                    },
+                )
+            }
+            _ => {
+                return Err(format!(
+                    "attachment {:?} has unsupported data for media type {:?}",
+                    attachment.name, attachment.media_type
+                ));
+            }
+        };
+        total_bytes = total_bytes.saturating_add(byte_len);
+        if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+            return Err(format!(
+                "attachments exceed the {MAX_TOTAL_ATTACHMENT_BYTES}-byte total limit"
+            ));
+        }
+        stored_attachments.push(StoredAttachment {
+            name: attachment.name.clone(),
+            media_type: attachment.media_type.clone(),
+            content_hash,
+            byte_len: u64::try_from(byte_len).unwrap_or(u64::MAX),
+        });
+        attachment_blocks.push(block);
+    }
+    if content.is_empty() && attachment_blocks.is_empty() {
+        return Err("message content and attachments cannot both be empty".to_owned());
+    }
+    Ok(PreparedUserMessage {
+        content: content.to_owned(),
+        stored_attachments,
+        attachment_blocks,
+    })
+}
+
+fn canonical_base64_decoded_len(data: &str) -> Option<usize> {
+    if data.is_empty() || !data.len().is_multiple_of(4) || !data.is_ascii() {
+        return None;
+    }
+    let padding = data.bytes().rev().take_while(|byte| *byte == b'=').count();
+    if padding > 2 {
+        return None;
+    }
+    let payload_len = data.len().checked_sub(padding)?;
+    if data
+        .bytes()
+        .take(payload_len)
+        .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/')))
+        || data.bytes().skip(payload_len).any(|byte| byte != b'=')
+    {
+        return None;
+    }
+    data.len()
+        .checked_div(4)?
+        .checked_mul(3)?
+        .checked_sub(padding)
 }
 
 fn send_ack(
@@ -3970,11 +4392,16 @@ fn unsupported_in_m2(command: &ClientCommand) -> bool {
     matches!(
         command,
         ClientCommand::CreateSession { .. }
+            | ClientCommand::ResumeSession { .. }
             | ClientCommand::SwitchMode { .. }
-            | ClientCommand::SwitchModel { .. }
             | ClientCommand::Fork { .. }
-            | ClientCommand::UserShellStarted { .. }
-            | ClientCommand::UserShellEnded { .. }
+            | ClientCommand::ListSessions { .. }
+            | ClientCommand::ListCommands { .. }
+            | ClientCommand::ListModels { .. }
+            | ClientCommand::SearchWorkspaceFiles { .. }
+            | ClientCommand::PreviewWorkspaceFile { .. }
+            | ClientCommand::GetWorkspaceStatus { .. }
+            | ClientCommand::ShutdownHost { .. }
     )
 }
 
@@ -3997,7 +4424,7 @@ fn start_manual_compaction(
     let mut conversation = state.conversation.clone();
     let mut context_surgery = state.context_surgery.clone();
     let local_session_accounting = session_accounting_fallback(&state.accounting);
-    let config = Arc::clone(config);
+    let config = Arc::new(config.with_model_alias(state.model_alias.clone()));
     let signals = turn_signals.clone();
     tokio::spawn(async move {
         let result = async {
@@ -4140,10 +4567,103 @@ async fn handle_actor_command(
                         return;
                     }
                 }
-                ClientCommand::SendMessage { attachments, .. } if !attachments.is_empty() => {
+                ClientCommand::SendMessage { .. } if state.active_shell.is_some() => {
                     let outcome = protocol_rejection(
-                        "attachments_not_available",
-                        "message attachments are not available in milestone M2",
+                        "user_shell_active",
+                        "an agent turn cannot start while the foreground user shell is active",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::SendMessage { attachments, .. }
+                    if state.running.is_some() && !attachments.is_empty() =>
+                {
+                    let outcome = protocol_rejection(
+                        "attachment_queue_unsupported",
+                        "messages with attachments require an idle session so their provider-neutral blocks commit atomically",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::SendMessage {
+                    content,
+                    attachments,
+                    ..
+                } if content.trim_start().starts_with('/') && !attachments.is_empty() => {
+                    let outcome = protocol_rejection(
+                        "command_attachments_unsupported",
+                        "slash commands do not accept message attachments",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::SendMessage {
+                    content,
+                    attachments,
+                    ..
+                } => {
+                    if let Err(message) = prepare_user_message(
+                        content,
+                        attachments,
+                        &state.model_alias,
+                        config.model.as_ref(),
+                    ) {
+                        let outcome = protocol_rejection("invalid_attachment", message);
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
+                }
+                ClientCommand::SwitchModel { .. }
+                    if state.running.is_some() || state.active_shell.is_some() =>
+                {
+                    let outcome = protocol_rejection(
+                        "session_not_idle",
+                        "model switching requires an idle session with no active user shell",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::SwitchModel { model, .. }
+                    if !config.model.has_model_alias(&model.0) =>
+                {
+                    let outcome = protocol_rejection(
+                        "unknown_model_alias",
+                        format!("model alias {:?} is not configured", model.0),
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::UserShellStarted { command, .. }
+                    if command.trim().is_empty()
+                        || state.running.is_some()
+                        || state.active_shell.is_some() =>
+                {
+                    let outcome = protocol_rejection(
+                        "shell_start_rejected",
+                        "a non-empty foreground shell may start only while the session is idle",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::UserShellEnded {
+                    shell_id,
+                    captured_output,
+                    ..
+                } if state.active_shell.as_ref().map(|shell| &shell.shell_id) != Some(shell_id)
+                    || captured_output
+                        .as_ref()
+                        .is_some_and(|output| output.len() > MAX_CAPTURED_SHELL_OUTPUT_BYTES) =>
+                {
+                    let outcome = protocol_rejection(
+                        "shell_end_rejected",
+                        "shell end must match the active shell id and its captured output must fit the durable limit",
                     );
                     send_ack(state, events, &meta, session, outcome.clone());
                     let _ = respond.send(outcome);
@@ -4465,11 +4985,95 @@ async fn handle_actor_command(
                         .client_roles
                         .insert(meta.client_id.0.clone(), ClientRole::Driver);
                 }
-                ClientCommand::SendMessage { content, .. } => {
+                ClientCommand::SwitchModel { model, .. } => {
+                    let result = emit(
+                        state,
+                        events,
+                        &config.event_sink,
+                        PendingEvent::ModelChanged {
+                            model: model.clone(),
+                        },
+                    )
+                    .await;
+                    if result.is_ok() {
+                        state.model_alias = model.0;
+                    }
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
+                    }
+                }
+                ClientCommand::UserShellStarted { command, .. } => {
+                    let shell_id = ShellId(format!(
+                        "shell-{}",
+                        state
+                            .sequence
+                            .map_or(0, |sequence| sequence.saturating_add(1))
+                    ));
+                    let shell = RecoveredUserShell {
+                        shell_id: shell_id.clone(),
+                        command: command.clone(),
+                    };
+                    let result = emit(
+                        state,
+                        events,
+                        &config.event_sink,
+                        PendingEvent::UserShellStateChanged {
+                            shell_id,
+                            command,
+                            active: true,
+                            status: None,
+                            captured_output: None,
+                        },
+                    )
+                    .await;
+                    if result.is_ok() {
+                        state.active_shell = Some(shell);
+                    }
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
+                    }
+                }
+                ClientCommand::UserShellEnded {
+                    shell_id,
+                    status,
+                    captured_output,
+                    ..
+                } => {
+                    let command = state
+                        .active_shell
+                        .as_ref()
+                        .map(|shell| shell.command.clone())
+                        .unwrap_or_default();
+                    let result = emit(
+                        state,
+                        events,
+                        &config.event_sink,
+                        PendingEvent::UserShellStateChanged {
+                            shell_id,
+                            command,
+                            active: false,
+                            status: Some(status),
+                            captured_output,
+                        },
+                    )
+                    .await;
+                    if result.is_ok() {
+                        state.active_shell = None;
+                    }
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
+                    }
+                }
+                ClientCommand::SendMessage {
+                    content,
+                    attachments,
+                    ..
+                } => {
                     let (internal_respond, internal_receive) = oneshot::channel();
                     Box::pin(handle_actor_command(
                         ActorCommand::SendMessage {
                             content,
+                            attachments,
                             observed_turn: active_turn.load(Ordering::Acquire),
                             respond: internal_respond,
                         },
@@ -4707,11 +5311,16 @@ async fn handle_actor_command(
                     );
                 }
                 ClientCommand::CreateSession { .. }
+                | ClientCommand::ResumeSession { .. }
                 | ClientCommand::SwitchMode { .. }
-                | ClientCommand::SwitchModel { .. }
                 | ClientCommand::Fork { .. }
-                | ClientCommand::UserShellStarted { .. }
-                | ClientCommand::UserShellEnded { .. }
+                | ClientCommand::ListSessions { .. }
+                | ClientCommand::ListCommands { .. }
+                | ClientCommand::ListModels { .. }
+                | ClientCommand::SearchWorkspaceFiles { .. }
+                | ClientCommand::PreviewWorkspaceFile { .. }
+                | ClientCommand::GetWorkspaceStatus { .. }
+                | ClientCommand::ShutdownHost { .. }
                 | ClientCommand::Rewind {
                     target: RewindTarget::Checkpoint { .. },
                     ..
@@ -4726,6 +5335,7 @@ async fn handle_actor_command(
         }
         ActorCommand::SendMessage {
             content,
+            attachments,
             observed_turn,
             respond,
         } => {
@@ -4891,6 +5501,7 @@ async fn handle_actor_command(
                     PendingEvent::MessageQueued {
                         position: state.queued.len(),
                         content,
+                        attachments: Vec::new(),
                     },
                 )
                 .await;
@@ -4907,7 +5518,7 @@ async fn handle_actor_command(
                     tool_context,
                     turn_signals,
                     events,
-                    vec![content],
+                    vec![(content, attachments)],
                     active_turn,
                 )
                 .await;
@@ -4934,6 +5545,8 @@ async fn handle_actor_command(
                 queued_messages: state.queued.iter().cloned().collect(),
                 running: state.running.is_some(),
                 completed_turns: state.completed_turns,
+                model_alias: state.model_alias.clone(),
+                active_shell: state.active_shell.clone(),
             });
         }
     }
@@ -5179,7 +5792,11 @@ async fn handle_turn_signal(
             });
             emit_batch(state, events, &config.event_sink, terminal_events).await?;
             if !state.queued.is_empty() {
-                let messages = state.queued.drain(..).collect();
+                let messages = state
+                    .queued
+                    .drain(..)
+                    .map(|content| (content, Vec::new()))
+                    .collect();
                 start_turn(
                     state,
                     config,
@@ -5211,7 +5828,11 @@ async fn handle_turn_signal(
                 let _ = completion.send(result.map(|()| ProtocolCompletion::Unit));
             }
             if state.running.is_none() && !state.queued.is_empty() {
-                let messages = state.queued.drain(..).collect();
+                let messages = state
+                    .queued
+                    .drain(..)
+                    .map(|content| (content, Vec::new()))
+                    .collect();
                 start_turn(
                     state,
                     config,
@@ -5235,9 +5856,21 @@ async fn start_turn(
     tool_context: &ToolContext,
     signals: &mpsc::UnboundedSender<TurnSignal>,
     events: &broadcast::Sender<RoutedEvent>,
-    messages: Vec<String>,
+    messages: Vec<(String, Vec<Attachment>)>,
     active_turn: &Arc<AtomicU64>,
 ) -> Result<(), AgentLoopError> {
+    let messages = messages
+        .into_iter()
+        .map(|(content, attachments)| {
+            prepare_user_message(
+                &content,
+                &attachments,
+                &state.model_alias,
+                config.model.as_ref(),
+            )
+            .map_err(AgentLoopError::InvalidConfiguration)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let turn = state.next_turn;
     state.next_turn = state.next_turn.saturating_add(1);
     let cancellation = CancellationToken::default();
@@ -5263,18 +5896,15 @@ async fn start_turn(
     opening_events.extend(
         messages
             .iter()
-            .cloned()
-            .map(|content| PendingEvent::UserMessageAccepted { turn, content }),
+            .map(|message| PendingEvent::UserMessageAccepted {
+                turn,
+                content: message.content.clone(),
+                attachments: message.stored_attachments.clone(),
+            }),
     );
     if prepare_users_synchronously {
-        for content in &messages {
-            let user_turn = Turn {
-                role: Role::User,
-                blocks: vec![Block::Text {
-                    text: content.clone(),
-                }],
-                meta: TurnMeta::default(),
-            };
+        for message in &messages {
+            let user_turn = message.turn(message.content.clone());
             opening_events.push(PendingEvent::ConversationTurnCommitted {
                 agent_turn: turn,
                 turn: user_turn.clone(),
@@ -5293,7 +5923,7 @@ async fn start_turn(
     } else {
         messages
     };
-    let config = Arc::clone(config);
+    let config = Arc::new(config.with_model_alias(state.model_alias.clone()));
     let protocol_asker: Arc<dyn QuestionAsker> = Arc::new(ActorQuestionAsker {
         signals: signals.clone(),
         cancellation: cancellation.clone(),
@@ -7387,7 +8017,7 @@ async fn compact_during_turn(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_turn(
     turn: u64,
-    messages: Vec<String>,
+    messages: Vec<PreparedUserMessage>,
     mut conversation: Vec<Turn>,
     config: Arc<SessionActorConfig>,
     tool_context: ToolContext,
@@ -7398,11 +8028,11 @@ async fn run_turn(
     mut budgeter: Budgeter,
     local_session_accounting: SessionAccountingFallback,
 ) -> TurnOutcome {
-    for content in messages {
+    for message in messages {
         let Ok(hook) = dispatch_hook(
             &config.hooks,
             HookEvent::UserPromptSubmit,
-            json!({ "content": content }),
+            json!({ "content": message.content }),
             &cancellation,
         )
         .await
@@ -7441,11 +8071,7 @@ async fn run_turn(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let user_turn = Turn {
-            role: Role::User,
-            blocks: vec![Block::Text { text: content }],
-            meta: TurnMeta::default(),
-        };
+        let user_turn = message.turn(content);
         conversation.push(user_turn.clone());
         if persist_event(
             &signals,
@@ -8212,6 +8838,28 @@ mod tests {
     struct ScriptedModel {
         scripts: Mutex<VecDeque<ProviderScript>>,
         requests: Mutex<Vec<ProviderRequest>>,
+    }
+
+    struct AliasVisionModel;
+
+    impl ModelDriver for AliasVisionModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            Err(AgentLoopError::Provider(
+                "alias fixture does not make provider calls".to_owned(),
+            ))
+        }
+
+        fn has_model_alias(&self, alias: &str) -> bool {
+            matches!(alias, "fast" | "slow")
+        }
+
+        fn supports_vision(&self, alias: &str) -> bool {
+            alias == "slow"
+        }
     }
 
     impl ScriptedModel {
@@ -9780,7 +10428,7 @@ mod tests {
         assert_eq!(accepted.sequence, 43.into());
         assert!(matches!(
             &accepted.kind,
-            PendingEvent::UserMessageAccepted { turn: 7, content }
+            PendingEvent::UserMessageAccepted { turn: 7, content, .. }
                 if content == "persist me"
         ));
         let persisted = sink.events.lock().expect("sink lock");
@@ -9969,7 +10617,7 @@ mod tests {
         ));
         assert!(matches!(
             &persisted[2].kind,
-            PendingEvent::UserMessageAccepted { turn: 1, content } if content == "run"
+            PendingEvent::UserMessageAccepted { turn: 1, content, .. } if content == "run"
         ));
         assert!(matches!(
             &persisted[3].kind,
@@ -10045,7 +10693,7 @@ mod tests {
         {
             assert!(matches!(
                 &event.kind,
-                PendingEvent::UserMessageAccepted { turn: 1, content }
+                PendingEvent::UserMessageAccepted { turn: 1, content, .. }
                     if content == expected
             ));
         }
@@ -10250,6 +10898,7 @@ mod tests {
                 PendingEvent::UserMessageAccepted {
                     turn: 1,
                     content: "inspect".to_owned(),
+                    attachments: Vec::new(),
                 },
             ),
             wire_event(
@@ -10311,6 +10960,7 @@ mod tests {
             PendingEvent::UserMessageAccepted {
                 turn: 1,
                 content: "kept user".to_owned(),
+                attachments: Vec::new(),
             },
             PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
@@ -10329,11 +10979,13 @@ mod tests {
             PendingEvent::MessageQueued {
                 position: 1,
                 content: "future duplicate".to_owned(),
+                attachments: Vec::new(),
             },
             PendingEvent::TurnStarted { turn: 2 },
             PendingEvent::UserMessageAccepted {
                 turn: 2,
                 content: "future duplicate".to_owned(),
+                attachments: Vec::new(),
             },
             PendingEvent::TextDelta {
                 turn: 2,
@@ -10348,6 +11000,7 @@ mod tests {
             PendingEvent::MessageQueued {
                 position: 1,
                 content: "queued after failure".to_owned(),
+                attachments: Vec::new(),
             },
             PendingEvent::ConversationRewound {
                 to_turn: 1,
@@ -10407,6 +11060,7 @@ mod tests {
             PendingEvent::UserMessageAccepted {
                 turn: 1,
                 content: "use tool".to_owned(),
+                attachments: Vec::new(),
             },
             PendingEvent::ConversationTurnCommitted {
                 agent_turn: 1,
@@ -10574,7 +11228,7 @@ mod tests {
         );
         assert!(kinds.iter().any(|kind| matches!(
             kind,
-            PendingEvent::UserMessageAccepted { turn: 2, content }
+            PendingEvent::UserMessageAccepted { turn: 2, content, .. }
                 if content == "queued during crash"
         )));
     }
@@ -13973,5 +14627,188 @@ mod tests {
         );
         let resumed = project_session_events(&durable).expect("fallback resume");
         assert_eq!(resumed.accounting.len(), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
+        let root = TempDir::new().expect("workspace");
+        let actor_config = config(
+            root.path(),
+            Arc::new(AliasVisionModel),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Ask,
+            HookDispatcher::new(),
+        );
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AttachSession {
+                    meta: protocol_meta("driver", "attach"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                })
+                .await
+                .expect("attach"),
+            CommandOutcome::Accepted
+        );
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::UserShellStarted {
+                    meta: protocol_meta("driver", "shell-start"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    command: "python".to_owned(),
+                })
+                .await
+                .expect("shell start"),
+            CommandOutcome::Accepted
+        );
+        let active = handle
+            .snapshot()
+            .await
+            .expect("active shell snapshot")
+            .active_shell
+            .expect("active shell");
+        assert!(matches!(
+            handle
+                .dispatch(ClientCommand::SendMessage {
+                    meta: protocol_meta("driver", "blocked-turn"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    content: "must wait".to_owned(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("blocked turn"),
+            CommandOutcome::Rejected { error } if error.code == "user_shell_active"
+        ));
+        assert!(matches!(
+            handle
+                .dispatch(ClientCommand::UserShellEnded {
+                    meta: protocol_meta("driver", "wrong-shell-end"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    shell_id: ShellId("wrong".to_owned()),
+                    status: 0,
+                    captured_output: None,
+                })
+                .await
+                .expect("wrong shell end"),
+            CommandOutcome::Rejected { error } if error.code == "shell_end_rejected"
+        ));
+        let durable = handle
+            .event_sink
+            .read_after(None)
+            .await
+            .expect("durable shell start");
+        let recovered = project_session_events(&durable).expect("project shell gate");
+        assert_eq!(recovered.active_shell.as_ref(), Some(&active));
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::UserShellEnded {
+                    meta: protocol_meta("driver", "shell-end"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    shell_id: active.shell_id,
+                    status: 130,
+                    captured_output: Some("full captured tail".to_owned()),
+                })
+                .await
+                .expect("shell end"),
+            CommandOutcome::Accepted
+        );
+        assert!(
+            handle
+                .snapshot()
+                .await
+                .expect("ended shell")
+                .active_shell
+                .is_none()
+        );
+        assert!(matches!(
+            handle
+                .dispatch(ClientCommand::SwitchModel {
+                    meta: protocol_meta("driver", "unknown-model"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    model: ModelAlias("missing".to_owned()),
+                })
+                .await
+                .expect("unknown model"),
+            CommandOutcome::Rejected { error } if error.code == "unknown_model_alias"
+        ));
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SwitchModel {
+                    meta: protocol_meta("driver", "switch-model"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    model: ModelAlias("slow".to_owned()),
+                })
+                .await
+                .expect("switch model"),
+            CommandOutcome::Accepted
+        );
+        assert_eq!(
+            handle.snapshot().await.expect("model snapshot").model_alias,
+            "slow"
+        );
+        let durable = handle
+            .event_sink
+            .read_after(None)
+            .await
+            .expect("durable model switch");
+        assert_eq!(
+            project_session_events(&durable)
+                .expect("project model")
+                .model_alias
+                .as_deref(),
+            Some("slow")
+        );
+    }
+
+    #[test]
+    fn attachment_validation_is_bounded_provider_neutral_and_vision_gated() {
+        let text = Attachment {
+            name: "notes.txt".to_owned(),
+            media_type: "text/plain".to_owned(),
+            data: AttachmentData::Text {
+                content: "bounded context".to_owned(),
+            },
+        };
+        let prepared = prepare_user_message("inspect", &[text], "fast", &AliasVisionModel)
+            .expect("text attachment");
+        assert_eq!(prepared.stored_attachments.len(), 1);
+        assert_eq!(prepared.stored_attachments[0].content_hash.len(), 64);
+        assert!(matches!(prepared.attachment_blocks[0], Block::Text { .. }));
+
+        let image = Attachment {
+            name: "screen.png".to_owned(),
+            media_type: "image/png".to_owned(),
+            data: AttachmentData::InlineBase64 {
+                data: "iVBORw0KGgo=".to_owned(),
+            },
+        };
+        assert!(
+            prepare_user_message(
+                "inspect",
+                std::slice::from_ref(&image),
+                "fast",
+                &AliasVisionModel
+            )
+            .expect_err("non-vision alias must reject before acceptance")
+            .contains("does not support image")
+        );
+        let prepared = prepare_user_message("inspect", &[image], "slow", &AliasVisionModel)
+            .expect("vision attachment");
+        assert!(matches!(prepared.attachment_blocks[0], Block::Image { .. }));
+
+        let unsafe_name = Attachment {
+            name: "../secret.txt".to_owned(),
+            media_type: "text/plain".to_owned(),
+            data: AttachmentData::Text {
+                content: "secret".to_owned(),
+            },
+        };
+        assert!(
+            prepare_user_message("inspect", &[unsafe_name], "fast", &AliasVisionModel).is_err()
+        );
     }
 }

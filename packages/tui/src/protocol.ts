@@ -3,6 +3,31 @@ import type {
   EngineEvent as GeneratedEngineEvent,
 } from "../../../protocol/types"
 
+export { PROTOCOL_VERSION } from "../../../protocol/types"
+export type {
+  Answer,
+  Attachment,
+  AttachmentData,
+  ApprovalDecision,
+  BudgetLevel,
+  BudgetScope,
+  BudgetUnit,
+  ClientRole,
+  CommandOutcome,
+  ContextSnapshot,
+  Cost,
+  CostSnapshot,
+  EngineError,
+  PromptDump,
+  Question,
+  ToolCapability,
+  ToolOutput,
+  ToolOutputStream,
+  Turn,
+  TurnStatus,
+  Usage,
+} from "../../../protocol/types"
+
 /**
  * The TUI only consumes protocol types generated from the Rust source of truth.
  * Keeping this boundary in one module makes that ownership explicit and gives

@@ -3,6 +3,7 @@
 mod admin;
 mod copilot_credentials;
 mod engine;
+mod host;
 mod instructions;
 mod permission;
 mod provider_factory;
@@ -31,6 +32,10 @@ pub use engine::{
     SessionSubscription, SessionUsage, SystemEventClock, TOOL_CANCELLATION_GRACE,
     builtin_command_registry, builtin_hook_dispatcher, project_session_events,
 };
+pub use host::{
+    BoundClient, CreateSessionRequest, EngineHost, EngineHostConfig, HostError, HostQueryService,
+    HostedSession, SessionFactory,
+};
 pub use instructions::{
     MAX_ROOT_INSTRUCTIONS_BYTES, ProjectInstructions, ProjectInstructionsError,
     base_agent_system_turn, initial_session_context, load_root_project_instructions,
@@ -46,10 +51,12 @@ pub use rw_providers::{
     ProviderModelMetadata, TokenUsage as ModelTokenUsage, UsageAccounting as ModelAccounting,
 };
 pub use rw_types::{
-    Answer, ClientCommand, ClientId, CommandOutcome, Cost, EngineError, EngineErrorCategory,
-    EngineEvent, EventMeta, QuestionId, SequenceId, ToolOutputStream, TurnId, TurnStatus,
-    UnrestorablePath, Usage,
+    Answer, ClientCommand, ClientId, CommandAckMeta, CommandMeta, CommandOutcome, Cost,
+    EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, RequestId, SequenceId,
+    SessionDescriptor, SessionId, ShellId, ToolOutputStream, TurnId, TurnStatus, UnrestorablePath,
+    Usage,
 };
+pub use rw_types::PROTOCOL_VERSION;
 
 /// Stable construction and protocol surface for executable frontends.
 ///

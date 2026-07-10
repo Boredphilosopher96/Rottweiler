@@ -84,7 +84,8 @@ export const contractFixture = {
         "client_id": "client-fixture",
         "request_id": "request-fixture"
       },
-      "cwd": "workspace"
+      "cwd": "workspace",
+      "model": "fast"
     },
     {
       "type": "send_message",
@@ -278,6 +279,7 @@ export const contractFixture = {
         "request_id": "request-fixture"
       },
       "session_id": "session-fixture",
+      "shell_id": "shell-fixture",
       "status": 0,
       "captured_output": null
     },
@@ -457,7 +459,8 @@ export const contractFixture = {
       "capabilities": [
         "execute"
       ],
-      "rationale": "runs a local command"
+      "rationale": "runs a local command",
+      "diff": null
     },
     {
       "type": "tool_output_delta",
@@ -719,8 +722,11 @@ export const contractFixture = {
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
+      "shell_id": "shell-fixture",
+      "command": "python",
       "active": false,
-      "status": null
+      "status": null,
+      "captured_output": null
     },
     {
       "type": "error",

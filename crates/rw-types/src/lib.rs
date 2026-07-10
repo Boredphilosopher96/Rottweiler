@@ -15,12 +15,14 @@ pub use ir::{Block, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn
 pub use protocol::{
     AccountingAttribution, Answer, ApprovalDecision, Attachment, AttachmentData, BudgetLevel,
     BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId, ClientRole, CommandAckMeta,
-    CommandMeta, CommandOutcome, CompactionReason, ContextItemId, ContextItemKind,
-    ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot, EngineError,
-    EngineErrorCategory, EngineEvent, EventMeta, ModelAlias, PromptDump, PromptTool, Question,
-    QuestionId, QuestionOption, QuestionResponseKind, RequestId, RewindTarget, SequenceId,
-    SessionId, SubagentId, ToolCapability, ToolOutputStream, TurnAccounting, TurnId, TurnStatus,
-    UnrestorablePath, Usage,
+    CommandDescriptor, CommandMeta, CommandOutcome, CompactionReason, ContextItemId,
+    ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot,
+    EngineError, EngineErrorCategory, EngineEvent, EventMeta, ModelAlias, ModelCacheBehavior,
+    ModelCapabilities, ModelDescriptor, PromptDump, PromptTool, Question, QuestionId,
+    QuestionOption, QuestionResponseKind, RequestId, RewindTarget, SequenceId, SessionDescriptor,
+    SessionId, ShellId, StoredAttachment, SubagentId, ToolCapability, ToolOutputStream,
+    TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceStatus,
 };
 
 /// Version of the protocol emitted by these types.

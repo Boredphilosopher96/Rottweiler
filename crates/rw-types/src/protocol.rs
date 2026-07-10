@@ -61,6 +61,10 @@ string_id!(
     "Client-generated identifier used to correlate a command."
 );
 string_id!(TurnId, "Stable identifier of a conversation turn.");
+string_id!(
+    ShellId,
+    "Engine-generated identifier of one foreground user shell."
+);
 string_id!(QuestionId, "Stable identifier of an interactive question.");
 string_id!(SubagentId, "Stable identifier of a child agent session.");
 string_id!(
@@ -141,6 +145,105 @@ pub struct Attachment {
     pub name: String,
     pub media_type: String,
     pub data: AttachmentData,
+}
+
+/// Durable content-addressed attachment metadata persisted in the event log.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct StoredAttachment {
+    pub name: String,
+    pub media_type: String,
+    pub content_hash: String,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub byte_len: u64,
+}
+
+/// One active or resumable session returned by the engine host.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[ts(optional_fields = nullable)]
+pub struct SessionDescriptor {
+    pub session_id: SessionId,
+    pub workspace_name: String,
+    pub model: ModelAlias,
+    pub driver_client_id: Option<ClientId>,
+    pub shell_active: bool,
+}
+
+/// One slash command exposed to fuzzy pickers without UI-private metadata.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct CommandDescriptor {
+    pub name: String,
+    pub description: String,
+    pub usage: String,
+}
+
+/// Prompt-cache behavior exposed without leaking a provider implementation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ModelCacheBehavior {
+    None,
+    Explicit,
+    ProviderManaged,
+}
+
+/// Provider-neutral capabilities used by model pickers and attachment checks.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ModelCapabilities {
+    pub tool_calling: bool,
+    pub vision: bool,
+    pub thinking: bool,
+    pub cache_behavior: ModelCacheBehavior,
+}
+
+/// One configured model alias and its offline-known capabilities.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ModelDescriptor {
+    pub alias: ModelAlias,
+    pub capabilities: ModelCapabilities,
+}
+
+/// Relative workspace path returned by fuzzy file search.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct WorkspaceFileMatch {
+    pub path: String,
+    pub is_directory: bool,
+}
+
+/// Remote-safe in-band file preview; paths are always workspace-relative.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct WorkspaceFilePreview {
+    pub path: String,
+    pub media_type: String,
+    pub data: AttachmentData,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub total_bytes: u64,
+    pub truncated: bool,
+}
+
+/// Workspace status for the TUI status line and file picker.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[ts(optional_fields = nullable)]
+pub struct WorkspaceStatus {
+    pub workspace_name: String,
+    pub branch: Option<String>,
+    pub changed_paths: Vec<String>,
+    pub truncated: bool,
+}
+
+/// Optional structured unified diff attached to a mutating-tool approval.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct UnifiedDiff {
+    pub proposal_id: String,
+    pub path: String,
+    pub unified_diff: String,
+    pub arguments_hash: String,
+    pub base_hash: String,
+    pub diff_hash: String,
+    pub truncated: bool,
 }
 
 /// A driver's decision at the permission chokepoint.
@@ -398,6 +501,13 @@ pub enum ClientCommand {
     CreateSession {
         meta: CommandMeta,
         cwd: String,
+        model: Option<ModelAlias>,
+    },
+    ResumeSession {
+        meta: CommandMeta,
+        session_id: SessionId,
+        last_seen_sequence: Option<SequenceId>,
+        role: ClientRole,
     },
     AttachSession {
         meta: CommandMeta,
@@ -464,6 +574,7 @@ pub enum ClientCommand {
     UserShellEnded {
         meta: CommandMeta,
         session_id: SessionId,
+        shell_id: ShellId,
         status: i32,
         captured_output: Option<String>,
     },
@@ -490,6 +601,107 @@ pub enum ClientCommand {
         session_id: SessionId,
         turn_id: Option<TurnId>,
     },
+    ListSessions {
+        meta: CommandMeta,
+    },
+    ListCommands {
+        meta: CommandMeta,
+    },
+    ListModels {
+        meta: CommandMeta,
+    },
+    SearchWorkspaceFiles {
+        meta: CommandMeta,
+        session_id: SessionId,
+        query: String,
+        limit: u32,
+    },
+    PreviewWorkspaceFile {
+        meta: CommandMeta,
+        session_id: SessionId,
+        path: String,
+        max_bytes: u32,
+    },
+    GetWorkspaceStatus {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    ShutdownHost {
+        meta: CommandMeta,
+    },
+}
+
+impl ClientCommand {
+    /// Returns caller-supplied command metadata. Transports must replace the
+    /// client id with their authenticated, connection-bound identity before
+    /// authorization or dispatch.
+    #[must_use]
+    pub fn meta(&self) -> &CommandMeta {
+        match self {
+            Self::CreateSession { meta, .. }
+            | Self::ResumeSession { meta, .. }
+            | Self::AttachSession { meta, .. }
+            | Self::SendMessage { meta, .. }
+            | Self::Interrupt { meta, .. }
+            | Self::ApproveTool { meta, .. }
+            | Self::AnswerQuestion { meta, .. }
+            | Self::SwitchMode { meta, .. }
+            | Self::SwitchModel { meta, .. }
+            | Self::Compact { meta, .. }
+            | Self::Fork { meta, .. }
+            | Self::Rewind { meta, .. }
+            | Self::TakeDriver { meta, .. }
+            | Self::UserShellStarted { meta, .. }
+            | Self::UserShellEnded { meta, .. }
+            | Self::PinContext { meta, .. }
+            | Self::EvictContext { meta, .. }
+            | Self::GetContext { meta, .. }
+            | Self::GetCost { meta, .. }
+            | Self::DumpPrompt { meta, .. }
+            | Self::ListSessions { meta, .. }
+            | Self::ListCommands { meta, .. }
+            | Self::ListModels { meta, .. }
+            | Self::SearchWorkspaceFiles { meta, .. }
+            | Self::PreviewWorkspaceFile { meta, .. }
+            | Self::GetWorkspaceStatus { meta, .. }
+            | Self::ShutdownHost { meta, .. } => meta,
+        }
+    }
+
+    /// Mutable metadata used by a transport to bind authorization to its
+    /// authenticated connection instead of trusting the wire `client_id`.
+    #[must_use]
+    pub fn meta_mut(&mut self) -> &mut CommandMeta {
+        match self {
+            Self::CreateSession { meta, .. }
+            | Self::ResumeSession { meta, .. }
+            | Self::AttachSession { meta, .. }
+            | Self::SendMessage { meta, .. }
+            | Self::Interrupt { meta, .. }
+            | Self::ApproveTool { meta, .. }
+            | Self::AnswerQuestion { meta, .. }
+            | Self::SwitchMode { meta, .. }
+            | Self::SwitchModel { meta, .. }
+            | Self::Compact { meta, .. }
+            | Self::Fork { meta, .. }
+            | Self::Rewind { meta, .. }
+            | Self::TakeDriver { meta, .. }
+            | Self::UserShellStarted { meta, .. }
+            | Self::UserShellEnded { meta, .. }
+            | Self::PinContext { meta, .. }
+            | Self::EvictContext { meta, .. }
+            | Self::GetContext { meta, .. }
+            | Self::GetCost { meta, .. }
+            | Self::DumpPrompt { meta, .. }
+            | Self::ListSessions { meta, .. }
+            | Self::ListCommands { meta, .. }
+            | Self::ListModels { meta, .. }
+            | Self::SearchWorkspaceFiles { meta, .. }
+            | Self::PreviewWorkspaceFile { meta, .. }
+            | Self::GetWorkspaceStatus { meta, .. }
+            | Self::ShutdownHost { meta, .. } => meta,
+        }
+    }
 }
 
 /// Capabilities used by the permission engine for a tool invocation.
@@ -685,6 +897,42 @@ pub enum EngineEvent {
         session_id: SessionId,
         dump: PromptDump,
     },
+    SessionReplayCompleted {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        through_sequence: Option<SequenceId>,
+    },
+    SessionsListed {
+        meta: CommandAckMeta,
+        sessions: Vec<SessionDescriptor>,
+    },
+    CommandDescriptorsListed {
+        meta: CommandAckMeta,
+        commands: Vec<CommandDescriptor>,
+    },
+    ModelsListed {
+        meta: CommandAckMeta,
+        models: Vec<ModelDescriptor>,
+    },
+    WorkspaceFilesFound {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        matches: Vec<WorkspaceFileMatch>,
+        truncated: bool,
+    },
+    WorkspaceFilePreviewReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        preview: WorkspaceFilePreview,
+    },
+    WorkspaceStatusReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        status: WorkspaceStatus,
+    },
+    HostShutdown {
+        meta: CommandAckMeta,
+    },
     SessionCreated {
         meta: EventMeta,
         driver_client_id: ClientId,
@@ -700,6 +948,7 @@ pub enum EngineEvent {
         #[ts(type = "string")]
         position: u64,
         content: String,
+        attachments: Vec<StoredAttachment>,
     },
     UserMessageAccepted {
         meta: EventMeta,
@@ -708,7 +957,7 @@ pub enum EngineEvent {
         #[ts(type = "string")]
         agent_turn: u64,
         content: String,
-        attachments: Vec<Attachment>,
+        attachments: Vec<StoredAttachment>,
     },
     ConversationTurnCommitted {
         meta: EventMeta,
@@ -764,6 +1013,7 @@ pub enum EngineEvent {
         args: Value,
         capabilities: Vec<ToolCapability>,
         rationale: String,
+        diff: Option<UnifiedDiff>,
     },
     ToolOutputDelta {
         meta: EventMeta,
@@ -914,8 +1164,11 @@ pub enum EngineEvent {
     },
     UserShellStateChanged {
         meta: EventMeta,
+        shell_id: ShellId,
+        command: Option<String>,
         active: bool,
         status: Option<i32>,
+        captured_output: Option<String>,
     },
     HookFailed {
         meta: EventMeta,
@@ -951,7 +1204,15 @@ impl EngineEvent {
             Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }
-            | Self::PromptDumpReady { .. } => None,
+            | Self::PromptDumpReady { .. }
+            | Self::SessionReplayCompleted { .. }
+            | Self::SessionsListed { .. }
+            | Self::CommandDescriptorsListed { .. }
+            | Self::ModelsListed { .. }
+            | Self::WorkspaceFilesFound { .. }
+            | Self::WorkspaceFilePreviewReady { .. }
+            | Self::WorkspaceStatusReady { .. }
+            | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
@@ -997,7 +1258,15 @@ impl EngineEvent {
             Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }
-            | Self::PromptDumpReady { .. } => None,
+            | Self::PromptDumpReady { .. }
+            | Self::SessionReplayCompleted { .. }
+            | Self::SessionsListed { .. }
+            | Self::CommandDescriptorsListed { .. }
+            | Self::ModelsListed { .. }
+            | Self::WorkspaceFilesFound { .. }
+            | Self::WorkspaceFilePreviewReady { .. }
+            | Self::WorkspaceStatusReady { .. }
+            | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
@@ -1033,5 +1302,23 @@ impl EngineEvent {
             | Self::GuardTriggered { meta, .. }
             | Self::Error { meta, .. } => Some(meta),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClientCommand, ClientId, CommandMeta, RequestId};
+
+    #[test]
+    fn transport_can_replace_untrusted_wire_client_identity() {
+        let mut command = ClientCommand::ShutdownHost {
+            meta: CommandMeta {
+                protocol_version: 1,
+                client_id: ClientId("spoofed-on-wire".to_owned()),
+                request_id: RequestId("request-1".to_owned()),
+            },
+        };
+        command.meta_mut().client_id = ClientId("bound-connection".to_owned());
+        assert_eq!(command.meta().client_id.0, "bound-connection");
     }
 }

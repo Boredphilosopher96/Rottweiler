@@ -38,6 +38,9 @@ base64 = "0.22.1"
 blake3 = "1.8.2"
 clap = { version = "4.5", features = ["derive"] }
 getrandom = "0.4.3"
+http-body-util = "0.1.3"
+hyper = { version = "1.10.1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1.20", features = ["http1", "server", "tokio"] }
 keyring = "4.1.4"
 miette = { version = "7.6", features = ["fancy"] }
 rpassword = "=7.5.4"
@@ -48,7 +51,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"
 thiserror = "2.0"
-tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+tokio = { version = "1.48", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

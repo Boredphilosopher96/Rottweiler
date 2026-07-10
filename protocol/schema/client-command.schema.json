@@ -12,6 +12,16 @@
         "cwd": {
           "type": "string"
         },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelAlias"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "type": {
           "type": "string",
           "const": "create_session"
@@ -21,6 +31,40 @@
         "type",
         "meta",
         "cwd"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "last_seen_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/ClientRole"
+        },
+        "type": {
+          "type": "string",
+          "const": "resume_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "role"
       ]
     },
     {
@@ -348,6 +392,9 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "shell_id": {
+          "$ref": "#/$defs/ShellId"
+        },
         "status": {
           "type": "integer",
           "format": "int32"
@@ -367,6 +414,7 @@
         "type",
         "meta",
         "session_id",
+        "shell_id",
         "status"
       ]
     },
@@ -487,6 +535,150 @@
         "meta",
         "session_id"
       ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_sessions"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_commands"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_models"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "query": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "search_workspace_files"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "query",
+        "limit"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "preview_workspace_file"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "path",
+        "max_bytes"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_workspace_status"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "type": {
+          "type": "string",
+          "const": "shutdown_host"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
     }
   ],
   "$defs": {
@@ -519,6 +711,10 @@
     },
     "RequestId": {
       "description": "Client-generated identifier used to correlate a command.",
+      "type": "string"
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
       "type": "string"
     },
     "SessionId": {
@@ -630,10 +826,6 @@
         "values"
       ]
     },
-    "ModelAlias": {
-      "description": "Provider-blind model alias resolved by the engine router.",
-      "type": "string"
-    },
     "TurnId": {
       "description": "Stable identifier of a conversation turn.",
       "type": "string"
@@ -674,6 +866,10 @@
           ]
         }
       ]
+    },
+    "ShellId": {
+      "description": "Engine-generated identifier of one foreground user shell.",
+      "type": "string"
     },
     "ContextItemId": {
       "description": "Stable identifier of one assembled context item.",

@@ -12,6 +12,14 @@ use rw_core::{
 use tracing_subscriber::EnvFilter;
 
 mod runtime;
+#[allow(dead_code)]
+mod server;
+#[allow(dead_code)]
+mod supervisor;
+#[allow(dead_code)]
+mod remote;
+#[allow(dead_code)]
+mod tty;
 
 #[derive(Debug, Parser)]
 #[command(name = "rw", version, about = "Rottweiler coding-agent harness")]

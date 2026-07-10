@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalDecision, Attachment, AttachmentData, Block,
     BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId, ClientRole,
-    CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId, ContextItemKind,
-    ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot, EngineError,
-    EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias, PromptDump, PromptTool,
-    Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role,
-    SequenceId, SessionId, SubagentId, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
-    ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
+    CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CompactionReason,
+    ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost,
+    CostSnapshot, EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias,
+    ModelCacheBehavior, ModelCapabilities, ModelDescriptor, PromptDump, PromptTool, Question,
+    QuestionId, QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId,
+    SessionDescriptor, SessionId, ShellId, StoredAttachment, SubagentId, ToolCallId,
+    ToolCapability, ToolOutput, ToolOutputPart, ToolOutputStream, Turn, TurnAccounting, TurnId,
+    TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -140,6 +143,7 @@ fn generate_typescript() -> String {
     declaration!(ClientId);
     declaration!(RequestId);
     declaration!(TurnId);
+    declaration!(ShellId);
     declaration!(QuestionId);
     declaration!(SubagentId);
     declaration!(ContextItemId);
@@ -158,6 +162,16 @@ fn generate_typescript() -> String {
     declaration!(ClientRole);
     declaration!(AttachmentData);
     declaration!(Attachment);
+    declaration!(StoredAttachment);
+    declaration!(SessionDescriptor);
+    declaration!(CommandDescriptor);
+    declaration!(ModelCacheBehavior);
+    declaration!(ModelCapabilities);
+    declaration!(ModelDescriptor);
+    declaration!(WorkspaceFileMatch);
+    declaration!(WorkspaceFilePreview);
+    declaration!(WorkspaceStatus);
+    declaration!(UnifiedDiff);
     declaration!(ApprovalDecision);
     declaration!(RewindTarget);
     declaration!(QuestionResponseKind);
@@ -303,6 +317,7 @@ fn contract_fixture() -> ContractFixture {
             ClientCommand::CreateSession {
                 meta: command_meta.clone(),
                 cwd: "workspace".to_owned(),
+                model: Some(ModelAlias("fast".to_owned())),
             },
             ClientCommand::SendMessage {
                 meta: command_meta.clone(),
@@ -408,6 +423,7 @@ fn contract_fixture() -> ContractFixture {
             ClientCommand::UserShellEnded {
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
+                shell_id: ShellId("shell-fixture".to_owned()),
                 status: 0,
                 captured_output: None,
             },
@@ -503,6 +519,7 @@ fn contract_fixture() -> ContractFixture {
                 args: json!({"command": "cargo test"}),
                 capabilities: vec![ToolCapability::Execute],
                 rationale: "runs a local command".to_owned(),
+                diff: None,
             },
             EngineEvent::ToolOutputDelta {
                 meta: event_meta(7),
@@ -616,8 +633,11 @@ fn contract_fixture() -> ContractFixture {
             },
             EngineEvent::UserShellStateChanged {
                 meta: event_meta(22),
+                shell_id: ShellId("shell-fixture".to_owned()),
+                command: Some("python".to_owned()),
                 active: false,
                 status: None,
+                captured_output: None,
             },
             EngineEvent::Error {
                 meta: event_meta(23),
