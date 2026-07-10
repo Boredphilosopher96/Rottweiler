@@ -1,0 +1,680 @@
+{
+  "turns": [
+    {
+      "role": "assistant",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "Working"
+        },
+        {
+          "type": "thinking",
+          "content": "Check the repository",
+          "signature": "opaque-signature"
+        },
+        {
+          "type": "tool_call",
+          "id": "tool-1",
+          "name": "bash",
+          "args": {
+            "command": "cargo test"
+          }
+        },
+        {
+          "type": "tool_result",
+          "id": "tool-1",
+          "output": {
+            "type": "mixed",
+            "parts": [
+              {
+                "type": "text",
+                "text": "build output"
+              },
+              {
+                "type": "structured",
+                "value": {
+                  "passed": 3,
+                  "failed": 0
+                }
+              },
+              {
+                "type": "image",
+                "media_type": "image/png",
+                "data": {
+                  "type": "inline_base64",
+                  "data": "iVBORw0KGgo="
+                }
+              }
+            ]
+          },
+          "is_error": false
+        },
+        {
+          "type": "image",
+          "media_type": "image/png",
+          "data": {
+            "type": "url",
+            "url": "https://example.invalid/image.png"
+          }
+        },
+        {
+          "type": "citation",
+          "uri": "https://example.invalid/source",
+          "title": "Source",
+          "excerpt": null
+        }
+      ],
+      "meta": {
+        "created_at": "2026-01-01T00:00:00Z",
+        "model": "fast",
+        "synthetic": false,
+        "summary": false
+      }
+    }
+  ],
+  "client_commands": [
+    {
+      "type": "create_session",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "cwd": "workspace"
+    },
+    {
+      "type": "send_message",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "content": "Build it",
+      "attachments": []
+    },
+    {
+      "type": "attach_session",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "last_seen_sequence": "4",
+      "role": "observer"
+    },
+    {
+      "type": "attach_session",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "last_seen_sequence": null,
+      "role": "driver"
+    },
+    {
+      "type": "send_message",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "content": "Inspect these",
+      "attachments": [
+        {
+          "name": "notes.txt",
+          "media_type": "text/plain",
+          "data": {
+            "type": "text",
+            "content": "in-band text"
+          }
+        },
+        {
+          "name": "screen.png",
+          "media_type": "image/png",
+          "data": {
+            "type": "inline_base64",
+            "data": "iVBORw0KGgo="
+          }
+        }
+      ]
+    },
+    {
+      "type": "approve_tool",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "tool_call_id": "tool-1",
+      "decision": "allow_once"
+    },
+    {
+      "type": "answer_question",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "question_id": "question-1",
+      "answers": [
+        {
+          "question_id": "question-1",
+          "values": [
+            "yes"
+          ]
+        }
+      ]
+    },
+    {
+      "type": "interrupt",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture"
+    },
+    {
+      "type": "switch_mode",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "mode": "plan"
+    },
+    {
+      "type": "switch_model",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "model": "fast"
+    },
+    {
+      "type": "compact",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "instructions": null
+    },
+    {
+      "type": "fork",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "at_turn": null
+    },
+    {
+      "type": "rewind",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "target": {
+        "type": "turn",
+        "turn_id": "turn-fixture"
+      }
+    },
+    {
+      "type": "rewind",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "target": {
+        "type": "checkpoint",
+        "checkpoint_id": "checkpoint-1"
+      }
+    },
+    {
+      "type": "take_driver",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture"
+    },
+    {
+      "type": "user_shell_started",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "command": "python"
+    },
+    {
+      "type": "user_shell_ended",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "status": 0,
+      "captured_output": null
+    },
+    {
+      "type": "pin_context",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "item_id": "context-1"
+    },
+    {
+      "type": "evict_context",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "item_id": "context-2"
+    }
+  ],
+  "engine_events": [
+    {
+      "type": "command_acknowledged",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture",
+        "emitted_at": "2026-01-01T00:00:00Z"
+      },
+      "session_id": "session-fixture",
+      "outcome": {
+        "type": "accepted"
+      }
+    },
+    {
+      "type": "command_acknowledged",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "rejected-request",
+        "emitted_at": "2026-01-01T00:00:00Z"
+      },
+      "session_id": null,
+      "outcome": {
+        "type": "rejected",
+        "error": {
+          "category": "protocol",
+          "code": "invalid_command",
+          "message": "command was rejected",
+          "retryable": false,
+          "details": null
+        }
+      }
+    },
+    {
+      "type": "session_created",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "0",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "driver_client_id": "client-fixture"
+    },
+    {
+      "type": "driver_changed",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "1",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "driver_client_id": "client-fixture"
+    },
+    {
+      "type": "turn_started",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "2",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "turn_id": "turn-fixture"
+    },
+    {
+      "type": "text_delta",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "3",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "turn_id": "turn-fixture",
+      "text": "hello"
+    },
+    {
+      "type": "thinking_delta",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "4",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "turn_id": "turn-fixture",
+      "text": "checking"
+    },
+    {
+      "type": "tool_call_started",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "5",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "turn_id": "turn-fixture",
+      "tool_call_id": "tool-1",
+      "name": "bash",
+      "args": {
+        "command": "cargo test"
+      },
+      "call_index": 0
+    },
+    {
+      "type": "tool_approval_needed",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "6",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "turn_id": "turn-fixture",
+      "tool_call_id": "tool-1",
+      "capabilities": [
+        "execute"
+      ],
+      "rationale": "runs a local command"
+    },
+    {
+      "type": "tool_output_delta",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "7",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "turn_id": "turn-fixture",
+      "tool_call_id": "tool-1",
+      "stream": "stdout",
+      "chunk": "running tests"
+    },
+    {
+      "type": "tool_call_finished",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "8",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "turn_id": "turn-fixture",
+      "tool_call_id": "tool-1",
+      "output": {
+        "type": "mixed",
+        "parts": [
+          {
+            "type": "text",
+            "text": "build output"
+          },
+          {
+            "type": "structured",
+            "value": {
+              "passed": 3,
+              "failed": 0
+            }
+          },
+          {
+            "type": "image",
+            "media_type": "image/png",
+            "data": {
+              "type": "inline_base64",
+              "data": "iVBORw0KGgo="
+            }
+          }
+        ]
+      },
+      "is_error": false
+    },
+    {
+      "type": "question_asked",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "9",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "question_id": "question-1",
+      "questions": [
+        {
+          "id": "question-1",
+          "prompt": "Continue?",
+          "response_kind": "select_one",
+          "options": [
+            {
+              "value": "yes",
+              "label": "Yes",
+              "description": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "turn_finished",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "10",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "turn_id": "turn-fixture",
+      "status": "completed",
+      "usage": {
+        "input_tokens": "100",
+        "output_tokens": "20",
+        "cache_read_tokens": "80",
+        "cache_write_tokens": "0"
+      },
+      "cost": {
+        "amount_micros": "125",
+        "currency": "USD"
+      }
+    },
+    {
+      "type": "compaction_started",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "11",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "reason": "automatic"
+    },
+    {
+      "type": "compaction_finished",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "12",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "summary_turn_id": "summary-turn",
+      "reclaimed_tokens": "25000"
+    },
+    {
+      "type": "subagent_spawned",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "13",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "subagent_id": "subagent-1",
+      "task": "inspect protocol"
+    },
+    {
+      "type": "subagent_finished",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "14",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "subagent_id": "subagent-1",
+      "output": {
+        "type": "text",
+        "text": "done"
+      },
+      "is_error": false
+    },
+    {
+      "type": "subagent_finished",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "15",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "subagent_id": "subagent-2",
+      "output": {
+        "type": "structured",
+        "value": {
+          "files": 3
+        }
+      },
+      "is_error": false
+    },
+    {
+      "type": "tool_output_pruned",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "16",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "tool_call_id": "tool-old",
+      "reclaimed_tokens": "21000"
+    },
+    {
+      "type": "mode_changed",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "17",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "mode": "plan"
+    },
+    {
+      "type": "model_changed",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "18",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "model": "fast"
+    },
+    {
+      "type": "context_item_pinned",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "19",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "item_id": "context-1"
+    },
+    {
+      "type": "context_item_evicted",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "20",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "item_id": "context-2"
+    },
+    {
+      "type": "user_shell_state_changed",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "21",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "active": false,
+      "status": null
+    },
+    {
+      "type": "error",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "22",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "error": {
+        "category": "protocol",
+        "code": "invalid_command",
+        "message": "command was rejected",
+        "retryable": false,
+        "details": {
+          "field": "type"
+        }
+      }
+    }
+  ]
+}

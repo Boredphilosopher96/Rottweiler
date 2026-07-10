@@ -1,0 +1,11 @@
+/target/
+*.profraw
+.DS_Store
+.idea/
+.vscode/
+packages/tui/node_modules/
+packages/tui/dist/
+packages/tui/*.bun-build
+.rottweiler/sessions/
+.rottweiler/checkpoints/
+.rottweiler/runtime/

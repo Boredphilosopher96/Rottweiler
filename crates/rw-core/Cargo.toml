@@ -1,0 +1,21 @@
+[package]
+name = "rw-core"
+description = "Headless Rottweiler agent engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rw-context.workspace = true
+rw-ext.workspace = true
+rw-mcp.workspace = true
+rw-providers.workspace = true
+rw-store.workspace = true
+rw-tools.workspace = true
+rw-types.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "rw-mcp"
+description = "MCP client and server integration for Rottweiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rw-tools.workspace = true
+rw-types.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,15 @@
+[package]
+name = "rw-tools"
+description = "Public tool registry and built-in tools for Rottweiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rw-intel.workspace = true
+rw-sandbox.workspace = true
+rw-types.workspace = true
+
+[lints]
+workspace = true

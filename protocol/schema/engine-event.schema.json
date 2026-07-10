@@ -1,0 +1,1043 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "EngineEvent",
+  "description": "Events streamed to clients and persisted in the session event log.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/CommandOutcome"
+        },
+        "type": {
+          "type": "string",
+          "const": "command_acknowledged"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "outcome"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "driver_client_id": {
+          "$ref": "#/$defs/ClientId"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_created"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "driver_client_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "driver_client_id": {
+          "$ref": "#/$defs/ClientId"
+        },
+        "type": {
+          "type": "string",
+          "const": "driver_changed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "driver_client_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "type": "string",
+          "const": "turn_started"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "text_delta"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "thinking_delta"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "args": true,
+        "call_index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_call_started"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "tool_call_id",
+        "name",
+        "args",
+        "call_index"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ToolCapability"
+          }
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_approval_needed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "tool_call_id",
+        "capabilities",
+        "rationale"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "stream": {
+          "$ref": "#/$defs/ToolOutputStream"
+        },
+        "chunk": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_output_delta"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "tool_call_id",
+        "stream",
+        "chunk"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "output": {
+          "$ref": "#/$defs/ToolOutput"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_call_finished"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "tool_call_id",
+        "output",
+        "is_error"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "questions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Question"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "question_asked"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "question_id",
+        "questions"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "status": {
+          "$ref": "#/$defs/TurnStatus"
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "cost": {
+          "$ref": "#/$defs/Cost"
+        },
+        "type": {
+          "type": "string",
+          "const": "turn_finished"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "status",
+        "usage",
+        "cost"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "reason": {
+          "$ref": "#/$defs/CompactionReason"
+        },
+        "type": {
+          "type": "string",
+          "const": "compaction_started"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "reason"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "summary_turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "reclaimed_tokens": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "compaction_finished"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "summary_turn_id",
+        "reclaimed_tokens"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "task": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "subagent_spawned"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "subagent_id",
+        "task"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "output": {
+          "$ref": "#/$defs/ToolOutput"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "subagent_finished"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "subagent_id",
+        "output",
+        "is_error"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "reclaimed_tokens": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_output_pruned"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "tool_call_id",
+        "reclaimed_tokens"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "mode_changed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "mode"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "type": {
+          "type": "string",
+          "const": "model_changed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "model"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "item_id": {
+          "$ref": "#/$defs/ContextItemId"
+        },
+        "type": {
+          "type": "string",
+          "const": "context_item_pinned"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "item_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "item_id": {
+          "$ref": "#/$defs/ContextItemId"
+        },
+        "type": {
+          "type": "string",
+          "const": "context_item_evicted"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "item_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "type": {
+          "type": "string",
+          "const": "user_shell_state_changed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "active"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "error": {
+          "$ref": "#/$defs/EngineError"
+        },
+        "type": {
+          "type": "string",
+          "const": "error"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "error"
+      ]
+    }
+  ],
+  "$defs": {
+    "CommandAckMeta": {
+      "description": "Metadata for immediate command acknowledgements before session sequencing.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "client_id": {
+          "$ref": "#/$defs/ClientId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        },
+        "emitted_at": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "client_id",
+        "request_id",
+        "emitted_at"
+      ]
+    },
+    "ClientId": {
+      "description": "Stable identifier of a connected client.",
+      "type": "string"
+    },
+    "RequestId": {
+      "description": "Client-generated identifier used to correlate a command.",
+      "type": "string"
+    },
+    "SessionId": {
+      "description": "Stable identifier of an engine session.",
+      "type": "string"
+    },
+    "CommandOutcome": {
+      "description": "Immediate disposition of a client command, delivered on the event channel.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "accepted"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "error": {
+              "$ref": "#/$defs/EngineError"
+            },
+            "type": {
+              "type": "string",
+              "const": "rejected"
+            }
+          },
+          "required": [
+            "type",
+            "error"
+          ]
+        }
+      ]
+    },
+    "EngineError": {
+      "description": "Actionable client-safe error payload.",
+      "type": "object",
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/EngineErrorCategory"
+        },
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": true
+      },
+      "required": [
+        "category",
+        "code",
+        "message",
+        "retryable"
+      ]
+    },
+    "EngineErrorCategory": {
+      "description": "Stable error categories used across engine boundaries.",
+      "type": "string",
+      "enum": [
+        "provider",
+        "tool",
+        "sandbox",
+        "config",
+        "extension",
+        "protocol",
+        "internal"
+      ]
+    },
+    "EventMeta": {
+      "description": "Metadata common to persisted and streamed events.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "sequence_id": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "emitted_at": {
+          "type": "string"
+        },
+        "caused_by": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "sequence_id",
+        "emitted_at"
+      ]
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "TurnId": {
+      "description": "Stable identifier of a conversation turn.",
+      "type": "string"
+    },
+    "ToolCallId": {
+      "description": "Stable identifier assigned to a model tool call.",
+      "type": "string"
+    },
+    "ToolCapability": {
+      "description": "Capabilities used by the permission engine for a tool invocation.",
+      "type": "string",
+      "enum": [
+        "read_filesystem",
+        "write_filesystem",
+        "network",
+        "execute"
+      ]
+    },
+    "ToolOutputStream": {
+      "description": "A stream associated with partial output from a running tool.",
+      "type": "string",
+      "enum": [
+        "stdout",
+        "stderr"
+      ]
+    },
+    "ToolOutput": {
+      "description": "Provider-neutral output produced by a tool.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": true,
+            "type": {
+              "type": "string",
+              "const": "structured"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "parts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ToolOutputPart"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "mixed"
+            }
+          },
+          "required": [
+            "type",
+            "parts"
+          ]
+        }
+      ]
+    },
+    "ToolOutputPart": {
+      "description": "One part of a mixed tool result.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": true,
+            "type": {
+              "type": "string",
+              "const": "structured"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "media_type": {
+              "type": "string"
+            },
+            "data": {
+              "$ref": "#/$defs/ImageRef"
+            },
+            "type": {
+              "type": "string",
+              "const": "image"
+            }
+          },
+          "required": [
+            "type",
+            "media_type",
+            "data"
+          ]
+        }
+      ]
+    },
+    "ImageRef": {
+      "description": "An image reference that does not assume a filesystem shared with a client.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "inline_base64"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "url"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ]
+        }
+      ]
+    },
+    "QuestionId": {
+      "description": "Stable identifier of an interactive question.",
+      "type": "string"
+    },
+    "Question": {
+      "description": "A typed question sent to an interactive client.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "prompt": {
+          "type": "string"
+        },
+        "response_kind": {
+          "$ref": "#/$defs/QuestionResponseKind"
+        },
+        "options": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/QuestionOption"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "prompt",
+        "response_kind",
+        "options"
+      ]
+    },
+    "QuestionResponseKind": {
+      "description": "Shape of a response accepted for an interactive question.",
+      "type": "string",
+      "enum": [
+        "text",
+        "select_one",
+        "select_many"
+      ]
+    },
+    "QuestionOption": {
+      "description": "A selectable response to an engine question.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "value",
+        "label"
+      ]
+    },
+    "TurnStatus": {
+      "description": "Terminal state of an agent turn.",
+      "type": "string",
+      "enum": [
+        "completed",
+        "interrupted",
+        "failed"
+      ]
+    },
+    "Usage": {
+      "description": "Provider-reported token accounting normalized by the router.",
+      "type": "object",
+      "properties": {
+        "input_tokens": {
+          "type": "string"
+        },
+        "output_tokens": {
+          "type": "string"
+        },
+        "cache_read_tokens": {
+          "type": "string"
+        },
+        "cache_write_tokens": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens"
+      ]
+    },
+    "Cost": {
+      "description": "Exact fixed-point monetary amount.",
+      "type": "object",
+      "properties": {
+        "amount_micros": {
+          "type": "string"
+        },
+        "currency": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "amount_micros",
+        "currency"
+      ]
+    },
+    "CompactionReason": {
+      "description": "Why a context compaction began.",
+      "type": "string",
+      "enum": [
+        "automatic",
+        "manual",
+        "provider_overflow"
+      ]
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
+      "type": "string"
+    },
+    "ContextItemId": {
+      "description": "Stable identifier of one assembled context item.",
+      "type": "string"
+    }
+  }
+}

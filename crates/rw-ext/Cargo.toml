@@ -1,0 +1,15 @@
+[package]
+name = "rw-ext"
+description = "Extension discovery, hooks, and RPC plugin hosting for Rottweiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rw-providers.workspace = true
+rw-tools.workspace = true
+rw-types.workspace = true
+
+[lints]
+workspace = true

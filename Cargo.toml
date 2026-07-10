@@ -1,0 +1,56 @@
+[workspace]
+members = [
+    "crates/rw-cli",
+    "crates/rw-context",
+    "crates/rw-core",
+    "crates/rw-ext",
+    "crates/rw-intel",
+    "crates/rw-mcp",
+    "crates/rw-providers",
+    "crates/rw-sandbox",
+    "crates/rw-store",
+    "crates/rw-tools",
+    "crates/rw-types",
+    "crates/xtask",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.94"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+expect_used = "warn"
+unwrap_used = "warn"
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+miette = { version = "7.6", features = ["fancy"] }
+schemars = { version = "1.2.1", features = ["preserve_order"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "signal", "sync"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
+url = "2.5"
+
+rw-context = { version = "0.1.0", path = "crates/rw-context" }
+rw-core = { version = "0.1.0", path = "crates/rw-core" }
+rw-ext = { version = "0.1.0", path = "crates/rw-ext" }
+rw-intel = { version = "0.1.0", path = "crates/rw-intel" }
+rw-mcp = { version = "0.1.0", path = "crates/rw-mcp" }
+rw-providers = { version = "0.1.0", path = "crates/rw-providers" }
+rw-sandbox = { version = "0.1.0", path = "crates/rw-sandbox" }
+rw-store = { version = "0.1.0", path = "crates/rw-store" }
+rw-tools = { version = "0.1.0", path = "crates/rw-tools" }
+rw-types = { version = "0.1.0", path = "crates/rw-types" }

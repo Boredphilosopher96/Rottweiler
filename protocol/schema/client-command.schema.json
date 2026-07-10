@@ -1,0 +1,613 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClientCommand",
+  "description": "Commands accepted by the headless engine from any client.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "create_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "cwd"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "last_seen_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/ClientRole"
+        },
+        "type": {
+          "type": "string",
+          "const": "attach_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "role"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "content": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "send_message"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "content",
+        "attachments"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "interrupt"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "type": {
+          "type": "string",
+          "const": "approve_tool"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "tool_call_id",
+        "decision"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Answer"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "answer_question"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "question_id",
+        "answers"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "switch_mode"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "mode"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "type": {
+          "type": "string",
+          "const": "switch_model"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "model"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "instructions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "compact"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "at_turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "fork"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/RewindTarget"
+        },
+        "type": {
+          "type": "string",
+          "const": "rewind"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "take_driver"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "command": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "user_shell_started"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "command"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "captured_output": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "user_shell_ended"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "status"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "item_id": {
+          "$ref": "#/$defs/ContextItemId"
+        },
+        "type": {
+          "type": "string",
+          "const": "pin_context"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "item_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "item_id": {
+          "$ref": "#/$defs/ContextItemId"
+        },
+        "type": {
+          "type": "string",
+          "const": "evict_context"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "item_id"
+      ]
+    }
+  ],
+  "$defs": {
+    "CommandMeta": {
+      "description": "Metadata common to commands from all client transports.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "client_id": {
+          "$ref": "#/$defs/ClientId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "client_id",
+        "request_id"
+      ]
+    },
+    "ClientId": {
+      "description": "Stable identifier of a connected client.",
+      "type": "string"
+    },
+    "RequestId": {
+      "description": "Client-generated identifier used to correlate a command.",
+      "type": "string"
+    },
+    "SessionId": {
+      "description": "Stable identifier of an engine session.",
+      "type": "string"
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "ClientRole": {
+      "description": "Whether a client mutates the session or only observes it.",
+      "type": "string",
+      "enum": [
+        "driver",
+        "observer"
+      ]
+    },
+    "Attachment": {
+      "description": "User-provided content attached to a message.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "data": {
+          "$ref": "#/$defs/AttachmentData"
+        }
+      },
+      "required": [
+        "name",
+        "media_type",
+        "data"
+      ]
+    },
+    "AttachmentData": {
+      "description": "In-band attachment data; protocol messages never require shared files.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "inline_base64"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ]
+        }
+      ]
+    },
+    "ToolCallId": {
+      "description": "Stable identifier assigned to a model tool call.",
+      "type": "string"
+    },
+    "ApprovalDecision": {
+      "description": "A driver's decision at the permission chokepoint.",
+      "type": "string",
+      "enum": [
+        "allow_once",
+        "allow_session",
+        "deny"
+      ]
+    },
+    "QuestionId": {
+      "description": "Stable identifier of an interactive question.",
+      "type": "string"
+    },
+    "Answer": {
+      "description": "One answer returned for a question entry.",
+      "type": "object",
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "question_id",
+        "values"
+      ]
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
+      "type": "string"
+    },
+    "TurnId": {
+      "description": "Stable identifier of a conversation turn.",
+      "type": "string"
+    },
+    "RewindTarget": {
+      "description": "Rewind destination selected by a client.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "type": {
+              "type": "string",
+              "const": "turn"
+            }
+          },
+          "required": [
+            "type",
+            "turn_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "checkpoint_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "checkpoint"
+            }
+          },
+          "required": [
+            "type",
+            "checkpoint_id"
+          ]
+        }
+      ]
+    },
+    "ContextItemId": {
+      "description": "Stable identifier of one assembled context item.",
+      "type": "string"
+    }
+  }
+}

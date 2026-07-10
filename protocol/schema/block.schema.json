@@ -1,0 +1,291 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Block",
+  "description": "A provider-neutral content block.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "text"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "signature": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "thinking"
+        }
+      },
+      "required": [
+        "type",
+        "content"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "args": true,
+        "type": {
+          "type": "string",
+          "const": "tool_call"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "name",
+        "args"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "output": {
+          "$ref": "#/$defs/ToolOutput"
+        },
+        "is_error": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_result"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "output",
+        "is_error"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "media_type": {
+          "type": "string"
+        },
+        "data": {
+          "$ref": "#/$defs/ImageRef"
+        },
+        "type": {
+          "type": "string",
+          "const": "image"
+        }
+      },
+      "required": [
+        "type",
+        "media_type",
+        "data"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string"
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "excerpt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "citation"
+        }
+      },
+      "required": [
+        "type",
+        "uri"
+      ]
+    }
+  ],
+  "$defs": {
+    "ToolCallId": {
+      "description": "Stable identifier assigned to a model tool call.",
+      "type": "string"
+    },
+    "ToolOutput": {
+      "description": "Provider-neutral output produced by a tool.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": true,
+            "type": {
+              "type": "string",
+              "const": "structured"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "parts": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ToolOutputPart"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "mixed"
+            }
+          },
+          "required": [
+            "type",
+            "parts"
+          ]
+        }
+      ]
+    },
+    "ToolOutputPart": {
+      "description": "One part of a mixed tool result.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "value": true,
+            "type": {
+              "type": "string",
+              "const": "structured"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "media_type": {
+              "type": "string"
+            },
+            "data": {
+              "$ref": "#/$defs/ImageRef"
+            },
+            "type": {
+              "type": "string",
+              "const": "image"
+            }
+          },
+          "required": [
+            "type",
+            "media_type",
+            "data"
+          ]
+        }
+      ]
+    },
+    "ImageRef": {
+      "description": "An image reference that does not assume a filesystem shared with a client.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "inline_base64"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "url"
+            }
+          },
+          "required": [
+            "type",
+            "url"
+          ]
+        }
+      ]
+    }
+  }
+}
