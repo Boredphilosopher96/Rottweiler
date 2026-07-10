@@ -7,6 +7,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = "0.1.89"
 rw-context.workspace = true
 rw-ext.workspace = true
 rw-mcp.workspace = true
@@ -18,6 +19,11 @@ tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 url.workspace = true
+
+[dev-dependencies]
+futures-util = "0.3.31"
+serde_json.workspace = true
+tempfile = "3.23"
 
 [lints]
 workspace = true

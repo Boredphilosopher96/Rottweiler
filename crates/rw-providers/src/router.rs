@@ -93,7 +93,27 @@ impl ProviderRouter {
         providers: impl IntoIterator<Item = Arc<dyn Provider>>,
         retry: RetryPolicy,
     ) -> Result<Self, RouterError> {
-        Self::with_delay(aliases, providers, retry, Arc::new(TokioDelay))
+        let providers = providers
+            .into_iter()
+            .map(|provider| (provider.name().to_owned(), provider));
+        Self::with_registry_and_delay(aliases, providers, retry, Arc::new(TokioDelay))
+    }
+
+    /// Creates a router from an explicit registry-key/provider mapping.
+    ///
+    /// This boundary lets a composition root register multiple model-bound
+    /// views of one logical endpoint without changing the provider identity
+    /// used by recording and diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed candidates or missing registry keys.
+    pub fn with_registry(
+        aliases: BTreeMap<String, Vec<String>>,
+        providers: impl IntoIterator<Item = (String, Arc<dyn Provider>)>,
+        retry: RetryPolicy,
+    ) -> Result<Self, RouterError> {
+        Self::with_registry_and_delay(aliases, providers, retry, Arc::new(TokioDelay))
     }
 
     /// Creates a router with injected time for deterministic tests/replay.
@@ -107,7 +127,19 @@ impl ProviderRouter {
         retry: RetryPolicy,
         delay: Arc<dyn Delay>,
     ) -> Result<Self, RouterError> {
-        Self::with_timing(
+        let providers = providers
+            .into_iter()
+            .map(|provider| (provider.name().to_owned(), provider));
+        Self::with_registry_and_delay(aliases, providers, retry, delay)
+    }
+
+    fn with_registry_and_delay(
+        aliases: BTreeMap<String, Vec<String>>,
+        providers: impl IntoIterator<Item = (String, Arc<dyn Provider>)>,
+        retry: RetryPolicy,
+        delay: Arc<dyn Delay>,
+    ) -> Result<Self, RouterError> {
+        Self::with_registry_and_timing(
             aliases,
             providers,
             retry,
@@ -133,6 +165,29 @@ impl ProviderRouter {
         clock: Arc<dyn Clock>,
         failover_cooldown: Duration,
     ) -> Result<Self, RouterError> {
+        let providers = providers
+            .into_iter()
+            .map(|provider| (provider.name().to_owned(), provider));
+        Self::with_registry_and_timing(
+            aliases,
+            providers,
+            retry,
+            delay,
+            jitter,
+            clock,
+            failover_cooldown,
+        )
+    }
+
+    fn with_registry_and_timing(
+        aliases: BTreeMap<String, Vec<String>>,
+        providers: impl IntoIterator<Item = (String, Arc<dyn Provider>)>,
+        retry: RetryPolicy,
+        delay: Arc<dyn Delay>,
+        jitter: Arc<dyn JitterSource>,
+        clock: Arc<dyn Clock>,
+        failover_cooldown: Duration,
+    ) -> Result<Self, RouterError> {
         let aliases = aliases
             .into_iter()
             .map(|(alias, values)| {
@@ -143,10 +198,7 @@ impl ProviderRouter {
                 Ok((alias, candidates))
             })
             .collect::<Result<BTreeMap<_, _>, RouterError>>()?;
-        let providers = providers
-            .into_iter()
-            .map(|provider| (provider.name().to_owned(), provider))
-            .collect::<BTreeMap<_, _>>();
+        let providers = providers.into_iter().collect::<BTreeMap<_, _>>();
         for candidate in aliases.values().flatten() {
             if !providers.contains_key(&candidate.provider) {
                 return Err(RouterError::ProviderNotRegistered(

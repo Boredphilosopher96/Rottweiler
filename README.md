@@ -11,6 +11,7 @@ verification requirements begin in [PROJECT.md](PROJECT.md).
 ```sh
 cargo run --locked -p rw-cli -- config check
 cargo run --locked -p rw-cli -- models refresh
+cargo run --locked -p rw-cli -- auth set-key <provider>
 cargo run --locked --quiet -p xtask -- codegen
 cargo run --locked --quiet -p xtask -- codegen --check
 cargo fmt --all -- --check

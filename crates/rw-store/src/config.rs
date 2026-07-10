@@ -161,6 +161,12 @@ impl LoadedConfig {
                         ),
                     );
                 }
+                if let Some(credential) = &provider.api_key_credential {
+                    lines.push(self.render_leaf(
+                        &format!("providers.{name}.api_key_credential"),
+                        &quoted(credential),
+                    ));
+                }
                 if let Some(variable) = &provider.oauth_token_env {
                     lines.push(self.render_leaf(
                         &format!("providers.{name}.oauth_token_env"),
@@ -773,6 +779,7 @@ fn apply_provider_override(
             provider.proxy_password_credential = nonempty_override(value);
         }
         "api_key_env" => provider.api_key_env = nonempty_override(value),
+        "api_key_credential" => provider.api_key_credential = nonempty_override(value),
         "oauth_token_env" => provider.oauth_token_env = nonempty_override(value),
         "oauth_authorization_endpoint" => {
             provider.oauth_authorization_endpoint = nonempty_override(value);
@@ -816,6 +823,7 @@ fn set_provider_sources(
             "proxy_password_credential",
         ),
         (provider.api_key_env.is_some(), "api_key_env"),
+        (provider.api_key_credential.is_some(), "api_key_credential"),
         (provider.oauth_token_env.is_some(), "oauth_token_env"),
         (
             provider.oauth_authorization_endpoint.is_some(),
@@ -931,6 +939,15 @@ fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<(), Config
                 "providers.{name}.{field} must name an environment variable"
             )));
         }
+    }
+    if provider
+        .api_key_credential
+        .as_deref()
+        .is_some_and(|reference| reference.trim().is_empty())
+    {
+        return Err(ConfigError::Validation(format!(
+            "providers.{name}.api_key_credential must not be empty"
+        )));
     }
     validate_provider_oauth(name, provider)?;
     Ok(())
@@ -1212,6 +1229,7 @@ proxy = "http://provider-proxy"
 proxy_username = "provider-user"
 proxy_password_credential = "provider-proxy-password"
 api_key_env = "GATEWAY_API_KEY"
+api_key_credential = "gateway-api-key"
 [network]
 proxy = "http://user-proxy"
 proxy_username = "global-user"
@@ -1291,6 +1309,12 @@ channel = "stable"
                 .as_deref(),
             Some("provider-proxy-password")
         );
+        assert_eq!(
+            loaded.config.providers["gateway"]
+                .api_key_credential
+                .as_deref(),
+            Some("gateway-api-key")
+        );
         assert_eq!(loaded.config.permissions.default, PermissionDecision::Allow);
         assert_eq!(loaded.config.sandbox.safe_list, ["git status"]);
         assert!(!loaded.config.telemetry.enabled);
@@ -1307,6 +1331,11 @@ channel = "stable"
         assert_eq!(
             loaded.provenance("providers.gateway.proxy"),
             Some(&ConfigSource::UserFile(user))
+        );
+        assert!(
+            loaded
+                .render_with_provenance()
+                .contains("providers.gateway.api_key_credential = \"gateway-api-key\"")
         );
     }
 
@@ -1364,6 +1393,7 @@ channel = "stable"
             "providers.local.kind=local_adapter".to_owned(),
             "providers.local.base_url=http://127.0.0.1:11434/v1".to_owned(),
             "providers.local.api_key_env=LOCAL_MODEL_TOKEN".to_owned(),
+            "providers.local.api_key_credential=providers.local.api_key".to_owned(),
             "models.thinking.fast=low".to_owned(),
         ])
         .load()
@@ -1372,6 +1402,30 @@ channel = "stable"
             valid.config.models.thinking["fast"],
             rw_types::config::ThinkingLevel::Low
         );
+        assert_eq!(
+            valid.config.providers["local"]
+                .api_key_credential
+                .as_deref(),
+            Some("providers.local.api_key")
+        );
+
+        let empty_credential_user = root.path().join("empty-credential-user.toml");
+        fs::write(
+            &empty_credential_user,
+            r#"
+[providers.local]
+kind = "local_adapter"
+api_key_credential = ""
+"#,
+        )
+        .expect("invalid provider config should be written");
+        let error = ConfigLoader::new(
+            empty_credential_user,
+            root.path().join("missing-project.toml"),
+        )
+        .load()
+        .expect_err("empty API-key credential references must fail validation");
+        assert!(error.to_string().contains("api_key_credential"));
 
         let error = ConfigLoader::new(
             root.path().join("missing-user.toml"),

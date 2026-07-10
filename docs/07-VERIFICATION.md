@@ -36,16 +36,50 @@ echoing either secret. A CLI integration test reads the printed
 authorization URL, sends an adversarial callback state, and verifies that the
 process rejects it without echoing the state or authorization code.
 
+The production `rw-core::ProviderFactory` is exercised separately from adapter
+unit construction. Deterministic loopback tests cover env-over-keychain API
+keys, static OAuth bearer auth, an actual refresh request plus durable rotation,
+provider-proxy Basic auth, known-secret fixture redaction, mixed-auth rejection,
+and exact model binding. A two-model/one-provider fixture gives the models
+different tool capabilities and proves the registry does not collapse them to
+one endpoint-wide claim. Missing default aliases and thinking entries pointing
+at absent aliases fail before any socket can open.
+The refresh fixture deliberately echoes the newly issued bearer token and
+rotated refresh token from the model endpoint after the recorder is already
+constructed; both are absent from fixture JSON, redactor/runtime diagnostics,
+and a keychain-fallback warning remains visible. A poisoned-registry test proves
+previous and subsequent registrations still redact. Catalog tests also bind an
+official kind to its canonical namespace despite a conflicting logical-name
+entry, while a compatible adapter uses only its explicit logical entry.
+
 These deterministic fixtures do **not** substitute for M1's credentialed live
 smoke. A minimal tool-call recording from both remote API families remains a
 release/milestone gate whenever credentials are available; CI must continue to
 replay the reviewed, redacted recordings with external networking disabled.
-The opt-in harness is `crates/rw-providers/tests/live_smoke.rs`; it requires an
-existing absolute fixture directory outside the repository, both exported API
-keys, explicit current tool-capable model ids, and
-`RW_LIVE_SMOKE=accept-paid-requests` before its ignored test can run.
-That paid harness forces the exact `live_smoke_ping` function through the
+The single authoritative opt-in harness is
+`crates/rw-core/tests/live_smoke_credentials.rs`. It loads user-scoped provider
+configuration and credentials through the production factory, preflights both
+families before the first paid request, and requires an existing absolute
+fixture directory outside the repository, explicit current tool-capable model
+ids, and `RW_LIVE_SMOKE=accept-paid-requests` before its ignored test can run.
+Keys are supplied with `rw auth set-key anthropic` and `rw auth set-key openai`
+(or their configured environment references), never test arguments. The paid
+harness forces the exact `live_smoke_ping` function through the
 provider-neutral named-tool choice, rather than relying on prompt compliance.
+The minimum non-secret user configuration for that harness is:
+
+```toml
+[providers.anthropic]
+kind = "anthropic"
+
+[providers.openai]
+kind = "openai"
+```
+
+It belongs in `ROTTWEILER_HOME/config.toml`,
+`$XDG_CONFIG_HOME/rottweiler/config.toml`, or the documented fallback
+`~/.rottweiler/config.toml`; provider definitions in project config are
+security-sensitive and intentionally ignored.
 
 ## 2. Test pyramid
 

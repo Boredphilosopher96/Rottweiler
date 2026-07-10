@@ -99,6 +99,8 @@ pub struct ProviderConfig {
     pub proxy_password_credential: Option<String>,
     /// Optional environment-variable name containing an API key.
     pub api_key_env: Option<String>,
+    /// Optional credential-store identifier containing an API key.
+    pub api_key_credential: Option<String>,
     /// Optional environment-variable name containing an OAuth access token.
     pub oauth_token_env: Option<String>,
     /// Provider-documented browser authorization endpoint for OAuth login.

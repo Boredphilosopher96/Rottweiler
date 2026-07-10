@@ -184,7 +184,7 @@ security-sensitive sections are rejected before merging, so they never become
 effective even transiently.
 
 **M1 provider/network contract.** `[providers.<name>]` holds an adapter kind,
-optional endpoint, credential environment references, and an optional
+optional endpoint, API-key environment/keychain references, and an optional
 provider-specific proxy. `[models].aliases` remains the provider-blind ordered
 `provider/model` routing table; `[models].thinking` maps aliases to
 `off|low|medium|high`. Proxy authentication is configured as a non-secret
@@ -192,6 +192,13 @@ username plus a `proxy_password_credential` identifier; the password resolves
 through the OS keychain (or warned 0600 fallback) and is never rendered.
 The global `[network]` form uses the same fields. Provider definitions and all
 proxy/authentication fields are user-scoped and ignored in project config.
+An API key uses `api_key_credential` when configured, otherwise the stable
+`providers.<name>.api_key` identifier; `api_key_env` remains the
+highest-precedence source. The exact built-in `anthropic` and `openai` adapters
+default that environment reference to `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`,
+respectively; compatible/custom endpoints never guess an environment name.
+`rw auth set-key <provider>` receives the value from a hidden TTY prompt and
+passes an opaque core-owned secret directly to the credential manager.
 
 For providers with a documented native OAuth surface, the same user-only table
 may set `oauth_authorization_endpoint`, `oauth_token_endpoint`,
@@ -205,6 +212,36 @@ credential manager; neither config nor the event/session protocol carries them.
 If a token refresh rotates the refresh token, the adapter persists the rotated
 value through an injected credential sink before returning the new access token;
 storage failure is fail-closed and sanitized.
+
+`rw-core::ProviderFactory` is the only production composition root for those
+pieces. It resolves provider > global > environment proxy precedence and proxy
+credentials once per logical provider, then shares one authentication object
+across every model on that endpoint (so concurrent models cannot race OAuth
+refresh-token rotation). Authentication precedence is explicit API-key env over
+API-key credential; the API-key and OAuth families are mutually exclusive;
+within OAuth, an explicitly populated token env wins, otherwise a configured
+refresh credential is used, then a stored access token. Missing authentication
+is accepted only for an explicitly configured loopback endpoint.
+The recorder redactor is a shared registry rather than a construction-time
+snapshot: OAuth registers each newly issued access token synchronously before
+returning bearer material and registers a rotated refresh token immediately
+after durable persistence. Credential-store fallback warnings produced by a
+later rotation remain visible through the runtime warning snapshot.
+
+Routing is model-bound rather than pretending endpoint-wide capabilities are
+model-wide. Each configured `provider/model` candidate receives a conservative
+capability view from the refreshed or bundled catalog, enforces the exact model
+id at dispatch, and gets a distinct recording identity/capability manifest.
+The router uses private registration keys so multiple models on one logical
+provider can truthfully differ. Fields absent from the catalog (currently
+vision and an authoritative cache-control mode) remain disabled; catalog
+`reasoning_options` effort values are the only basis for enabling a reasoning
+dial. Unknown/local models therefore degrade conservatively instead of gaining
+features by assumption. Exact built-in kinds always query their canonical
+catalog namespace (`anthropic/...` or `openai/...`), regardless of the user's
+logical provider name; only compatible adapters use an exact logical
+`provider/model` catalog entry. A misleading local name therefore cannot
+shadow official capability metadata.
 
 ### TUI (`packages/tui`, OpenTUI)
 

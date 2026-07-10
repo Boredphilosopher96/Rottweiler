@@ -208,6 +208,9 @@ fn spawn_http_server(body: &'static str) -> TestServer {
             match listener.accept() {
                 Ok((mut stream, _)) => {
                     stream
+                        .set_nonblocking(false)
+                        .expect("fixture stream should become blocking");
+                    stream
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .expect("fixture stream timeout should be set");
                     let mut received = Vec::new();

@@ -18,12 +18,12 @@ mod router;
 mod sse;
 mod types;
 
-pub use anthropic::{AnthropicConfig, AnthropicProvider};
+pub use anthropic::{AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy};
 pub use auth::{
-    AuthMaterial, AuthProvider, DEFAULT_OAUTH_CALLBACK_TIMEOUT, OAuthAuthorizationCode,
-    OAuthAuthorizationCodeConfig, OAuthEntropy, OAuthLoginSession, OAuthRefreshConfig,
-    OAuthTokenSet, ProxyAuthentication, RefreshTokenSink, RefreshingOAuth, Secret, StaticAuth,
-    SystemOAuthEntropy,
+    AuthMaterial, AuthProvider, DEFAULT_OAUTH_CALLBACK_TIMEOUT, KnownSecretRegistrar,
+    OAuthAuthorizationCode, OAuthAuthorizationCodeConfig, OAuthEntropy, OAuthLoginSession,
+    OAuthRefreshConfig, OAuthTokenSet, ProxyAuthentication, RefreshTokenSink, RefreshingOAuth,
+    Secret, StaticAuth, SystemOAuthEntropy,
 };
 pub use http::{ProcessNetworkDenyGuard, deny_outbound_network_for_process};
 pub use models_dev::{

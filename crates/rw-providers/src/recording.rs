@@ -139,30 +139,95 @@ impl WireFrameSink for CapturedFrames {
     }
 }
 
-/// Known-secret redactor applied before fixture bytes reach disk.
-#[derive(Clone, Debug, Default)]
+/// Shared known-secret redactor applied before fixture bytes reach disk.
+///
+/// Clones share one registry so credentials learned after provider composition
+/// (for example, refreshed OAuth tokens) are visible to an already-created
+/// recorder before it serializes a response.
+#[derive(Clone, Default)]
 pub struct FixtureRedactor {
-    secrets: Vec<String>,
+    secrets: Arc<std::sync::RwLock<Vec<String>>>,
+}
+
+impl std::fmt::Debug for FixtureRedactor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FixtureRedactor")
+            .field("registered_secret_count", &self.registered_secret_count())
+            .finish_non_exhaustive()
+    }
 }
 
 impl FixtureRedactor {
     /// Creates a redactor from registered secrets. Empty values are ignored.
     #[must_use]
     pub fn new(secrets: impl IntoIterator<Item = String>) -> Self {
-        Self {
-            secrets: secrets
-                .into_iter()
-                .filter(|secret| !secret.is_empty())
-                .collect(),
+        let redactor = Self::default();
+        for secret in secrets {
+            redactor.register_value(secret);
+        }
+        redactor
+    }
+
+    /// Registers a credential without exposing it through the type system.
+    /// Empty values are ignored and duplicate registrations are deduplicated.
+    pub fn register_secret(&self, secret: &crate::Secret) {
+        self.register_value(secret.expose_secret().to_owned());
+    }
+
+    /// Number of non-empty known secrets registered for fixture sanitization.
+    /// This exposes no credential material and supports acceptance assertions
+    /// that every preflighted credential reached the recording boundary.
+    #[must_use]
+    pub fn registered_secret_count(&self) -> usize {
+        match self.secrets.read() {
+            Ok(secrets) => secrets.len(),
+            Err(poisoned) => poisoned.into_inner().len(),
+        }
+    }
+
+    /// Whether already-rendered content still contains a registered secret.
+    /// The result exposes no secret value.
+    #[must_use]
+    pub fn contains_registered_secret(&self, value: &str) -> bool {
+        match self.secrets.read() {
+            Ok(secrets) => secrets.iter().any(|secret| value.contains(secret)),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .iter()
+                .any(|secret| value.contains(secret)),
         }
     }
 
     fn redact(&self, value: &str) -> String {
-        self.secrets
-            .iter()
-            .fold(value.to_owned(), |rendered, secret| {
+        let redact_with = |secrets: &[String]| {
+            secrets.iter().fold(value.to_owned(), |rendered, secret| {
                 rendered.replace(secret, "[REDACTED]")
             })
+        };
+        match self.secrets.read() {
+            Ok(secrets) => redact_with(&secrets),
+            Err(poisoned) => redact_with(&poisoned.into_inner()),
+        }
+    }
+
+    fn register_value(&self, secret: String) {
+        if secret.is_empty() {
+            return;
+        }
+        let mut secrets = match self.secrets.write() {
+            Ok(secrets) => secrets,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !secrets.contains(&secret) {
+            secrets.push(secret);
+        }
+    }
+}
+
+impl crate::KnownSecretRegistrar for FixtureRedactor {
+    fn register(&self, secret: &crate::Secret) {
+        self.register_secret(secret);
     }
 }
 
@@ -1144,6 +1209,29 @@ mod tests {
         calls: AtomicUsize,
         first_entered: Arc<Notify>,
         release_first: Arc<Notify>,
+    }
+
+    #[test]
+    fn shared_redactor_debug_is_safe_and_poisoning_retains_registered_secrets() {
+        const FIRST: &str = "redactor-debug-canary-one";
+        const SECOND: &str = "redactor-debug-canary-two";
+        let redactor = FixtureRedactor::default();
+        redactor.register_secret(&crate::Secret::new(FIRST));
+        let lock = Arc::clone(&redactor.secrets);
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = lock
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("deliberately poison redactor registry");
+        });
+
+        redactor.register_secret(&crate::Secret::new(SECOND));
+        let rendered = redactor.redact(&format!("{FIRST} {SECOND}"));
+        assert_eq!(rendered, "[REDACTED] [REDACTED]");
+        let debug = format!("{redactor:?}");
+        assert!(!debug.contains(FIRST));
+        assert!(!debug.contains(SECOND));
+        assert_eq!(redactor.registered_secret_count(), 2);
     }
 
     #[async_trait]

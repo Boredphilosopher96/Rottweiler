@@ -5,7 +5,10 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use miette::{IntoDiagnostic, Result};
-use rw_core::{DEFAULT_MODEL_CATALOG_URL, begin_oauth_login, refresh_model_catalog};
+use rw_core::{
+    DEFAULT_MODEL_CATALOG_URL, ProviderApiKey, begin_oauth_login, refresh_model_catalog,
+    store_provider_api_key,
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -64,6 +67,11 @@ enum AuthCommand {
         /// User-configured provider name from `[providers.<name>]`.
         provider: String,
     },
+    /// Store an API key from a hidden TTY prompt.
+    SetKey {
+        /// User-configured provider name from `[providers.<name>]`.
+        provider: String,
+    },
 }
 
 #[tokio::main]
@@ -106,8 +114,22 @@ async fn main() -> Result<()> {
         Command::Auth {
             command: AuthCommand::Login { provider },
         } => auth_login(&provider).await?,
+        Command::Auth {
+            command: AuthCommand::SetKey { provider },
+        } => auth_set_key(&provider)?,
     }
 
+    Ok(())
+}
+
+fn auth_set_key(provider_name: &str) -> Result<()> {
+    let input = rpassword::prompt_password("API key: ").into_diagnostic()?;
+    let api_key = ProviderApiKey::from_terminal_input(input).into_diagnostic()?;
+    let warnings = store_provider_api_key(provider_name, api_key).into_diagnostic()?;
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+    println!("stored API key for provider {provider_name}");
     Ok(())
 }
 

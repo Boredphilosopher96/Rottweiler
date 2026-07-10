@@ -805,6 +805,16 @@ pub trait RefreshTokenSink: Send + Sync + fmt::Debug {
     async fn persist(&self, refresh_token: &Secret) -> Result<(), ProviderError>;
 }
 
+/// Synchronous boundary for registering credentials with export/fixture redaction.
+///
+/// Implementations must retain no diagnostic representation of the supplied
+/// value. Registration is synchronous so a token cannot be returned or used in
+/// a provider request before the redaction boundary knows it.
+pub trait KnownSecretRegistrar: Send + Sync + fmt::Debug {
+    /// Registers one credential for all subsequent redaction operations.
+    fn register(&self, secret: &Secret);
+}
+
 #[derive(Clone, Debug)]
 struct CachedToken {
     value: Secret,
@@ -823,6 +833,7 @@ pub struct RefreshingOAuth {
     config: OAuthRefreshConfig,
     client: reqwest::Client,
     refresh_token_sink: Option<Arc<dyn RefreshTokenSink>>,
+    secret_registrar: Option<Arc<dyn KnownSecretRegistrar>>,
     state: Mutex<RefreshState>,
 }
 
@@ -853,11 +864,24 @@ impl RefreshingOAuth {
             config,
             client,
             refresh_token_sink,
+            secret_registrar: None,
             state: Mutex::new(RefreshState {
                 refresh_token,
                 cached: None,
             }),
         }
+    }
+
+    /// Registers initial and subsequently issued OAuth credentials with a
+    /// shared redaction boundary before they can be used or returned.
+    #[must_use]
+    pub fn with_secret_registrar(mut self, registrar: Arc<dyn KnownSecretRegistrar>) -> Self {
+        registrar.register(&self.config.refresh_token);
+        if let Some(client_secret) = &self.config.client_secret {
+            registrar.register(client_secret);
+        }
+        self.secret_registrar = Some(registrar);
+        self
     }
 
     /// Creates a refresh-token source using the same explicit proxy policy as
@@ -991,9 +1015,15 @@ impl AuthProvider for RefreshingOAuth {
                     "could not persist the rotated OAuth refresh token",
                 )
             })?;
+            if let Some(registrar) = &self.secret_registrar {
+                registrar.register(&rotated);
+            }
             state.refresh_token = rotated;
         }
         let value = Secret::new(token.access_token);
+        if let Some(registrar) = &self.secret_registrar {
+            registrar.register(&value);
+        }
         state.cached = Some(CachedToken {
             value: value.clone(),
             expires_at: now + Duration::from_secs(token.expires_in),
