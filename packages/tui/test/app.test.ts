@@ -38,7 +38,8 @@ describe("Rottweiler OpenTUI shell", () => {
 
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Rottweiler")
-    expect(frame).toContain("Generated protocol connected · event received")
+    expect(frame).toContain("hello")
+    expect(frame).toContain("model fast")
 
     const cells = setup.captureSpans()
     expect(cells.cols).toBe(72)
