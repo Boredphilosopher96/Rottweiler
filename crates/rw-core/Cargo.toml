@@ -15,7 +15,9 @@ rw-store.workspace = true
 rw-tools.workspace = true
 rw-types.workspace = true
 tokio.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [lints]
 workspace = true

@@ -13,6 +13,40 @@ The record/replay middleware (M1) is the spine of all agent-level testing:
 
 Fixture library grows with every bug: a fixed bug without a replay fixture reproducing it is not fixed.
 
+### M1 deterministic provider evidence
+
+CI uses wire-faithful loopback origins for Anthropic Messages, OpenAI Chat, and
+OpenAI Responses. The production HTTP adapters stream tool calls and usage,
+the recorder stores raw SSE, and replay reparses those frames with provider
+networking absent before comparing normalized bytes. Separate loopback tests
+exercise global/per-provider/authenticated proxies, killed-primary failover,
+sticky failback, and the rule that a partial semantic stream can never fail
+over. A socket canary also proves that both live adapters reject network-denied
+requests before opening a connection. The models.dev converter is covered by
+proxy-routed atomic-install tests and a live schema compatibility probe.
+
+OAuth acceptance uses only configurable mock endpoints: deterministic injected
+entropy proves RFC 7636 `S256` construction, a real ephemeral loopback listener
+proves happy callback and state-mismatch behavior, an authenticated forward
+proxy observes the code exchange, and canary assertions cover session/token
+debug output plus CLI diagnostics. Refresh-token rotation tests assert that the
+rotated value reaches an injected credential sink before bearer material is
+returned, and that a storage failure suppresses the access token without
+echoing either secret. A CLI integration test reads the printed
+authorization URL, sends an adversarial callback state, and verifies that the
+process rejects it without echoing the state or authorization code.
+
+These deterministic fixtures do **not** substitute for M1's credentialed live
+smoke. A minimal tool-call recording from both remote API families remains a
+release/milestone gate whenever credentials are available; CI must continue to
+replay the reviewed, redacted recordings with external networking disabled.
+The opt-in harness is `crates/rw-providers/tests/live_smoke.rs`; it requires an
+existing absolute fixture directory outside the repository, both exported API
+keys, explicit current tool-capable model ids, and
+`RW_LIVE_SMOKE=accept-paid-requests` before its ignored test can run.
+That paid harness forces the exact `live_smoke_ping` function through the
+provider-neutral named-tool choice, rather than relying on prompt compliance.
+
 ## 2. Test pyramid
 
 | Layer | What | Tooling |
@@ -82,7 +116,7 @@ A corpus of structured payloads (search results, dir listings, MCP responses, di
 
 ## 6. CI pipeline summary
 
-Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · protocol codegen check (schema → generated types are committed and in sync) · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · dep-direction check · docs build.
+Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · protocol codegen check (schema → generated types are committed and in sync) · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · dependency-direction and guarded-network-boundary checks · docs build.
 Nightly: full perf suite · soak test · fuzzers · terminal-bench subset · macOS + Linux matrix.
 Release: reproducible build, provenance attestation, update-signature verification fixtures, binary-size gate, `--record` smoke against live providers.
 **Network policy**: the socket-deny guard applies to the per-PR test harness; the only networked jobs are the nightly terminal-bench eval (a solve-rate benchmark can't run under replay) and the release `--record` smoke.

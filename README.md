@@ -6,10 +6,11 @@ and an OpenTUI frontend.
 The complete product specification, architecture, decision log, roadmap, and
 verification requirements begin in [PROJECT.md](PROJECT.md).
 
-## M0 development commands
+## Development commands
 
 ```sh
 cargo run --locked -p rw-cli -- config check
+cargo run --locked -p rw-cli -- models refresh
 cargo run --locked --quiet -p xtask -- codegen
 cargo run --locked --quiet -p xtask -- codegen --check
 cargo fmt --all -- --check
@@ -17,6 +18,7 @@ cargo test --locked --workspace --all-features
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
 python3 scripts/check-dependency-direction.py
+python3 scripts/check-network-boundaries.py
 cargo deny check
 cargo audit
 

@@ -149,9 +149,13 @@ resolve(alias) → [candidate models] → adapter → provider
 ```
 
 - Adapters implement `trait Provider { fn stream(&self, req: IrRequest) -> EventStream; fn caps(&self) -> Caps; }`.
+- `IrRequest` carries a provider-neutral tool choice (`auto`, `required`,
+  `none`, or an exact function name). Adapters validate names locally and map
+  the choice to their documented wire shape before any socket is opened.
 - `Caps` declares: tool calling, vision, thinking, cache breakpoints, max context. The engine adapts behavior from caps (e.g., no parallel tool hints for models that can't).
 - Retry/failover middleware wraps any provider. Pricing table is data (`models.toml`, refreshable), keyed by canonical model id.
 - **Record/replay middleware** wraps every provider: `--record` writes request/response fixtures; the replay provider serves them back for tests. This is a provider like any other, which is why nothing can bypass it.
+- Provider endpoint, proxy, and credential-reference settings are user-scoped security-sensitive configuration. Project files may select user-defined provider/model candidates, but cannot define or redirect a provider connection.
 
 ### Context engine (`rw-context`)
 
@@ -178,6 +182,29 @@ leaf, model-alias maps merge by alias, and list values replace rather than
 concatenate. Provenance is recorded per rendered leaf. Project-level
 security-sensitive sections are rejected before merging, so they never become
 effective even transiently.
+
+**M1 provider/network contract.** `[providers.<name>]` holds an adapter kind,
+optional endpoint, credential environment references, and an optional
+provider-specific proxy. `[models].aliases` remains the provider-blind ordered
+`provider/model` routing table; `[models].thinking` maps aliases to
+`off|low|medium|high`. Proxy authentication is configured as a non-secret
+username plus a `proxy_password_credential` identifier; the password resolves
+through the OS keychain (or warned 0600 fallback) and is never rendered.
+The global `[network]` form uses the same fields. Provider definitions and all
+proxy/authentication fields are user-scoped and ignored in project config.
+
+For providers with a documented native OAuth surface, the same user-only table
+may set `oauth_authorization_endpoint`, `oauth_token_endpoint`,
+`oauth_client_id`, `oauth_scopes`, and optional access/refresh credential-store
+identifiers. `rw auth login <provider>` binds `127.0.0.1:0`, prints the external
+browser URL, validates the exact callback path and cryptographic state, and
+exchanges the code with PKCE `S256`. The token client uses the same resolved
+provider/global/environment proxy precedence and separately resolved proxy
+credentials as model calls. Access and refresh values go directly to the
+credential manager; neither config nor the event/session protocol carries them.
+If a token refresh rotates the refresh token, the adapter persists the rotated
+value through an injected credential sink before returning the new access token;
+storage failure is fail-closed and sanitized.
 
 ### TUI (`packages/tui`, OpenTUI)
 

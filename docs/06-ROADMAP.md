@@ -14,7 +14,7 @@ Workspace with all crates stubbed; **codegen spike first (ADR-013): schemars/typ
 
 ## M1 — Provider layer + record/replay (the testing spine)
 
-Anthropic + OpenAI-compatible adapters (streaming, tool calls, usage); router with aliases + fallback chains; auth (API keys + OAuth flows for providers that support them); **HTTP(S) proxy support — global `[network] proxy`, per-provider override, env-var fallback (01 §4)**; thinking/reasoning-effort dial mapped per adapter; pricing table + cost computation; **record/replay middleware**; retry/backoff.
+Anthropic Messages + OpenAI Chat/Responses-compatible adapters (streaming, tool calls, usage; Gemini v1 routes through Google's official OpenAI-compatible endpoint as defined in 01 §4); router with aliases + fallback chains; auth (API keys + OAuth flows for providers that support them); **HTTP(S) proxy support — global `[network] proxy`, per-provider override, env-var fallback (01 §4)**; thinking/reasoning-effort dial mapped per adapter; pricing table + cost computation; **record/replay middleware**; retry/backoff.
 
 **AC:** live smoke test (recorded once) streams a tool-call turn from both API families through the IR; replay harness re-runs it byte-identically with network disabled; kill-one-provider test proves failover; proxy fixture: with a local proxy configured globally, all provider traffic routes through it; with a per-provider proxy, only that provider's traffic does (asserted by the proxy's access log); cost computed for a recorded session matches hand-calculated value.
 

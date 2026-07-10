@@ -6,13 +6,17 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rw_types::config::{Config, ConfigFile, PermissionDecision, UpdateChannel};
+use rw_types::config::{
+    Config, ConfigFile, PermissionDecision, ProviderConfig, ThinkingLevel, UpdateChannel,
+};
 use thiserror::Error;
-use url::Url;
+use url::{Host, Url};
 
 const ENV_ENGINE_SESSIONS: &str = "RW_ENGINE_MAX_CONCURRENT_SESSIONS";
 const ENV_MODEL_DEFAULT: &str = "RW_MODEL_DEFAULT";
 const ENV_NETWORK_PROXY: &str = "RW_NETWORK_PROXY";
+const ENV_NETWORK_PROXY_USERNAME: &str = "RW_NETWORK_PROXY_USERNAME";
+const ENV_NETWORK_PROXY_PASSWORD_CREDENTIAL: &str = "RW_NETWORK_PROXY_PASSWORD_CREDENTIAL";
 const ENV_PERMISSION_DEFAULT: &str = "RW_PERMISSION_DEFAULT";
 const ENV_SANDBOX_SAFE_LIST: &str = "RW_SANDBOX_SAFE_LIST";
 const ENV_TELEMETRY_ENABLED: &str = "RW_TELEMETRY_ENABLED";
@@ -83,6 +87,7 @@ impl LoadedConfig {
 
     /// Renders stable, scriptable effective values with a source per leaf.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn render_with_provenance(&self) -> String {
         let mut lines = Vec::new();
         lines.push(self.render_leaf(
@@ -105,6 +110,103 @@ impl LoadedConfig {
             }
         }
 
+        if self.config.models.thinking.is_empty() {
+            lines.push(self.render_leaf("models.thinking", "{}"));
+        } else {
+            for (alias, level) in &self.config.models.thinking {
+                lines.push(self.render_leaf(
+                    &format!("models.thinking.{alias}"),
+                    thinking_level_name(*level),
+                ));
+            }
+        }
+
+        if self.config.providers.is_empty() {
+            lines.push(self.render_leaf("providers", "{}"));
+        } else {
+            for (name, provider) in &self.config.providers {
+                lines.push(
+                    self.render_leaf(&format!("providers.{name}.kind"), &quoted(&provider.kind)),
+                );
+                if let Some(base_url) = &provider.base_url {
+                    lines.push(
+                        self.render_leaf(&format!("providers.{name}.base_url"), &quoted(base_url)),
+                    );
+                }
+                if let Some(proxy) = &provider.proxy {
+                    lines.push(
+                        self.render_leaf(
+                            &format!("providers.{name}.proxy"),
+                            &redacted_proxy(proxy),
+                        ),
+                    );
+                }
+                if let Some(username) = &provider.proxy_username {
+                    lines.push(self.render_leaf(
+                        &format!("providers.{name}.proxy_username"),
+                        &quoted(username),
+                    ));
+                }
+                if let Some(credential) = &provider.proxy_password_credential {
+                    lines.push(self.render_leaf(
+                        &format!("providers.{name}.proxy_password_credential"),
+                        &quoted(credential),
+                    ));
+                }
+                if let Some(variable) = &provider.api_key_env {
+                    lines.push(
+                        self.render_leaf(
+                            &format!("providers.{name}.api_key_env"),
+                            &quoted(variable),
+                        ),
+                    );
+                }
+                if let Some(variable) = &provider.oauth_token_env {
+                    lines.push(self.render_leaf(
+                        &format!("providers.{name}.oauth_token_env"),
+                        &quoted(variable),
+                    ));
+                }
+                for (field, value) in [
+                    (
+                        "oauth_authorization_endpoint",
+                        provider.oauth_authorization_endpoint.as_deref(),
+                    ),
+                    (
+                        "oauth_token_endpoint",
+                        provider.oauth_token_endpoint.as_deref(),
+                    ),
+                    ("oauth_client_id", provider.oauth_client_id.as_deref()),
+                    (
+                        "oauth_access_token_credential",
+                        provider.oauth_access_token_credential.as_deref(),
+                    ),
+                    (
+                        "oauth_refresh_token_credential",
+                        provider.oauth_refresh_token_credential.as_deref(),
+                    ),
+                ] {
+                    if let Some(value) = value {
+                        lines.push(
+                            self.render_leaf(&format!("providers.{name}.{field}"), &quoted(value)),
+                        );
+                    }
+                }
+                if !provider.oauth_scopes.is_empty() {
+                    let scopes = provider
+                        .oauth_scopes
+                        .iter()
+                        .map(|scope| quoted(scope))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    lines.push(self.render_leaf(
+                        &format!("providers.{name}.oauth_scopes"),
+                        &format!("[{scopes}]"),
+                    ));
+                }
+            }
+        }
+
         lines.push(
             self.render_leaf(
                 "network.proxy",
@@ -114,6 +216,28 @@ impl LoadedConfig {
                     .proxy
                     .as_deref()
                     .map_or_else(|| "<unset>".to_owned(), redacted_proxy),
+            ),
+        );
+        lines.push(
+            self.render_leaf(
+                "network.proxy_username",
+                &self
+                    .config
+                    .network
+                    .proxy_username
+                    .as_deref()
+                    .map_or_else(|| "<unset>".to_owned(), quoted),
+            ),
+        );
+        lines.push(
+            self.render_leaf(
+                "network.proxy_password_credential",
+                &self
+                    .config
+                    .network
+                    .proxy_password_credential
+                    .as_deref()
+                    .map_or_else(|| "<unset>".to_owned(), quoted),
             ),
         );
         lines.push(self.render_leaf(
@@ -286,6 +410,12 @@ impl ConfigLoader {
         self
     }
 
+    /// User-scoped credential fallback adjacent to the effective user config.
+    #[must_use]
+    pub fn credentials_path(&self) -> PathBuf {
+        self.user_path.with_file_name("credentials.toml")
+    }
+
     /// Loads, deep-merges, validates, and annotates all configured layers.
     ///
     /// # Errors
@@ -330,7 +460,11 @@ fn defaults_with_provenance() -> LoadedConfig {
         "engine.max_concurrent_sessions",
         "models.default",
         "models.aliases",
+        "models.thinking",
+        "providers",
         "network.proxy",
+        "network.proxy_username",
+        "network.proxy_password_credential",
         "permissions.default",
         "sandbox.safe_list",
         "telemetry.enabled",
@@ -386,6 +520,13 @@ fn apply_file(
                 set_source(loaded, &key, source);
             }
         }
+        if let Some(thinking) = models.thinking {
+            for (alias, level) in thinking {
+                let key = format!("models.thinking.{alias}");
+                loaded.config.models.thinking.insert(alias, level);
+                set_source(loaded, &key, source);
+            }
+        }
     }
     if scope == FileScope::User {
         if let Some(telemetry) = file.telemetry.take()
@@ -405,11 +546,25 @@ fn apply_security_file_sections(
     file: ConfigFile,
     source: &ConfigSource,
 ) {
-    if let Some(network) = file.network
-        && let Some(value) = network.proxy
-    {
-        loaded.config.network.proxy = Some(value);
-        set_source(loaded, "network.proxy", source);
+    if let Some(network) = file.network {
+        if let Some(value) = network.proxy {
+            loaded.config.network.proxy = Some(value);
+            set_source(loaded, "network.proxy", source);
+        }
+        if let Some(value) = network.proxy_username {
+            loaded.config.network.proxy_username = Some(value);
+            set_source(loaded, "network.proxy_username", source);
+        }
+        if let Some(value) = network.proxy_password_credential {
+            loaded.config.network.proxy_password_credential = Some(value);
+            set_source(loaded, "network.proxy_password_credential", source);
+        }
+    }
+    if let Some(providers) = file.providers {
+        for (name, provider) in providers {
+            set_provider_sources(loaded, &name, &provider, source);
+            loaded.config.providers.insert(name, provider);
+        }
     }
     if let Some(permissions) = file.permissions
         && let Some(value) = permissions.default
@@ -438,6 +593,7 @@ fn warn_ignored_project_sections(
 ) {
     for (present, section) in [
         (file.network.is_some(), "network"),
+        (file.providers.is_some(), "providers"),
         (file.permissions.is_some(), "permissions"),
         (file.sandbox.is_some(), "sandbox.safe_list"),
         (file.telemetry.is_some(), "telemetry"),
@@ -461,6 +617,11 @@ fn apply_environment(
         (ENV_ENGINE_SESSIONS, "engine.max_concurrent_sessions"),
         (ENV_MODEL_DEFAULT, "models.default"),
         (ENV_NETWORK_PROXY, "network.proxy"),
+        (ENV_NETWORK_PROXY_USERNAME, "network.proxy_username"),
+        (
+            ENV_NETWORK_PROXY_PASSWORD_CREDENTIAL,
+            "network.proxy_password_credential",
+        ),
         (ENV_PERMISSION_DEFAULT, "permissions.default"),
         (ENV_SANDBOX_SAFE_LIST, "sandbox.safe_list"),
         (ENV_TELEMETRY_ENABLED, "telemetry.enabled"),
@@ -503,6 +664,12 @@ fn apply_override(
         }
         "models.default" => value.clone_into(&mut loaded.config.models.default),
         "network.proxy" => loaded.config.network.proxy = Some(value.to_owned()),
+        "network.proxy_username" => {
+            loaded.config.network.proxy_username = nonempty_override(value);
+        }
+        "network.proxy_password_credential" => {
+            loaded.config.network.proxy_password_credential = nonempty_override(value);
+        }
         "permissions.default" => {
             loaded.config.permissions.default =
                 parse_permission(value).ok_or_else(|| ConfigError::CliOverride {
@@ -541,6 +708,27 @@ fn apply_override(
                 .aliases
                 .insert(alias.to_owned(), split_list(value));
         }
+        _ if key.starts_with("models.thinking.") => {
+            let alias = key.trim_start_matches("models.thinking.");
+            if alias.is_empty() {
+                return Err(ConfigError::CliOverride {
+                    override_value: raw.to_owned(),
+                    reason: "model alias name must not be empty".to_owned(),
+                });
+            }
+            let level = parse_thinking_level(value).ok_or_else(|| ConfigError::CliOverride {
+                override_value: raw.to_owned(),
+                reason: "expected off, low, medium, or high".to_owned(),
+            })?;
+            loaded
+                .config
+                .models
+                .thinking
+                .insert(alias.to_owned(), level);
+        }
+        _ if key.starts_with("providers.") => {
+            apply_provider_override(loaded, key, value, raw)?;
+        }
         _ => {
             return Err(ConfigError::CliOverride {
                 override_value: raw.to_owned(),
@@ -554,6 +742,104 @@ fn apply_override(
 
 fn set_source(loaded: &mut LoadedConfig, key: &str, source: &ConfigSource) {
     loaded.provenance.insert(key.to_owned(), source.clone());
+}
+
+fn apply_provider_override(
+    loaded: &mut LoadedConfig,
+    key: &str,
+    value: &str,
+    raw: &str,
+) -> Result<(), ConfigError> {
+    let remainder = key.trim_start_matches("providers.");
+    let Some((name, field)) = remainder.rsplit_once('.') else {
+        return Err(ConfigError::CliOverride {
+            override_value: raw.to_owned(),
+            reason: "expected providers.<name>.<field>".to_owned(),
+        });
+    };
+    if name.trim().is_empty() {
+        return Err(ConfigError::CliOverride {
+            override_value: raw.to_owned(),
+            reason: "provider name must not be empty".to_owned(),
+        });
+    }
+    let provider = loaded.config.providers.entry(name.to_owned()).or_default();
+    match field {
+        "kind" => value.clone_into(&mut provider.kind),
+        "base_url" => provider.base_url = nonempty_override(value),
+        "proxy" => provider.proxy = nonempty_override(value),
+        "proxy_username" => provider.proxy_username = nonempty_override(value),
+        "proxy_password_credential" => {
+            provider.proxy_password_credential = nonempty_override(value);
+        }
+        "api_key_env" => provider.api_key_env = nonempty_override(value),
+        "oauth_token_env" => provider.oauth_token_env = nonempty_override(value),
+        "oauth_authorization_endpoint" => {
+            provider.oauth_authorization_endpoint = nonempty_override(value);
+        }
+        "oauth_token_endpoint" => provider.oauth_token_endpoint = nonempty_override(value),
+        "oauth_client_id" => provider.oauth_client_id = nonempty_override(value),
+        "oauth_scopes" => provider.oauth_scopes = split_list(value),
+        "oauth_access_token_credential" => {
+            provider.oauth_access_token_credential = nonempty_override(value);
+        }
+        "oauth_refresh_token_credential" => {
+            provider.oauth_refresh_token_credential = nonempty_override(value);
+        }
+        _ => {
+            return Err(ConfigError::CliOverride {
+                override_value: raw.to_owned(),
+                reason: format!("unknown provider configuration field {field:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn nonempty_override(value: &str) -> Option<String> {
+    (!value.trim().is_empty()).then(|| value.to_owned())
+}
+
+fn set_provider_sources(
+    loaded: &mut LoadedConfig,
+    name: &str,
+    provider: &ProviderConfig,
+    source: &ConfigSource,
+) {
+    set_source(loaded, &format!("providers.{name}.kind"), source);
+    for (present, field) in [
+        (provider.base_url.is_some(), "base_url"),
+        (provider.proxy.is_some(), "proxy"),
+        (provider.proxy_username.is_some(), "proxy_username"),
+        (
+            provider.proxy_password_credential.is_some(),
+            "proxy_password_credential",
+        ),
+        (provider.api_key_env.is_some(), "api_key_env"),
+        (provider.oauth_token_env.is_some(), "oauth_token_env"),
+        (
+            provider.oauth_authorization_endpoint.is_some(),
+            "oauth_authorization_endpoint",
+        ),
+        (
+            provider.oauth_token_endpoint.is_some(),
+            "oauth_token_endpoint",
+        ),
+        (provider.oauth_client_id.is_some(), "oauth_client_id"),
+        (!provider.oauth_scopes.is_empty(), "oauth_scopes"),
+        (
+            provider.oauth_access_token_credential.is_some(),
+            "oauth_access_token_credential",
+        ),
+        (
+            provider.oauth_refresh_token_credential.is_some(),
+            "oauth_refresh_token_credential",
+        ),
+    ] {
+        if present {
+            set_source(loaded, &format!("providers.{name}.{field}"), source);
+        }
+    }
 }
 
 fn validate(config: &Config) -> Result<(), ConfigError> {
@@ -574,12 +860,39 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             )));
         }
     }
+    for alias in config.models.thinking.keys() {
+        if alias.trim().is_empty() {
+            return Err(ConfigError::Validation(
+                "model thinking alias must not be empty".to_owned(),
+            ));
+        }
+    }
     if let Some(proxy) = &config.network.proxy {
-        let parsed = Url::parse(proxy).map_err(|_| {
-            ConfigError::Validation(
-                "network.proxy must be an absolute HTTP(S) URL without inline credentials"
-                    .to_owned(),
-            )
+        validate_proxy("network.proxy", proxy)?;
+    }
+    validate_proxy_authentication(
+        "network",
+        config.network.proxy.as_deref(),
+        config.network.proxy_username.as_deref(),
+        config.network.proxy_password_credential.as_deref(),
+    )?;
+    for (name, provider) in &config.providers {
+        validate_provider(name, provider)?;
+    }
+    Ok(())
+}
+
+fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<(), ConfigError> {
+    if name.trim().is_empty() || provider.kind.trim().is_empty() {
+        return Err(ConfigError::Validation(format!(
+            "provider {name:?} must have a non-empty name and kind"
+        )));
+    }
+    if let Some(base_url) = &provider.base_url {
+        let parsed = Url::parse(base_url).map_err(|_| {
+            ConfigError::Validation(format!(
+                "providers.{name}.base_url must be an absolute HTTP(S) URL"
+            ))
         })?;
         if !matches!(parsed.scheme(), "http" | "https")
             || parsed.host().is_none()
@@ -587,15 +900,175 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             || parsed.password().is_some()
             || parsed.query().is_some()
             || parsed.fragment().is_some()
-            || !matches!(parsed.path(), "" | "/")
         {
-            return Err(ConfigError::Validation(
-                "network.proxy must be an HTTP(S) origin without inline credentials, path, query, or fragment"
-                    .to_owned(),
-            ));
+            return Err(ConfigError::Validation(format!(
+                "providers.{name}.base_url must not contain credentials, query, or fragment"
+            )));
+        }
+        if parsed.scheme() == "http" && !is_loopback_endpoint(&parsed) {
+            return Err(ConfigError::Validation(format!(
+                "providers.{name}.base_url must use HTTPS unless it targets loopback"
+            )));
+        }
+    }
+    if let Some(proxy) = &provider.proxy {
+        validate_proxy(&format!("providers.{name}.proxy"), proxy)?;
+    }
+    validate_proxy_authentication(
+        &format!("providers.{name}"),
+        provider.proxy.as_deref(),
+        provider.proxy_username.as_deref(),
+        provider.proxy_password_credential.as_deref(),
+    )?;
+    for (field, variable) in [
+        ("api_key_env", provider.api_key_env.as_deref()),
+        ("oauth_token_env", provider.oauth_token_env.as_deref()),
+    ] {
+        if let Some(variable) = variable
+            && !valid_environment_name(variable)
+        {
+            return Err(ConfigError::Validation(format!(
+                "providers.{name}.{field} must name an environment variable"
+            )));
+        }
+    }
+    validate_provider_oauth(name, provider)?;
+    Ok(())
+}
+
+fn validate_provider_oauth(name: &str, provider: &ProviderConfig) -> Result<(), ConfigError> {
+    let authorization_endpoint = provider.oauth_authorization_endpoint.as_deref();
+    let token_endpoint = provider.oauth_token_endpoint.as_deref();
+    let client_id = provider.oauth_client_id.as_deref();
+    let login_configured = authorization_endpoint.is_some()
+        || token_endpoint.is_some()
+        || client_id.is_some()
+        || !provider.oauth_scopes.is_empty();
+    if login_configured
+        && (authorization_endpoint.is_none() || token_endpoint.is_none() || client_id.is_none())
+    {
+        return Err(ConfigError::Validation(format!(
+            "providers.{name} OAuth login requires oauth_authorization_endpoint, oauth_token_endpoint, and oauth_client_id"
+        )));
+    }
+    for (field, endpoint) in [
+        ("oauth_authorization_endpoint", authorization_endpoint),
+        ("oauth_token_endpoint", token_endpoint),
+    ] {
+        if let Some(endpoint) = endpoint {
+            validate_remote_endpoint(&format!("providers.{name}.{field}"), endpoint)?;
+        }
+    }
+    if client_id.is_some_and(|client_id| client_id.trim().is_empty()) {
+        return Err(ConfigError::Validation(format!(
+            "providers.{name}.oauth_client_id must not be empty"
+        )));
+    }
+    if provider
+        .oauth_scopes
+        .iter()
+        .any(|scope| scope.trim().is_empty() || scope.chars().any(char::is_whitespace))
+    {
+        return Err(ConfigError::Validation(format!(
+            "providers.{name}.oauth_scopes entries must be non-empty and contain no whitespace"
+        )));
+    }
+    for (field, reference) in [
+        (
+            "oauth_access_token_credential",
+            provider.oauth_access_token_credential.as_deref(),
+        ),
+        (
+            "oauth_refresh_token_credential",
+            provider.oauth_refresh_token_credential.as_deref(),
+        ),
+    ] {
+        if reference.is_some_and(|reference| reference.trim().is_empty()) {
+            return Err(ConfigError::Validation(format!(
+                "providers.{name}.{field} must not be empty"
+            )));
         }
     }
     Ok(())
+}
+
+fn validate_remote_endpoint(key: &str, value: &str) -> Result<(), ConfigError> {
+    let parsed = Url::parse(value)
+        .map_err(|_| ConfigError::Validation(format!("{key} must be an absolute HTTPS URL")))?;
+    let loopback_host = match parsed.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(_)) | None => false,
+    };
+    let loopback_http = parsed.scheme() == "http" && loopback_host;
+    if (parsed.scheme() != "https" && !loopback_http)
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(ConfigError::Validation(format!(
+            "{key} must use HTTPS without credentials or a fragment (loopback HTTP is test-only)"
+        )));
+    }
+    Ok(())
+}
+
+fn is_loopback_endpoint(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
+fn validate_proxy(key: &str, proxy: &str) -> Result<(), ConfigError> {
+    let parsed = Url::parse(proxy).map_err(|_| {
+        ConfigError::Validation(format!(
+            "{key} must be an absolute HTTP(S) URL without inline credentials"
+        ))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !matches!(parsed.path(), "" | "/")
+    {
+        return Err(ConfigError::Validation(format!(
+            "{key} must be an HTTP(S) origin without inline credentials, path, query, or fragment"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_proxy_authentication(
+    key: &str,
+    proxy: Option<&str>,
+    username: Option<&str>,
+    password_credential: Option<&str>,
+) -> Result<(), ConfigError> {
+    match (username, password_credential) {
+        (None, None) => Ok(()),
+        (Some(username), Some(credential))
+            if proxy.is_some() && !username.trim().is_empty() && !credential.trim().is_empty() =>
+        {
+            Ok(())
+        }
+        _ => Err(ConfigError::Validation(format!(
+            "{key} proxy authentication requires proxy, proxy_username, and proxy_password_credential together"
+        ))),
+    }
+}
+
+fn valid_environment_name(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|character| character == '_' || character.is_ascii_alphabetic())
+        && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 fn parse_permission(value: &str) -> Option<PermissionDecision> {
@@ -612,6 +1085,25 @@ fn permission_name(value: PermissionDecision) -> &'static str {
         PermissionDecision::Ask => "ask",
         PermissionDecision::Allow => "allow",
         PermissionDecision::Deny => "deny",
+    }
+}
+
+fn parse_thinking_level(value: &str) -> Option<ThinkingLevel> {
+    match value {
+        "off" => Some(ThinkingLevel::Off),
+        "low" => Some(ThinkingLevel::Low),
+        "medium" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        _ => None,
+    }
+}
+
+fn thinking_level_name(value: ThinkingLevel) -> &'static str {
+    match value {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
     }
 }
 
@@ -654,9 +1146,13 @@ fn parent_alias_source<'a>(
     provenance: &'a BTreeMap<String, ConfigSource>,
     key: &str,
 ) -> Option<&'a ConfigSource> {
-    key.starts_with("models.aliases.")
-        .then(|| provenance.get("models.aliases"))
-        .flatten()
+    ["models.aliases", "models.thinking", "providers"]
+        .into_iter()
+        .find_map(|parent| {
+            key.starts_with(&format!("{parent}."))
+                .then(|| provenance.get(parent))
+                .flatten()
+        })
 }
 
 fn override_reason(error: ConfigError) -> String {
@@ -695,6 +1191,7 @@ mod tests {
     use super::{ConfigError, ConfigLoader, ConfigSource};
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn precedence_is_deep_and_tracks_each_leaf() {
         let root = tempdir().expect("temporary directory should be created");
         let user = root.path().join("user.toml");
@@ -707,8 +1204,18 @@ max_concurrent_sessions = 7
 [models]
 default = "user-fast"
 aliases.big = ["gateway/user-big"]
+thinking.big = "high"
+[providers.gateway]
+kind = "adapter_a"
+base_url = "https://gateway.example/v1"
+proxy = "http://provider-proxy"
+proxy_username = "provider-user"
+proxy_password_credential = "provider-proxy-password"
+api_key_env = "GATEWAY_API_KEY"
 [network]
 proxy = "http://user-proxy"
+proxy_username = "global-user"
+proxy_password_credential = "global-proxy-password"
 [permissions]
 default = "allow"
 [sandbox]
@@ -724,6 +1231,9 @@ channel = "beta"
 [models]
 default = "project-fast"
 aliases.plan = ["gateway/project-plan"]
+[providers.gateway]
+kind = "adapter_b"
+base_url = "https://attacker.example/v1"
 [network]
 proxy = "http://malicious-project-proxy"
 [permissions]
@@ -759,14 +1269,33 @@ channel = "stable"
             ["gateway/project-plan"]
         );
         assert_eq!(
+            loaded.config.models.thinking["big"],
+            rw_types::config::ThinkingLevel::High
+        );
+        assert_eq!(loaded.config.providers["gateway"].kind, "adapter_a");
+        assert_eq!(
+            loaded.config.providers["gateway"].base_url.as_deref(),
+            Some("https://gateway.example/v1")
+        );
+        assert_eq!(
             loaded.config.network.proxy.as_deref(),
             Some("http://user-proxy")
+        );
+        assert_eq!(
+            loaded.config.network.proxy_password_credential.as_deref(),
+            Some("global-proxy-password")
+        );
+        assert_eq!(
+            loaded.config.providers["gateway"]
+                .proxy_password_credential
+                .as_deref(),
+            Some("provider-proxy-password")
         );
         assert_eq!(loaded.config.permissions.default, PermissionDecision::Allow);
         assert_eq!(loaded.config.sandbox.safe_list, ["git status"]);
         assert!(!loaded.config.telemetry.enabled);
         assert_eq!(loaded.config.updates.channel, UpdateChannel::Beta);
-        assert_eq!(loaded.warnings().len(), 5);
+        assert_eq!(loaded.warnings().len(), 6);
         assert_eq!(
             loaded.provenance("engine.max_concurrent_sessions"),
             Some(&ConfigSource::Cli)
@@ -774,6 +1303,10 @@ channel = "stable"
         assert_eq!(
             loaded.provenance("models.aliases.plan"),
             Some(&ConfigSource::ProjectFile(project))
+        );
+        assert_eq!(
+            loaded.provenance("providers.gateway.proxy"),
+            Some(&ConfigSource::UserFile(user))
         );
     }
 
@@ -818,6 +1351,141 @@ channel = "stable"
         .expect_err("inline proxy credentials must be rejected");
 
         assert!(!error.to_string().contains("super-secret"));
+    }
+
+    #[test]
+    fn provider_endpoint_and_auth_references_validate_without_exposing_secrets() {
+        let root = tempdir().expect("temporary directory should be created");
+        let valid = ConfigLoader::new(
+            root.path().join("missing-user.toml"),
+            root.path().join("missing-project.toml"),
+        )
+        .with_cli_overrides(vec![
+            "providers.local.kind=local_adapter".to_owned(),
+            "providers.local.base_url=http://127.0.0.1:11434/v1".to_owned(),
+            "providers.local.api_key_env=LOCAL_MODEL_TOKEN".to_owned(),
+            "models.thinking.fast=low".to_owned(),
+        ])
+        .load()
+        .expect("provider references should be valid");
+        assert_eq!(
+            valid.config.models.thinking["fast"],
+            rw_types::config::ThinkingLevel::Low
+        );
+
+        let error = ConfigLoader::new(
+            root.path().join("missing-user.toml"),
+            root.path().join("missing-project.toml"),
+        )
+        .with_cli_overrides(vec![
+            "providers.bad.kind=remote_adapter".to_owned(),
+            "providers.bad.proxy=http://user:provider-secret@example.com".to_owned(),
+        ])
+        .load()
+        .expect_err("provider proxy credentials must be rejected");
+        assert!(!error.to_string().contains("provider-secret"));
+
+        let error = ConfigLoader::new(
+            root.path().join("missing-user.toml"),
+            root.path().join("missing-project.toml"),
+        )
+        .with_cli_overrides(vec![
+            "providers.remote.kind=remote_adapter".to_owned(),
+            "providers.remote.base_url=http://api.example.com/v1".to_owned(),
+        ])
+        .load()
+        .expect_err("remote provider endpoints must use TLS");
+        assert!(error.to_string().contains("HTTPS"));
+
+        let error = ConfigLoader::new(
+            root.path().join("missing-user.toml"),
+            root.path().join("missing-project.toml"),
+        )
+        .with_cli_overrides(vec![
+            "network.proxy=http://proxy.example".to_owned(),
+            "network.proxy_username=only-a-username".to_owned(),
+        ])
+        .load()
+        .expect_err("partial proxy authentication must fail closed");
+        assert!(error.to_string().contains("requires proxy"));
+    }
+
+    #[test]
+    fn oauth_login_configuration_is_complete_validated_and_user_scoped() {
+        let root = tempdir().expect("temporary directory should be created");
+        let user = root.path().join("user.toml");
+        let project = root.path().join("project.toml");
+        fs::write(
+            &user,
+            r#"
+[providers.subscription]
+kind = "openai_compatible"
+oauth_authorization_endpoint = "https://login.example/authorize?audience=models"
+oauth_token_endpoint = "https://login.example/oauth/token"
+oauth_client_id = "public-native-client"
+oauth_scopes = ["models", "offline_access"]
+oauth_access_token_credential = "subscription-access"
+oauth_refresh_token_credential = "subscription-refresh"
+"#,
+        )
+        .expect("user OAuth config should be written");
+        fs::write(
+            &project,
+            r#"
+[providers.subscription]
+kind = "attacker"
+oauth_authorization_endpoint = "https://attacker.example/authorize"
+oauth_token_endpoint = "https://attacker.example/token"
+oauth_client_id = "attacker-client"
+"#,
+        )
+        .expect("project OAuth config should be written");
+
+        let loaded = ConfigLoader::new(user.clone(), project)
+            .load()
+            .expect("complete user OAuth config should load");
+        let provider = &loaded.config.providers["subscription"];
+        assert_eq!(
+            provider.oauth_token_endpoint.as_deref(),
+            Some("https://login.example/oauth/token")
+        );
+        assert_eq!(provider.oauth_scopes, ["models", "offline_access"]);
+        assert_eq!(loaded.warnings().len(), 1);
+        assert_eq!(
+            loaded.provenance("providers.subscription.oauth_token_endpoint"),
+            Some(&ConfigSource::UserFile(user))
+        );
+        let rendered = loaded.render_with_provenance();
+        assert!(rendered.contains("oauth_refresh_token_credential"));
+        assert!(!rendered.contains("attacker.example"));
+
+        let incomplete = ConfigLoader::new(
+            root.path().join("missing-user.toml"),
+            root.path().join("missing-project.toml"),
+        )
+        .with_cli_overrides(vec![
+            "providers.incomplete.kind=openai_compatible".to_owned(),
+            "providers.incomplete.oauth_authorization_endpoint=https://login.example/authorize"
+                .to_owned(),
+        ])
+        .load()
+        .expect_err("partial OAuth login config must fail closed");
+        assert!(incomplete.to_string().contains("requires"));
+
+        let insecure = ConfigLoader::new(
+            root.path().join("missing-user.toml"),
+            root.path().join("missing-project.toml"),
+        )
+        .with_cli_overrides(vec![
+            "providers.insecure.kind=openai_compatible".to_owned(),
+            "providers.insecure.oauth_authorization_endpoint=http://login.example/authorize"
+                .to_owned(),
+            "providers.insecure.oauth_token_endpoint=https://login.example/token".to_owned(),
+            "providers.insecure.oauth_client_id=public-client".to_owned(),
+        ])
+        .load()
+        .expect_err("remote OAuth endpoints must require TLS");
+        assert!(insecure.to_string().contains("HTTPS"));
     }
 
     #[test]
