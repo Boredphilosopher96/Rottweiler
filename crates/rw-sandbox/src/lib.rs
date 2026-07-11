@@ -562,6 +562,15 @@ pub fn shell_launch_plan(
     }
     #[cfg(target_os = "linux")]
     {
+        if matches!(
+            &policy.network,
+            NetworkPolicy::PolicyProxy {
+                relay_path: None,
+                ..
+            }
+        ) {
+            return Err(SandboxError::PolicyProxyUnavailable);
+        }
         let (helper_executable, helper_pin) = pin_linux_helper(helper_executable)?;
         let encoded = serde_json::to_os_string(policy)?;
         let mut args = vec![OsString::from(HELPER_ARG), encoded];
@@ -585,9 +594,6 @@ pub fn shell_launch_plan(
                 warnings: Vec::new(),
                 helper_pin: Some(helper_pin),
             });
-        }
-        if matches!(&policy.network, NetworkPolicy::PolicyProxy { .. }) {
-            return Err(SandboxError::PolicyProxyUnavailable);
         }
         let unshare = audited_linux_tool(&["/usr/bin/unshare"]).ok_or_else(|| {
             SandboxError::Unavailable("trusted /usr/bin/unshare is unavailable".to_owned())
