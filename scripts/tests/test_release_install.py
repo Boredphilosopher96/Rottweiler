@@ -55,6 +55,7 @@ class ReleaseInstallTests(unittest.TestCase):
             self.assertEqual(second.returncode, 0, second.stderr.decode())
             self.assertEqual(os.readlink(prefix / "current"), f"versions/{VERSION}")
             self.assertEqual(os.readlink(prefix / "bin" / "rw"), "../current/bin/rw")
+            self.assertTrue((prefix / "versions" / VERSION / "install.sh").is_file())
             run = subprocess.run(
                 [str(prefix / "bin" / "rw"), "--version"],
                 stdout=subprocess.PIPE,
@@ -84,3 +85,43 @@ class ReleaseInstallTests(unittest.TestCase):
             self.assertEqual(
                 (prefix / "versions" / VERSION / "bin" / "rw").read_bytes(), b"changed"
             )
+
+    def test_refuses_archive_and_existing_generation_hardlinks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = self.make_release(root)
+            os.link(release / "bin" / "rw", release / "bin" / "rw-alias")
+            prefix = root / "installed"
+            run = self.install(release, prefix)
+            self.assertNotEqual(run.returncode, 0)
+            self.assertFalse(prefix.exists())
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = self.make_release(root)
+            prefix = root / "installed"
+            self.assertEqual(self.install(release, prefix).returncode, 0)
+            generation = prefix / "versions" / VERSION
+            os.link(generation / "bin" / "rw", generation / "bin" / "rw-alias")
+            run = self.install(release, prefix)
+            self.assertNotEqual(run.returncode, 0)
+
+    def test_install_lock_refuses_live_owner_and_recovers_dead_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = self.make_release(root)
+            prefix = root / "installed"
+            lock = prefix / ".install-lock"
+            lock.mkdir(parents=True, mode=0o700)
+            owner = lock / "pid"
+            owner.write_text(f"{os.getpid()}\n", encoding="ascii")
+            owner.chmod(0o600)
+            run = self.install(release, prefix)
+            self.assertNotEqual(run.returncode, 0)
+            self.assertTrue(lock.is_dir())
+
+            owner.write_text("2147483647\n", encoding="ascii")
+            owner.chmod(0o600)
+            run = self.install(release, prefix)
+            self.assertEqual(run.returncode, 0, run.stderr.decode())
+            self.assertFalse(lock.exists())

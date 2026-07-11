@@ -9118,6 +9118,7 @@ impl WebFetcher for PolicyWebFetcher {
                     proxy_authentication: None,
                     dns_pin,
                     max_bytes: request.max_bytes,
+                    timeout: std::time::Duration::from_secs(60),
                 }) => {
                     response.map_err(|error| match error {
                         GuardedHttpFetchError::Provider(error) => {

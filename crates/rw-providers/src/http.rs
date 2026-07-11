@@ -101,6 +101,8 @@ pub struct GuardedHttpFetchRequest {
     pub dns_pin: Option<(String, SocketAddr)>,
     /// Maximum accepted response bytes.
     pub max_bytes: usize,
+    /// Explicit connect and whole-response deadline.
+    pub timeout: Duration,
 }
 
 /// Provider-neutral result of one guarded HTTP GET without redirect following.
@@ -576,6 +578,7 @@ pub async fn guarded_http_fetch(
     request: GuardedHttpFetchRequest,
 ) -> Result<GuardedHttpFetchResponse, GuardedHttpFetchError> {
     require_process_network()?;
+    validate_fetch_timeout(request.timeout)?;
     if request.proxy.is_some() && request.dns_pin.is_some() {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidRequest,
@@ -593,8 +596,8 @@ pub async fn guarded_http_fetch(
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(60));
+        .connect_timeout(request.timeout.min(Duration::from_secs(15)))
+        .timeout(request.timeout);
     if let Some((host, address)) = &request.dns_pin {
         builder = builder.resolve(host, *address);
     }
@@ -671,6 +674,17 @@ pub async fn guarded_http_fetch(
         body,
         location,
     })
+}
+
+fn validate_fetch_timeout(timeout: Duration) -> Result<(), GuardedHttpFetchError> {
+    if timeout.is_zero() || timeout > Duration::from_secs(120) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "guarded HTTP fetch timeout is invalid",
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Process-local outbound-network denial used by replay and offline test
@@ -951,6 +965,7 @@ mod tests {
             proxy_authentication: None,
             dns_pin: None,
             max_bytes: 8,
+            timeout: Duration::from_secs(60),
         })
         .await
         .expect("fetch");
@@ -975,6 +990,7 @@ mod tests {
                 "1.1.1.1:443".parse().expect("pin"),
             )),
             max_bytes: 8,
+            timeout: Duration::from_secs(60),
         })
         .await
         .expect_err("proxy plus target pin must fail closed");
@@ -1030,6 +1046,7 @@ mod tests {
             proxy_authentication: Some(authentication),
             dns_pin: None,
             max_bytes: 8,
+            timeout: Duration::from_secs(60),
         })
         .await
         .expect("fetch through proxy");

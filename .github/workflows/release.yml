@@ -1,0 +1,242 @@
+name: Signed release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin-arm64
+          - os: ubuntu-latest
+            platform: linux-x86_64
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+      ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
+      ROTTWEILER_UPDATE_ROOT_THRESHOLD: ${{ vars.ROTTWEILER_UPDATE_ROOT_THRESHOLD }}
+      ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
+      ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Validate immutable release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rw-cli"))')
+          test "$GITHUB_REF_NAME" = "v$version"
+          test -n "$ROTTWEILER_UPDATE_ROOT_VERSION"
+          test -n "$ROTTWEILER_UPDATE_ROOT_THRESHOLD"
+          test -n "$ROTTWEILER_UPDATE_ROOT_KEYS_JSON"
+          test -n "$ROTTWEILER_UPDATE_BASE_URL"
+          case "$ROTTWEILER_UPDATE_BASE_URL" in
+            */) ;;
+            *) echo 'ROTTWEILER_UPDATE_BASE_URL must end with /' >&2; exit 1 ;;
+          esac
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+
+          document = json.loads(Path("release/update/root-chain.json").read_text())
+          latest = document["roots"][-1]
+          envelope = json.loads(base64.b64decode(latest["envelope"], validate=True))
+          root = json.loads(base64.b64decode(envelope["payload"], validate=True))
+          embedded = json.loads(os.environ["ROTTWEILER_UPDATE_ROOT_KEYS_JSON"])
+          expected = {key_id: root["keys"][key_id] for key_id in root["root_key_ids"]}
+          if int(os.environ["ROTTWEILER_UPDATE_ROOT_VERSION"]) != root["version"]:
+              raise SystemExit("embedded root version does not match latest signed root")
+          if int(os.environ["ROTTWEILER_UPDATE_ROOT_THRESHOLD"]) != root["root_threshold"]:
+              raise SystemExit("embedded root threshold does not match latest signed root")
+          if embedded != expected:
+              raise SystemExit("embedded root keys do not match latest signed root role")
+          for encoded in embedded.values():
+              decoded = base64.b64decode(encoded, validate=True)
+              if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != encoded:
+                  raise SystemExit("embedded root key is not canonical 32-byte base64")
+          PY
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+        working-directory: packages/tui
+      - name: Build deterministic size-gated archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(scripts/build-release.sh | tail -1)
+          test -f "$archive"
+          test "$(basename "$archive")" = "rottweiler-${GITHUB_REF_NAME#v}-${{ matrix.platform }}.tar.gz"
+          printf 'path=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+      - name: Attest archive provenance
+        uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
+        with:
+          subject-path: ${{ steps.archive.outputs.path }}
+      - name: Upload unsigned archive for release signing
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: ${{ steps.archive.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  sign-and-publish:
+    name: Sign metadata and publish
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: release-*
+          path: dist/unsigned
+          merge-multiple: true
+      - name: Validate public signing inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s release/update/root-chain.json
+          test -s release/update/stable.spec.json
+          test -s release/update/beta.spec.json
+          test -n "$ROTTWEILER_UPDATE_BASE_URL"
+          case "$ROTTWEILER_UPDATE_BASE_URL" in
+            */) ;;
+            *) echo 'ROTTWEILER_UPDATE_BASE_URL must end with /' >&2; exit 1 ;;
+          esac
+          test "$(find dist/unsigned -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')" -eq 2
+      - name: Sign release metadata with online role only
+        shell: bash
+        env:
+          RELEASE_KEYS_JSON: ${{ secrets.ROTTWEILER_UPDATE_RELEASE_KEYS_JSON }}
+        run: |
+          set -euo pipefail
+          private=$(mktemp -d "${RUNNER_TEMP}/rottweiler-release-key.XXXXXX")
+          trap 'rm -rf "$private"' EXIT
+          manifest="$private/release-keys.manifest"
+          KEY_DIRECTORY="$private" KEY_MANIFEST="$manifest" python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          encoded_json = os.environ.pop("RELEASE_KEYS_JSON", "")
+          try:
+              keys = json.loads(encoded_json)
+          except Exception as error:
+              raise SystemExit("release signing secret must be a JSON object") from error
+          if not isinstance(keys, dict) or not 1 <= len(keys) <= 32:
+              raise SystemExit("release signing secret must contain 1..32 keys")
+          directory = Path(os.environ["KEY_DIRECTORY"])
+          manifest = Path(os.environ["KEY_MANIFEST"])
+          seen_seeds = set()
+          bindings = []
+          for index, (key_id, encoded) in enumerate(sorted(keys.items())):
+              if not isinstance(key_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", key_id):
+                  raise SystemExit("release signing key id is invalid")
+              if not isinstance(encoded, str):
+                  raise SystemExit("release signing seed must be canonical base64")
+              try:
+                  seed = base64.b64decode(encoded, validate=True)
+              except Exception as error:
+                  raise SystemExit("release signing seed is not canonical base64") from error
+              if len(seed) != 32 or base64.b64encode(seed).decode("ascii") != encoded:
+                  raise SystemExit("release signing seed must decode to exactly 32 bytes")
+              if seed in seen_seeds:
+                  raise SystemExit("release signing keys must use distinct seed material")
+              seen_seeds.add(seed)
+              path = directory / f"release-{index}.seed"
+              descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+              with os.fdopen(descriptor, "wb") as output:
+                  output.write(seed)
+                  output.flush()
+                  os.fsync(output.fileno())
+              bindings.append(f"{key_id}={path}")
+          descriptor = os.open(manifest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+              output.write("\n".join(bindings) + "\n")
+              output.flush()
+              os.fsync(output.fileno())
+          PY
+          unset RELEASE_KEYS_JSON
+          release_key_args=()
+          while IFS= read -r binding; do
+            test -n "$binding"
+            release_key_args+=(--release-key "$binding")
+          done < "$manifest"
+          cargo xtask sign-update release \
+            --root-chain release/update/root-chain.json \
+            --stable-spec release/update/stable.spec.json \
+            --beta-spec release/update/beta.spec.json \
+            --base-url "$ROTTWEILER_UPDATE_BASE_URL" \
+            --artifact "dist/unsigned/rottweiler-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz" \
+            --platform darwin-arm64 \
+            --artifact "dist/unsigned/rottweiler-${GITHUB_REF_NAME#v}-linux-x86_64.tar.gz" \
+            --platform linux-x86_64 \
+            "${release_key_args[@]}" \
+            --output dist/signed
+          rm -rf "$private"
+          trap - EXIT
+      - name: Attest signed release set
+        uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
+        with:
+          subject-path: |
+            dist/unsigned/*.tar.gz
+            dist/signed/*
+      - name: Retain signed update repository for deployment
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: signed-update-repository-${{ github.ref_name }}
+          path: |
+            dist/unsigned/*.tar.gz
+            dist/signed/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Publish immutable GitHub release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          options=(--verify-tag --generate-notes)
+          case "$GITHUB_REF_NAME" in
+            *-*) options+=(--prerelease) ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" \
+            "${options[@]}" \
+            dist/unsigned/*.tar.gz \
+            dist/signed/*

@@ -1,11 +1,18 @@
-use std::{collections::BTreeMap, fmt, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    path::PathBuf,
+    time::Duration,
+};
 
 use rw_providers::{
     DEFAULT_OAUTH_CALLBACK_TIMEOUT, DeviceFlowCancellation, GITHUB_COPILOT_DEVICE_CODE_ENDPOINT,
-    GitHubCopilotDeviceFlow, GitHubCopilotDeviceSession, OAuthAuthorizationCode,
-    OAuthAuthorizationCodeConfig, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT, ProxyAuthentication,
-    ProxyEnvironment, ProxySettings, ProxySource, Secret as ProviderSecret, default_models_path,
-    openai_subscription_oauth_flow, refresh_models_dev_with_proxy_auth,
+    GitHubCopilotDeviceFlow, GitHubCopilotDeviceSession, GuardedHttpFetchRequest,
+    OAuthAuthorizationCode, OAuthAuthorizationCodeConfig, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT,
+    ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource, Secret as ProviderSecret,
+    default_models_path, guarded_http_fetch, openai_subscription_oauth_flow,
+    refresh_models_dev_with_proxy_auth,
 };
 use rw_store::{
     config::ConfigLoader,
@@ -14,7 +21,7 @@ use rw_store::{
         Secret as StoredSecret,
     },
 };
-use rw_types::config::ProviderConfig;
+use rw_types::config::{ProviderConfig, UpdateChannel};
 use thiserror::Error;
 use url::Url;
 
@@ -25,6 +32,10 @@ use crate::subscription_credentials::{
 
 /// Default public model-catalog endpoint used by the administrative facade.
 pub const DEFAULT_MODEL_CATALOG_URL: &str = rw_providers::DEFAULT_MODELS_DEV_URL;
+
+/// Compile-time update metadata origin. Ordinary development builds fail
+/// closed when it is absent; runtime/project configuration cannot replace it.
+pub const EMBEDDED_UPDATE_BASE_URL: Option<&str> = option_env!("ROTTWEILER_UPDATE_BASE_URL");
 
 /// Sanitized failure returned by a headless administrative workflow.
 #[derive(Debug, Error)]
@@ -220,6 +231,7 @@ pub async fn refresh_model_catalog(
         .map(Url::parse)
         .transpose()
         .map_err(AdminError::from_display)?;
+    let global_configured = global.is_some();
     let proxies = ProxySettings {
         global,
         per_provider: BTreeMap::new(),
@@ -229,15 +241,19 @@ pub async fn refresh_model_catalog(
         .map_or_else(default_models_path, Ok)
         .map_err(AdminError::from_display)?;
     let manager = CredentialManager::system(credentials_path);
-    let (proxy_authentication, credential_warnings) = resolve_proxy_authentication(
-        &manager,
-        effective.config.network.proxy_username.as_deref(),
-        effective
-            .config
-            .network
-            .proxy_password_credential
-            .as_deref(),
-    )?;
+    let (proxy_authentication, credential_warnings) = if global_configured {
+        resolve_proxy_authentication(
+            &manager,
+            effective.config.network.proxy_username.as_deref(),
+            effective
+                .config
+                .network
+                .proxy_password_credential
+                .as_deref(),
+        )?
+    } else {
+        (None, Vec::new())
+    };
     warnings.extend(credential_warnings);
     let report = refresh_models_dev_with_proxy_auth(
         source,
@@ -253,6 +269,219 @@ pub async fn refresh_model_catalog(
         path: report.path,
         warnings,
     })
+}
+
+/// Opaque, proxy-aware client for signed update metadata and artifacts.
+/// Proxy credentials never cross the core boundary or appear in debug output.
+pub struct UpdateNetworkClient {
+    channel: UpdateChannel,
+    proxies: ProxySettings,
+    proxy_authentication: Option<ProxyAuthentication>,
+    warnings: Vec<String>,
+}
+
+impl UpdateNetworkClient {
+    /// Effective user-scoped update channel.
+    #[must_use]
+    pub const fn channel(&self) -> UpdateChannel {
+        self.channel
+    }
+
+    /// Sanitized configuration/credential warnings.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    /// Fetches one exact, bounded response without following redirects.
+    /// Ambient proxies are disabled; global/config/environment proxy precedence
+    /// is resolved explicitly for each signed target.
+    ///
+    /// # Errors
+    ///
+    /// Rejects invalid/private destinations, redirects, non-200 responses,
+    /// DNS overflows, timeouts, transport failures, and oversized bodies with
+    /// sanitized errors that never include the URL.
+    pub async fn fetch(
+        &self,
+        url: &Url,
+        max_bytes: usize,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, AdminError> {
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+            || max_bytes == 0
+            || max_bytes > 64 * 1024 * 1024
+            || timeout.is_zero()
+            || timeout > Duration::from_secs(120)
+        {
+            return Err(AdminError::new("signed update fetch request is invalid"));
+        }
+        let resolution = self.proxies.resolve_global(url);
+        let proxy = resolution.as_ref().map(|value| value.url.clone());
+        let proxy_authentication = resolution
+            .as_ref()
+            .filter(|value| value.source == ProxySource::Global)
+            .and(self.proxy_authentication.clone());
+        let dns_pin = if proxy.is_some() {
+            None
+        } else {
+            Some(resolve_public_update_address(url).await?)
+        };
+        let response = guarded_http_fetch(GuardedHttpFetchRequest {
+            url: url.clone(),
+            headers: vec![(
+                "accept".to_owned(),
+                "application/json, application/octet-stream".to_owned(),
+            )],
+            proxy,
+            proxy_authentication,
+            dns_pin,
+            max_bytes,
+            timeout,
+        })
+        .await
+        .map_err(|_| AdminError::new("signed update fetch failed"))?;
+        if response.status != 200 || response.final_url != *url || response.location.is_some() {
+            return Err(AdminError::new(
+                "signed update fetch returned an unexpected response",
+            ));
+        }
+        Ok(response.body)
+    }
+}
+
+/// Loads the effective user update channel and resolves global proxy
+/// authentication exactly once for the update process.
+///
+/// # Errors
+///
+/// Returns a sanitized config, proxy, or credential error.
+pub fn prepare_update_network() -> Result<UpdateNetworkClient, AdminError> {
+    let loader = ConfigLoader::from_environment().map_err(AdminError::from_display)?;
+    let credentials_path = loader.credentials_path();
+    let effective = loader.load().map_err(AdminError::from_display)?;
+    let global = effective
+        .config
+        .network
+        .proxy
+        .as_deref()
+        .map(Url::parse)
+        .transpose()
+        .map_err(AdminError::from_display)?;
+    let global_configured = global.is_some();
+    let proxies = ProxySettings {
+        global,
+        per_provider: BTreeMap::new(),
+        environment: ProxyEnvironment::capture(),
+    };
+    let manager = CredentialManager::system(credentials_path);
+    let (proxy_authentication, credential_warnings) = if global_configured {
+        resolve_proxy_authentication(
+            &manager,
+            effective.config.network.proxy_username.as_deref(),
+            effective
+                .config
+                .network
+                .proxy_password_credential
+                .as_deref(),
+        )?
+    } else {
+        (None, Vec::new())
+    };
+    let mut warnings = config_warnings(&effective);
+    warnings.extend(credential_warnings);
+    Ok(UpdateNetworkClient {
+        channel: effective.config.updates.channel,
+        proxies,
+        proxy_authentication,
+        warnings,
+    })
+}
+
+async fn resolve_public_update_address(url: &Url) -> Result<(String, SocketAddr), AdminError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| AdminError::new("signed update destination has no host"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| AdminError::new("signed update destination has no port"))?;
+    let mut addresses = tokio::net::lookup_host((host.trim_matches(['[', ']']), port))
+        .await
+        .map_err(|_| AdminError::new("signed update DNS lookup failed"))?
+        .take(17)
+        .collect::<Vec<_>>();
+    if addresses.len() > 16 {
+        return Err(AdminError::new(
+            "signed update DNS lookup exceeded its address limit",
+        ));
+    }
+    addresses.sort_unstable();
+    addresses.dedup();
+    let address = addresses
+        .into_iter()
+        .find(|address| public_update_ip(address.ip()))
+        .ok_or_else(|| AdminError::new("signed update destination is not public"))?;
+    Ok((host.to_owned(), address))
+}
+
+fn public_update_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(value) => public_update_v4(value),
+        IpAddr::V6(value) => public_update_v6(value),
+    }
+}
+
+fn public_update_v4(address: Ipv4Addr) -> bool {
+    let [a, b, c, _] = address.octets();
+    !(address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_broadcast()
+        || address.is_documentation()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || a == 0
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 198 && (18..=19).contains(&b))
+        || a >= 240)
+}
+
+fn public_update_v6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    if let Some(mapped) = address.to_ipv4_mapped() {
+        return public_update_v4(mapped);
+    }
+    if segments[..6] == [0, 0, 0, 0, 0, 0] {
+        return public_update_v4(update_embedded_v4(segments[6], segments[7]));
+    }
+    if segments[0] == 0x0064 && segments[1] == 0xff9b {
+        return segments[2..6] == [0, 0, 0, 0]
+            && public_update_v4(update_embedded_v4(segments[6], segments[7]));
+    }
+    if segments[0] == 0x2002 {
+        return public_update_v4(update_embedded_v4(segments[1], segments[2]));
+    }
+    if matches!(segments[4], 0 | 0x0200) && segments[5] == 0x5efe {
+        return public_update_v4(update_embedded_v4(segments[6], segments[7]));
+    }
+    !(address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || address.is_unique_local()
+        || address.is_unicast_link_local()
+        || (segments[0] == 0x2001 && matches!(segments[1], 0 | 0x0db8)))
+}
+
+fn update_embedded_v4(high: u16, low: u16) -> Ipv4Addr {
+    let [a, b] = high.to_be_bytes();
+    let [c, d] = low.to_be_bytes();
+    Ipv4Addr::new(a, b, c, d)
 }
 
 /// Opaque, in-progress OAuth browser login owned by the core facade.

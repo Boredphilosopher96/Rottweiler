@@ -25,6 +25,7 @@ mod doctor;
 mod history;
 #[allow(dead_code)]
 mod host_runtime;
+mod import;
 #[allow(dead_code)]
 mod m8_config;
 #[allow(dead_code)]
@@ -50,6 +51,7 @@ mod supervisor;
 #[allow(dead_code)]
 mod tty;
 mod tui_config;
+mod upgrade;
 mod workflow_runtime;
 
 #[derive(Debug, Parser)]
@@ -249,6 +251,23 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Import declarative configuration without reading credentials or executing content.
+    Import {
+        #[arg(value_enum)]
+        source: import::ImportSource,
+        /// Source project/config directory.
+        #[arg(long, value_name = "PATH")]
+        source_root: PathBuf,
+        /// Existing target project root; defaults to the current directory.
+        #[arg(long, value_name = "PATH")]
+        target: Option<PathBuf>,
+        /// Plan and report without creating files.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the stable JSON report.
+        #[arg(long)]
+        json: bool,
+    },
     /// Diagnose configuration, credentials, sandbox, terminal, and providers.
     Doctor {
         /// Opt in to bounded provider reachability and credential-validation probes.
@@ -261,6 +280,36 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Install a signed stable/beta release or atomically select the previous generation.
+    Upgrade {
+        /// Override the effective user-scoped update channel for this invocation.
+        #[arg(long, value_enum)]
+        channel: Option<UpgradeChannel>,
+        /// Permit a lower product version only when all signatures and rollback checks pass.
+        #[arg(long, conflicts_with = "rollback")]
+        allow_downgrade: bool,
+        /// Atomically reactivate the previous locally verified generation without networking.
+        #[arg(long, conflicts_with = "channel")]
+        rollback: bool,
+        /// Per-fetch connect and whole-response deadline in milliseconds.
+        #[arg(long, default_value_t = 30_000, value_name = "MILLISECONDS")]
+        timeout_ms: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum UpgradeChannel {
+    Stable,
+    Beta,
+}
+
+impl From<UpgradeChannel> for rw_core::UpdateChannel {
+    fn from(value: UpgradeChannel) -> Self {
+        match value {
+            UpgradeChannel::Stable => Self::Stable,
+            UpgradeChannel::Beta => Self::Beta,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -408,6 +457,7 @@ async fn main() -> Result<()> {
         .init();
 
     let mut cli = Cli::parse();
+    upgrade::show_pending_release_notes();
     if let Some(host) = cli.remote.as_deref() {
         if cli.command.is_some() || cli.prompt.is_some() || cli.line {
             return Err(miette!("--remote is available only for the OpenTUI client"));
@@ -637,6 +687,33 @@ async fn main() -> Result<()> {
                 print!("{}", stats::render_text(&report));
             }
         }
+        Some(Command::Import {
+            source,
+            source_root,
+            target,
+            dry_run,
+            json,
+        }) => {
+            let target_root = target.unwrap_or(std::env::current_dir().into_diagnostic()?);
+            let report = import::run(&import::ImportOptions {
+                source,
+                source_root,
+                target_root,
+                dry_run,
+            })?;
+            if json
+                || matches!(
+                    cli.output_format,
+                    OutputFormat::Json | OutputFormat::StreamJson
+                )
+            {
+                println!("{}", serde_json::to_string(&report).into_diagnostic()?);
+            } else {
+                for item in report.items {
+                    println!("{:?}\t{}\t{}", item.status, item.target, item.detail);
+                }
+            }
+        }
         Some(Command::Doctor {
             network,
             timeout_ms,
@@ -660,6 +737,20 @@ async fn main() -> Result<()> {
             if report.has_failures() {
                 return Err(miette!("doctor found one or more blocking issues"));
             }
+        }
+        Some(Command::Upgrade {
+            channel,
+            allow_downgrade,
+            rollback,
+            timeout_ms,
+        }) => {
+            upgrade::run(upgrade::UpgradeOptions {
+                channel: channel.map(Into::into),
+                allow_downgrade,
+                rollback,
+                timeout_ms,
+            })
+            .await?;
         }
         None => {
             let headless_or_line = cli.prompt.is_some()
@@ -2792,8 +2883,8 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Cli, Command, TrustCommand, valid_bootstrap_token, write_github_device_prompt,
-        write_private_file_atomic,
+        Cli, Command, TrustCommand, UpgradeChannel, valid_bootstrap_token,
+        write_github_device_prompt, write_private_file_atomic,
     };
 
     #[test]
@@ -2855,6 +2946,30 @@ mod tests {
                 json: true,
             })
         ));
+    }
+
+    #[test]
+    fn upgrade_channel_and_downgrade_policy_are_explicit() {
+        let cli = Cli::try_parse_from([
+            "rw",
+            "upgrade",
+            "--channel",
+            "beta",
+            "--allow-downgrade",
+            "--timeout-ms",
+            "5000",
+        ])
+        .unwrap_or_else(|error| panic!("upgrade CLI should parse: {error}"));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Upgrade {
+                channel: Some(UpgradeChannel::Beta),
+                allow_downgrade: true,
+                rollback: false,
+                timeout_ms: 5_000,
+            })
+        ));
+        assert!(Cli::try_parse_from(["rw", "update"]).is_err());
     }
 
     #[test]

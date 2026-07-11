@@ -11,9 +11,10 @@ mod orchestration;
 mod permission;
 mod provider_factory;
 mod subscription_credentials;
+mod update;
 
 pub use rw_types::config::{
-    BudgetConfig, CompactionConfig, Config, PermissionConfig, ProviderConfig,
+    BudgetConfig, CompactionConfig, Config, PermissionConfig, ProviderConfig, UpdateChannel,
 };
 pub use rw_types::{
     AccountingAttribution, AttachmentData, CommandDescriptor, ContextItemId, ContextSnapshot,
@@ -24,10 +25,11 @@ pub use rw_types::{
 };
 
 pub use admin::{
-    AdminError, DEFAULT_MODEL_CATALOG_URL, GitHubCopilotLogin, GitHubCopilotLoginResult,
-    ModelCatalogRefresh, OAuthLogin, OAuthLoginResult, ProviderApiKey, ProviderLogin,
-    ProviderLoginCancellation, ResolvedProviderApiKey, begin_oauth_login, begin_provider_login,
-    default_provider_api_key_credential_id, refresh_model_catalog, resolve_provider_api_key,
+    AdminError, DEFAULT_MODEL_CATALOG_URL, EMBEDDED_UPDATE_BASE_URL, GitHubCopilotLogin,
+    GitHubCopilotLoginResult, ModelCatalogRefresh, OAuthLogin, OAuthLoginResult, ProviderApiKey,
+    ProviderLogin, ProviderLoginCancellation, ResolvedProviderApiKey, UpdateNetworkClient,
+    begin_oauth_login, begin_provider_login, default_provider_api_key_credential_id,
+    prepare_update_network, refresh_model_catalog, resolve_provider_api_key,
     store_provider_api_key, validate_stored_provider_credential,
 };
 pub use engine::{
@@ -94,6 +96,12 @@ pub use rw_types::{
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, RequestId, SequenceId,
     SessionDescriptor, SessionId, ShellId, SubagentIsolation, ToolOutputStream, TurnId, TurnStatus,
     UnrestorablePath, Usage,
+};
+pub use update::{
+    EMBEDDED_ROOT_KEY_ID, EMBEDDED_ROOT_KEYS_JSON, EMBEDDED_ROOT_PUBLIC_KEY,
+    EMBEDDED_ROOT_THRESHOLD, EMBEDDED_ROOT_VERSION, TrustedRoot, UpdateHighWaterMark,
+    UpdateVerificationError, UpdateVerificationPolicy, VerifiedUpdate, restore_trusted_root_chain,
+    verify_update_metadata, verify_update_metadata_chain,
 };
 
 /// Stable construction and protocol surface for executable frontends.

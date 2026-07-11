@@ -19,3 +19,5 @@ packages/plugin-docs/*.bun-build
 .rottweiler/checkpoints/
 .rottweiler/runtime/
 **/__pycache__/
+release/update/*.key
+release/update/*.seed

@@ -59,6 +59,8 @@ entry_count=$(find "$root" -mindepth 1 -print | wc -l | tr -d ' ')
 [ "$entry_count" = 5 ] || fail 'archive contains unexpected entries'
 [ -z "$(find "$root" ! -type f ! -type d -print -quit)" ] ||
   fail 'archive contains a link or special filesystem object'
+[ -z "$(find "$root" -type f -links +1 -print -quit)" ] ||
+  fail 'archive contains a hard-linked file'
 
 if [ -L "$prefix" ]; then
   fail 'installation prefix must not be a symlink'
@@ -79,7 +81,46 @@ if [ "$(uname -s)" = Linux ]; then
 fi
 
 lock="$prefix/.install-lock"
-mkdir "$lock" 2>/dev/null || fail 'another install or upgrade is already running'
+lock_pid="$lock/pid"
+stat_mode() {
+  case "$(uname -s)" in
+    Darwin) stat -f '%Lp' -- "$1" ;;
+    *) stat -c '%a' -- "$1" ;;
+  esac
+}
+stat_uid() {
+  case "$(uname -s)" in
+    Darwin) stat -f '%u' -- "$1" ;;
+    *) stat -c '%u' -- "$1" ;;
+  esac
+}
+reclaim_stale_lock() {
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  [ "$(stat_mode "$lock" 2>/dev/null)" = 700 ] || return 1
+  [ "$(stat_uid "$lock" 2>/dev/null)" = "$(id -u)" ] || return 1
+  [ "$(find "$lock" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')" = 1 ] || return 1
+  [ -f "$lock_pid" ] && [ ! -L "$lock_pid" ] || return 1
+  [ "$(stat_mode "$lock_pid" 2>/dev/null)" = 600 ] || return 1
+  [ "$(stat_uid "$lock_pid" 2>/dev/null)" = "$(id -u)" ] || return 1
+  [ "$(wc -c < "$lock_pid" | tr -d ' ')" -le 64 ] || return 1
+  owner_pid=$(tr -d '\n' < "$lock_pid")
+  case "$owner_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$owner_pid" -gt 0 ] || return 1
+  kill -0 "$owner_pid" 2>/dev/null && return 1
+  rm -f "$lock_pid" || return 1
+  rmdir "$lock" || return 1
+}
+if ! mkdir "$lock" 2>/dev/null; then
+  reclaim_stale_lock || fail 'another install or upgrade is already running'
+  mkdir "$lock" 2>/dev/null || fail 'another install or upgrade is already running'
+fi
+chmod 700 "$lock"
+if ! (umask 077 && printf '%s\n' "$$" > "$lock_pid"); then
+  rmdir "$lock" 2>/dev/null || true
+  fail 'could not record install lock ownership'
+fi
 staging=
 temporary_current=
 temporary_bin=
@@ -87,6 +128,7 @@ cleanup() {
   [ -z "$staging" ] || rm -rf "$staging"
   [ -z "$temporary_current" ] || rm -f "$temporary_current"
   [ -z "$temporary_bin" ] || rm -f "$temporary_bin"
+  rm -f "$lock_pid"
   rmdir "$lock" 2>/dev/null || true
 }
 trap cleanup EXIT HUP INT TERM
@@ -101,7 +143,13 @@ version_dir="$prefix/versions/$version"
 if [ -e "$version_dir" ] || [ -L "$version_dir" ]; then
   [ -d "$version_dir" ] && [ ! -L "$version_dir" ] ||
     fail 'existing version generation is unsafe'
-  for relative in bin/rw bin/rottweiler-tui "bin/$native"; do
+  [ "$(find "$version_dir" -mindepth 1 -print | wc -l | tr -d ' ')" = 5 ] ||
+    fail 'existing version generation contains unexpected entries'
+  [ -z "$(find "$version_dir" ! -type f ! -type d -print -quit)" ] ||
+    fail 'existing version generation contains a link or special filesystem object'
+  [ -z "$(find "$version_dir" -type f -links +1 -print -quit)" ] ||
+    fail 'existing version generation contains a hard-linked file'
+  for relative in install.sh bin/rw bin/rottweiler-tui "bin/$native"; do
     [ -f "$version_dir/$relative" ] && [ ! -L "$version_dir/$relative" ] ||
       fail 'existing version generation is incomplete'
     cmp -s "$root/$relative" "$version_dir/$relative" ||
@@ -111,16 +159,16 @@ else
   staging=$(mktemp -d "$prefix/.staging-$version.XXXXXX") ||
     fail 'could not create same-filesystem staging directory'
   mkdir "$staging/bin"
+  chmod 755 "$staging/bin"
   cp "$root/bin/rw" "$staging/bin/rw"
   cp "$root/bin/rottweiler-tui" "$staging/bin/rottweiler-tui"
   cp "$root/bin/$native" "$staging/bin/$native"
+  cp "$root/install.sh" "$staging/install.sh"
   chmod 755 "$staging/bin/rw" "$staging/bin/rottweiler-tui"
+  chmod 755 "$staging/install.sh"
   chmod 644 "$staging/bin/$native"
   version_output=$("$staging/bin/rw" --version) || fail 'staged rw failed its version check'
-  case "$version_output" in
-    "rw $version"*) ;;
-    *) fail 'staged rw reported the wrong version' ;;
-  esac
+  [ "$version_output" = "rw $version" ] || fail 'staged rw reported the wrong version'
   mv "$staging" "$version_dir"
   staging=
 fi
