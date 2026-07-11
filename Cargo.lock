@@ -2837,6 +2837,7 @@ dependencies = [
  "base64",
  "landlock",
  "libc",
+ "nix 0.28.0",
  "rustix",
  "rustls",
  "rw-types",

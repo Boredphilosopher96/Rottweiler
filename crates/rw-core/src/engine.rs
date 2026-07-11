@@ -3703,6 +3703,23 @@ pub struct SessionSubscription {
 }
 
 impl SessionSubscription {
+    /// Loads and validates the initial durable replay before a caller starts a
+    /// new protocol command. This prevents a freshly persisted command result
+    /// from entering the replay ahead of its connection-scoped acknowledgement.
+    ///
+    /// # Errors
+    ///
+    /// Returns a persistence error when the durable replay is invalid.
+    pub async fn prime(&mut self) -> Result<(), AgentLoopError> {
+        if self.needs_initial_replay {
+            let gap = self.sink.read_after(self.last_sequence).await?;
+            validate_gap(self.last_sequence, &gap, &self.session_id)?;
+            self.pending.extend(gap);
+            self.needs_initial_replay = false;
+        }
+        Ok(())
+    }
+
     /// Receives the next protocol event for this client.
     ///
     /// # Errors
@@ -3711,12 +3728,7 @@ impl SessionSubscription {
     /// [`AgentLoopError::Closed`] after the actor event channel closes.
     pub async fn recv(&mut self) -> Result<EngineEvent, AgentLoopError> {
         loop {
-            if self.needs_initial_replay {
-                self.needs_initial_replay = false;
-                let gap = self.sink.read_after(self.last_sequence).await?;
-                validate_gap(self.last_sequence, &gap, &self.session_id)?;
-                self.pending.extend(gap);
-            }
+            self.prime().await?;
             if let Some(event) = self.pending.pop_front() {
                 self.observe(&event);
                 return Ok(event);

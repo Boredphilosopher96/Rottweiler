@@ -16,7 +16,7 @@ use std::{
 
 use rw_core::{
     EngineEvent, TurnStatus,
-    runtime_support::{FinishReason, ProviderEvent},
+    runtime_support::{FinishReason, ProviderEvent, SandboxSupport, probe_sandbox},
 };
 use serde_json::json;
 use tempfile::{TempDir, tempdir};
@@ -172,6 +172,10 @@ fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
 
 #[test]
 fn binary_records_then_replays_a_complete_offline_tool_turn() {
+    if probe_sandbox().support != SandboxSupport::Enforced {
+        eprintln!("skipping live record/replay acceptance: sandbox enforcement is unavailable");
+        return;
+    }
     let fixture_root = tempdir().expect("fixture root");
     let fixture_dir = fixture_root.path().join("replay");
     let script_path = fixture_root.path().join("script.json");
@@ -208,10 +212,13 @@ fn binary_records_then_replays_a_complete_offline_tool_turn() {
     for (expected, event) in events.iter().filter_map(EngineEvent::meta).enumerate() {
         assert_eq!(event.sequence_id.0, expected as u64);
     }
-    assert!(events.iter().any(|event| matches!(
-        event,
-        EngineEvent::ToolOutputDelta { chunk, .. } if chunk.contains("hi")
-    )));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            EngineEvent::ToolOutputDelta { chunk, .. } if chunk.contains("hi")
+        )),
+        "replayed events did not contain bash output: {events:#?}"
+    );
     assert!(events.iter().any(|event| matches!(
         event,
         EngineEvent::TextDelta { text, .. } if text.contains(STEERING)
@@ -249,6 +256,10 @@ fn binary_records_then_replays_a_complete_offline_tool_turn() {
 
 #[test]
 fn bash_replay_serves_recorded_output_without_spawning_or_opening_a_socket() {
+    if probe_sandbox().support != SandboxSupport::Enforced {
+        eprintln!("skipping live bash replay acceptance: sandbox enforcement is unavailable");
+        return;
+    }
     let root = tempdir().expect("root");
     let listener = TcpListener::bind("127.0.0.1:0").expect("canary listener");
     listener.set_nonblocking(true).expect("nonblocking canary");
@@ -1067,6 +1078,10 @@ fn simultaneous_resume_rejects_the_second_writer_before_startup_mutation() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn sigkill_mid_bash_waits_for_watchdog_then_recovers_opaque_checkpoint() {
+    if probe_sandbox().support != SandboxSupport::Enforced {
+        eprintln!("skipping live SIGKILL acceptance: sandbox enforcement is unavailable");
+        return;
+    }
     let root = tempdir().expect("root");
     let fixtures = root.path().join("fixtures");
     let script = root.path().join("opaque-bash.json");
@@ -1109,6 +1124,7 @@ fn sigkill_mid_bash_waits_for_watchdog_then_recovers_opaque_checkpoint() {
         run.workspace.join("mutated.txt").is_file()
             && read_pid(&run.workspace.join("child.pid")).is_some()
     });
+    #[cfg(not(target_os = "linux"))]
     let shell_pid = read_pid(&run.workspace.join("child.pid")).expect("shell pid");
     assert!(
         Command::new("kill")
@@ -1138,6 +1154,10 @@ fn sigkill_mid_bash_waits_for_watchdog_then_recovers_opaque_checkpoint() {
         "resume stderr: {}",
         String::from_utf8_lossy(&resumed.stderr)
     );
+    // Linux commands run in a PID namespace, so the PID written by the shell
+    // is namespace-local and must not be queried in the host PID table. The
+    // privileged linux_egress gate separately proves descendant termination.
+    #[cfg(not(target_os = "linux"))]
     assert!(
         !Command::new("kill")
             .args(["-0", &shell_pid.to_string()])
@@ -1187,6 +1207,10 @@ fn sigkill_mid_bash_waits_for_watchdog_then_recovers_opaque_checkpoint() {
 
 #[test]
 fn sigint_mid_bash_closes_the_log_and_kills_the_process_group() {
+    if probe_sandbox().support != SandboxSupport::Enforced {
+        eprintln!("skipping live SIGINT acceptance: sandbox enforcement is unavailable");
+        return;
+    }
     let root = tempdir().expect("root");
     let fixtures = root.path().join("fixtures");
     let script = root.path().join("bash.json");
@@ -1228,6 +1252,7 @@ fn sigint_mid_bash_closes_the_log_and_kills_the_process_group() {
     wait_until(Duration::from_secs(5), || {
         read_pid(&run.workspace.join("child.pid")).is_some()
     });
+    #[cfg(not(target_os = "linux"))]
     let shell_pid = read_pid(&run.workspace.join("child.pid"))
         .expect("numeric child pid")
         .to_string();
@@ -1240,6 +1265,7 @@ fn sigint_mid_bash_closes_the_log_and_kills_the_process_group() {
     );
     let status = child.wait().expect("interrupted child");
     assert!(!status.success());
+    #[cfg(not(target_os = "linux"))]
     wait_until(Duration::from_secs(5), || {
         !Command::new("kill")
             .args(["-0", &shell_pid])

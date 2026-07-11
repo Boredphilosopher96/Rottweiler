@@ -9319,12 +9319,16 @@ async fn run_print(
     perf_markers: bool,
 ) -> Result<Option<TurnStatus>> {
     let mut events = actor.subscribe();
+    // Complete the initial durable replay before dispatch. Otherwise a fast
+    // command result can enter the replay ahead of its connection-scoped ACK.
+    events
+        .prime()
+        .await
+        .map_err(|error| miette!("session event stream failed: {error}"))?;
     let dispatch_started = std::time::Instant::now();
     let actor_task = actor.clone();
     let prompt_task = prompt.to_owned();
     let dispatch = tokio::spawn(async move { actor_task.send_message(prompt_task).await });
-    // Prime the subscription before awaiting the command completion. Otherwise
-    // an initial durable replay can overtake the connection-scoped ACK.
     let first_event = events
         .recv()
         .await

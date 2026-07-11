@@ -3,6 +3,7 @@
 #[cfg(target_os = "linux")]
 fn main() {
     use std::ffi::OsString;
+    use std::fs::File;
     use std::path::Path;
     use std::process::Command;
 
@@ -12,6 +13,10 @@ fn main() {
         unreachable!("sandbox helper replaces the process")
     }
 
+    let held_descriptors = (0..16)
+        .map(|_| File::open("/dev/null").expect("held descriptor"))
+        .collect::<Vec<_>>();
+    assert_eq!(held_descriptors.len(), 16);
     let workspace = tempfile::tempdir().expect("workspace");
     let policy =
         SandboxPolicy::new([workspace.path()], NetworkPolicy::Deny).expect("sandbox policy");
@@ -29,6 +34,10 @@ fn main() {
         })
         .expect("helper descriptor path");
     let helper_descriptor = helper_path.parse::<u32>().expect("helper descriptor");
+    assert!(
+        helper_descriptor >= 10,
+        "regression requires a multi-digit helper descriptor"
+    );
     *plan.args.last_mut().expect("shell script argument") =
         OsString::from(format!("test ! -e /proc/self/fd/{helper_descriptor}"));
     let status = Command::new(&plan.program)

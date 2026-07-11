@@ -785,7 +785,7 @@ mod linux {
         }
         install_landlock(&policy)?;
         install_network_floor(false)?;
-        let error = command_without_helper_pin(&args[3], &args[4..], helper_pin).exec();
+        let error = command_without_helper_pin(&args[3], &args[4..], helper_pin)?.exec();
         Err(SandboxError::Exec(error))
     }
 
@@ -808,20 +808,24 @@ mod linux {
         program: &OsString,
         args: &[OsString],
         helper_pin: Option<u32>,
-    ) -> Command {
-        let Some(helper_pin) = helper_pin else {
-            let mut command = Command::new(program);
-            command.args(args);
-            return command;
-        };
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg(format!("set -e\nexec {helper_pin}<&-\nexec \"$@\""))
-            .arg("rottweiler-helper-fd-closer")
-            .arg(program)
-            .args(args);
-        command
+    ) -> Result<Command, SandboxError> {
+        if let Some(helper_pin) = helper_pin {
+            let helper_pin: i32 = helper_pin
+                .try_into()
+                .map_err(|_| SandboxError::MalformedHelper)?;
+            // The descriptor was validated from /proc/self/fd and remains
+            // open in this process. CLOEXEC closes it atomically when the
+            // target replaces the helper, without shell-parsing an arbitrary
+            // multi-digit descriptor number.
+            nix::fcntl::fcntl(
+                helper_pin,
+                nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+            )
+            .map_err(sandbox_backend)?;
+        }
+        let mut command = Command::new(program);
+        command.args(args);
+        Ok(command)
     }
 
     fn run_proxy_helper(
@@ -853,7 +857,7 @@ mod linux {
 
         install_landlock(policy)?;
         install_network_floor(true)?;
-        let status = command_without_helper_pin(program, args, helper_pin)
+        let status = command_without_helper_pin(program, args, helper_pin)?
             .status()
             .map_err(SandboxError::Exec)?;
         running.store(false, Ordering::Release);

@@ -1048,6 +1048,7 @@ def ssh_loopback_gate(
         "#!/bin/sh\n"
         f"export ROTTWEILER_HOME={home}\n"
         "export ROTTWEILER_CREDENTIAL_BACKEND=file\n"
+        f"export M4_FIXTURE_API_KEY={SHELL_SECRET_VALUE}\n"
         f"exec {rw} \"$@\"\n",
         encoding="utf-8",
     )

@@ -25,6 +25,7 @@ webpki-roots = "1.0.8"
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.5"
 libc = "0.2.183"
+nix = { workspace = true, features = ["fs"] }
 rustix.workspace = true
 seccompiler = "0.5.0"
 
