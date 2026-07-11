@@ -34,7 +34,7 @@ pub struct FilesystemSpool {
     #[cfg(unix)]
     root: std::os::fd::OwnedFd,
     #[cfg(unix)]
-    identity: (u64, u64),
+    identity: (rustix::fs::Dev, u64),
     #[cfg(not(unix))]
     root: PathBuf,
     sequence: AtomicU64,
@@ -85,7 +85,7 @@ impl FilesystemSpool {
         Ok(Self {
             parent: parent_fd,
             root,
-            identity: (u64::try_from(stat.st_dev).unwrap_or(u64::MAX), stat.st_ino),
+            identity: (stat.st_dev, stat.st_ino),
             sequence: AtomicU64::new(0),
             records: std::sync::Mutex::new(BTreeMap::new()),
             pending: std::sync::Mutex::new(BTreeSet::new()),
@@ -125,14 +125,8 @@ impl FilesystemSpool {
         )
         .map_err(spool_error)?;
         let current = rustix::fs::fstat(&current).map_err(spool_error)?;
-        let retained_identity = (
-            u64::try_from(retained.st_dev).unwrap_or(u64::MAX),
-            retained.st_ino,
-        );
-        let current_identity = (
-            u64::try_from(current.st_dev).unwrap_or(u64::MAX),
-            current.st_ino,
-        );
+        let retained_identity = (retained.st_dev, retained.st_ino);
+        let current_identity = (current.st_dev, current.st_ino);
         if retained_identity != self.identity || current_identity != self.identity {
             return Err(McpError::Spool(
                 "overflow namespace was replaced".to_owned(),
