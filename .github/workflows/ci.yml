@@ -42,7 +42,7 @@ jobs:
       - name: Capability-eval adapter contract
         run: |
           python3 -m py_compile evals/harbor/rottweiler_agent.py
-          python3 -m unittest scripts/tests/test_dogfood_gate.py
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
           bash -n scripts/run-terminal-bench.sh
           test "$(grep -c '^terminal-bench/[a-z0-9-][a-z0-9-]*$' evals/terminal-bench-20.txt)" -eq 20
       - run: cargo doc --locked --workspace --no-deps

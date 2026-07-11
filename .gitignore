@@ -18,3 +18,4 @@ packages/plugin-docs/*.bun-build
 .rottweiler/sessions/
 .rottweiler/checkpoints/
 .rottweiler/runtime/
+**/__pycache__/

@@ -5,6 +5,10 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo"
 
 export CARGO_PROFILE_RELEASE_DEBUG=0
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+  SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD 2>/dev/null || printf '%s' 1700000000)
+  export SOURCE_DATE_EPOCH
+fi
 cargo build --locked --release -p rw-cli
 (cd packages/tui && bun run build)
 
@@ -44,7 +48,7 @@ cp "$engine" "$stage/bin/rw"
 cp "$tui" "$stage/bin/rottweiler-tui"
 cp "$opentui_native" "$stage/bin/$opentui_native_name"
 chmod 755 "$stage/bin/rw" "$stage/bin/rottweiler-tui"
-tar -czf "$archive" -C "$repo/dist" "$(basename "$stage")"
+python3 scripts/package-release.py "$stage" "$archive"
 
 verify=$(mktemp -d "${TMPDIR:-/tmp}/rottweiler-release.XXXXXX")
 trap 'rm -rf "$verify"' EXIT HUP INT TERM

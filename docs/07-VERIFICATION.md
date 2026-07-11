@@ -219,6 +219,11 @@ Nightly: full perf suite · soak test · fuzzers · terminal-bench subset · mac
 Release: reproducible build, provenance attestation, update-signature verification fixtures, binary-size gate, `--record` smoke against live providers.
 **Network policy**: the socket-deny guard applies to the per-PR test harness; the only networked jobs are the nightly terminal-bench eval (a solve-rate benchmark can't run under replay) and the release `--record` smoke.
 
+`scripts/package-release.py` canonicalizes archive ordering, ownership, modes,
+timestamps, and gzip headers under `SOURCE_DATE_EPOCH`. Its checkout-independent
+fixture must produce byte-identical archives before a release artifact can be
+signed or attested.
+
 ## 7. Definition of Done (any task, any milestone)
 
 1. Code + tests land together; new behavior has a replay fixture or property test.
