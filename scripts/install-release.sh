@@ -169,9 +169,26 @@ else
   chmod 644 "$staging/bin/$native"
   version_output=$("$staging/bin/rw" --version) || fail 'staged rw failed its version check'
   [ "$version_output" = "rw $version" ] || fail 'staged rw reported the wrong version'
+  "$staging/bin/rw" __install-sync \
+    "$staging/install.sh" \
+    "$staging/bin/rw" \
+    "$staging/bin/rottweiler-tui" \
+    "$staging/bin/$native" \
+    "$staging/bin" \
+    "$staging" || fail 'staged generation could not be flushed durably'
   mv "$staging" "$version_dir"
   staging=
 fi
+
+"$version_dir/bin/rw" __install-sync \
+  "$version_dir/install.sh" \
+  "$version_dir/bin/rw" \
+  "$version_dir/bin/rottweiler-tui" \
+  "$version_dir/bin/$native" \
+  "$version_dir/bin" \
+  "$version_dir" \
+  "$prefix/versions" \
+  "$prefix" || fail 'installed generation could not be flushed durably'
 
 if [ -e "$prefix/current" ] && [ ! -L "$prefix/current" ]; then
   fail 'current selector is not a symlink'
@@ -180,6 +197,8 @@ temporary_current="$prefix/.current.$$"
 ln -s "versions/$version" "$temporary_current"
 mv -f "$temporary_current" "$prefix/current"
 temporary_current=
+"$version_dir/bin/rw" __install-sync "$prefix" ||
+  fail 'current selector could not be flushed durably'
 
 if [ -e "$prefix/bin/rw" ] && [ ! -L "$prefix/bin/rw" ]; then
   fail 'bin/rw is not a managed symlink'
@@ -188,6 +207,8 @@ temporary_bin="$prefix/bin/.rw.$$"
 ln -s '../current/bin/rw' "$temporary_bin"
 mv -f "$temporary_bin" "$prefix/bin/rw"
 temporary_bin=
+"$version_dir/bin/rw" __install-sync "$prefix/bin" "$prefix" ||
+  fail 'managed launcher could not be flushed durably'
 
 cleanup
 trap - EXIT HUP INT TERM

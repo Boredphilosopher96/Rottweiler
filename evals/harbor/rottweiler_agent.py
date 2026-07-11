@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import re
 import shlex
 import tarfile
 import tempfile
@@ -16,13 +14,7 @@ from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from harbor.models.trial.paths import EnvironmentPaths
 
-
-_CREDENTIAL_ENV = (
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "GITHUB_TOKEN",
-    "GITHUB_COPILOT_TOKEN",
-)
+from evals.harbor.model_config import build_model_config, credential_environment
 
 
 class Rottweiler(BaseInstalledAgent):
@@ -86,28 +78,19 @@ class Rottweiler(BaseInstalledAgent):
         )
 
     def _model_config(self) -> str:
-        if not self.model_name or not re.fullmatch(
-            r"[a-z0-9][a-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:/-]*", self.model_name
-        ):
-            raise ValueError("model must be a pinned provider/model identifier")
-        return (
-            "[models]\n"
-            'default = "benchmark"\n'
-            "[models.aliases]\n"
-            f"benchmark = [{json.dumps(self.model_name)}]\n"
-        )
+        return build_model_config(self.model_name)
 
     async def _upload_private_credentials(self, environment: BaseEnvironment) -> str:
-        values = {key: os.environ[key] for key in _CREDENTIAL_ENV if os.environ.get(key)}
-        if not values:
-            raise RuntimeError("no supported provider credential is available for the live eval")
+        key = credential_environment(self.model_name)
+        value = os.environ.get("ROTTWEILER_EVAL_API_KEY")
+        if not value:
+            raise RuntimeError("ROTTWEILER_EVAL_API_KEY is required for the live eval")
         descriptor, local_name = tempfile.mkstemp(prefix="rottweiler-eval-credentials-")
         local = Path(local_name)
         remote = "/tmp/rottweiler-eval-credentials"
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                for key, value in values.items():
-                    handle.write(f"export {key}={shlex.quote(value)}\n")
+                handle.write(f"export {key}={shlex.quote(value)}\n")
             local.chmod(0o600)
             await environment.upload_file(local, remote)
         finally:

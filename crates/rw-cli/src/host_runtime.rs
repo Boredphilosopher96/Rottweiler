@@ -2137,6 +2137,7 @@ mod tests {
             provider_mode: HostedProviderMode::DeterministicReplay {
                 provider_name: "offline-host".to_owned(),
                 scripts: Vec::new(),
+                event_delay_ms: 0,
             },
             dangerously_trust: false,
         })
@@ -2426,6 +2427,7 @@ mod tests {
                         reason: FinishReason::Stop,
                     },
                 ]],
+                event_delay_ms: 0,
             },
             dangerously_trust: false,
         })

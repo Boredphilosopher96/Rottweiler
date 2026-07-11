@@ -28,5 +28,8 @@ set -- \
 if [ "${ROTTWEILER_M8_FUNCTIONAL_ONLY:-0}" = 1 ]; then
   set -- "$@" --functional-only
 fi
+if [ -n "${ROTTWEILER_PERF_OUTPUT:-}" ]; then
+  set -- "$@" --metrics-json "$ROTTWEILER_PERF_OUTPUT"
+fi
 
 python3 crates/rw-cli/tests/m8_release_gate.py "$@"

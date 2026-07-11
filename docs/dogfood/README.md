@@ -19,3 +19,10 @@ The validator fails closed on gaps, duplicates, P0s, stale windows, malformed
 or replaced files, oversized input, missing session evidence, and unknown
 fields. A release workflow must pass this validator; a single development run
 must never manufacture the two-week temporal evidence.
+
+For a tag release, encode the reviewed external ledger as canonical base64 in
+the protected `release` environment secret
+`ROTTWEILER_DOGFOOD_LEDGER_B64`. The workflow materializes it as a private
+temporary file, validates a window ending on the release runner's current UTC
+date, retains only the non-secret gate result, and deletes the ledger before
+signing. Missing or stale evidence blocks publication.

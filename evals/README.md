@@ -10,9 +10,18 @@ model and its provider credential, then run:
 
 ```sh
 ROTTWEILER_RELEASE_ARCHIVE=/path/to/rottweiler-linux.tar.gz \
-ROTTWEILER_EVAL_MODEL=openai/gpt-5-mini \
+ROTTWEILER_EVAL_MODEL='openai/<immutable-dated-model-id>' \
+ROTTWEILER_EVAL_API_KEY='<selected-provider-api-key>' \
+ROTTWEILER_EVAL_OUTPUT_DIR=/path/to/empty-evidence-directory \
 scripts/run-terminal-bench.sh
 ```
+
+Replace the angle-bracket values before running. The model must be an immutable
+dated OpenAI or Anthropic model identifier (for example, a provider model name
+ending in `-YYYY-MM-DD` or `-YYYYMMDD`). `ROTTWEILER_EVAL_API_KEY` is mapped
+only to the provider selected by the model prefix; it is not exposed to the
+other provider. The evidence directory must already be dedicated to this run
+and empty so results from different commits or archives cannot be mixed.
 
 The adapter uploads the exact local archive, verifies its SHA-256 inside each
 task container, and runs the normal headless `rw` entrypoint. Provider secrets

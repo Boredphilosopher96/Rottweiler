@@ -474,6 +474,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixture", type=pathlib.Path, required=True)
     parser.add_argument("--samples", type=int, default=100)
     parser.add_argument("--functional-only", action="store_true")
+    parser.add_argument("--metrics-json", type=pathlib.Path)
     return parser.parse_args()
 
 
@@ -483,6 +484,8 @@ def main() -> int:
         raise RuntimeError("M8 p99 release gate requires at least 100 samples")
     if args.samples < 1:
         raise RuntimeError("M8 gate requires at least one sample")
+    if args.metrics_json is not None and args.functional_only:
+        raise RuntimeError("metric output requires the complete M8 performance gate")
     source_rw = args.rw.resolve()
     source_fixture = args.fixture.resolve()
     if not source_rw.is_file() or not source_fixture.is_file():
@@ -588,6 +591,21 @@ def main() -> int:
             raise RuntimeError(
                 f"three-server cold-start to prompt-ready p99 {p99:.3f}ms exceeds 250ms"
             )
+        if args.metrics_json is not None:
+            args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
+            temporary = args.metrics_json.with_name(f".{args.metrics_json.name}.tmp")
+            temporary.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "metrics": {"mcp_prompt_ready_p99_us": math.ceil(p99 * 1000)},
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            temporary.replace(args.metrics_json)
     return 0
 
 

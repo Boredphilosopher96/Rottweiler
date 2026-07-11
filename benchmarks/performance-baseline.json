@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "maximum_regression_fraction": 0.1,
+  "platforms": {
+    "darwin-arm64": {
+      "suites": {
+        "core": {
+          "baseline_kind": "bootstrap",
+          "provenance": "bootstrap ceilings derived from fixed absolute v1 budgets; replace with reviewed runner measurements",
+          "metrics": {
+            "engine_binary_bytes": 22727272,
+            "engine_ready_p99_us": 45454,
+            "headless_print_p99_us": 72727,
+            "mcp_prompt_ready_p99_us": 227272,
+            "tui_bundle_bytes": 90909090,
+            "tui_first_paint_p99_us": 136363,
+            "tui_frame_p95_us": 14545,
+            "tui_frame_p999_us": 30000,
+            "tui_input_echo_p99_us": 14545,
+            "tui_vim_echo_p99_us": 14545,
+            "turn_overhead_p99_us": 18181,
+            "uds_event_p99_us": 1818
+          }
+        },
+        "soak": {
+          "baseline_kind": "bootstrap",
+          "provenance": "bootstrap RSS ceiling retained from the pre-baseline soak guard; replace with reviewed runner measurements",
+          "metrics": {
+            "max_rss_bytes": 268435456
+          }
+        }
+      }
+    },
+    "linux-x86_64": {
+      "suites": {
+        "core": {
+          "baseline_kind": "bootstrap",
+          "provenance": "bootstrap ceilings derived from fixed absolute v1 budgets; replace with reviewed runner measurements",
+          "metrics": {
+            "engine_binary_bytes": 22727272,
+            "engine_ready_p99_us": 45454,
+            "headless_print_p99_us": 72727,
+            "mcp_prompt_ready_p99_us": 227272,
+            "tui_bundle_bytes": 90909090,
+            "tui_first_paint_p99_us": 136363,
+            "tui_frame_p95_us": 14545,
+            "tui_frame_p999_us": 30000,
+            "tui_input_echo_p99_us": 14545,
+            "tui_vim_echo_p99_us": 14545,
+            "turn_overhead_p99_us": 18181,
+            "uds_event_p99_us": 1818
+          }
+        },
+        "soak": {
+          "baseline_kind": "bootstrap",
+          "provenance": "bootstrap RSS ceiling retained from the pre-baseline soak guard; replace with reviewed runner measurements",
+          "metrics": {
+            "max_rss_bytes": 268435456
+          }
+        }
+      }
+    }
+  }
+}

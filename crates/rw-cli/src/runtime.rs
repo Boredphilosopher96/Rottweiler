@@ -818,6 +818,36 @@ pub(crate) enum RunAction {
     PromptDump { turn: Option<u64> },
 }
 
+/// A startup task must not outlive an invocation that returns before joining
+/// it. Aborting drops any in-flight Tokio child process, whose `kill_on_drop`
+/// boundary then terminates the audited Git subprocess.
+struct AbortOnDropTask<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T> AbortOnDropTask<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    async fn join(mut self) -> std::result::Result<T, tokio::task::JoinError> {
+        let Some(handle) = self.handle.take() else {
+            unreachable!("startup task can be joined only once");
+        };
+        handle.await
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) enum HostedProviderMode {
@@ -825,6 +855,7 @@ pub(crate) enum HostedProviderMode {
     DeterministicReplay {
         provider_name: String,
         scripts: Vec<Vec<ProviderEvent>>,
+        event_delay_ms: u64,
     },
 }
 
@@ -932,6 +963,26 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     // metadata read/write or checkpoint recovery may happen before it.
     let log = SessionEventLog::open(&storage_root, &session_id)
         .map_err(|error| miette!("session log could not open: {error}"))?;
+    // Exact Git-root validation is required before isolated subagents become
+    // available, but it is independent of session recovery and tool
+    // composition. Start it only after configuration/session validation and
+    // writer ownership, then overlap the Git subprocess with that work. The
+    // result is still awaited below before the factory is published.
+    let worktree_isolation_task = if matches!(&options.action, RunAction::Agent) {
+        let repository_root = workspace.clone();
+        let private_root = storage_root.join("worktrees");
+        Some(AbortOnDropTask::new(tokio::spawn(async move {
+            WorktreeIsolation::new(
+                repository_root,
+                private_root,
+                WorktreeLimits::default(),
+                CancellationToken::default(),
+            )
+            .await
+        })))
+    } else {
+        None
+    };
     if resuming {
         let committed = project_session_events(&load_session_events(&log)?)
             .map_err(|error| miette!("session root projection failed: {error}"))?;
@@ -1582,13 +1633,13 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
                     template.rebind_config(session_id, root, policy)
                 });
         let shared: Arc<dyn SubagentSessionFactory> = Arc::new(factory);
-        let isolation = WorktreeIsolation::new(
-            &workspace,
-            storage_root.join("worktrees"),
-            WorktreeLimits::default(),
-            CancellationToken::default(),
-        )
-        .await;
+        let isolation = match worktree_isolation_task {
+            Some(task) => match task.join().await {
+                Ok(result) => result.map_err(|error| error.to_string()),
+                Err(error) => Err(format!("worktree validation worker failed: {error}")),
+            },
+            None => Err("worktree validation was not started".to_owned()),
+        };
         let (isolated, worktree_manager, isolation_error): (
             Option<Arc<dyn SubagentSessionFactory>>,
             Option<Arc<WorktreeIsolation>>,
@@ -1605,7 +1656,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
                     String::new(),
                 )
             }
-            Err(error) => (None, None, error.to_string()),
+            Err(error) => (None, None, error),
         };
         let factory: Arc<dyn SubagentSessionFactory> = Arc::new(RuntimeSubagentSessionFactory {
             shared,
@@ -2160,9 +2211,10 @@ pub(crate) async fn compose_hosted_actor(
             HostedProviderMode::DeterministicReplay {
                 provider_name,
                 scripts,
+                event_delay_ms,
             } => {
                 let provider: Arc<dyn Provider> =
-                    Arc::new(ScriptProvider::new(provider_name, scripts, 0));
+                    Arc::new(ScriptProvider::new(provider_name, scripts, event_delay_ms));
                 (
                     Arc::new(ProviderModel::new(
                         provider,
@@ -9993,6 +10045,35 @@ mod tests {
     }
 
     struct RecoveryProbeObserver;
+
+    struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn overlapping_startup_task_is_aborted_when_its_owner_returns_early() {
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        let (started, running) = tokio::sync::oneshot::channel();
+        let task = AbortOnDropTask::new(tokio::spawn(async move {
+            let _probe = DropProbe(task_dropped);
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        }));
+        running.await.expect("startup task should begin");
+        drop(task);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborted startup task should drop its in-flight resources");
+    }
 
     #[cfg(unix)]
     #[test]

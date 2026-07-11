@@ -645,7 +645,7 @@ def performance_gate(
     workspace: pathlib.Path,
     port: int,
     samples: int,
-) -> None:
+) -> dict[str, int]:
     # Warm the installed-artifact inode until macOS's one-time executable
     # inspection and dynamic-loader caches have settled. A single warmup can
     # return its first paint while XProtect is still scanning in the
@@ -675,6 +675,10 @@ def performance_gate(
         raise RuntimeError(
             f"cold engine plus compiled-TUI first-paint p99 {combined_p99:.3f}ms exceeds 150ms"
         )
+    return {
+        "engine_ready_p99_us": math.ceil(engine_p99 * 1000),
+        "tui_first_paint_p99_us": math.ceil(combined_p99 * 1000),
+    }
 
 
 def mint_client(runtime: Runtime) -> tuple[str, str]:
@@ -719,7 +723,7 @@ def socket_latency_gate(
     workspace: pathlib.Path,
     port: int,
     samples: int,
-) -> None:
+) -> dict[str, int]:
     sample_root = root / "socket-latency"
     sample_root.mkdir(mode=0o700)
     session_id = "m4-socket-latency"
@@ -796,6 +800,7 @@ def socket_latency_gate(
             raise RuntimeError(
                 f"production engine-to-TUI socket event p99 {latency_p99:.3f}ms exceeds 2ms"
             )
+        return {"uds_event_p99_us": math.ceil(latency_p99 * 1000)}
     finally:
         if commands is not None:
             commands.close()
@@ -1206,6 +1211,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-supervisor", action="store_true")
     parser.add_argument("--skip-shell", action="store_true")
     parser.add_argument("--ssh-loopback", metavar="HOST")
+    parser.add_argument("--metrics-json", type=pathlib.Path)
     return parser.parse_args()
 
 
@@ -1221,6 +1227,8 @@ def main() -> int:
     args = parse_args()
     if args.samples < 100 and not args.skip_performance:
         raise RuntimeError("p99 release gate requires at least 100 samples")
+    if args.metrics_json is not None and args.skip_performance:
+        raise RuntimeError("metric output requires the complete M4 performance gate")
     repo = args.repo.resolve()
     source_rw = args.rw.resolve()
     source_tui = args.tui.resolve()
@@ -1232,6 +1240,7 @@ def main() -> int:
     # Darwin's sockaddr_un path is only 104 bytes. Keep the release harness
     # rooted at the short /tmp spelling so the production supervisor's nested
     # private runtime directory is testing startup rather than path overflow.
+    metrics: dict[str, int] = {}
     with tempfile.TemporaryDirectory(prefix="rw4-", dir="/tmp") as temporary:
         root = pathlib.Path(temporary)
         root.chmod(0o700)
@@ -1253,14 +1262,23 @@ def main() -> int:
         workspace.mkdir(mode=0o700)
         with fixture_origin() as port:
             if not args.skip_performance:
-                performance_gate(rw, tui, root, workspace, port, args.samples)
-                socket_latency_gate(rw, root, workspace, port, args.samples)
+                metrics.update(performance_gate(rw, tui, root, workspace, port, args.samples))
+                metrics.update(socket_latency_gate(rw, root, workspace, port, args.samples))
             if not args.skip_supervisor:
                 supervisor_reattach_gate(rw, tui, root, workspace, port)
             if not args.skip_shell:
                 shell_handover_gate(rw, tui, root, workspace, port)
             if args.ssh_loopback is not None:
                 ssh_loopback_gate(rw, tui, root, workspace, port, args.ssh_loopback)
+    if args.metrics_json is not None:
+        metrics["tui_bundle_bytes"] = source_tui.stat().st_size + source_tui_native.stat().st_size
+        args.metrics_json.parent.mkdir(parents=True, exist_ok=True)
+        temporary = args.metrics_json.with_name(f".{args.metrics_json.name}.tmp")
+        temporary.write_text(
+            json.dumps({"schema_version": 1, "metrics": metrics}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(args.metrics_json)
     return 0
 
 

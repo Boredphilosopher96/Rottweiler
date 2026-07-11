@@ -944,6 +944,16 @@ mod tests {
     }
 
     #[test]
+    fn equal_shared_metadata_epoch_is_valid_across_channel_switches() {
+        for channel in [UpdateChannel::Stable, UpdateChannel::Beta] {
+            let (trusted, root, release, _) = fixtures("1.1.0", channel);
+            let mut selected = policy(channel);
+            selected.high_water.metadata_version = 4;
+            assert!(verify_update_metadata(&trusted, &root, &release, &selected).is_ok());
+        }
+    }
+
+    #[test]
     fn root_rotation_requires_old_and_new_thresholds_and_exact_next_version() {
         let old = signing_key(1);
         let new = signing_key(2);

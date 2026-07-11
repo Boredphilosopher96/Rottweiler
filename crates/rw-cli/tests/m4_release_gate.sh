@@ -28,5 +28,8 @@ fi
 if [ -n "${ROTTWEILER_M4_SSH_LOOPBACK_HOST:-}" ]; then
   set -- "$@" --ssh-loopback "$ROTTWEILER_M4_SSH_LOOPBACK_HOST"
 fi
+if [ -n "${ROTTWEILER_PERF_OUTPUT:-}" ]; then
+  set -- "$@" --metrics-json "$ROTTWEILER_PERF_OUTPUT"
+fi
 
 exec python3 crates/rw-cli/tests/m4_release_gate.py "$@"

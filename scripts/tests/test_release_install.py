@@ -26,7 +26,15 @@ class ReleaseInstallTests(unittest.TestCase):
         )
         (release / "install.sh").write_text(installer, encoding="utf-8")
         rw = binary_dir / "rw"
-        rw.write_text("#!/bin/sh\nprintf 'rw 1.2.3\\n'\n", encoding="utf-8")
+        rw.write_text(
+            "#!/bin/sh\n"
+            "case \"${1:-}\" in\n"
+            "  --version) printf 'rw 1.2.3\\n' ;;\n"
+            "  __install-sync) printf '%s\\n' \"$*\" >> \"${ROTTWEILER_INSTALL_SYNC_LOG:-/dev/null}\" ;;\n"
+            "  *) exit 1 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
         tui = binary_dir / "rottweiler-tui"
         tui.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         native = binary_dir / ("libopentui.dylib" if SYSTEM == "darwin" else "libopentui.so")
@@ -37,10 +45,13 @@ class ReleaseInstallTests(unittest.TestCase):
         return release
 
     def install(self, release: Path, prefix: Path) -> subprocess.CompletedProcess[bytes]:
+        environment = os.environ.copy()
+        environment["ROTTWEILER_INSTALL_SYNC_LOG"] = str(prefix.parent / "install-sync.log")
         return subprocess.run(
             [str(release / "install.sh"), "--prefix", str(prefix)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=environment,
             check=False,
         )
 
@@ -56,6 +67,10 @@ class ReleaseInstallTests(unittest.TestCase):
             self.assertEqual(os.readlink(prefix / "current"), f"versions/{VERSION}")
             self.assertEqual(os.readlink(prefix / "bin" / "rw"), "../current/bin/rw")
             self.assertTrue((prefix / "versions" / VERSION / "install.sh").is_file())
+            sync_log = (root / "install-sync.log").read_text(encoding="utf-8")
+            self.assertIn("__install-sync", sync_log)
+            self.assertIn(str(prefix / "versions"), sync_log)
+            self.assertIn(str(prefix / "bin"), sync_log)
             run = subprocess.run(
                 [str(prefix / "bin" / "rw"), "--version"],
                 stdout=subprocess.PIPE,

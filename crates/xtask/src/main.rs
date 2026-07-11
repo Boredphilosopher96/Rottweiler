@@ -41,7 +41,7 @@ const MAX_RELEASE_NOTES_BYTES: usize = 64 * 1024;
 #[derive(Debug, Error)]
 enum XtaskError {
     #[error(
-        "usage:\n  cargo xtask codegen [--check]\n  cargo xtask sign-update release --root-chain PATH --stable-spec PATH --beta-spec PATH --base-url HTTPS_URL/ --artifact PATH --platform PLATFORM [--artifact PATH --platform PLATFORM ...] --release-key KEY_ID=PATH [--release-key KEY_ID=PATH ...] --output DIRECTORY\n  cargo xtask sign-update rotate-root --root-spec PATH [--root-chain PATH] --root-key KEY_ID=PATH [--root-key KEY_ID=PATH ...] --output DIRECTORY\n\nEd25519 private-key files are exact 32-byte seeds and must be owned by the current user, mode 0600, regular, and single-link. Root keys are accepted only by the explicit offline rotate-root command."
+        "usage:\n  cargo xtask codegen [--check]\n  cargo xtask sign-update release --root-chain PATH --stable-spec PATH --beta-spec PATH --base-url HTTPS_URL/ --now-unix SECONDS [--previous-stable PATH] [--previous-beta PATH] --artifact PATH --platform PLATFORM [--artifact PATH --platform PLATFORM ...] --release-key KEY_ID=PATH [--release-key KEY_ID=PATH ...] --output DIRECTORY\n  cargo xtask sign-update rotate-root --root-spec PATH [--root-chain PATH] --root-key KEY_ID=PATH [--root-key KEY_ID=PATH ...] --output DIRECTORY\n\nEd25519 private-key files are exact 32-byte seeds and must be owned by the current user, mode 0600, regular, and single-link. Root keys are accepted only by the explicit offline rotate-root command."
     )]
     Usage,
     #[error("could not read {path}: {source}")]
@@ -126,6 +126,9 @@ struct ReleaseSignArgs {
     stable_spec: PathBuf,
     beta_spec: PathBuf,
     base_url: String,
+    now_unix: u64,
+    previous_stable: Option<PathBuf>,
+    previous_beta: Option<PathBuf>,
     artifacts: Vec<PathBuf>,
     platforms: Vec<String>,
     release_keys: Vec<(String, PathBuf)>,
@@ -155,6 +158,9 @@ impl SignUpdateCommand {
         let mut stable_spec = None;
         let mut beta_spec = None;
         let mut base_url = None;
+        let mut now_unix = None;
+        let mut previous_stable = None;
+        let mut previous_beta = None;
         let mut artifacts = Vec::new();
         let mut platforms = Vec::new();
         let mut release_keys = Vec::new();
@@ -171,6 +177,15 @@ impl SignUpdateCommand {
                 }
                 "--beta-spec" if beta_spec.is_none() => beta_spec = Some(PathBuf::from(value)),
                 "--base-url" if base_url.is_none() => base_url = Some(value),
+                "--now-unix" if now_unix.is_none() => {
+                    now_unix = Some(value.parse::<u64>().map_err(|_| XtaskError::Usage)?);
+                }
+                "--previous-stable" if previous_stable.is_none() => {
+                    previous_stable = Some(PathBuf::from(value));
+                }
+                "--previous-beta" if previous_beta.is_none() => {
+                    previous_beta = Some(PathBuf::from(value));
+                }
                 "--artifact" => artifacts.push(PathBuf::from(value)),
                 "--platform" => platforms.push(value),
                 "--release-key" => release_keys.push(parse_key_argument(&value)?),
@@ -186,6 +201,9 @@ impl SignUpdateCommand {
             stable_spec: stable_spec.ok_or(XtaskError::Usage)?,
             beta_spec: beta_spec.ok_or(XtaskError::Usage)?,
             base_url: base_url.ok_or(XtaskError::Usage)?,
+            now_unix: now_unix.ok_or(XtaskError::Usage)?,
+            previous_stable,
+            previous_beta,
             artifacts,
             platforms,
             release_keys,
@@ -258,7 +276,8 @@ struct ReleaseTargetSpec {
     url: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ReleasePayload {
     schema_version: u16,
     role: String,
@@ -269,7 +288,8 @@ struct ReleasePayload {
     targets: BTreeMap<String, ReleaseTarget>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ReleaseTarget {
     version: String,
     url: String,
@@ -306,6 +326,8 @@ struct MetadataSignature {
 
 struct ArtifactIdentity {
     file_name: String,
+    platform: String,
+    version: Version,
     length: u64,
     sha256: String,
 }
@@ -318,27 +340,54 @@ fn sign_update(command: &SignUpdateCommand) -> Result<(), XtaskError> {
 }
 
 fn sign_release(arguments: &ReleaseSignArgs) -> Result<(), XtaskError> {
+    if arguments.now_unix == 0 {
+        return Err(XtaskError::SignArgument(
+            "fixed release signing time must be positive Unix seconds".to_owned(),
+        ));
+    }
     let (root_chain, root) = load_root_chain(Some(&arguments.root_chain))?;
     let root = root.ok_or_else(|| XtaskError::UpdateSpec {
         path: arguments.root_chain.clone(),
         reason: "release signing requires a non-empty pre-signed root chain".to_owned(),
     })?;
+    if root.expires_unix <= arguments.now_unix {
+        return Err(XtaskError::UpdateSpec {
+            path: arguments.root_chain.clone(),
+            reason: "active root is expired at the fixed release signing time".to_owned(),
+        });
+    }
     let release_keys = load_signers(&arguments.release_keys)?;
     validate_release_signers(&root, &release_keys, &arguments.root_chain)?;
     let stable: ReleasePayloadSpec = read_spec(&arguments.stable_spec)?;
     let beta: ReleasePayloadSpec = read_spec(&arguments.beta_spec)?;
-    if stable.version != beta.version {
-        return Err(XtaskError::SignArgument(
-            "stable and beta metadata must use one shared repository version".to_owned(),
-        ));
-    }
-    let artifacts = inspect_artifacts(&arguments.platforms, &arguments.artifacts)?;
+    validate_new_release_expiry(&stable, arguments.now_unix, &arguments.stable_spec)?;
+    validate_new_release_expiry(&beta, arguments.now_unix, &arguments.beta_spec)?;
     let base_url = validate_release_base_url(&arguments.base_url)?;
+    let previous_stable = arguments
+        .previous_stable
+        .as_deref()
+        .map(|path| load_prior_release(path, UpdateChannel::Stable, &root, &base_url))
+        .transpose()?;
+    let previous_beta = arguments
+        .previous_beta
+        .as_deref()
+        .map(|path| load_prior_release(path, UpdateChannel::Beta, &root, &base_url))
+        .transpose()?;
+    validate_release_epoch(
+        stable.version,
+        beta.version,
+        previous_stable.as_ref(),
+        previous_beta.as_ref(),
+    )?;
+    let artifacts = inspect_artifacts(&arguments.platforms, &arguments.artifacts)?;
+    let mut used_artifacts = BTreeSet::new();
     let stable = fill_release(
         stable,
         UpdateChannel::Stable,
         &artifacts,
         &base_url,
+        previous_stable.as_ref(),
+        &mut used_artifacts,
         &arguments.stable_spec,
     )?;
     let beta = fill_release(
@@ -346,8 +395,15 @@ fn sign_release(arguments: &ReleaseSignArgs) -> Result<(), XtaskError> {
         UpdateChannel::Beta,
         &artifacts,
         &base_url,
+        previous_beta.as_ref(),
+        &mut used_artifacts,
         &arguments.beta_spec,
     )?;
+    if used_artifacts.len() != artifacts.len() {
+        return Err(XtaskError::SignArgument(
+            "every supplied artifact must be used by at least one channel target".to_owned(),
+        ));
+    }
     let stable_bytes = signed_envelope_bytes("release", &stable, &release_keys)?;
     let beta_bytes = signed_envelope_bytes("release", &beta, &release_keys)?;
     let root_bytes = STANDARD
@@ -378,6 +434,66 @@ fn sign_release(arguments: &ReleaseSignArgs) -> Result<(), XtaskError> {
             ("stable.json", stable_bytes.as_slice()),
         ],
     )
+}
+
+fn validate_release_epoch(
+    stable_version: u64,
+    beta_version: u64,
+    previous_stable: Option<&ReleasePayload>,
+    previous_beta: Option<&ReleasePayload>,
+) -> Result<(), XtaskError> {
+    if stable_version != beta_version {
+        return Err(XtaskError::SignArgument(
+            "stable and beta metadata must use one shared repository version".to_owned(),
+        ));
+    }
+    match (previous_stable.as_ref(), previous_beta.as_ref()) {
+        (None, None) if stable_version != 1 => {
+            return Err(XtaskError::SignArgument(
+                "the first channel publication must use metadata version 1".to_owned(),
+            ));
+        }
+        (None, None) => {}
+        (Some(stable_prior), Some(beta_prior)) => {
+            if stable_prior.version != beta_prior.version {
+                return Err(XtaskError::SignArgument(
+                    "prior stable and beta metadata must use one shared repository version"
+                        .to_owned(),
+                ));
+            }
+            let expected = stable_prior.version.checked_add(1).ok_or_else(|| {
+                XtaskError::SignArgument(
+                    "prior channel metadata version cannot be advanced".to_owned(),
+                )
+            })?;
+            if stable_version != expected {
+                return Err(XtaskError::SignArgument(format!(
+                    "new channel metadata version must advance exactly from {} to {expected}",
+                    stable_prior.version
+                )));
+            }
+        }
+        _ => {
+            return Err(XtaskError::SignArgument(
+                "channel metadata updates require both prior signed channel envelopes".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_new_release_expiry(
+    spec: &ReleasePayloadSpec,
+    now_unix: u64,
+    path: &Path,
+) -> Result<(), XtaskError> {
+    if spec.expires_unix <= now_unix {
+        return Err(XtaskError::UpdateSpec {
+            path: path.to_owned(),
+            reason: "new release metadata is expired at the fixed release signing time".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn rotate_root(arguments: &RootRotationArgs) -> Result<(), XtaskError> {
@@ -960,16 +1076,105 @@ fn validate_release_signers(
     Ok(())
 }
 
+fn load_prior_release(
+    path: &Path,
+    expected_channel: UpdateChannel,
+    root: &RootPayload,
+    base_url: &Url,
+) -> Result<ReleasePayload, XtaskError> {
+    let envelope: SignedEnvelope = read_spec(path)?;
+    let payload_bytes = decode_envelope_payload(&envelope, path)?;
+    verify_envelope_role(
+        &envelope,
+        &payload_bytes,
+        "release",
+        &root.keys,
+        &root.release_key_ids,
+        root.release_threshold,
+        path,
+    )?;
+    let payload: ReleasePayload =
+        serde_json::from_slice(&payload_bytes).map_err(|_| XtaskError::UpdateSpec {
+            path: path.to_owned(),
+            reason: "prior release payload is malformed".to_owned(),
+        })?;
+    validate_release_payload(&payload, expected_channel, base_url, path)?;
+    Ok(payload)
+}
+
+fn validate_release_payload(
+    payload: &ReleasePayload,
+    expected_channel: UpdateChannel,
+    base_url: &Url,
+    path: &Path,
+) -> Result<(), XtaskError> {
+    if payload.schema_version != 1
+        || payload.role != "release"
+        || payload.version == 0
+        || payload.expires_unix == 0
+        || payload.channel != expected_channel
+        || payload.targets.is_empty()
+        || payload.targets.len() > MAX_UPDATE_TARGETS
+        || payload.release_notes.len() > MAX_RELEASE_NOTES_BYTES
+        || payload
+            .release_notes
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+    {
+        return Err(XtaskError::UpdateSpec {
+            path: path.to_owned(),
+            reason: "prior release header, channel, notes, or target count is invalid".to_owned(),
+        });
+    }
+    for (platform, target) in &payload.targets {
+        validate_release_target(platform, target, expected_channel, base_url, path)?;
+    }
+    Ok(())
+}
+
+fn validate_release_target(
+    platform: &str,
+    target: &ReleaseTarget,
+    channel: UpdateChannel,
+    base_url: &Url,
+    path: &Path,
+) -> Result<Version, XtaskError> {
+    let invalid = || XtaskError::UpdateSpec {
+        path: path.to_owned(),
+        reason: "release target URL, version, length, digest, or platform is invalid".to_owned(),
+    };
+    if !safe_selector(platform) {
+        return Err(invalid());
+    }
+    let version = Version::parse(&target.version).map_err(|_| invalid())?;
+    if channel == UpdateChannel::Stable && !version.pre.is_empty() {
+        return Err(invalid());
+    }
+    let file_name = format!("rottweiler-{version}-{platform}.tar.gz");
+    let url = Url::parse(&target.url).map_err(|_| invalid())?;
+    if base_url.join(&file_name).ok().as_ref() != Some(&url)
+        || target.length == 0
+        || target.length > MAX_UPDATE_ARTIFACT_BYTES
+        || target.sha256.len() != 64
+        || !target
+            .sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(invalid());
+    }
+    Ok(version)
+}
+
 fn inspect_artifacts(
     platforms: &[String],
     paths: &[PathBuf],
 ) -> Result<BTreeMap<String, ArtifactIdentity>, XtaskError> {
     let mut artifacts = BTreeMap::new();
-    let mut names = BTreeSet::new();
     for (platform, path) in platforms.iter().zip(paths) {
-        if !safe_selector(platform) || artifacts.contains_key(platform) {
+        if !safe_selector(platform) {
             return Err(XtaskError::SignArgument(format!(
-                "invalid or duplicate artifact platform {platform:?}"
+                "invalid artifact platform {platform:?}"
             )));
         }
         let metadata = fs::symlink_metadata(path).map_err(|source| XtaskError::Read {
@@ -997,16 +1202,34 @@ fn inspect_artifacts(
                 ))
             })?
             .to_owned();
-        if !names.insert(file_name.clone()) {
+        let version_text = file_name
+            .strip_prefix("rottweiler-")
+            .and_then(|value| value.strip_suffix(&format!("-{platform}.tar.gz")))
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                XtaskError::SignArgument(format!(
+                    "artifact {file_name:?} does not encode platform {platform:?}"
+                ))
+            })?;
+        let version = Version::parse(version_text).map_err(|_| {
+            XtaskError::SignArgument(format!(
+                "artifact {file_name:?} does not encode a semantic version"
+            ))
+        })?;
+        if format!("rottweiler-{version}-{platform}.tar.gz") != file_name
+            || artifacts.contains_key(&file_name)
+        {
             return Err(XtaskError::SignArgument(format!(
                 "duplicate artifact file name {file_name:?}"
             )));
         }
         let (length, sha256) = digest_file(path)?;
         artifacts.insert(
-            platform.clone(),
+            file_name.clone(),
             ArtifactIdentity {
                 file_name,
+                platform: platform.clone(),
+                version,
                 length,
                 sha256,
             },
@@ -1093,6 +1316,8 @@ fn fill_release(
     expected_channel: UpdateChannel,
     artifacts: &BTreeMap<String, ArtifactIdentity>,
     base_url: &Url,
+    prior: Option<&ReleasePayload>,
+    used_artifacts: &mut BTreeSet<String>,
     path: &Path,
 ) -> Result<ReleasePayload, XtaskError> {
     let invalid = |reason: &str| XtaskError::UpdateSpec {
@@ -1116,46 +1341,61 @@ fn fill_release(
             "release header, channel, notes, or target count is invalid",
         ));
     }
-    if spec.targets.keys().ne(artifacts.keys()) {
+    if prior.is_some_and(|prior| {
+        prior
+            .targets
+            .keys()
+            .any(|key| !spec.targets.contains_key(key))
+    }) {
         return Err(invalid(
-            "release target platforms must exactly match --platform arguments",
+            "release metadata must not drop a prior platform target",
         ));
     }
     let targets = spec
         .targets
         .into_iter()
         .map(|(platform, target)| {
-            Version::parse(&target.version)
+            if !safe_selector(&platform) {
+                return Err(invalid("release target platform is invalid"));
+            }
+            let version = Version::parse(&target.version)
                 .map_err(|_| invalid("release target version is not semantic versioning"))?;
-            if expected_channel == UpdateChannel::Stable
-                && !Version::parse(&target.version)
-                    .map_err(|_| invalid("release target version is invalid"))?
-                    .pre
-                    .is_empty()
-            {
+            if expected_channel == UpdateChannel::Stable && !version.pre.is_empty() {
                 return Err(invalid("stable target must not be a prerelease"));
             }
-            let url = Url::parse(&target.url)
+            let prior_target = prior.and_then(|prior| prior.targets.get(&platform));
+            if let Some(prior_target) = prior_target {
+                let prior_version = Version::parse(&prior_target.version)
+                    .map_err(|_| invalid("prior target version is invalid"))?;
+                if version < prior_version {
+                    return Err(invalid("release target semantic version must not decrease"));
+                }
+                if version == prior_version {
+                    if target.version != prior_target.version || target.url != prior_target.url {
+                        return Err(invalid(
+                            "an unchanged target version must carry forward the exact prior target",
+                        ));
+                    }
+                    return Ok((platform, prior_target.clone()));
+                }
+            }
+            let file_name = format!("rottweiler-{version}-{platform}.tar.gz");
+            let artifact = artifacts.get(&file_name).ok_or_else(|| {
+                invalid("a new channel target has no exact matching artifact in the pool")
+            })?;
+            let expected_url = base_url
+                .join(&file_name)
                 .map_err(|_| invalid("release target URL is invalid"))?;
-            let artifact = artifacts
-                .get(&platform)
-                .ok_or_else(|| invalid("release target platform has no artifact"))?;
-            let expected_file_name =
-                format!("rottweiler-{}-{platform}.tar.gz", target.version);
-            if url.scheme() != "https"
-                || url.host_str().is_none()
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || url.query().is_some()
-                || url.fragment().is_some()
-                || artifact.file_name != expected_file_name
-                || url.path_segments().and_then(Iterator::last) != Some(&artifact.file_name)
-                || base_url.join(&artifact.file_name).ok().as_ref() != Some(&url)
+            if artifact.file_name != file_name
+                || artifact.platform != platform
+                || artifact.version != version
+                || target.url != expected_url.as_str()
             {
                 return Err(invalid(
-                    "release target URL and artifact name must match the signed version and platform",
+                    "release target URL, artifact, version, and platform do not match",
                 ));
             }
+            used_artifacts.insert(file_name);
             Ok((
                 platform,
                 ReleaseTarget {
@@ -2170,12 +2410,12 @@ mod tests {
         let beta_spec = root.path().join("beta-spec.json");
         fs::write(
             &stable_spec,
-            serde_json::to_vec(&release_spec("stable", 4)).expect("stable spec"),
+            serde_json::to_vec(&release_spec("stable", 1)).expect("stable spec"),
         )
         .expect("write stable spec");
         fs::write(
             &beta_spec,
-            serde_json::to_vec(&release_spec("beta", 4)).expect("beta spec"),
+            serde_json::to_vec(&release_spec("beta", 1)).expect("beta spec"),
         )
         .expect("write beta spec");
         let rotation = RootRotationArgs {
@@ -2198,10 +2438,42 @@ mod tests {
             stable_spec: root.path().join("stable-spec.json"),
             beta_spec: root.path().join("beta-spec.json"),
             base_url: "https://releases.example.invalid/".to_owned(),
+            now_unix: 1_800_000_000,
+            previous_stable: None,
+            previous_beta: None,
             artifacts: vec![root.path().join("rottweiler-1.2.3-darwin-arm64.tar.gz")],
             platforms: vec!["darwin-arm64".to_owned()],
             release_keys: vec![("release-1".to_owned(), root.path().join("release.key"))],
             output: root.path().join(output_name),
+        }
+    }
+
+    fn decode_release(path: &Path) -> ReleasePayload {
+        let envelope: SignedEnvelope =
+            serde_json::from_slice(&fs::read(path).expect("release envelope"))
+                .expect("parse release envelope");
+        serde_json::from_slice(
+            &STANDARD
+                .decode(envelope.payload.as_bytes())
+                .expect("release payload"),
+        )
+        .expect("parse release payload")
+    }
+
+    fn set_release_spec_version(path: &Path, version: u64) {
+        let mut spec: serde_json::Value =
+            serde_json::from_slice(&fs::read(path).expect("release spec"))
+                .expect("parse release spec");
+        spec["version"] = json!(version);
+        fs::write(path, serde_json::to_vec(&spec).expect("release spec bytes"))
+            .expect("write release spec");
+    }
+
+    fn sign_argument_reason(result: Result<(), XtaskError>) -> String {
+        match result {
+            Err(XtaskError::SignArgument(reason)) => reason,
+            Err(error) => panic!("expected signing-argument error, got {error}"),
+            Ok(()) => panic!("expected signing-argument error"),
         }
     }
 
@@ -2348,6 +2620,297 @@ mod tests {
         assert!(matches!(
             sign_release(&arguments),
             Err(XtaskError::UpdateSpec { .. })
+        ));
+    }
+
+    #[test]
+    fn channels_advance_independently_only_from_signed_prior_targets() {
+        let fixture = fixture();
+        rotate_root(&fixture.rotation).expect("initial root");
+        let chain = fixture.root.path().join("initial-root/root-chain.json");
+        let initial = release_arguments(&fixture.root, &chain, "initial-release");
+        sign_release(&initial).expect("initial release");
+        let prior_stable = fixture.root.path().join("initial-release/stable.json");
+        let prior_beta = fixture.root.path().join("initial-release/beta.json");
+
+        let beta_name = "rottweiler-1.3.0-beta.1-darwin-arm64.tar.gz";
+        let beta_artifact = fixture.root.path().join(beta_name);
+        fs::write(&beta_artifact, b"new beta artifact").expect("beta artifact");
+        let stable_spec = json!({
+            "schema_version": 1,
+            "role": "release",
+            "version": 2,
+            "expires_unix": 1_950_000_000_u64,
+            "channel": "stable",
+            "release_notes": "Stable remains unchanged",
+            "targets": {"darwin-arm64": {
+                "version": "1.2.3",
+                "url": "https://releases.example.invalid/rottweiler-1.2.3-darwin-arm64.tar.gz"
+            }}
+        });
+        let beta_spec = json!({
+            "schema_version": 1,
+            "role": "release",
+            "version": 2,
+            "expires_unix": 1_950_000_000_u64,
+            "channel": "beta",
+            "release_notes": "New beta",
+            "targets": {"darwin-arm64": {
+                "version": "1.3.0-beta.1",
+                "url": format!("https://releases.example.invalid/{beta_name}")
+            }}
+        });
+        fs::write(
+            fixture.root.path().join("stable-spec.json"),
+            serde_json::to_vec(&stable_spec).expect("stable spec"),
+        )
+        .expect("write stable spec");
+        fs::write(
+            fixture.root.path().join("beta-spec.json"),
+            serde_json::to_vec(&beta_spec).expect("beta spec"),
+        )
+        .expect("write beta spec");
+        let mut next = release_arguments(&fixture.root, &chain, "independent");
+        next.now_unix = 1_925_000_000;
+        next.previous_stable = Some(prior_stable.clone());
+        next.previous_beta = Some(prior_beta.clone());
+        next.artifacts = vec![beta_artifact];
+        sign_release(&next).expect("independent beta release");
+
+        let old = decode_release(&prior_stable);
+        let new_stable = decode_release(&fixture.root.path().join("independent/stable.json"));
+        let new_beta = decode_release(&fixture.root.path().join("independent/beta.json"));
+        assert_eq!(new_stable.version, 2);
+        assert_eq!(new_beta.version, 2);
+        assert_eq!(
+            new_stable.targets["darwin-arm64"],
+            old.targets["darwin-arm64"]
+        );
+        assert_eq!(new_beta.targets["darwin-arm64"].version, "1.3.0-beta.1");
+
+        let mut crossed = release_arguments(&fixture.root, &chain, "crossed");
+        crossed.previous_stable = Some(prior_beta);
+        crossed.previous_beta = Some(prior_stable);
+        crossed.artifacts = vec![fixture.root.path().join(beta_name)];
+        assert!(matches!(
+            sign_release(&crossed),
+            Err(XtaskError::UpdateSpec { .. })
+        ));
+    }
+
+    #[test]
+    fn release_signing_rejects_expired_active_root_and_new_channel_specs() {
+        let expired_root = fixture();
+        rotate_root(&expired_root.rotation).expect("initial root");
+        let chain = expired_root
+            .root
+            .path()
+            .join("initial-root/root-chain.json");
+        let mut arguments = release_arguments(&expired_root.root, &chain, "expired-root");
+        arguments.now_unix = 0;
+        let reason = sign_argument_reason(sign_release(&arguments));
+        assert!(reason.contains("positive Unix seconds"));
+        arguments.now_unix = 2_000_000_000;
+        assert!(matches!(
+            sign_release(&arguments),
+            Err(XtaskError::UpdateSpec { path, reason })
+                if path == chain && reason.contains("active root is expired")
+        ));
+
+        let expired_stable = fixture();
+        rotate_root(&expired_stable.rotation).expect("initial root");
+        let chain = expired_stable
+            .root
+            .path()
+            .join("initial-root/root-chain.json");
+        let stable_path = expired_stable.root.path().join("stable-spec.json");
+        let mut arguments = release_arguments(&expired_stable.root, &chain, "expired-stable");
+        arguments.now_unix = 1_900_000_000;
+        assert!(matches!(
+            sign_release(&arguments),
+            Err(XtaskError::UpdateSpec { path, reason })
+                if path == stable_path && reason.contains("expired")
+        ));
+
+        let expired_beta = fixture();
+        rotate_root(&expired_beta.rotation).expect("initial root");
+        let chain = expired_beta
+            .root
+            .path()
+            .join("initial-root/root-chain.json");
+        let stable_path = expired_beta.root.path().join("stable-spec.json");
+        let beta_path = expired_beta.root.path().join("beta-spec.json");
+        let mut stable: serde_json::Value =
+            serde_json::from_slice(&fs::read(&stable_path).expect("stable spec"))
+                .expect("stable JSON");
+        stable["expires_unix"] = json!(1_950_000_000_u64);
+        fs::write(
+            &stable_path,
+            serde_json::to_vec(&stable).expect("stable bytes"),
+        )
+        .expect("write stable");
+        let mut arguments = release_arguments(&expired_beta.root, &chain, "expired-beta");
+        arguments.now_unix = 1_900_000_000;
+        assert!(matches!(
+            sign_release(&arguments),
+            Err(XtaskError::UpdateSpec { path, reason })
+                if path == beta_path && reason.contains("expired")
+        ));
+    }
+
+    #[test]
+    fn release_metadata_epochs_start_at_one_and_advance_exactly_from_matching_priors() {
+        let fixture = fixture();
+        rotate_root(&fixture.rotation).expect("initial root");
+        let chain = fixture.root.path().join("initial-root/root-chain.json");
+        let stable_spec = fixture.root.path().join("stable-spec.json");
+        let beta_spec = fixture.root.path().join("beta-spec.json");
+
+        set_release_spec_version(&stable_spec, 2);
+        set_release_spec_version(&beta_spec, 2);
+        let reason = sign_argument_reason(sign_release(&release_arguments(
+            &fixture.root,
+            &chain,
+            "invalid-initial-epoch",
+        )));
+        assert!(reason.contains("first channel publication"));
+
+        set_release_spec_version(&stable_spec, 1);
+        set_release_spec_version(&beta_spec, 1);
+        sign_release(&release_arguments(&fixture.root, &chain, "initial-release"))
+            .expect("initial release");
+        let prior_stable = fixture.root.path().join("initial-release/stable.json");
+        let prior_beta = fixture.root.path().join("initial-release/beta.json");
+
+        set_release_spec_version(&stable_spec, 3);
+        set_release_spec_version(&beta_spec, 3);
+        let mut skipped = release_arguments(&fixture.root, &chain, "skipped-epoch");
+        skipped.previous_stable = Some(prior_stable.clone());
+        skipped.previous_beta = Some(prior_beta.clone());
+        let reason = sign_argument_reason(sign_release(&skipped));
+        assert!(reason.contains("advance exactly"));
+
+        set_release_spec_version(&stable_spec, 2);
+        set_release_spec_version(&beta_spec, 2);
+        let mut second = release_arguments(&fixture.root, &chain, "second-release");
+        second.previous_stable = Some(prior_stable.clone());
+        second.previous_beta = Some(prior_beta);
+        second.artifacts.clear();
+        second.platforms.clear();
+        sign_release(&second).expect("second release");
+
+        set_release_spec_version(&stable_spec, 3);
+        set_release_spec_version(&beta_spec, 3);
+        let mut split = release_arguments(&fixture.root, &chain, "split-prior-epochs");
+        split.previous_stable = Some(prior_stable);
+        split.previous_beta = Some(fixture.root.path().join("second-release/beta.json"));
+        split.artifacts.clear();
+        split.platforms.clear();
+        let reason = sign_argument_reason(sign_release(&split));
+        assert!(reason.contains("prior stable and beta metadata"));
+    }
+
+    #[test]
+    fn prior_rollback_unsigned_prior_and_unused_artifacts_are_rejected() {
+        let fixture = fixture();
+        rotate_root(&fixture.rotation).expect("initial root");
+        let chain = fixture.root.path().join("initial-root/root-chain.json");
+        let initial = release_arguments(&fixture.root, &chain, "initial-release");
+        sign_release(&initial).expect("initial release");
+        let prior_stable = fixture.root.path().join("initial-release/stable.json");
+        let prior_beta = fixture.root.path().join("initial-release/beta.json");
+
+        let unsigned = fixture.root.path().join("unsigned-stable.json");
+        let mut envelope: SignedEnvelope =
+            serde_json::from_slice(&fs::read(&prior_stable).expect("prior stable"))
+                .expect("prior envelope");
+        envelope.signatures[0].signature = STANDARD.encode([0_u8; 64]);
+        fs::write(
+            &unsigned,
+            serde_json::to_vec(&envelope).expect("unsigned envelope"),
+        )
+        .expect("write unsigned prior");
+        let mut unsigned_args = release_arguments(&fixture.root, &chain, "unsigned");
+        unsigned_args.previous_stable = Some(unsigned);
+        unsigned_args.previous_beta = Some(prior_beta.clone());
+        assert!(matches!(
+            sign_release(&unsigned_args),
+            Err(XtaskError::UpdateSpec { .. })
+        ));
+
+        let mut stale = release_arguments(&fixture.root, &chain, "stale");
+        stale.previous_stable = Some(prior_stable);
+        stale.previous_beta = Some(prior_beta);
+        assert!(matches!(
+            sign_release(&stale),
+            Err(XtaskError::SignArgument(_))
+        ));
+
+        let downgrade_name = "rottweiler-1.1.0-darwin-arm64.tar.gz";
+        let downgrade_path = fixture.root.path().join(downgrade_name);
+        fs::write(&downgrade_path, b"older signed artifact").expect("downgrade artifact");
+        let channel_spec = |channel: &str, target_version: &str, target_name: &str| {
+            json!({
+                "schema_version": 1,
+                "role": "release",
+                "version": 2,
+                "expires_unix": 1_950_000_000_u64,
+                "channel": channel,
+                "release_notes": "rollback fixture",
+                "targets": {"darwin-arm64": {
+                    "version": target_version,
+                    "url": format!("https://releases.example.invalid/{target_name}")
+                }}
+            })
+        };
+        fs::write(
+            fixture.root.path().join("stable-spec.json"),
+            serde_json::to_vec(&channel_spec("stable", "1.1.0", downgrade_name))
+                .expect("downgrade stable"),
+        )
+        .expect("write downgrade stable");
+        fs::write(
+            fixture.root.path().join("beta-spec.json"),
+            serde_json::to_vec(&channel_spec(
+                "beta",
+                "1.2.3",
+                "rottweiler-1.2.3-darwin-arm64.tar.gz",
+            ))
+            .expect("carry beta"),
+        )
+        .expect("write carry beta");
+        let mut downgrade = release_arguments(&fixture.root, &chain, "downgrade");
+        downgrade.previous_stable = Some(fixture.root.path().join("initial-release/stable.json"));
+        downgrade.previous_beta = Some(fixture.root.path().join("initial-release/beta.json"));
+        downgrade.artifacts = vec![downgrade_path];
+        assert!(matches!(
+            sign_release(&downgrade),
+            Err(XtaskError::UpdateSpec { .. })
+        ));
+
+        let current_name = "rottweiler-1.2.3-darwin-arm64.tar.gz";
+        fs::write(
+            fixture.root.path().join("stable-spec.json"),
+            serde_json::to_vec(&channel_spec("stable", "1.2.3", current_name))
+                .expect("current stable"),
+        )
+        .expect("write current stable");
+        fs::write(
+            fixture.root.path().join("beta-spec.json"),
+            serde_json::to_vec(&channel_spec("beta", "1.2.3", current_name)).expect("current beta"),
+        )
+        .expect("write current beta");
+        let unused_name = "rottweiler-2.0.0-darwin-arm64.tar.gz";
+        let unused_path = fixture.root.path().join(unused_name);
+        fs::write(&unused_path, b"unused artifact").expect("unused artifact");
+        let mut unused = release_arguments(&fixture.root, &chain, "unused");
+        unused.previous_stable = Some(fixture.root.path().join("initial-release/stable.json"));
+        unused.previous_beta = Some(fixture.root.path().join("initial-release/beta.json"));
+        unused.artifacts.push(unused_path);
+        unused.platforms.push("darwin-arm64".to_owned());
+        assert!(matches!(
+            sign_release(&unused),
+            Err(XtaskError::SignArgument(_))
         ));
     }
 

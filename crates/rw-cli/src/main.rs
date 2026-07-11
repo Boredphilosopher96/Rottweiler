@@ -156,6 +156,13 @@ impl PermissionMode {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Internal release-installer durability helper.
+    #[command(name = "__install-sync", hide = true)]
+    InstallSync {
+        /// Exact regular files/directories to flush without following symlinks.
+        #[arg(value_name = "PATH", num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
     /// Run the authenticated headless engine server.
     Serve {
         /// Unix socket path; defaults to `ROTTWEILER_ENGINE_SOCKET`.
@@ -466,6 +473,9 @@ async fn main() -> Result<()> {
         return Ok(());
     }
     match cli.command.take() {
+        Some(Command::InstallSync { paths }) => {
+            sync_install_paths(&paths)?;
+        }
         Some(Command::Serve {
             socket,
             token_file,
@@ -483,6 +493,8 @@ async fn main() -> Result<()> {
                 cli.detach,
                 cli.add_dirs,
                 cli.dangerously_trust,
+                cli.in_memory_replay_script,
+                cli.record_script_delay_ms,
             )
             .await?;
         }
@@ -601,6 +613,7 @@ async fn main() -> Result<()> {
                     provider_name: "mcp-server-replay".to_owned(),
                     scripts: serde_json::from_slice(&fs::read(script).into_diagnostic()?)
                         .into_diagnostic()?,
+                    event_delay_ms: cli.record_script_delay_ms,
                 }
             } else {
                 runtime::HostedProviderMode::Live
@@ -757,8 +770,6 @@ async fn main() -> Result<()> {
                 || cli.line
                 || cli.replay_dir.is_some()
                 || cli.record_replay_script.is_some()
-                || cli.in_memory_replay_script.is_some()
-                || cli.record_script_delay_ms != 0
                 || cli.perf_markers;
             if headless_or_line {
                 runtime::run(runtime::RunOptions {
@@ -1041,6 +1052,8 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
             model: cli.model.clone(),
             additional_workspaces: workspace_roots.into_iter().skip(1).collect(),
             dangerously_trust: cli.dangerously_trust,
+            in_memory_replay_script: cli.in_memory_replay_script.clone(),
+            record_script_delay_ms: cli.record_script_delay_ms,
             shell_target: Some(shell_broker::ShellTarget::Local),
             detach: cli.detach,
             restart_policy: supervisor::RestartPolicy::default(),
@@ -1826,6 +1839,8 @@ async fn run_serve(
     detach: bool,
     add_dirs: Vec<PathBuf>,
     dangerously_trust: bool,
+    in_memory_replay_script: Option<PathBuf>,
+    record_script_delay_ms: u64,
 ) -> Result<()> {
     let storage_root = configuration_root_path()?;
     let paths = resolve_server_paths(socket, token_file, &storage_root)?;
@@ -1858,12 +1873,22 @@ async fn run_serve(
     let preparation: Result<()> = async {
         ensure_configuration_root(&storage_root)?;
         let workspace = workspace_roots[0].clone();
+        let provider_mode = if let Some(script) = in_memory_replay_script.as_deref() {
+            runtime::HostedProviderMode::DeterministicReplay {
+                provider_name: "local-tui-replay".to_owned(),
+                scripts: serde_json::from_slice(&fs::read(script).into_diagnostic()?)
+                    .into_diagnostic()?,
+                event_delay_ms: record_script_delay_ms,
+            }
+        } else {
+            runtime::HostedProviderMode::Live
+        };
         let options = host_runtime::CliHostOptions::from_environment(
             workspace_roots,
             dangerously_trust,
             permission_mode,
             max_turns,
-            runtime::HostedProviderMode::Live,
+            provider_mode,
         )
         .map_err(|error| miette!(error.to_string()))?;
         let max_sessions = options.config.engine.max_concurrent_sessions;
@@ -2878,12 +2903,36 @@ fn write_github_device_prompt(
     writer.flush()
 }
 
+fn sync_install_paths(paths: &[PathBuf]) -> Result<()> {
+    for path in paths {
+        let descriptor = rustix::fs::open(
+            path,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        )
+        .map_err(|_| miette!("installer durability path could not be opened safely"))?;
+        let stat = rustix::fs::fstat(&descriptor)
+            .map_err(|_| miette!("installer durability metadata could not be read"))?;
+        let kind = rustix::fs::FileType::from_raw_mode(stat.st_mode);
+        if !kind.is_file() && !kind.is_dir() {
+            return Err(miette!(
+                "installer durability path must be a regular file or directory"
+            ));
+        }
+        rustix::fs::fsync(&descriptor).map_err(|_| miette!("installer durability flush failed"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser as _;
 
     use super::{
-        Cli, Command, TrustCommand, UpgradeChannel, valid_bootstrap_token,
+        Cli, Command, TrustCommand, UpgradeChannel, sync_install_paths, valid_bootstrap_token,
         write_github_device_prompt, write_private_file_atomic,
     };
 
@@ -2970,6 +3019,21 @@ mod tests {
             })
         ));
         assert!(Cli::try_parse_from(["rw", "update"]).is_err());
+    }
+
+    #[test]
+    fn installer_sync_flushes_files_and_directories_without_following_links() {
+        let root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("sync root should be created: {error}"));
+        let file = root.path().join("runtime");
+        std::fs::write(&file, b"runtime")
+            .unwrap_or_else(|error| panic!("runtime fixture should be written: {error}"));
+        sync_install_paths(&[file.clone(), root.path().to_owned()])
+            .unwrap_or_else(|error| panic!("durability sync should succeed: {error}"));
+        let link = root.path().join("runtime-link");
+        std::os::unix::fs::symlink(&file, &link)
+            .unwrap_or_else(|error| panic!("link fixture should be created: {error}"));
+        assert!(sync_install_paths(&[link]).is_err());
     }
 
     #[test]

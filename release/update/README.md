@@ -38,6 +38,13 @@ repository values:
   base64 encoding of its exact 32-byte Ed25519 seed. Key ids and seed material
   must both be unique; at most 32 keys are accepted.
 
+The protected `release` environment also supplies the paid live-smoke keys,
+dated model ids, external dogfood-ledger secret, and Terminal-Bench baseline
+documented in `docs/07-VERIFICATION.md`. Dedicated self-hosted runners labeled
+`soak`, `terminal-bench`, and `wsl2` must be online. These are prerequisites to
+signing: the workflow does not offer a skip flag for missing evidence or
+infrastructure.
+
 The tag workflow materializes those seeds as mode-0600 temporary files, signs
 the two channel documents, deletes the temporary directory, attests the archive
 and metadata bytes, and publishes the artifacts. Signature metadata is not the
@@ -45,10 +52,29 @@ host: copy the signed set plus archives to the configured no-redirect update
 origin as an explicit release-deployment step.
 
 Manual release signing must pass that same origin explicitly with
-`--base-url "$ROTTWEILER_UPDATE_BASE_URL"`; the signer requires every target URL
-to equal that base joined with the authenticated archive filename. Stable and
-beta documents also share one repository metadata version so channel changes
-cannot look like rollback.
+`--base-url "$ROTTWEILER_UPDATE_BASE_URL"` and a single captured signing time as
+`--now-unix "$RELEASE_NOW_UNIX"`; the signer requires every target URL to equal
+that base joined with the authenticated archive filename. It rejects an active
+root or either new channel document whose expiry is not later than that fixed
+time. Stable and beta documents also share one repository metadata version so
+channel changes cannot look like rollback.
+
+Stable and beta targets remain independent. Before routine signing, the release
+workflow downloads the previously deployed `stable.json` and `beta.json`
+without redirects and passes them as `--previous-stable` / `--previous-beta`.
+When a spec target has no matching current archive (for example, a beta
+prerelease while stable remains on the prior production build), the signer
+carries it forward only if its exact version and URL occur in the corresponding
+prior envelope and that envelope meets the active release-role threshold.
+Cross-channel envelopes, unsigned hashes, target downgrades, mismatched or
+unused archives, and invalid metadata transitions are rejected. The first
+publication omits both prior-envelope flags, uses metadata version 1, and must
+provide matching artifacts for every target in both channel specs. Every later
+publication requires both prior envelopes at the same metadata version and
+advances the shared version exactly from `N` to `N+1`. Prior channel envelopes
+are authenticated historical transition inputs, so their expiry may precede
+the fixed signing time; only the active root and newly emitted documents must
+still be live.
 
 The channel specs use this shape; the signer fills authenticated length and
 SHA-256 values from the exact archives:
@@ -74,7 +100,11 @@ SHA-256 values from the exact archives:
 }
 ```
 
-Beta uses the same shape with `"channel": "beta"`. Stable targets cannot be
-prereleases. Metadata versions and expiry times must advance deliberately; the
-signer and client reject rollback, wrong-channel, wrong-platform, expired, and
-unsigned inputs.
+Beta uses the same shape with `"channel": "beta"` and may name a different
+semantic target version/archive. Stable targets cannot be prereleases. The two
+top-level metadata `version` values must remain equal for every publication,
+while target versions may differ. Publications advance the shared metadata
+version exactly once; a client may then accept that same authenticated version
+when switching channels. Expiry times must advance deliberately; the signer and
+client reject rollback, wrong-channel, wrong-platform, expired, and unsigned
+inputs.

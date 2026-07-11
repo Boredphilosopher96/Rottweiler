@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, describe, expect, test } from "bun:test"
+import { mkdirSync, renameSync, writeFileSync } from "node:fs"
+import { dirname, join } from "node:path"
 import {
   createTestRenderer,
   MockTreeSitterClient,
@@ -7,6 +9,28 @@ import {
 
 import { createRottweilerApp } from "../../src/app"
 import { createInitialState, type RottweilerState } from "../../src/state"
+
+const emittedMetrics: Record<string, number> = {}
+
+afterAll(() => {
+  const output = process.env.ROTTWEILER_PERF_OUTPUT
+  if (output === undefined || output === "") return
+  const expected = [
+    "tui_frame_p95_us",
+    "tui_frame_p999_us",
+    "tui_input_echo_p99_us",
+    "tui_vim_echo_p99_us",
+  ]
+  expect(Object.keys(emittedMetrics).sort()).toEqual(expected)
+  mkdirSync(dirname(output), { recursive: true })
+  const temporary = join(dirname(output), `.${crypto.randomUUID()}.tmp`)
+  writeFileSync(
+    temporary,
+    `${JSON.stringify({ schema_version: 1, metrics: emittedMetrics })}\n`,
+    { encoding: "utf8", mode: 0o600 },
+  )
+  renameSync(temporary, output)
+})
 
 describe("M4 executable TUI performance budgets", () => {
   let renderer: TestRenderer | undefined
@@ -88,6 +112,8 @@ describe("M4 executable TUI performance budgets", () => {
 
     const p95 = percentile(samples.slice(10), 0.95)
     const p999 = percentile(samples.slice(10), 0.999)
+    emittedMetrics.tui_frame_p95_us = Math.ceil(p95 * 1_000)
+    emittedMetrics.tui_frame_p999_us = Math.ceil(p999 * 1_000)
     expect(p95).toBeLessThan(16)
     expect(p999).toBeLessThan(33)
     expect(app.transcript.mountedEntryCount).toBeLessThan(24)
@@ -119,7 +145,7 @@ describe("M4 executable TUI performance budgets", () => {
     Bun.gc(true)
 
     const samples: number[] = []
-    const input = "responsivetypingwithoutblockingtherenderloop"
+    const input = "responsivetypingwithoutblockingtherenderloop".repeat(4)
     for (const key of input) {
       const started = Bun.nanoseconds()
       setup.mockInput.pressKey(key)
@@ -129,7 +155,10 @@ describe("M4 executable TUI performance budgets", () => {
     }
 
     expect(app.composer.value).toBe(input)
-    expect(percentile(samples.slice(5), 0.99)).toBeLessThan(16)
+    const p99 = percentile(samples.slice(5), 0.99)
+    expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
+    emittedMetrics.tui_input_echo_p99_us = Math.ceil(p99 * 1_000)
+    expect(p99).toBeLessThan(16)
   })
 
   test("Vim mode dispatch and insert echo stay below 16ms p99", async () => {
@@ -155,7 +184,7 @@ describe("M4 executable TUI performance budgets", () => {
     Bun.gc(true)
 
     const samples: number[] = []
-    const input = "vimmodestaysresponsiveundertyping"
+    const input = "vimmodestaysresponsiveundertyping".repeat(4)
     for (const key of input) {
       const started = Bun.nanoseconds()
       setup.mockInput.pressKey(key)
@@ -165,7 +194,10 @@ describe("M4 executable TUI performance budgets", () => {
     }
 
     expect(app.composer.value).toBe(input)
-    expect(percentile(samples.slice(5), 0.99)).toBeLessThan(16)
+    const p99 = percentile(samples.slice(5), 0.99)
+    expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
+    emittedMetrics.tui_vim_echo_p99_us = Math.ceil(p99 * 1_000)
+    expect(p99).toBeLessThan(16)
   })
 })
 

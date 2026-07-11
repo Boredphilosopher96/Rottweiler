@@ -10,7 +10,8 @@ cargo build --locked --release -p rw-cli
 root=$(mktemp -d "${TMPDIR:-/tmp}/rottweiler-perf.XXXXXX")
 trap 'rm -rf "$root"' EXIT HUP INT TERM
 
-python3 - "$repo" "$root" <<'PY'
+python3 - "$repo" "$root" "${ROTTWEILER_PERF_OUTPUT:-}" <<'PY'
+import json
 import math
 import os
 import pathlib
@@ -22,6 +23,7 @@ import time
 
 repo = pathlib.Path(sys.argv[1])
 root = pathlib.Path(sys.argv[2])
+output = pathlib.Path(sys.argv[3]) if sys.argv[3] else None
 built_binary = repo / "target/release/rw"
 binary = root / "rw"
 shutil.copyfile(built_binary, binary)
@@ -95,4 +97,16 @@ if turn_p99 >= 20:
     raise SystemExit(f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds 20ms")
 if built_binary.stat().st_size >= 25_000_000:
     raise SystemExit(f"release binary size {built_binary.stat().st_size} exceeds 25MB")
+if output is not None:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.name}.tmp")
+    temporary.write_text(json.dumps({
+        "schema_version": 1,
+        "metrics": {
+            "engine_binary_bytes": built_binary.stat().st_size,
+            "headless_print_p99_us": math.ceil(start_p99 * 1000),
+            "turn_overhead_p99_us": math.ceil(turn_p99 * 1000),
+        },
+    }, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(output)
 PY

@@ -23,6 +23,10 @@ const LAST_SEEN_FILE_ENV: &str = "ROTTWEILER_LAST_SEEN_FILE";
 const FORK_OPERATION_DIRECTORY_ENV: &str = "ROTTWEILER_FORK_OPERATION_DIRECTORY";
 const TUI_KEYBINDINGS_ENV: &str = "ROTTWEILER_TUI_KEYBINDINGS";
 
+type ShellBrokerResult = Result<(), crate::shell_broker::ShellBrokerError>;
+type ShellBrokerTask = tokio::task::JoinHandle<ShellBrokerResult>;
+type ShellBrokerReady = tokio::sync::oneshot::Receiver<Result<(), String>>;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StdioMode {
     Inherit,
@@ -53,6 +57,8 @@ pub struct SupervisorConfig {
     pub model: Option<String>,
     pub additional_workspaces: Vec<PathBuf>,
     pub dangerously_trust: bool,
+    pub in_memory_replay_script: Option<PathBuf>,
+    pub record_script_delay_ms: u64,
     pub shell_target: Option<crate::shell_broker::ShellTarget>,
     pub detach: bool,
     pub restart_policy: RestartPolicy,
@@ -89,6 +95,7 @@ pub enum SupervisorError {
     RestartBudgetExhausted,
     Readiness(io::Error),
     ShellBroker(String),
+    Signal(io::Error),
 }
 
 impl std::fmt::Display for SupervisorError {
@@ -106,6 +113,7 @@ impl std::fmt::Display for SupervisorError {
             Self::ShellBroker(error) => {
                 write!(formatter, "foreground-shell broker failed: {error}")
             }
+            Self::Signal(error) => write!(formatter, "could not monitor shutdown signals: {error}"),
         }
     }
 }
@@ -138,6 +146,7 @@ impl ResumeHandoff {
 pub enum ProcessSignal {
     Interrupt,
     Terminate,
+    Kill,
     WindowChanged,
 }
 
@@ -158,6 +167,11 @@ pub trait ProcessBackend: Send + Sync {
     }
 
     async fn wait_ready(&self, _socket: &Path, _token_file: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    async fn wait_shutdown_signal(&self) -> io::Result<()> {
+        std::future::pending::<()>().await;
         Ok(())
     }
 }
@@ -187,6 +201,7 @@ impl ManagedChild for TokioManagedChild {
         let signal = match signal {
             ProcessSignal::Interrupt => rustix::process::Signal::INT,
             ProcessSignal::Terminate => rustix::process::Signal::TERM,
+            ProcessSignal::Kill => rustix::process::Signal::KILL,
             ProcessSignal::WindowChanged => rustix::process::Signal::WINCH,
         };
         if let Some(group) = self.process_group {
@@ -254,6 +269,18 @@ impl ProcessBackend for TokioProcessBackend {
             }
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
+    }
+
+    async fn wait_shutdown_signal(&self) -> io::Result<()> {
+        let mut interrupt =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            _ = interrupt.recv() => {}
+            _ = terminate.recv() => {}
+        }
+        Ok(())
     }
 }
 
@@ -332,59 +359,171 @@ impl<B: ProcessBackend> Supervisor<B> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&self) -> Result<(), SupervisorError> {
         let mut budget = RestartBudget::new(self.config.restart_policy);
-        let mut engine = self.spawn_engine().await?;
-        let mut tui = self.spawn_tui_guarded(&mut engine).await?;
-        self.wait_engine_ready_guarded(&mut engine, &mut tui)
-            .await?;
-        let mut shell_broker = self.spawn_shell_broker().await?;
-        loop {
-            tokio::select! {
-                status = engine.wait() => {
-                    status.map_err(|source| SupervisorError::Wait { component: "engine", source })?;
-                    terminate_and_reap(&mut tui, "TUI").await?;
-                    self.backend.sleep(budget.failure_delay()?).await;
-                    engine = self.spawn_engine().await?;
-                    tui = self.spawn_tui_guarded(&mut engine).await?;
-                    self.wait_engine_ready_guarded(&mut engine, &mut tui).await?;
-                }
-                status = tui.wait() => {
-                    let status = status.map_err(|source| SupervisorError::Wait { component: "TUI", source })?;
-                    if status.success() {
-                        if self.config.detach {
-                            tokio::spawn(async move { let _ = engine.wait().await; });
-                        } else {
-                            terminate_and_reap(&mut engine, "engine").await?;
+        let mut engine = None;
+        let mut tui = None;
+        let mut shell_broker = None;
+        // Construct this future before the first spawn and poll it first in
+        // every startup race. Tokio installs the Unix handlers on that first
+        // poll, before any independently grouped child can exist.
+        let shutdown_signal = self.backend.wait_shutdown_signal();
+        tokio::pin!(shutdown_signal);
+        let managed_result: Result<(), SupervisorError> = async {
+            macro_rules! await_or_shutdown {
+                ($future:expr) => {{
+                    tokio::select! {
+                        biased;
+                        signal = &mut shutdown_signal => {
+                            signal.map_err(SupervisorError::Signal)?;
+                            None
                         }
-                        shell_broker.abort();
+                        output = $future => Some(output),
+                    }
+                }};
+            }
+
+            let Some(spawned) = await_or_shutdown!(self.spawn_engine()) else {
+                return Ok(());
+            };
+            engine = Some(spawned?);
+            let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
+                return Ok(());
+            };
+            tui = Some(spawned?);
+            let Some(readiness) = await_or_shutdown!(
+                self.backend
+                    .wait_ready(&self.config.socket, &self.config.token_file)
+            ) else {
+                return Ok(());
+            };
+            readiness.map_err(SupervisorError::Readiness)?;
+
+            let (broker_task, broker_ready) = self.start_shell_broker();
+            shell_broker = Some(broker_task);
+            if let Some(broker_ready) = broker_ready {
+                let Some(readiness) = await_or_shutdown!(broker_ready) else {
+                    return Ok(());
+                };
+                match readiness {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => return Err(SupervisorError::ShellBroker(error)),
+                    Err(error) => return Err(SupervisorError::ShellBroker(error.to_string())),
+                }
+            }
+
+            loop {
+                enum RuntimeEvent {
+                    Shutdown(io::Result<()>),
+                    Engine(io::Result<ExitStatus>),
+                    Tui(io::Result<ExitStatus>),
+                    Broker(Result<ShellBrokerResult, tokio::task::JoinError>),
+                }
+
+                let event = {
+                    let engine_child = engine
+                        .as_mut()
+                        .ok_or(SupervisorError::InvalidConfig("engine child missing"))?;
+                    let tui_child = tui
+                        .as_mut()
+                        .ok_or(SupervisorError::InvalidConfig("TUI child missing"))?;
+                    let broker_task = shell_broker
+                        .as_mut()
+                        .ok_or(SupervisorError::InvalidConfig("shell broker missing"))?;
+                    tokio::select! {
+                        biased;
+                        signal = &mut shutdown_signal => RuntimeEvent::Shutdown(signal),
+                        status = engine_child.wait() => RuntimeEvent::Engine(status),
+                        status = tui_child.wait() => RuntimeEvent::Tui(status),
+                        broker = broker_task => RuntimeEvent::Broker(broker),
+                    }
+                };
+
+                match event {
+                    RuntimeEvent::Shutdown(signal) => {
+                        signal.map_err(SupervisorError::Signal)?;
                         return Ok(());
                     }
-                    self.backend.sleep(budget.failure_delay()?).await;
-                    tui = self.spawn_tui_guarded(&mut engine).await?;
-                }
-                broker = &mut shell_broker => {
-                    let message = match broker {
-                        Ok(Ok(())) => "foreground-shell broker stopped unexpectedly".to_owned(),
-                        Ok(Err(error)) => error.to_string(),
-                        Err(error) => error.to_string(),
-                    };
-                    terminate_and_reap(&mut tui, "TUI").await?;
-                    terminate_and_reap(&mut engine, "engine").await?;
-                    return Err(SupervisorError::ShellBroker(message));
+                    RuntimeEvent::Engine(status) => {
+                        status.map_err(|source| SupervisorError::Wait {
+                            component: "engine",
+                            source,
+                        })?;
+                        engine.take();
+                        if let Some(mut child) = tui.take() {
+                            terminate_and_reap(&mut child, "TUI").await?;
+                        }
+                        let delay = budget.failure_delay()?;
+                        if await_or_shutdown!(self.backend.sleep(delay)).is_none() {
+                            return Ok(());
+                        }
+                        let Some(spawned) = await_or_shutdown!(self.spawn_engine()) else {
+                            return Ok(());
+                        };
+                        engine = Some(spawned?);
+                        let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
+                            return Ok(());
+                        };
+                        tui = Some(spawned?);
+                        let Some(readiness) = await_or_shutdown!(
+                            self.backend
+                                .wait_ready(&self.config.socket, &self.config.token_file)
+                        ) else {
+                            return Ok(());
+                        };
+                        readiness.map_err(SupervisorError::Readiness)?;
+                    }
+                    RuntimeEvent::Tui(status) => {
+                        let status = status.map_err(|source| SupervisorError::Wait {
+                            component: "TUI",
+                            source,
+                        })?;
+                        tui.take();
+                        if status.success() {
+                            if self.config.detach
+                                && let Some(mut detached_engine) = engine.take()
+                            {
+                                tokio::spawn(async move {
+                                    let _ = detached_engine.wait().await;
+                                });
+                            }
+                            return Ok(());
+                        }
+                        let delay = budget.failure_delay()?;
+                        if await_or_shutdown!(self.backend.sleep(delay)).is_none() {
+                            return Ok(());
+                        }
+                        let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
+                            return Ok(());
+                        };
+                        tui = Some(spawned?);
+                    }
+                    RuntimeEvent::Broker(broker) => {
+                        shell_broker.take();
+                        let message = match broker {
+                            Ok(Ok(())) => "foreground-shell broker stopped unexpectedly".to_owned(),
+                            Ok(Err(error)) => error.to_string(),
+                            Err(error) => error.to_string(),
+                        };
+                        return Err(SupervisorError::ShellBroker(message));
+                    }
                 }
             }
         }
+        .await;
+
+        let cleanup_result =
+            cleanup_managed_children(&mut engine, &mut tui, &mut shell_broker).await;
+        match managed_result {
+            Err(error) => Err(error),
+            Ok(()) => cleanup_result,
+        }
     }
 
-    async fn spawn_shell_broker(
-        &self,
-    ) -> Result<
-        tokio::task::JoinHandle<Result<(), crate::shell_broker::ShellBrokerError>>,
-        SupervisorError,
-    > {
+    fn start_shell_broker(&self) -> (ShellBrokerTask, Option<ShellBrokerReady>) {
         let Some(target) = self.config.shell_target.clone() else {
-            return Ok(tokio::spawn(std::future::pending()));
+            return (tokio::spawn(std::future::pending()), None);
         };
         let (ready, ready_rx) = tokio::sync::oneshot::channel();
         let config = crate::shell_broker::ShellBrokerConfig {
@@ -393,18 +532,10 @@ impl<B: ProcessBackend> Supervisor<B> {
             session_id: rw_core::SessionId(self.config.session_id.clone()),
             target,
         };
-        let task = tokio::spawn(crate::shell_broker::run(config, ready));
-        match ready_rx.await {
-            Ok(Ok(())) => Ok(task),
-            Ok(Err(error)) => {
-                task.abort();
-                Err(SupervisorError::ShellBroker(error))
-            }
-            Err(error) => {
-                task.abort();
-                Err(SupervisorError::ShellBroker(error.to_string()))
-            }
-        }
+        (
+            tokio::spawn(crate::shell_broker::run(config, ready)),
+            Some(ready_rx),
+        )
     }
 
     async fn spawn_engine(&self) -> Result<B::Child, SupervisorError> {
@@ -421,23 +552,6 @@ impl<B: ProcessBackend> Supervisor<B> {
             })
     }
 
-    async fn wait_engine_ready_guarded(
-        &self,
-        engine: &mut B::Child,
-        tui: &mut B::Child,
-    ) -> Result<(), SupervisorError> {
-        if let Err(error) = self
-            .backend
-            .wait_ready(&self.config.socket, &self.config.token_file)
-            .await
-        {
-            let _ = terminate_and_reap(tui, "TUI").await;
-            let _ = terminate_and_reap(engine, "engine").await;
-            return Err(SupervisorError::Readiness(error));
-        }
-        Ok(())
-    }
-
     async fn spawn_tui(&self) -> Result<B::Child, SupervisorError> {
         let persisted = read_resume_handoff(&self.config.last_seen_file);
         self.backend
@@ -450,16 +564,6 @@ impl<B: ProcessBackend> Supervisor<B> {
                 component: "TUI",
                 source,
             })
-    }
-
-    async fn spawn_tui_guarded(&self, engine: &mut B::Child) -> Result<B::Child, SupervisorError> {
-        match self.spawn_tui().await {
-            Ok(tui) => Ok(tui),
-            Err(error) => {
-                terminate_and_reap(engine, "engine").await?;
-                Err(error)
-            }
-        }
     }
 }
 
@@ -491,11 +595,24 @@ fn remove_stale_runtime_file(path: &Path, expected: RuntimeFileKind) -> io::Resu
 }
 
 fn engine_spec(config: &SupervisorConfig) -> ChildSpec {
-    let mut args = vec![
+    let mut args = Vec::new();
+    if let Some(script) = &config.in_memory_replay_script {
+        args.extend([
+            OsString::from("--in-memory-replay-script"),
+            script.as_os_str().to_owned(),
+        ]);
+    }
+    if config.record_script_delay_ms != 0 {
+        args.extend([
+            OsString::from("--record-script-delay-ms"),
+            OsString::from(config.record_script_delay_ms.to_string()),
+        ]);
+    }
+    args.extend([
         OsString::from("serve"),
         OsString::from("--max-turns"),
         OsString::from(config.max_turns.to_string()),
-    ];
+    ]);
     if let Some(mode) = config.permission_mode {
         args.extend([
             OsString::from("--permission-mode"),
@@ -515,7 +632,13 @@ fn engine_spec(config: &SupervisorConfig) -> ChildSpec {
         program: config.rw_executable.clone(),
         args,
         env: connection_env(config, None),
-        stdio: StdioMode::Null,
+        stdio: if config.in_memory_replay_script.is_some() {
+            // Hidden deterministic harnesses retain engine diagnostics in the
+            // owning PTY. Production live-provider launches remain quiet.
+            StdioMode::Inherit
+        } else {
+            StdioMode::Null
+        },
         new_process_group: true,
     }
 }
@@ -584,18 +707,55 @@ fn read_resume_handoff(path: &Path) -> Option<SequenceId> {
     value.trim().parse::<u64>().ok().map(SequenceId)
 }
 
+async fn cleanup_managed_children<C: ManagedChild>(
+    engine: &mut Option<C>,
+    tui: &mut Option<C>,
+    shell_broker: &mut Option<ShellBrokerTask>,
+) -> Result<(), SupervisorError> {
+    if let Some(task) = shell_broker.take() {
+        task.abort();
+        let _ = task.await;
+    }
+    let tui_result = if let Some(mut child) = tui.take() {
+        terminate_and_reap(&mut child, "TUI").await
+    } else {
+        Ok(())
+    };
+    let engine_result = if let Some(mut child) = engine.take() {
+        terminate_and_reap(&mut child, "engine").await
+    } else {
+        Ok(())
+    };
+    tui_result.and(engine_result)
+}
+
 async fn terminate_and_reap(
     child: &mut impl ManagedChild,
     component: &'static str,
 ) -> Result<(), SupervisorError> {
+    terminate_and_reap_with_grace(child, component, Duration::from_secs(5)).await
+}
+
+async fn terminate_and_reap_with_grace(
+    child: &mut impl ManagedChild,
+    component: &'static str,
+    grace: Duration,
+) -> Result<(), SupervisorError> {
+    let _ = child.signal_group(ProcessSignal::Terminate);
+    if matches!(tokio::time::timeout(grace, child.wait()).await, Ok(Ok(_))) {
+        return Ok(());
+    }
     child
-        .signal_group(ProcessSignal::Terminate)
+        .signal_group(ProcessSignal::Kill)
         .map_err(|source| SupervisorError::Wait { component, source })?;
-    child
-        .wait()
+    tokio::time::timeout(grace, child.wait())
         .await
-        .map_err(|source| SupervisorError::Wait { component, source })?;
-    Ok(())
+        .map_err(|_| SupervisorError::Wait {
+            component,
+            source: io::Error::new(io::ErrorKind::TimedOut, "child did not exit after SIGKILL"),
+        })?
+        .map(|_| ())
+        .map_err(|source| SupervisorError::Wait { component, source })
 }
 
 fn validate_private_path(path: &Path) -> Result<(), SupervisorError> {
@@ -633,6 +793,8 @@ mod tests {
             model: None,
             additional_workspaces: Vec::new(),
             dangerously_trust: false,
+            in_memory_replay_script: None,
+            record_script_delay_ms: 0,
             shell_target: None,
             detach: false,
             restart_policy: RestartPolicy::default(),
@@ -723,6 +885,33 @@ mod tests {
     }
 
     #[test]
+    fn engine_restart_preserves_hidden_deterministic_replay_configuration() {
+        let mut config = fixture_config();
+        config.in_memory_replay_script = Some(PathBuf::from("/private/fixture/soak.json"));
+        config.record_script_delay_ms = 17;
+
+        let spec = engine_spec(&config);
+        assert!(spec.args.windows(2).any(|pair| {
+            pair == [
+                OsString::from("--in-memory-replay-script"),
+                OsString::from("/private/fixture/soak.json"),
+            ]
+        }));
+        assert!(spec.args.windows(2).any(|pair| {
+            pair == [
+                OsString::from("--record-script-delay-ms"),
+                OsString::from("17"),
+            ]
+        }));
+        assert!(
+            !tui_spec(&config, None)
+                .args
+                .iter()
+                .any(|argument| argument == "--in-memory-replay-script")
+        );
+    }
+
+    #[test]
     fn restart_budget_is_bounded_exponential() {
         let mut budget = RestartBudget::new(RestartPolicy {
             max_consecutive_failures: 3,
@@ -751,6 +940,11 @@ mod tests {
     enum Scenario {
         EngineCrash,
         TuiCrash,
+        ShutdownSignal,
+        StartupSignal,
+        ReadinessFailure,
+        EngineWaitError,
+        TuiRestartBudget,
     }
 
     struct MockBackend {
@@ -763,6 +957,7 @@ mod tests {
     struct MockChild {
         name: &'static str,
         outcome: Option<ExitStatus>,
+        wait_error_once: AtomicBool,
         terminated: AtomicBool,
         lifecycle: Arc<Mutex<Vec<String>>>,
     }
@@ -770,6 +965,13 @@ mod tests {
     #[async_trait]
     impl ManagedChild for MockChild {
         async fn wait(&mut self) -> io::Result<ExitStatus> {
+            if self.wait_error_once.swap(false, Ordering::AcqRel) {
+                self.lifecycle
+                    .lock()
+                    .expect("lifecycle")
+                    .push(format!("wait-error:{}", self.name));
+                return Err(io::Error::other("injected child wait failure"));
+            }
             while self.outcome.is_none() && !self.terminated.load(Ordering::Acquire) {
                 tokio::task::yield_now().await;
             }
@@ -790,6 +992,29 @@ mod tests {
         }
     }
 
+    struct IgnoringTermChild {
+        killed: AtomicBool,
+        signals: Arc<Mutex<Vec<ProcessSignal>>>,
+    }
+
+    #[async_trait]
+    impl ManagedChild for IgnoringTermChild {
+        async fn wait(&mut self) -> io::Result<ExitStatus> {
+            while !self.killed.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+            Ok(ExitStatus::from_raw(9))
+        }
+
+        fn signal_group(&self, signal: ProcessSignal) -> io::Result<()> {
+            self.signals.lock().expect("signals").push(signal);
+            if signal == ProcessSignal::Kill {
+                self.killed.store(true, Ordering::Release);
+            }
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl ProcessBackend for MockBackend {
         type Child = MockChild;
@@ -802,22 +1027,43 @@ mod tests {
                 .lock()
                 .expect("lifecycle")
                 .push(if engine { "spawn:engine" } else { "spawn:tui" }.to_owned());
-            let (name, outcome) = match (self.scenario, index, engine) {
+            let (name, outcome, wait_error_once) = match (self.scenario, index, engine) {
                 (Scenario::EngineCrash, 0, true) => {
-                    ("engine-1", Some(ExitStatus::from_raw(1 << 8)))
+                    ("engine-1", Some(ExitStatus::from_raw(1 << 8)), false)
                 }
-                (Scenario::EngineCrash, 1, false) => ("tui-1", None),
-                (Scenario::EngineCrash, 2, true) => ("engine-2", None),
+                (
+                    Scenario::EngineCrash
+                    | Scenario::ShutdownSignal
+                    | Scenario::ReadinessFailure
+                    | Scenario::EngineWaitError,
+                    1,
+                    false,
+                ) => ("tui-1", None, false),
+                (Scenario::EngineCrash, 2, true) => ("engine-2", None, false),
                 (Scenario::EngineCrash, 3, false) | (Scenario::TuiCrash, 2, false) => {
-                    ("tui-2", Some(ExitStatus::from_raw(0)))
+                    ("tui-2", Some(ExitStatus::from_raw(0)), false)
                 }
-                (Scenario::TuiCrash, 0, true) => ("engine-1", None),
-                (Scenario::TuiCrash, 1, false) => ("tui-1", Some(ExitStatus::from_raw(1 << 8))),
+                (
+                    Scenario::TuiCrash
+                    | Scenario::ShutdownSignal
+                    | Scenario::ReadinessFailure
+                    | Scenario::TuiRestartBudget,
+                    0,
+                    true,
+                ) => ("engine-1", None, false),
+                (Scenario::TuiCrash | Scenario::TuiRestartBudget, 1, false) => {
+                    ("tui-1", Some(ExitStatus::from_raw(1 << 8)), false)
+                }
+                (Scenario::EngineWaitError, 0, true) => ("engine-1", None, true),
+                (Scenario::TuiRestartBudget, 2, false) => {
+                    ("tui-2", Some(ExitStatus::from_raw(1 << 8)), false)
+                }
                 _ => return Err(io::Error::other("unexpected mock spawn")),
             };
             Ok(MockChild {
                 name,
                 outcome,
+                wait_error_once: AtomicBool::new(wait_error_once),
                 terminated: AtomicBool::new(false),
                 lifecycle: Arc::clone(&self.lifecycle),
             })
@@ -835,11 +1081,31 @@ mod tests {
                 .lock()
                 .expect("lifecycle")
                 .push("ready:engine".to_owned());
+            if matches!(self.scenario, Scenario::ReadinessFailure) {
+                return Err(io::Error::other("injected readiness failure"));
+            }
+            Ok(())
+        }
+
+        async fn wait_shutdown_signal(&self) -> io::Result<()> {
+            if matches!(self.scenario, Scenario::StartupSignal) {
+                return Ok(());
+            }
+            if matches!(self.scenario, Scenario::ShutdownSignal) {
+                while self.count.load(Ordering::Acquire) < 2 {
+                    tokio::task::yield_now().await;
+                }
+                return Ok(());
+            }
+            std::future::pending::<()>().await;
             Ok(())
         }
     }
 
-    async fn run_scenario(scenario: Scenario) -> (Vec<ChildSpec>, Vec<String>) {
+    async fn run_scenario_with_config(
+        scenario: Scenario,
+        config: SupervisorConfig,
+    ) -> (Result<(), SupervisorError>, Vec<ChildSpec>, Vec<String>) {
         let spawned = Arc::new(Mutex::new(Vec::new()));
         let lifecycle = Arc::new(Mutex::new(Vec::new()));
         let backend = MockBackend {
@@ -848,13 +1114,18 @@ mod tests {
             lifecycle: Arc::clone(&lifecycle),
             count: AtomicUsize::new(0),
         };
-        Supervisor::new(fixture_config(), backend, ResumeHandoff::default())
+        let result = Supervisor::new(config, backend, ResumeHandoff::default())
             .expect("supervisor")
             .run()
-            .await
-            .expect("supervisor run");
+            .await;
         let specs = spawned.lock().expect("spawns").clone();
         let events = lifecycle.lock().expect("lifecycle").clone();
+        (result, specs, events)
+    }
+
+    async fn run_scenario(scenario: Scenario) -> (Vec<ChildSpec>, Vec<String>) {
+        let (result, specs, events) = run_scenario_with_config(scenario, fixture_config()).await;
+        result.expect("supervisor run");
         (specs, events)
     }
 
@@ -883,5 +1154,100 @@ mod tests {
         assert_eq!(specs[1].env, specs[2].env);
         assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
         assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn detach_keeps_the_engine_group_alive_after_normal_tui_exit() {
+        let mut config = fixture_config();
+        config.detach = true;
+        let (result, specs, lifecycle) = run_scenario_with_config(Scenario::TuiCrash, config).await;
+        result.expect("detached supervisor run");
+        assert_eq!(specs.len(), 3);
+        assert!(
+            !lifecycle
+                .iter()
+                .any(|event| event == "signal:engine-1:Terminate")
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_reaps_tui_and_independent_engine_group() {
+        let (specs, lifecycle) = run_scenario(Scenario::ShutdownSignal).await;
+        assert_eq!(specs.len(), 2);
+        assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
+        assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn startup_signal_is_armed_before_the_first_child_spawn() {
+        let (specs, lifecycle) = run_scenario(Scenario::StartupSignal).await;
+        assert!(specs.is_empty());
+        assert!(lifecycle.is_empty());
+    }
+
+    #[tokio::test]
+    async fn readiness_failure_cleans_up_every_started_child() {
+        let (result, specs, lifecycle) =
+            run_scenario_with_config(Scenario::ReadinessFailure, fixture_config()).await;
+        assert!(matches!(result, Err(SupervisorError::Readiness(_))));
+        assert_eq!(specs.len(), 2);
+        assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
+        assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn child_wait_error_still_cleans_up_both_process_groups() {
+        let (result, specs, lifecycle) =
+            run_scenario_with_config(Scenario::EngineWaitError, fixture_config()).await;
+        assert!(matches!(
+            result,
+            Err(SupervisorError::Wait {
+                component: "engine",
+                ..
+            })
+        ));
+        assert_eq!(specs.len(), 2);
+        assert!(lifecycle.contains(&"wait-error:engine-1".to_owned()));
+        assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn restart_budget_exhaustion_reaps_the_surviving_engine() {
+        let mut config = fixture_config();
+        config.restart_policy.max_consecutive_failures = 1;
+        let (result, specs, lifecycle) =
+            run_scenario_with_config(Scenario::TuiRestartBudget, config).await;
+        assert!(matches!(
+            result,
+            Err(SupervisorError::RestartBudgetExhausted)
+        ));
+        assert_eq!(specs.len(), 3);
+        assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
+        assert!(lifecycle.contains(&"wait:tui-2".to_owned()));
+        assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn wedged_child_is_killed_after_bounded_shutdown_grace() {
+        let signals = Arc::new(Mutex::new(Vec::new()));
+        let mut child = IgnoringTermChild {
+            killed: AtomicBool::new(false),
+            signals: Arc::clone(&signals),
+        };
+
+        terminate_and_reap_with_grace(&mut child, "fixture", Duration::from_millis(1))
+            .await
+            .expect("bounded reap");
+        assert_eq!(
+            *signals.lock().expect("signals"),
+            [ProcessSignal::Terminate, ProcessSignal::Kill]
+        );
     }
 }

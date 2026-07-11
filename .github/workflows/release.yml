@@ -79,6 +79,16 @@ jobs:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
+      - run: mkdir -p perf-results
+      - name: Enforce exact-tag startup and protocol performance budgets
+        run: |
+          ROTTWEILER_PERF_OUTPUT=perf-results/headless.json crates/rw-cli/tests/perf_gate.sh
+          ROTTWEILER_PERF_OUTPUT=perf-results/m4.json crates/rw-cli/tests/m4_release_gate.sh
+          ROTTWEILER_PERF_OUTPUT=perf-results/m8.json crates/rw-cli/tests/m8_release_gate.sh
+      - run: bun test test/perf/performance.test.ts
+        working-directory: packages/tui
+        env:
+          ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/perf-results/tui.json
       - name: Build deterministic size-gated archive
         id: archive
         shell: bash
@@ -88,6 +98,26 @@ jobs:
           test -f "$archive"
           test "$(basename "$archive")" = "rottweiler-${GITHUB_REF_NAME#v}-${{ matrix.platform }}.tar.gz"
           printf 'path=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+      - name: Enforce checked-in platform baseline without waivers
+        run: >-
+          python3 scripts/check-perf-baseline.py
+          --baseline benchmarks/performance-baseline.json
+          --platform "${{ matrix.platform }}"
+          --suite core
+          --require-measured
+          --measurement perf-results/headless.json
+          --measurement perf-results/m4.json
+          --measurement perf-results/m8.json
+          --measurement perf-results/tui.json
+          --output perf-results/baseline-result.json
+      - name: Retain exact-tag performance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: performance-${{ matrix.platform }}-${{ github.ref_name }}
+          path: perf-results
+          if-no-files-found: warn
+          retention-days: 90
       - name: Attest archive provenance
         uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
         with:
@@ -101,9 +131,318 @@ jobs:
           retention-days: 7
           compression-level: 0
 
+  release-gate:
+    name: Exact-tag v1 acceptance gate
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    environment: release
+    permissions:
+      contents: read
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust and Bun toolchains
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal --component clippy,rustfmt
+          rustup override set 1.94.1
+          cargo install --locked cargo-audit --version 0.22.1
+          cargo install --locked cargo-deny --version 0.19.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - name: Global Rust, protocol, architecture, docs, and supply-chain gates
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+          cargo test --locked --workspace --all-features
+          cargo run --locked --quiet -p xtask -- codegen --check
+          python3 scripts/check-dependency-direction.py
+          python3 scripts/check-network-boundaries.py
+          python3 -m unittest discover -s scripts/tests -p 'test_*.py'
+          RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
+          cargo deny check
+          cargo audit
+      - name: Plugin SDK, docs, and OpenTUI gates
+        run: |
+          for package in packages/plugin-sdk packages/tui; do
+            bun install --cwd "$package" --frozen-lockfile
+            bun test --cwd "$package"
+            bun run --cwd "$package" typecheck
+            bun run --cwd "$package" build
+          done
+          bun test --cwd packages/plugin-docs
+          bun run --cwd packages/plugin-docs build
+      - name: Validate protected fourteen-day dogfood evidence
+        env:
+          DOGFOOD_LEDGER_B64: ${{ secrets.ROTTWEILER_DOGFOOD_LEDGER_B64 }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          encoded = os.environ.pop("DOGFOOD_LEDGER_B64", "")
+          try:
+              payload = base64.b64decode(encoded, validate=True)
+          except Exception as error:
+              raise SystemExit("dogfood ledger secret is not canonical base64") from error
+          path = Path(os.environ["RUNNER_TEMP"]) / "dogfood-ledger.jsonl"
+          descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+          with os.fdopen(descriptor, "wb") as output:
+              output.write(payload)
+              output.flush()
+              os.fsync(output.fileno())
+          PY
+          python3 scripts/check-dogfood-gate.py "$RUNNER_TEMP/dogfood-ledger.jsonl" \
+            --through "$(date -u +%F)" | tee dogfood-gate-result.json
+          rm -f "$RUNNER_TEMP/dogfood-ledger.jsonl"
+      - name: Paid two-family record and network-denied replay canary
+        env:
+          RW_LIVE_SMOKE: accept-paid-requests
+          RW_LIVE_ANTHROPIC_MODEL: ${{ vars.ROTTWEILER_LIVE_ANTHROPIC_MODEL }}
+          RW_LIVE_OPENAI_MODEL: ${{ vars.ROTTWEILER_LIVE_OPENAI_MODEL }}
+        run: |
+          test -n "$OPENAI_API_KEY"
+          test -n "$ANTHROPIC_API_KEY"
+          test -n "$RW_LIVE_ANTHROPIC_MODEL"
+          test -n "$RW_LIVE_OPENAI_MODEL"
+          live_home=$(mktemp -d "$RUNNER_TEMP/rottweiler-live-home.XXXXXX")
+          live_fixtures=$(mktemp -d "$RUNNER_TEMP/rottweiler-live-fixtures.XXXXXX")
+          chmod 700 "$live_home" "$live_fixtures"
+          printf '%s\n' \
+            '[providers.anthropic]' 'kind = "anthropic"' '' \
+            '[providers.openai]' 'kind = "openai"' > "$live_home/config.toml"
+          chmod 600 "$live_home/config.toml"
+          ROTTWEILER_HOME="$live_home" RW_LIVE_SMOKE_FIXTURE_DIR="$live_fixtures" \
+            cargo test --locked -p rw-core --test live_smoke_credentials \
+              credential_store_two_family_record_and_offline_replay \
+              -- --ignored --exact --nocapture
+          rm -rf "$live_home" "$live_fixtures"
+      - name: Retain non-secret acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-gate-evidence-${{ github.ref_name }}
+          path: dogfood-gate-result.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  release-terminal-bench:
+    name: Exact-tag Terminal-Bench capability gate
+    needs: build
+    runs-on: [self-hosted, Linux, X64, terminal-bench]
+    timeout-minutes: 720
+    environment: release
+    permissions:
+      contents: read
+    env:
+      ROTTWEILER_EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+      ROTTWEILER_EVAL_MODEL: ${{ vars.ROTTWEILER_EVAL_MODEL }}
+      ROTTWEILER_EVAL_CONCURRENCY: "4"
+      ROTTWEILER_EVAL_OUTPUT_DIR: ${{ github.workspace }}/terminal-bench-evidence
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-linux-x86_64
+          path: dist/release
+      - name: Install pinned Harbor evaluation harness
+        run: pipx install --force harbor==0.18.0
+      - name: Run exact release archive through the pinned 20-task capability gate
+        run: |
+          archive=$(find dist/release -maxdepth 1 -type f -name 'rottweiler-*-linux-x86_64.tar.gz' -print)
+          test -n "$archive"
+          test "$(printf '%s\n' "$archive" | wc -l)" -eq 1
+          ROTTWEILER_RELEASE_ARCHIVE="$archive" scripts/run-terminal-bench.sh
+      - name: Enforce protected Terminal-Bench baseline
+        env:
+          TERMINAL_BENCH_BASELINE_JSON: ${{ vars.ROTTWEILER_TERMINAL_BENCH_BASELINE_JSON }}
+        run: |
+          test -n "$TERMINAL_BENCH_BASELINE_JSON"
+          printf '%s\n' "$TERMINAL_BENCH_BASELINE_JSON" > terminal-bench-baseline.json
+          archive=$(find dist/release -maxdepth 1 -type f -name 'rottweiler-*-linux-x86_64.tar.gz' -print)
+          python3 scripts/check-terminal-bench.py terminal-bench-evidence terminal-bench-baseline.json \
+            --expected-git "$GITHUB_SHA" --archive "$archive" \
+            | tee terminal-bench-evidence/rottweiler-gate-result.json
+      - name: Retain complete Harbor evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-terminal-bench-${{ github.ref_name }}
+          path: terminal-bench-evidence
+          if-no-files-found: warn
+          retention-days: 90
+
+  release-soak:
+    name: Exact-tag eight-hour soak (${{ matrix.platform }})
+    needs: build
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 510
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: '["self-hosted","macOS","ARM64","soak"]'
+          - platform: linux-x86_64
+            runner: '["self-hosted","Linux","X64","soak"]'
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+      ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
+      ROTTWEILER_UPDATE_ROOT_THRESHOLD: ${{ vars.ROTTWEILER_UPDATE_ROOT_THRESHOLD }}
+      ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
+      ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/soak-release
+      - name: Install the exact uploaded release generation
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(find dist/soak-release -maxdepth 1 -type f -name "rottweiler-*-${{ matrix.platform }}.tar.gz" -print)
+          test -n "$archive"
+          test "$(printf '%s\n' "$archive" | wc -l | tr -d ' ')" -eq 1
+          root="$RUNNER_TEMP/rottweiler-release-soak-${GITHUB_RUN_ID}-${{ matrix.platform }}"
+          rm -rf "$root"
+          mkdir -p "$root/extracted"
+          ARCHIVE="$archive" PLATFORM="${{ matrix.platform }}" python3 - <<'PY'
+          import os
+          from pathlib import PurePosixPath
+          import tarfile
+
+          archive = os.environ["ARCHIVE"]
+          platform = os.environ["PLATFORM"]
+          native = "libopentui.dylib" if platform.startswith("darwin-") else "libopentui.so"
+          with tarfile.open(archive, "r:gz") as bundle:
+              members = bundle.getmembers()
+          roots = {PurePosixPath(member.name).parts[0] for member in members if member.name}
+          if len(roots) != 1:
+              raise SystemExit("release archive must contain exactly one root")
+          release_root = next(iter(roots))
+          allowed = {
+              release_root,
+              f"{release_root}/bin",
+              f"{release_root}/install.sh",
+              f"{release_root}/bin/rw",
+              f"{release_root}/bin/rottweiler-tui",
+              f"{release_root}/bin/{native}",
+          }
+          names = {member.name.rstrip("/") for member in members}
+          if names != allowed or len(members) != len(allowed):
+              raise SystemExit("release archive does not match the exact install allowlist")
+          if any(
+              PurePosixPath(member.name).is_absolute()
+              or ".." in PurePosixPath(member.name).parts
+              or not (member.isdir() or member.isfile())
+              for member in members
+          ):
+              raise SystemExit("release archive contains an unsafe entry")
+          if sum(member.size for member in members) > 150 * 1024 * 1024:
+              raise SystemExit("release archive exceeds the expanded-size bound")
+          PY
+          tar -xzf "$archive" -C "$root/extracted"
+          release=$(find "$root/extracted" -mindepth 1 -maxdepth 1 -type d -print)
+          test -n "$release"
+          test "$(printf '%s\n' "$release" | wc -l | tr -d ' ')" -eq 1
+          "$release/install.sh" --prefix "$root/installed"
+          printf 'ROTTWEILER_SOAK_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
+          printf 'ROTTWEILER_SOAK_RW=%s\n' "$root/installed/current/bin/rw" >> "$GITHUB_ENV"
+          printf 'ROTTWEILER_SOAK_TUI=%s\n' "$root/installed/current/bin/rottweiler-tui" >> "$GITHUB_ENV"
+      - run: >-
+          python3 scripts/run-soak.py
+          --rw "$ROTTWEILER_SOAK_RW"
+          --tui "$ROTTWEILER_SOAK_TUI"
+          --duration-seconds 28800
+          --output soak-result.json
+      - run: >-
+          python3 scripts/check-perf-baseline.py
+          --baseline benchmarks/performance-baseline.json
+          --platform "${{ matrix.platform }}"
+          --suite soak
+          --require-measured
+          --measurement soak-result.json
+          --output soak-baseline-result.json
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-soak-${{ matrix.platform }}-${{ github.ref_name }}
+          path: |
+            soak-result.json
+            soak-baseline-result.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Remove installed soak generation
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${ROTTWEILER_SOAK_ROOT:-}" ]; then
+            rm -rf "$ROTTWEILER_SOAK_ROOT"
+          fi
+
+  wsl2-acceptance:
+    name: Exact-tag WSL2 acceptance
+    needs: build
+    runs-on: [self-hosted, Windows, X64, wsl2]
+    timeout-minutes: 90
+    env:
+      ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
+      ROTTWEILER_UPDATE_ROOT_THRESHOLD: ${{ vars.ROTTWEILER_UPDATE_ROOT_THRESHOLD }}
+      ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
+      ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-linux-x86_64
+          path: dist/wsl-release
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          wsl.exe --status
+          if ($LASTEXITCODE -ne 0) { throw "WSL2 is unavailable" }
+          $workspace = (wsl.exe wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "checkout path could not be translated into WSL" }
+          if (-not $workspace.StartsWith("/mnt/")) { throw "checkout is not visible through WSL" }
+          $archives = @(Get-ChildItem -Path "$env:GITHUB_WORKSPACE/dist/wsl-release" -File -Filter "rottweiler-*-linux-x86_64.tar.gz")
+          if ($archives.Count -ne 1) { throw "expected exactly one Linux release archive" }
+          $archive = (wsl.exe wslpath -a "$($archives[0].FullName)").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "release archive path could not be translated into WSL" }
+          if (-not $archive.StartsWith("/mnt/")) { throw "release archive is not visible through WSL" }
+          wsl.exe --exec bash "$workspace/scripts/wsl-acceptance.sh" "$workspace" "$archive"
+          if ($LASTEXITCODE -ne 0) { throw "WSL release acceptance failed" }
+
+  release-linux-security:
+    name: Exact-tag native Linux sandbox security acceptance
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - run: crates/rw-sandbox/tests/linux_security_gate.sh
+
   sign-and-publish:
     name: Sign metadata and publish
-    needs: build
+    needs: [build, release-gate, release-terminal-bench, release-soak, wsl2-acceptance, release-linux-security]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -137,6 +476,47 @@ jobs:
             *) echo 'ROTTWEILER_UPDATE_BASE_URL must end with /' >&2; exit 1 ;;
           esac
           test "$(find dist/unsigned -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')" -eq 2
+      - name: Fetch prior signed channel metadata for secure carry-forward
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/previous
+          metadata_version=$(python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          stable = json.loads(Path("release/update/stable.spec.json").read_text())["version"]
+          beta = json.loads(Path("release/update/beta.spec.json").read_text())["version"]
+          if not isinstance(stable, int) or isinstance(stable, bool) or stable < 1 or beta != stable:
+              raise SystemExit("channel specs must use one positive metadata version")
+          print(stable)
+          PY
+          )
+          for channel in stable beta; do
+            temporary="dist/previous/$channel.json.tmp"
+            status=$(curl \
+              --silent --show-error \
+              --proto '=https' \
+              --tlsv1.2 \
+              --max-redirs 0 \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --max-filesize 1048576 \
+              --output "$temporary" \
+              --write-out '%{http_code}' \
+              "${ROTTWEILER_UPDATE_BASE_URL}${channel}.json")
+            case "$status" in
+              200) mv "$temporary" "dist/previous/$channel.json" ;;
+              404)
+                rm -f "$temporary"
+                test "$metadata_version" -eq 1 || {
+                  echo "prior $channel metadata is mandatory after version 1" >&2
+                  exit 1
+                }
+                ;;
+              *) echo "prior $channel metadata returned HTTP $status" >&2; exit 1 ;;
+            esac
+          done
       - name: Sign release metadata with online role only
         shell: bash
         env:
@@ -197,15 +577,28 @@ jobs:
             test -n "$binding"
             release_key_args+=(--release-key "$binding")
           done < "$manifest"
+          previous_args=()
+          if [ -f dist/previous/stable.json ]; then
+            previous_args+=(--previous-stable dist/previous/stable.json)
+          fi
+          if [ -f dist/previous/beta.json ]; then
+            previous_args+=(--previous-beta dist/previous/beta.json)
+          fi
+          release_now_unix=$(date -u +%s)
+          case "$release_now_unix" in
+            ''|*[!0-9]*) echo 'fixed release signing time must be Unix seconds' >&2; exit 1 ;;
+          esac
           cargo xtask sign-update release \
             --root-chain release/update/root-chain.json \
             --stable-spec release/update/stable.spec.json \
             --beta-spec release/update/beta.spec.json \
             --base-url "$ROTTWEILER_UPDATE_BASE_URL" \
+            --now-unix "$release_now_unix" \
             --artifact "dist/unsigned/rottweiler-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz" \
             --platform darwin-arm64 \
             --artifact "dist/unsigned/rottweiler-${GITHUB_REF_NAME#v}-linux-x86_64.tar.gz" \
             --platform linux-x86_64 \
+            "${previous_args[@]}" \
             "${release_key_args[@]}" \
             --output dist/signed
           rm -rf "$private"
