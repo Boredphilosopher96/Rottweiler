@@ -30,20 +30,20 @@ use rw_providers::{
     ProviderRequest, ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition,
 };
 use rw_tools::{
-    AskUserInput, CancellationToken, MutationScope, QuestionAsker, ToolContext, ToolDescriptor,
-    ToolError, ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult,
+    ApprovalPreview, AskUserInput, CancellationToken, MutationScope, QuestionAsker, ToolContext,
+    ToolDescriptor, ToolError, ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult,
 };
 use rw_types::config::{BudgetConfig, CompactionConfig};
 use rw_types::{
-    AccountingAttribution, Answer, ApprovalDecision, Attachment, AttachmentData, Block,
-    BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId, ClientRole,
-    CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId, ContextItemKind,
-    ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot, EngineError,
-    EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias, PROTOCOL_VERSION,
-    PromptDump, PromptTool, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
-    RewindTarget, Role, SequenceId, SessionId, ShellId, StoredAttachment, ToolCallId, ToolOutput,
-    ToolOutputPart, ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
-    UnifiedDiff, UnrestorablePath, Usage,
+    AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
+    Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
+    ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId,
+    ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot,
+    EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias,
+    PROTOCOL_VERSION, PromptDump, PromptTool, Question, QuestionId, QuestionOption,
+    QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId, SessionId, ShellId,
+    StoredAttachment, ToolCallId, ToolOutput, ToolOutputPart, ToolOutputStream, Turn,
+    TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -118,25 +118,50 @@ impl PreparedUserMessage {
     }
 }
 
-fn permission_diff(request: &PermissionRequest) -> Option<UnifiedDiff> {
-    let path = request.arguments.get("path")?.as_str()?.to_owned();
-    let (before, after) = match request.tool_name.as_str() {
-        "edit" => (
-            request.arguments.get("old")?.as_str()?.to_owned(),
-            request.arguments.get("new")?.as_str()?.to_owned(),
-        ),
-        "write" => (
-            String::new(),
-            request.arguments.get("content")?.as_str()?.to_owned(),
-        ),
-        _ => return None,
+fn approval_diff(request: &PermissionRequest, preview: &ApprovalPreview) -> Option<UnifiedDiff> {
+    let path = preview.path.to_str()?.to_owned();
+    let before = match &preview.before {
+        Some(bytes) => std::str::from_utf8(bytes).ok()?,
+        None => "",
+    };
+    let after = std::str::from_utf8(&preview.after).ok()?;
+    let before_label = if preview.before.is_some() {
+        format!("a/{path}")
+    } else {
+        "/dev/null".to_owned()
     };
     let full_diff = format!(
-        "--- a/{path}\n+++ b/{path}\n@@ proposed change @@\n-{}\n+{}\n",
+        "--- {before_label}\n+++ b/{path}\n@@ approved full-file change @@\n-{}\n+{}\n",
         before.replace('\n', "\n-"),
         after.replace('\n', "\n+")
     );
     let arguments = serde_json::to_vec(&request.arguments).ok()?;
+    let arguments_hash = blake3::hash(&arguments).to_hex().to_string();
+    let mut base_hasher = blake3::Hasher::new();
+    base_hasher.update(b"rottweiler-approval-base-v1\0");
+    match &preview.before {
+        Some(bytes) => {
+            base_hasher.update(b"present\0");
+            base_hasher.update(bytes);
+        }
+        None => {
+            base_hasher.update(b"missing\0");
+        }
+    }
+    let base_hash = base_hasher.finalize().to_hex().to_string();
+    let diff_hash = blake3::hash(full_diff.as_bytes()).to_hex().to_string();
+    let mut proposal_hasher = blake3::Hasher::new();
+    proposal_hasher.update(b"rottweiler-approval-proposal-v1\0");
+    proposal_hasher.update(request.id.as_bytes());
+    proposal_hasher.update(b"\0");
+    proposal_hasher.update(request.tool_name.as_bytes());
+    proposal_hasher.update(b"\0");
+    proposal_hasher.update(path.as_bytes());
+    proposal_hasher.update(b"\0");
+    proposal_hasher.update(arguments_hash.as_bytes());
+    proposal_hasher.update(base_hash.as_bytes());
+    proposal_hasher.update(diff_hash.as_bytes());
+    let proposal_id = proposal_hasher.finalize().to_hex().to_string();
     let truncated = full_diff.len() > MAX_APPROVAL_DIFF_BYTES;
     let unified_diff = if truncated {
         let boundary = full_diff
@@ -149,14 +174,23 @@ fn permission_diff(request: &PermissionRequest) -> Option<UnifiedDiff> {
         full_diff.clone()
     };
     Some(UnifiedDiff {
-        proposal_id: request.id.clone(),
+        proposal_id,
         path,
         unified_diff,
-        arguments_hash: blake3::hash(&arguments).to_hex().to_string(),
-        base_hash: blake3::hash(before.as_bytes()).to_hex().to_string(),
-        diff_hash: blake3::hash(full_diff.as_bytes()).to_hex().to_string(),
+        arguments_hash,
+        base_hash,
+        diff_hash,
         truncated,
     })
+}
+
+fn diff_binding(diff: &UnifiedDiff) -> ApprovalBinding {
+    ApprovalBinding {
+        proposal_id: diff.proposal_id.clone(),
+        arguments_hash: diff.arguments_hash.clone(),
+        base_hash: diff.base_hash.clone(),
+        diff_hash: diff.diff_hash.clone(),
+    }
 }
 
 /// Shared redaction hook applied before tool text enters persistence,
@@ -701,19 +735,16 @@ impl PendingEvent {
                 args: arguments,
                 call_index: u32::try_from(index).unwrap_or(u32::MAX),
             },
-            Self::PermissionRequested { turn, request } => {
-                let diff = permission_diff(&request);
-                EngineEvent::ToolApprovalNeeded {
-                    meta,
-                    turn_id: wire_turn_id(turn),
-                    tool_call_id: ToolCallId(request.id),
-                    name: request.tool_name.clone(),
-                    args: request.arguments,
-                    capabilities: request.capabilities,
-                    rationale: format!("permission required for tool `{}`", request.tool_name),
-                    diff,
-                }
-            }
+            Self::PermissionRequested { turn, request } => EngineEvent::ToolApprovalNeeded {
+                meta,
+                turn_id: wire_turn_id(turn),
+                tool_call_id: ToolCallId(request.id),
+                name: request.tool_name.clone(),
+                args: request.arguments,
+                capabilities: request.capabilities,
+                rationale: format!("permission required for tool `{}`", request.tool_name),
+                diff: request.approval_diff,
+            },
             Self::ToolOutput {
                 turn,
                 id,
@@ -1234,6 +1265,7 @@ fn recovered_pending_event(
             name,
             args,
             capabilities,
+            diff,
             ..
         } => PendingEvent::PermissionRequested {
             turn: parse_turn_id(turn_id)?,
@@ -1242,6 +1274,7 @@ fn recovered_pending_event(
                 tool_name: name.clone(),
                 arguments: args.clone(),
                 capabilities: capabilities.clone(),
+                approval_diff: diff.clone(),
             },
         },
         EngineEvent::QuestionAnswered {
@@ -1820,14 +1853,21 @@ pub fn project_session_events(
             }
             PendingEvent::UserShellStateChanged {
                 shell_id,
+                command,
                 active: false,
-                ..
+                status: Some(status),
+                captured_output,
             } => {
                 if active_shell.as_ref().map(|shell| &shell.shell_id) != Some(shell_id) {
                     return Err(SessionProjectionError::InvalidShellTransition(
                         "shell end did not match the active shell id".to_owned(),
                     ));
                 }
+                conversation.push(shell_context_turn(
+                    command,
+                    *status,
+                    captured_output.as_deref(),
+                ));
                 active_shell = None;
             }
             PendingEvent::UserShellStateChanged { .. } => {
@@ -1922,6 +1962,21 @@ pub fn project_session_events(
         model_alias,
         active_shell,
     })
+}
+
+fn shell_context_turn(command: &str, status: i32, captured_output: Option<&str>) -> Turn {
+    let mut text = format!(
+        "Foreground shell command (user-provided context):\n$ {command}\nExit status: {status}"
+    );
+    if let Some(output) = captured_output.filter(|output| !output.is_empty()) {
+        text.push_str("\nOutput:\n");
+        text.push_str(output);
+    }
+    Turn {
+        role: Role::User,
+        blocks: vec![Block::Text { text }],
+        meta: TurnMeta::default(),
+    }
 }
 
 /// Provider/UI-neutral durability boundary for the sequenced session log.
@@ -2839,6 +2894,36 @@ impl SessionHandle {
         receive.await.map_err(|_| AgentLoopError::Closed)
     }
 
+    /// Completes a foreground shell on behalf of the trusted CLI TTY broker.
+    ///
+    /// This is deliberately not a client protocol dispatch: the broker owns
+    /// the real terminal but never takes the interactive driver's lease. The
+    /// actor still validates the engine-generated shell id and persists the
+    /// inactive event before releasing the turn gate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the actor is closed, the shell id is stale, the
+    /// captured output exceeds the durable limit, or persistence fails.
+    pub async fn complete_user_shell(
+        &self,
+        shell_id: ShellId,
+        status: i32,
+        captured_output: Option<String>,
+    ) -> Result<(), AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::CompleteUserShell {
+                shell_id,
+                status,
+                captured_output,
+                respond,
+            })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
     async fn dispatch_wait(
         &self,
         command: ClientCommand,
@@ -2942,6 +3027,22 @@ impl SessionHandle {
         request_id: impl Into<String>,
         decision: ApprovalDecision,
     ) -> Result<bool, AgentLoopError> {
+        self.approve_bound(request_id, decision, None).await
+    }
+
+    /// Answers one pending ask-tier permission request with the exact binding
+    /// displayed by the client. Diff approvals require this method; generic
+    /// approvals continue to use [`Self::approve`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentLoopError::Closed`] if the actor is unavailable.
+    pub async fn approve_bound(
+        &self,
+        request_id: impl Into<String>,
+        decision: ApprovalDecision,
+        binding: Option<ApprovalBinding>,
+    ) -> Result<bool, AgentLoopError> {
         self.ensure_local_driver().await?;
         let target_turn = self.active_turn.load(Ordering::Acquire);
         if target_turn == 0 {
@@ -2953,6 +3054,7 @@ impl SessionHandle {
                 session_id: self.session_id.clone(),
                 tool_call_id: ToolCallId(request_id.into()),
                 decision,
+                binding,
             })
             .await?,
             CommandOutcome::Accepted
@@ -3145,6 +3247,12 @@ enum ActorCommand {
         respond: oneshot::Sender<CommandOutcome>,
         completion: Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>,
     },
+    CompleteUserShell {
+        shell_id: ShellId,
+        status: i32,
+        captured_output: Option<String>,
+        respond: oneshot::Sender<Result<(), AgentLoopError>>,
+    },
     SendMessage {
         content: String,
         attachments: Vec<Attachment>,
@@ -3223,7 +3331,7 @@ struct ActorState {
     conversation: Vec<Turn>,
     queued: VecDeque<String>,
     running: Option<RunningTurn>,
-    pending_approvals: BTreeMap<String, oneshot::Sender<ApprovalDecision>>,
+    pending_approvals: BTreeMap<String, PendingApproval>,
     next_turn: u64,
     completed_turns: u64,
     turn_ends: BTreeMap<u64, usize>,
@@ -3246,6 +3354,13 @@ struct ActorState {
 struct PendingQuestion {
     turn: u64,
     respond: oneshot::Sender<String>,
+}
+
+struct PendingApproval {
+    respond: oneshot::Sender<ApprovalDecision>,
+    binding: Option<ApprovalBinding>,
+    request: PermissionRequest,
+    turn: u64,
 }
 
 impl ActorState {
@@ -4494,7 +4609,7 @@ async fn handle_actor_command(
 ) {
     match command {
         ActorCommand::Protocol {
-            command,
+            mut command,
             respond,
             mut completion,
         } => {
@@ -4548,6 +4663,15 @@ async fn handle_actor_command(
                 send_ack(state, events, &meta, session, outcome.clone());
                 let _ = respond.send(outcome);
                 return;
+            }
+
+            if let ClientCommand::UserShellEnded {
+                captured_output, ..
+            } = &mut command
+            {
+                *captured_output = captured_output
+                    .take()
+                    .map(|output| config.secret_redactor.redact(&output));
             }
 
             match &command {
@@ -4720,6 +4844,41 @@ async fn handle_actor_command(
                     let _ = respond.send(outcome);
                     return;
                 }
+                ClientCommand::ApproveTool {
+                    tool_call_id,
+                    binding,
+                    ..
+                } if state
+                    .pending_approvals
+                    .get(&tool_call_id.0)
+                    .is_some_and(|pending| pending.binding.as_ref() != binding.as_ref()) =>
+                {
+                    let outcome = protocol_rejection(
+                        "approval_binding_mismatch",
+                        "approval binding does not match the displayed proposal; the approval remains pending",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::ApproveTool {
+                    tool_call_id,
+                    decision: ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession,
+                    ..
+                } if state
+                    .pending_approvals
+                    .get(&tool_call_id.0)
+                    .and_then(|pending| pending.request.approval_diff.as_ref())
+                    .is_some_and(|diff| diff.truncated) =>
+                {
+                    let outcome = protocol_rejection(
+                        "truncated_approval_denied",
+                        "a truncated diff cannot be approved; deny it and review the complete change through a bounded proposal",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
                 ClientCommand::AnswerQuestion {
                     question_id,
                     answers,
@@ -4808,6 +4967,78 @@ async fn handle_actor_command(
                 _ => {}
             }
 
+            if let ClientCommand::ApproveTool {
+                tool_call_id,
+                decision: ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession,
+                ..
+            } = &command
+            {
+                let pending_request = state
+                    .pending_approvals
+                    .get(&tool_call_id.0)
+                    .filter(|pending| pending.binding.is_some())
+                    .map(|pending| (pending.request.clone(), pending.turn));
+                if let Some((request, turn)) = pending_request {
+                    let refreshed = if let Some(tool) = config.tools.resolve(&request.tool_name) {
+                        current_approval_diff(&tool, tool_context, &request).await
+                    } else {
+                        Err("approved tool is no longer registered".to_owned())
+                    };
+                    let current_diff = refreshed.ok().flatten();
+                    let current_binding = current_diff.as_ref().map(diff_binding);
+                    let expected_binding = state
+                        .pending_approvals
+                        .get(&tool_call_id.0)
+                        .and_then(|pending| pending.binding.clone());
+                    if current_binding != expected_binding {
+                        if let Some(diff) = current_diff {
+                            let mut refreshed_request = request;
+                            refreshed_request.approval_diff = Some(diff);
+                            if let Some(pending) = state.pending_approvals.get_mut(&tool_call_id.0)
+                            {
+                                pending.binding = current_binding;
+                                pending.request = refreshed_request.clone();
+                            }
+                            if let Err(error) = emit(
+                                state,
+                                events,
+                                &config.event_sink,
+                                PendingEvent::PermissionRequested {
+                                    turn,
+                                    request: refreshed_request,
+                                },
+                            )
+                            .await
+                            {
+                                if let Some(pending) =
+                                    state.pending_approvals.remove(&tool_call_id.0)
+                                {
+                                    let _ = pending.respond.send(ApprovalDecision::Deny);
+                                }
+                                let outcome = protocol_rejection(
+                                    "approval_refresh_failed",
+                                    format!("could not persist refreshed approval: {error}"),
+                                );
+                                send_ack(state, events, &meta, session, outcome.clone());
+                                let _ = respond.send(outcome);
+                                return;
+                            }
+                        } else if let Some(pending) =
+                            state.pending_approvals.remove(&tool_call_id.0)
+                        {
+                            let _ = pending.respond.send(ApprovalDecision::Deny);
+                        }
+                        let outcome = protocol_rejection(
+                            "approval_stale",
+                            "workspace state changed after the displayed diff; no mutation ran and a fresh approval is required",
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
+                }
+            }
+
             let attach_gap = if let ClientCommand::AttachSession {
                 last_seen_sequence, ..
             } = &command
@@ -4880,7 +5111,9 @@ async fn handle_actor_command(
                     };
                     emit(state, events, &config.event_sink, driver_event).await
                 }
-                ClientCommand::TakeDriver { .. } => {
+                ClientCommand::TakeDriver { .. }
+                    if state.driver_client_id.as_ref() != Some(&meta.client_id) =>
+                {
                     emit(
                         state,
                         events,
@@ -5044,6 +5277,7 @@ async fn handle_actor_command(
                         .as_ref()
                         .map(|shell| shell.command.clone())
                         .unwrap_or_default();
+                    let context = shell_context_turn(&command, status, captured_output.as_deref());
                     let result = emit(
                         state,
                         events,
@@ -5058,6 +5292,7 @@ async fn handle_actor_command(
                     )
                     .await;
                     if result.is_ok() {
+                        state.conversation.push(context);
                         state.active_shell = None;
                     }
                     if let Some(complete) = completion.take() {
@@ -5126,8 +5361,8 @@ async fn handle_actor_command(
                     decision,
                     ..
                 } => {
-                    if let Some(sender) = state.pending_approvals.remove(&tool_call_id.0) {
-                        let _ = sender.send(decision);
+                    if let Some(pending) = state.pending_approvals.remove(&tool_call_id.0) {
+                        let _ = pending.respond.send(decision);
                     }
                 }
                 ClientCommand::AnswerQuestion { .. } => {
@@ -5539,6 +5774,57 @@ async fn handle_actor_command(
             });
             let _ = respond.send(interrupted);
         }
+        ActorCommand::CompleteUserShell {
+            shell_id,
+            status,
+            captured_output,
+            respond,
+        } => {
+            let captured_output =
+                captured_output.map(|output| config.secret_redactor.redact(&output));
+            let result = if captured_output
+                .as_ref()
+                .is_some_and(|output| output.len() > MAX_CAPTURED_SHELL_OUTPUT_BYTES)
+            {
+                Err(AgentLoopError::InvalidConfiguration(
+                    "captured foreground-shell output exceeds the durable limit".to_owned(),
+                ))
+            } else if state
+                .active_shell
+                .as_ref()
+                .is_none_or(|active| active.shell_id != shell_id)
+            {
+                Err(AgentLoopError::InvalidConfiguration(
+                    "foreground-shell completion does not match the active shell id".to_owned(),
+                ))
+            } else {
+                let command = state
+                    .active_shell
+                    .as_ref()
+                    .map(|active| active.command.clone())
+                    .unwrap_or_default();
+                let context = shell_context_turn(&command, status, captured_output.as_deref());
+                let persisted = emit(
+                    state,
+                    events,
+                    &config.event_sink,
+                    PendingEvent::UserShellStateChanged {
+                        shell_id,
+                        command,
+                        active: false,
+                        status: Some(status),
+                        captured_output,
+                    },
+                )
+                .await;
+                if persisted.is_ok() {
+                    state.conversation.push(context);
+                    state.active_shell = None;
+                }
+                persisted
+            };
+            let _ = respond.send(result);
+        }
         ActorCommand::Snapshot { respond } => {
             let _ = respond.send(SessionSnapshot {
                 conversation: state.conversation.clone(),
@@ -5692,8 +5978,17 @@ async fn handle_turn_signal(
                 let _ = respond.send(ApprovalDecision::Deny);
                 return Ok(());
             };
-            if let Some(previous) = state.pending_approvals.insert(request.id.clone(), respond) {
-                let _ = previous.send(ApprovalDecision::Deny);
+            let binding = request.approval_diff.as_ref().map(diff_binding);
+            if let Some(previous) = state.pending_approvals.insert(
+                request.id.clone(),
+                PendingApproval {
+                    respond,
+                    binding,
+                    request: request.clone(),
+                    turn,
+                },
+            ) {
+                let _ = previous.respond.send(ApprovalDecision::Deny);
             }
             emit(
                 state,
@@ -6137,6 +6432,7 @@ enum PreparedToolCall {
         arguments: Value,
         read_only: bool,
         mutation_scope: MutationScope,
+        approval_binding: Option<ApprovalBinding>,
     },
     Complete(ToolExecution),
 }
@@ -6873,21 +7169,27 @@ fn resolve_tool_security(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn authorize_tool_call(
     call: &PendingToolCall,
     arguments: &Value,
     capabilities: Vec<rw_types::ToolCapability>,
+    tool: &Arc<dyn rw_tools::Tool>,
+    context: &ToolContext,
     config: &SessionActorConfig,
     approver: &dyn PermissionApprover,
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
-) -> Result<(), String> {
-    let request = PermissionRequest {
+) -> Result<Option<ApprovalBinding>, String> {
+    let mut request = PermissionRequest {
         id: call.id.clone(),
         tool_name: call.name.clone(),
         arguments: arguments.clone(),
         capabilities,
+        approval_diff: None,
     };
+    request.approval_diff = current_approval_diff(tool, context, &request).await?;
+    let binding = request.approval_diff.as_ref().map(diff_binding);
     let permission_hook = dispatch_hook(
         &config.hooks,
         HookEvent::PermissionCheck,
@@ -6917,8 +7219,22 @@ async fn authorize_tool_call(
     if permission == PermissionOutcome::Denied {
         Err(format!("permission denied for tool `{}`", call.name))
     } else {
-        Ok(())
+        Ok(binding)
     }
+}
+
+async fn current_approval_diff(
+    tool: &Arc<dyn rw_tools::Tool>,
+    context: &ToolContext,
+    request: &PermissionRequest,
+) -> Result<Option<UnifiedDiff>, String> {
+    let preview = tool
+        .approval_preview(context, &request.arguments)
+        .await
+        .map_err(|error| format!("could not prepare approval preview: {error}"))?;
+    Ok(preview
+        .as_ref()
+        .and_then(|preview| approval_diff(request, preview)))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -6929,6 +7245,7 @@ async fn prepare_tool_call(
     approver: &dyn PermissionApprover,
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
+    context: &ToolContext,
 ) -> PreparedToolCall {
     let Some(arguments) = call.arguments.clone() else {
         return PreparedToolCall::Complete(failed_execution(
@@ -6953,10 +7270,12 @@ async fn prepare_tool_call(
             format!("unknown tool `{name}`"),
         ));
     };
-    if let Err(message) = authorize_tool_call(
+    let mut approval_binding = match authorize_tool_call(
         &call,
         &arguments,
-        initial_security.capabilities,
+        initial_security.capabilities.clone(),
+        &initial_security.tool,
+        context,
         config,
         approver,
         cancellation,
@@ -6964,8 +7283,9 @@ async fn prepare_tool_call(
     )
     .await
     {
-        return PreparedToolCall::Complete(failed_execution(call, message));
-    }
+        Ok(binding) => binding,
+        Err(message) => return PreparedToolCall::Complete(failed_execution(call, message)),
+    };
     let original_name = call.name.clone();
     let original_arguments = arguments.clone();
     let pre_tool = match dispatch_hook(
@@ -7013,19 +7333,23 @@ async fn prepare_tool_call(
             format!("unknown tool `{name}`"),
         ));
     };
-    if (call.name != original_name || arguments != original_arguments)
-        && let Err(message) = authorize_tool_call(
+    if call.name != original_name || arguments != original_arguments {
+        approval_binding = match authorize_tool_call(
             &call,
             &arguments,
-            security.capabilities,
+            security.capabilities.clone(),
+            &security.tool,
+            context,
             config,
             approver,
             cancellation,
             signals,
         )
         .await
-    {
-        return PreparedToolCall::Complete(failed_execution(call, message));
+        {
+            Ok(binding) => binding,
+            Err(message) => return PreparedToolCall::Complete(failed_execution(call, message)),
+        };
     }
     PreparedToolCall::Execute {
         call,
@@ -7033,6 +7357,7 @@ async fn prepare_tool_call(
         arguments,
         read_only: security.read_only,
         mutation_scope: security.mutation_scope,
+        approval_binding,
     }
 }
 
@@ -7133,14 +7458,15 @@ async fn execute_prepared_tool(
     checkpoints: Arc<dyn MutationCheckpointCoordinator>,
     turn: u64,
 ) -> (ToolExecution, bool) {
-    let (call, tool, arguments, mutation_scope) = match prepared {
+    let (call, tool, arguments, mutation_scope, approval_binding) = match prepared {
         PreparedToolCall::Execute {
             call,
             tool,
             arguments,
             mutation_scope,
+            approval_binding,
             ..
-        } => (call, tool, arguments, mutation_scope),
+        } => (call, tool, arguments, mutation_scope, approval_binding),
         PreparedToolCall::Complete(execution) => return (execution, false),
     };
     let checkpoint = if matches!(mutation_scope, MutationScope::None) {
@@ -7180,7 +7506,41 @@ async fn execute_prepared_tool(
         totals: Mutex::new((0, 0, false)),
     });
     let invocation_context = context.with_output(sink);
-    let result = if cancellation.is_cancelled() {
+    let revalidation = if let Some(expected) = approval_binding {
+        match tool.approval_preview(&invocation_context, &arguments).await {
+            Ok(Some(preview)) => {
+                let request = PermissionRequest {
+                    id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    arguments: arguments.clone(),
+                    capabilities: Vec::new(),
+                    approval_diff: None,
+                };
+                approval_diff(&request, &preview)
+                    .as_ref()
+                    .map(diff_binding)
+                    .filter(|current| current == &expected)
+                    .map(|_| ())
+                    .ok_or_else(|| {
+                        ToolError::Command(
+                            "approved diff is stale; no mutation ran; request a fresh approval"
+                                .to_owned(),
+                        )
+                    })
+            }
+            Ok(None) => Err(ToolError::Command(
+                "approved diff can no longer be reproduced; no mutation ran".to_owned(),
+            )),
+            Err(error) => Err(ToolError::Command(format!(
+                "approved diff could not be revalidated; no mutation ran: {error}"
+            ))),
+        }
+    } else {
+        Ok(())
+    };
+    let result = if let Err(error) = revalidation {
+        Err(error)
+    } else if cancellation.is_cancelled() {
         Err(ToolError::Cancelled)
     } else {
         let execution =
@@ -7300,7 +7660,9 @@ async fn execute_tool_calls(
 ) -> Vec<ToolExecution> {
     let mut prepared = Vec::with_capacity(calls.len());
     for call in calls {
-        prepared.push(prepare_tool_call(turn, call, config, approver, cancellation, signals).await);
+        prepared.push(
+            prepare_tool_call(turn, call, config, approver, cancellation, signals, context).await,
+        );
     }
     let may_run_in_parallel = prepared.iter().all(|call| match call {
         PreparedToolCall::Execute { read_only, .. } => *read_only,
@@ -8825,7 +9187,7 @@ mod tests {
         Capabilities, FixtureRedactor, Provider, ProviderError, ProviderErrorKind, ProviderRouter,
         Recorder, ReplayProvider, RetryPolicy,
     };
-    use rw_tools::{AskUserTool, CapabilityManifest, Tool, ToolLimits};
+    use rw_tools::{AskUserTool, CapabilityManifest, Tool, ToolLimits, WriteTool};
     use rw_types::{ToolCapability, ToolOutputStream, config::PermissionDecision};
     use tempfile::TempDir;
     use tokio::{sync::Notify, time::timeout};
@@ -10100,6 +10462,18 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ShellSecretRedactor;
+
+    impl SecretRedactor for ShellSecretRedactor {
+        fn redact(&self, text: &str) -> String {
+            if text.starts_with("COLLAPSE:") {
+                return "useful [REDACTED] output".to_owned();
+            }
+            text.replace("SHELL_SECRET", "[REDACTED]")
+        }
+    }
+
     #[derive(Clone, Debug, PartialEq)]
     struct SessionEvent {
         version: u16,
@@ -11329,6 +11703,244 @@ mod tests {
             .await;
             assert_eq!(tool.calls.load(Ordering::SeqCst), expected_calls);
         }
+    }
+
+    #[tokio::test]
+    async fn diff_approval_rejects_tampered_binding_without_consuming_the_prompt() {
+        let root = TempDir::new().expect("tempdir");
+        std::fs::write(root.path().join("bound.txt"), "before").expect("fixture");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "call",
+                    "write",
+                    json!({"path": "bound.txt", "content": "after"}),
+                )],
+                &[],
+            ),
+            stop_script("done", &[]),
+        ]));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(WriteTool::new(ToolLimits::default())))
+            .expect("register write");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("write").await.expect("message");
+        let event = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        let PendingEvent::PermissionRequested { request, .. } = event.kind else {
+            unreachable!("matching event")
+        };
+        let correct = diff_binding(request.approval_diff.as_ref().expect("diff"));
+        assert!(
+            !handle
+                .approve_bound(request.id.clone(), ApprovalDecision::AllowOnce, None,)
+                .await
+                .expect("missing approval binding")
+        );
+        for binding in [
+            ApprovalBinding {
+                proposal_id: "0".repeat(64),
+                ..correct.clone()
+            },
+            ApprovalBinding {
+                arguments_hash: "0".repeat(64),
+                ..correct.clone()
+            },
+            ApprovalBinding {
+                base_hash: "0".repeat(64),
+                ..correct.clone()
+            },
+            ApprovalBinding {
+                diff_hash: "0".repeat(64),
+                ..correct.clone()
+            },
+        ] {
+            assert!(
+                !handle
+                    .approve_bound(
+                        request.id.clone(),
+                        ApprovalDecision::AllowOnce,
+                        Some(binding),
+                    )
+                    .await
+                    .expect("tampered approval response")
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("bound.txt")).expect("unchanged"),
+            "before"
+        );
+        assert!(
+            handle
+                .approve_bound(request.id, ApprovalDecision::AllowOnce, Some(correct))
+                .await
+                .expect("bound approval")
+        );
+        next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::TurnFinished { .. })
+        })
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("bound.txt")).expect("written"),
+            "after"
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_diff_cannot_be_approved_by_any_client() {
+        let root = TempDir::new().expect("tempdir");
+        let path = root.path().join("large.txt");
+        std::fs::write(&path, "before").expect("fixture");
+        let content = "x".repeat(MAX_APPROVAL_DIFF_BYTES + 1024);
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "call",
+                    "write",
+                    json!({"path": "large.txt", "content": content}),
+                )],
+                &[],
+            ),
+            stop_script("done", &[]),
+        ]));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(WriteTool::new(ToolLimits::default())))
+            .expect("register write");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("write").await.expect("message");
+        let event = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        let PendingEvent::PermissionRequested { request, .. } = event.kind else {
+            unreachable!("matching event")
+        };
+        let diff = request.approval_diff.as_ref().expect("diff");
+        assert!(diff.truncated);
+        let binding = diff_binding(diff);
+        assert!(
+            !handle
+                .approve_bound(
+                    request.id.clone(),
+                    ApprovalDecision::AllowOnce,
+                    Some(binding.clone()),
+                )
+                .await
+                .expect("truncated allow rejection")
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("unchanged"), "before");
+        assert!(
+            handle
+                .approve_bound(request.id, ApprovalDecision::Deny, Some(binding))
+                .await
+                .expect("deny truncated proposal")
+        );
+        next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::ToolCallFinished { .. })
+        })
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(path).expect("still unchanged"),
+            "before"
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_approval_revalidates_current_base_before_mutation() {
+        let root = TempDir::new().expect("tempdir");
+        let path = root.path().join("race.txt");
+        std::fs::write(&path, "approved base").expect("fixture");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "call",
+                    "write",
+                    json!({"path": "race.txt", "content": "agent write"}),
+                )],
+                &[],
+            ),
+            stop_script("done", &[]),
+        ]));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(WriteTool::new(ToolLimits::default())))
+            .expect("register write");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("write").await.expect("message");
+        let event = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        let PendingEvent::PermissionRequested { request, .. } = event.kind else {
+            unreachable!("matching event")
+        };
+        let binding = diff_binding(request.approval_diff.as_ref().expect("diff"));
+        let approved_base_hash = binding.base_hash.clone();
+        std::fs::write(&path, "concurrent user edit").expect("race mutation");
+        assert!(
+            !handle
+                .approve_bound(request.id, ApprovalDecision::AllowOnce, Some(binding))
+                .await
+                .expect("stale approval")
+        );
+        let refreshed = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        let PendingEvent::PermissionRequested {
+            request: refreshed, ..
+        } = refreshed.kind
+        else {
+            unreachable!("matching event")
+        };
+        let refreshed_binding = diff_binding(refreshed.approval_diff.as_ref().expect("new diff"));
+        assert_ne!(refreshed_binding.base_hash, approved_base_hash);
+        assert!(
+            handle
+                .approve_bound(
+                    refreshed.id,
+                    ApprovalDecision::Deny,
+                    Some(refreshed_binding),
+                )
+                .await
+                .expect("deny refreshed approval")
+        );
+        next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::ToolCallFinished { .. })
+        })
+        .await;
+        assert_eq!(
+            std::fs::read_to_string(path).expect("race winner preserved"),
+            "concurrent user edit"
+        );
     }
 
     #[tokio::test]
@@ -14633,13 +15245,14 @@ mod tests {
     #[allow(clippy::too_many_lines)]
     async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
         let root = TempDir::new().expect("workspace");
-        let actor_config = config(
+        let mut actor_config = config(
             root.path(),
             Arc::new(AliasVisionModel),
             Arc::new(ToolRegistry::new()),
             PermissionDecision::Ask,
             HookDispatcher::new(),
         );
+        actor_config.secret_redactor = Arc::new(ShellSecretRedactor);
         let handle = SessionActor::spawn(actor_config).expect("actor");
         assert_eq!(
             handle
@@ -14703,27 +15316,47 @@ mod tests {
         let recovered = project_session_events(&durable).expect("project shell gate");
         assert_eq!(recovered.active_shell.as_ref(), Some(&active));
 
-        assert_eq!(
-            handle
-                .dispatch(ClientCommand::UserShellEnded {
-                    meta: protocol_meta("driver", "shell-end"),
-                    session_id: SessionId("fixture-session".to_owned()),
-                    shell_id: active.shell_id,
-                    status: 130,
-                    captured_output: Some("full captured tail".to_owned()),
-                })
-                .await
-                .expect("shell end"),
-            CommandOutcome::Accepted
-        );
         assert!(
             handle
-                .snapshot()
+                .complete_user_shell(ShellId("stale".to_owned()), 0, None)
                 .await
-                .expect("ended shell")
-                .active_shell
-                .is_none()
+                .is_err()
         );
+        handle
+            .complete_user_shell(
+                active.shell_id,
+                130,
+                Some(format!(
+                    "COLLAPSE:{}",
+                    "SHELL_SECRET".repeat(MAX_CAPTURED_SHELL_OUTPUT_BYTES / 8)
+                )),
+            )
+            .await
+            .expect("trusted broker shell end");
+        let ended = handle.snapshot().await.expect("ended shell");
+        assert!(ended.active_shell.is_none());
+        let shell_context = ended.conversation.last().expect("shell model context");
+        assert!(matches!(
+            shell_context.blocks.as_slice(),
+            [Block::Text { text }]
+                if text.contains("useful [REDACTED] output")
+                    && !text.contains("SHELL_SECRET")
+        ));
+        let durable = handle
+            .event_sink
+            .read_after(None)
+            .await
+            .expect("durable redacted shell end");
+        assert!(durable.iter().any(|event| matches!(
+            event,
+            EngineEvent::UserShellStateChanged {
+                active: false,
+                captured_output: Some(output),
+                ..
+            } if output == "useful [REDACTED] output"
+        )));
+        let resumed = project_session_events(&durable).expect("project redacted shell output");
+        assert_eq!(resumed.conversation.last(), Some(shell_context));
         assert!(matches!(
             handle
                 .dispatch(ClientCommand::SwitchModel {

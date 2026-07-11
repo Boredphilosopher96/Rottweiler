@@ -19,13 +19,17 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use miette::{IntoDiagnostic as _, Result, miette};
-use rw_core::{ClientCommand, ClientId, CommandOutcome, EngineEvent, SequenceId, SessionId};
+use rw_core::{
+    ClientCommand, ClientId, CommandOutcome, EngineError, EngineErrorCategory, EngineEvent,
+    SequenceId, SessionId, ShellId,
+};
 use serde::{Deserialize, Serialize};
 use tokio::{net::UnixListener, sync::mpsc};
 
 const COMMAND_BODY_LIMIT: usize = 2 * 1024 * 1024;
 const HOST_EVENT_FORWARD_CAPACITY: usize = 256;
 const CLIENT_HEADER: &str = "x-rottweiler-client";
+const CAPABILITY_HEADER: &str = "x-rottweiler-capability";
 
 type HttpBody = UnsyncBoxBody<Bytes, Infallible>;
 
@@ -93,6 +97,8 @@ pub struct ServerRuntimePaths {
 struct RuntimeDescriptor<'a> {
     version: u16,
     pid: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
     socket: &'a Path,
     token_file: &'a Path,
 }
@@ -131,16 +137,49 @@ impl ServerRuntime {
             descriptor: directory.join("runtime.json"),
             directory,
         };
+        Self::create_at(paths)
+    }
+
+    /// Creates a server at supervisor-selected private paths. Stale artifacts
+    /// from a crashed server may be replaced, but only inside the same
+    /// owner-private runtime directory and only when their file types match the
+    /// artifact being replaced.
+    pub fn create_at(
+        paths: ServerRuntimePaths,
+    ) -> Result<(Self, std::os::unix::net::UnixListener)> {
+        Self::create_for_session(paths, None)
+    }
+
+    /// Creates a server at supervisor-selected paths and projects the owning
+    /// session into the private discovery descriptor. The session binding lets
+    /// supervisors clean up only the runtime they launched.
+    pub fn create_for_session(
+        paths: ServerRuntimePaths,
+        session_id: Option<&str>,
+    ) -> Result<(Self, std::os::unix::net::UnixListener)> {
+        validate_runtime_paths(&paths)?;
+        ensure_private_directory(&paths.directory)?;
+        refuse_live_listener(&paths.socket)?;
+        remove_stale_artifact(&paths.socket, RuntimeArtifact::Socket)?;
+        remove_stale_artifact(&paths.token, RuntimeArtifact::RegularFile)?;
+        remove_stale_artifact(&paths.descriptor, RuntimeArtifact::RegularFile)?;
         let bootstrap = SecretToken::generate()?;
-        write_private_new(&paths.token, bootstrap.encode().as_bytes())?;
+        // Runtime credentials are ephemeral and rotate after a crash; they
+        // must be visible and private before bind, but do not need storage
+        // durability beyond the lifetime of this server process.
+        write_private_new_relaxed(&paths.token, bootstrap.encode().as_bytes())?;
         let descriptor = serde_json::to_vec(&RuntimeDescriptor {
             version: 1,
             pid: std::process::id(),
+            session_id,
             socket: &paths.socket,
             token_file: &paths.token,
         })
         .into_diagnostic()?;
-        write_private_new(&paths.descriptor, &descriptor)?;
+        // The descriptor is a disposable discovery projection. The token is
+        // synced above; delaying startup on a second fsync provides no crash
+        // safety because a missing descriptor is rebuilt with the server.
+        write_private_new_relaxed(&paths.descriptor, &descriptor)?;
 
         let listener = std::os::unix::net::UnixListener::bind(&paths.socket).into_diagnostic()?;
         set_mode(&paths.socket, 0o600)?;
@@ -153,19 +192,93 @@ impl ServerRuntime {
     }
 }
 
+fn refuse_live_listener(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !is_socket(&metadata) {
+                return Err(miette!(
+                    "refusing to replace an unexpected server runtime artifact"
+                ));
+            }
+            if std::os::unix::net::UnixStream::connect(path).is_ok() {
+                return Err(miette!("refusing to replace a live engine server socket"));
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).into_diagnostic(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeArtifact {
+    Socket,
+    RegularFile,
+}
+
+fn validate_runtime_paths(paths: &ServerRuntimePaths) -> Result<()> {
+    if !paths.directory.is_absolute()
+        || paths.socket.parent() != Some(paths.directory.as_path())
+        || paths.token.parent() != Some(paths.directory.as_path())
+        || paths.descriptor.parent() != Some(paths.directory.as_path())
+        || [&paths.socket, &paths.token, &paths.descriptor]
+            .iter()
+            .any(|path| path.file_name().is_none())
+    {
+        return Err(miette!(
+            "server runtime artifacts must be direct children of one absolute private directory"
+        ));
+    }
+    Ok(())
+}
+
+fn remove_stale_artifact(path: &Path, expected: RuntimeArtifact) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let matches = match expected {
+                RuntimeArtifact::Socket => is_socket(&metadata),
+                RuntimeArtifact::RegularFile => metadata.is_file(),
+            };
+            if metadata.file_type().is_symlink() || !matches {
+                return Err(miette!(
+                    "refusing to replace an unexpected server runtime artifact"
+                ));
+            }
+            fs::remove_file(path).into_diagnostic()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).into_diagnostic(),
+    }
+}
+
+#[cfg(unix)]
+fn is_socket(metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt as _;
+    metadata.file_type().is_socket()
+}
+
 fn ensure_private_directory(path: &Path) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
                 return Err(miette!("server runtime root is not a real directory"));
             }
+            if metadata.uid() != rustix::process::geteuid().as_raw() {
+                return Err(miette!("server runtime root is not owned by this user"));
+            }
+            if metadata.permissions().mode() & 0o077 != 0 {
+                set_mode(path, 0o700)?;
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir_all(path).into_diagnostic()?;
+            set_mode(path, 0o700)?;
         }
         Err(error) => return Err(error).into_diagnostic(),
     }
-    set_mode(path, 0o700)
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -174,7 +287,7 @@ fn set_mode(path: &Path, mode: u32) -> Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode)).into_diagnostic()
 }
 
-fn write_private_new(path: &Path, bytes: &[u8]) -> Result<()> {
+fn write_private_new_relaxed(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut file = OpenOptions::new()
         .create_new(true)
@@ -184,7 +297,7 @@ fn write_private_new(path: &Path, bytes: &[u8]) -> Result<()> {
         .into_diagnostic()?;
     file.write_all(bytes).into_diagnostic()?;
     file.flush().into_diagnostic()?;
-    file.sync_all().into_diagnostic()
+    Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -195,7 +308,25 @@ pub struct ClientCredentials {
 
 #[derive(Debug)]
 struct ClientRegistry {
-    clients: Mutex<HashMap<ClientId, SecretToken>>,
+    clients: Mutex<HashMap<ClientId, RegisteredClient>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientCapability {
+    Interactive,
+    ShellBroker,
+}
+
+#[derive(Clone, Debug)]
+struct RegisteredClient {
+    token: SecretToken,
+    capability: ClientCapability,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AuthenticatedClient {
+    client_id: ClientId,
+    capability: ClientCapability,
 }
 
 impl ClientRegistry {
@@ -205,7 +336,7 @@ impl ClientRegistry {
         }
     }
 
-    fn mint(&self) -> Result<ClientCredentials> {
+    fn mint(&self, capability: ClientCapability) -> Result<ClientCredentials> {
         for _ in 0..32 {
             let token = SecretToken::generate()?;
             let client_id = ClientId(format!("client-{}", &token.encode()[..24]));
@@ -216,7 +347,13 @@ impl ClientRegistry {
             if clients.contains_key(&client_id) {
                 continue;
             }
-            clients.insert(client_id.clone(), token.clone());
+            clients.insert(
+                client_id.clone(),
+                RegisteredClient {
+                    token: token.clone(),
+                    capability,
+                },
+            );
             return Ok(ClientCredentials {
                 client_id,
                 token: token.encode(),
@@ -227,20 +364,27 @@ impl ClientRegistry {
         ))
     }
 
-    fn authenticate(&self, client_id: &str, token: &str) -> Option<ClientId> {
+    fn authenticate(&self, client_id: &str, token: &str) -> Option<AuthenticatedClient> {
         let client_id = ClientId(client_id.to_owned());
         self.clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&client_id)
-            .filter(|expected| expected.matches_encoded(token))
-            .map(|_| client_id)
+            .filter(|registered| registered.token.matches_encoded(token))
+            .map(|registered| AuthenticatedClient {
+                client_id,
+                capability: registered.capability,
+            })
     }
 }
 
 /// Protocol host boundary consumed by the HTTP/SSE transport.
 #[async_trait]
 pub trait ServerEngine: Send + Sync + 'static {
+    fn is_ready(&self) -> bool {
+        true
+    }
+
     async fn dispatch(
         &self,
         bound_client: ClientId,
@@ -253,6 +397,16 @@ pub trait ServerEngine: Send + Sync + 'static {
         session_id: Option<SessionId>,
         last_seen: Option<SequenceId>,
     ) -> std::result::Result<mpsc::Receiver<std::result::Result<EngineEvent, String>>, String>;
+
+    /// Releases a foreground-shell gate from the trusted CLI parent without
+    /// transferring the interactive driver's lease.
+    async fn complete_shell(
+        &self,
+        session_id: SessionId,
+        shell_id: ShellId,
+        status: i32,
+        captured_output: Option<String>,
+    ) -> std::result::Result<(), String>;
 }
 
 /// Production adapter from the core multi-session host to the transport trait.
@@ -316,6 +470,19 @@ impl ServerEngine for HostedEngine {
             }
         });
         Ok(receive)
+    }
+
+    async fn complete_shell(
+        &self,
+        session_id: SessionId,
+        shell_id: ShellId,
+        status: i32,
+        captured_output: Option<String>,
+    ) -> std::result::Result<(), String> {
+        self.host
+            .complete_user_shell(&session_id, shell_id, status, captured_output)
+            .await
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -389,9 +556,13 @@ async fn handle_request(
     let response = match (request.method(), request.uri().path()) {
         (&Method::POST, "/v1/connect") => {
             if authenticate_bootstrap(&request, &state.bootstrap) {
+                let capability = match requested_capability(&request) {
+                    Ok(capability) => capability,
+                    Err(message) => return Ok(error_response(StatusCode::BAD_REQUEST, message)),
+                };
                 match state
                     .clients
-                    .mint()
+                    .mint(capability)
                     .and_then(|credentials| serde_json::to_vec(&credentials).into_diagnostic())
                 {
                     Ok(bytes) => json_response(StatusCode::CREATED, bytes),
@@ -405,13 +576,20 @@ async fn handle_request(
         }
         (&Method::GET, "/v1/health") => {
             if authenticate_bootstrap(&request, &state.bootstrap) {
-                json_response(StatusCode::OK, br#"{"ready":true}"#.to_vec())
+                if state.engine.is_ready() {
+                    json_response(StatusCode::OK, br#"{"ready":true}"#.to_vec())
+                } else {
+                    json_response(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        br#"{"ready":false}"#.to_vec(),
+                    )
+                }
             } else {
                 unauthorized()
             }
         }
         (&Method::POST, "/v1/command") => {
-            let Some(client_id) = authenticate_client(&request, &state.clients) else {
+            let Some(client) = authenticate_client(&request, &state.clients) else {
                 return Ok(unauthorized());
             };
             if request
@@ -431,8 +609,13 @@ async fn handle_request(
                 Ok(collected) => {
                     match serde_json::from_slice::<ClientCommand>(&collected.to_bytes()) {
                         Ok(mut command) => {
-                            command.meta_mut().client_id = client_id.clone();
-                            match state.engine.dispatch(client_id, command).await {
+                            command.meta_mut().client_id = client.client_id.clone();
+                            let outcome = if client.capability == ClientCapability::ShellBroker {
+                                dispatch_shell_broker(&*state.engine, command).await
+                            } else {
+                                state.engine.dispatch(client.client_id, command).await
+                            };
+                            match outcome {
                                 Ok(outcome) => match serde_json::to_vec(&outcome) {
                                     Ok(bytes) => json_response(StatusCode::ACCEPTED, bytes),
                                     Err(_) => error_response(
@@ -456,7 +639,7 @@ async fn handle_request(
             }
         }
         (&Method::GET, "/v1/events") => {
-            let Some(client_id) = authenticate_client(&request, &state.clients) else {
+            let Some(client) = authenticate_client(&request, &state.clients) else {
                 return Ok(unauthorized());
             };
             if request.headers().get(ACCEPT).is_some_and(|value| {
@@ -492,7 +675,7 @@ async fn handle_request(
             }
             match state
                 .engine
-                .subscribe(client_id, session_id, last_seen)
+                .subscribe(client.client_id, session_id, last_seen)
                 .await
             {
                 Ok(receiver) => sse_response(receiver),
@@ -517,9 +700,62 @@ fn authenticate_bootstrap(request: &Request<Incoming>, expected: &SecretToken) -
     bearer(request).is_some_and(|candidate| expected.matches_encoded(candidate))
 }
 
-fn authenticate_client(request: &Request<Incoming>, registry: &ClientRegistry) -> Option<ClientId> {
+fn authenticate_client(
+    request: &Request<Incoming>,
+    registry: &ClientRegistry,
+) -> Option<AuthenticatedClient> {
     let client_id = request.headers().get(CLIENT_HEADER)?.to_str().ok()?;
     registry.authenticate(client_id, bearer(request)?)
+}
+
+fn requested_capability(
+    request: &Request<Incoming>,
+) -> std::result::Result<ClientCapability, &'static str> {
+    match request.headers().get(CAPABILITY_HEADER) {
+        None => Ok(ClientCapability::Interactive),
+        Some(value) if value.as_bytes() == b"shell_broker" => Ok(ClientCapability::ShellBroker),
+        Some(_) => Err("unknown engine client capability"),
+    }
+}
+
+async fn dispatch_shell_broker(
+    engine: &dyn ServerEngine,
+    command: ClientCommand,
+) -> std::result::Result<CommandOutcome, String> {
+    let ClientCommand::UserShellEnded {
+        session_id,
+        shell_id,
+        status,
+        captured_output,
+        ..
+    } = command
+    else {
+        return Ok(CommandOutcome::Rejected {
+            error: EngineError {
+                category: EngineErrorCategory::Protocol,
+                code: "shell_broker_capability".to_owned(),
+                message: "the shell-broker capability may only complete a foreground shell"
+                    .to_owned(),
+                retryable: false,
+                details: None,
+            },
+        });
+    };
+    match engine
+        .complete_shell(session_id, shell_id, status, captured_output)
+        .await
+    {
+        Ok(()) => Ok(CommandOutcome::Accepted),
+        Err(message) => Ok(CommandOutcome::Rejected {
+            error: EngineError {
+                category: EngineErrorCategory::Protocol,
+                code: "shell_completion_rejected".to_owned(),
+                message,
+                retryable: false,
+                details: None,
+            },
+        }),
+    }
 }
 
 fn sse_response(
@@ -603,7 +839,10 @@ mod tests {
     struct StubEngine {
         dispatches: AtomicUsize,
         received: Mutex<Vec<(ClientId, ClientCommand)>>,
+        completions: Mutex<Vec<ShellCompletionFixture>>,
     }
+
+    type ShellCompletionFixture = (SessionId, ShellId, i32, Option<String>);
 
     #[async_trait]
     impl ServerEngine for StubEngine {
@@ -648,6 +887,22 @@ mod tests {
             .await
             .map_err(|_| "fixture receiver closed".to_owned())?;
             Ok(receive)
+        }
+
+        async fn complete_shell(
+            &self,
+            session_id: SessionId,
+            shell_id: ShellId,
+            status: i32,
+            captured_output: Option<String>,
+        ) -> std::result::Result<(), String> {
+            self.completions.lock().expect("shell completions").push((
+                session_id,
+                shell_id,
+                status,
+                captured_output,
+            ));
+            Ok(())
         }
     }
 
@@ -705,13 +960,75 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_selected_runtime_paths_rotate_only_expected_stale_artifacts() {
+        let root = tempdir().expect("runtime root");
+        let directory = root.path().join("selected");
+        fs::create_dir(&directory).expect("selected directory");
+        set_mode(&directory, 0o700).expect("private selected directory");
+        let paths = ServerRuntimePaths {
+            socket: directory.join("engine.sock"),
+            token: directory.join("auth.token"),
+            descriptor: directory.join("runtime.json"),
+            directory,
+        };
+        let (first, first_listener) =
+            ServerRuntime::create_for_session(paths.clone(), Some("session-selected"))
+                .expect("first selected runtime");
+        let first_token = fs::read_to_string(&first.paths.token).expect("first token");
+        let first_descriptor = fs::read_to_string(&first.paths.descriptor).expect("descriptor");
+        assert!(first_descriptor.contains(r#""session_id":"session-selected""#));
+        assert!(ServerRuntime::create_at(paths.clone()).is_err());
+        assert_eq!(
+            fs::read_to_string(&first.paths.token).expect("live token remains"),
+            first_token
+        );
+        drop(first_listener);
+        let (second, _second_listener) =
+            ServerRuntime::create_at(paths).expect("restarted selected runtime");
+        let second_token = fs::read_to_string(&second.paths.token).expect("second token");
+        assert_ne!(first_token, second_token);
+    }
+
+    #[test]
+    fn selected_runtime_refuses_symlink_artifacts() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().expect("runtime root");
+        let directory = root.path().join("selected");
+        fs::create_dir(&directory).expect("selected directory");
+        set_mode(&directory, 0o700).expect("private selected directory");
+        let outside = root.path().join("outside");
+        fs::write(&outside, b"do not replace").expect("outside fixture");
+        let token = directory.join("auth.token");
+        symlink(&outside, &token).expect("token symlink");
+        let paths = ServerRuntimePaths {
+            socket: directory.join("engine.sock"),
+            token,
+            descriptor: directory.join("runtime.json"),
+            directory,
+        };
+        assert!(ServerRuntime::create_at(paths).is_err());
+        assert_eq!(
+            fs::read(&outside).expect("outside remains"),
+            b"do not replace"
+        );
+    }
+
+    #[test]
     fn client_tokens_are_bound_to_server_minted_ids() {
         let registry = ClientRegistry::new();
-        let first = registry.mint().expect("first client");
-        let second = registry.mint().expect("second client");
+        let first = registry
+            .mint(ClientCapability::Interactive)
+            .expect("first client");
+        let second = registry
+            .mint(ClientCapability::ShellBroker)
+            .expect("second client");
         assert_eq!(
             registry.authenticate(&first.client_id.0, &first.token),
-            Some(first.client_id.clone())
+            Some(AuthenticatedClient {
+                client_id: first.client_id.clone(),
+                capability: ClientCapability::Interactive,
+            })
         );
         assert_eq!(
             registry.authenticate(&first.client_id.0, &second.token),
@@ -737,6 +1054,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn uds_auth_mints_bound_identity_and_overwrites_spoofed_meta() {
         let root = tempdir().expect("runtime root");
         let (runtime, listener) = ServerRuntime::create(root.path()).expect("runtime");
@@ -809,6 +1127,62 @@ mod tests {
             assert_eq!(received[0].0, credentials.client_id);
             assert_eq!(received[0].1.meta().client_id, credentials.client_id);
         }
+
+        let broker_connected = unix_request(
+            &runtime.paths.socket,
+            request_builder(Method::POST, "/v1/connect")
+                .header(AUTHORIZATION, format!("Bearer {}", bootstrap.trim()))
+                .header(CAPABILITY_HEADER, "shell_broker")
+                .body(Full::new(Bytes::new()))
+                .expect("broker connect"),
+        )
+        .await;
+        assert_eq!(broker_connected.status(), StatusCode::CREATED);
+        let broker: ClientCredentials = serde_json::from_slice(
+            &broker_connected
+                .into_body()
+                .collect()
+                .await
+                .expect("broker connect body")
+                .to_bytes(),
+        )
+        .expect("broker credentials");
+        let completion = ClientCommand::UserShellEnded {
+            meta: CommandMeta {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId("spoofed-broker".to_owned()),
+                request_id: RequestId("complete-shell".to_owned()),
+            },
+            session_id: SessionId("session-tty".to_owned()),
+            shell_id: ShellId("shell-9".to_owned()),
+            status: 130,
+            captured_output: Some("interrupted".to_owned()),
+        };
+        let trusted_completion = unix_request(
+            &runtime.paths.socket,
+            request_builder(Method::POST, "/v1/command")
+                .header(AUTHORIZATION, format!("Bearer {}", broker.token))
+                .header(CLIENT_HEADER, &broker.client_id.0)
+                .body(Full::new(Bytes::from(
+                    serde_json::to_vec(&completion).expect("completion JSON"),
+                )))
+                .expect("trusted shell completion"),
+        )
+        .await;
+        assert_eq!(trusted_completion.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            engine
+                .completions
+                .lock()
+                .expect("shell completions")
+                .as_slice(),
+            [(
+                SessionId("session-tty".to_owned()),
+                ShellId("shell-9".to_owned()),
+                130,
+                Some("interrupted".to_owned()),
+            )]
+        );
 
         let events = unix_request(
             &runtime.paths.socket,

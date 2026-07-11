@@ -15,6 +15,7 @@ export class AuthenticatedMockEngine {
   readonly clientToken = "minted-client-token"
   readonly requests: Array<{
     path: string
+    search: string
     authorization: string | null
     clientId: string | null
     body: string
@@ -57,7 +58,7 @@ export class AuthenticatedMockEngine {
     const body = request.method === "POST" ? await request.text() : ""
     const authorization = request.headers.get("Authorization")
     const clientId = request.headers.get("x-rottweiler-client")
-    this.requests.push({ path: url.pathname, authorization, clientId, body })
+    this.requests.push({ path: url.pathname, search: url.search, authorization, clientId, body })
 
     if (url.pathname === "/v1/connect") {
       if (authorization !== `Bearer ${this.bootstrapToken}` || clientId !== null) {
@@ -72,7 +73,7 @@ export class AuthenticatedMockEngine {
 
     if (url.pathname === "/v1/command" && request.method === "POST") {
       this.commands.push(JSON.parse(body) as ClientCommand)
-      return new Response(null, { status: 204 })
+      return Response.json({ type: "accepted" }, { status: 202 })
     }
     if (url.pathname === "/v1/events" && request.method === "GET") {
       server.timeout(request, 0)

@@ -1,0 +1,791 @@
+import {
+  chmod,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+} from "node:fs/promises"
+import { basename, dirname, join } from "node:path"
+
+import type { ClientCommand, CommandOutcome } from "./protocol"
+import { PROTOCOL_VERSION } from "./protocol"
+import {
+  createInitialState,
+  reduceRottweilerState,
+  transportClosed,
+  transportConnected,
+  transportConnecting,
+  transportDisconnected,
+  transportReconnecting,
+  type RottweilerAction,
+  type RottweilerState,
+} from "./state"
+import {
+  EngineHttpSseClient,
+  isRecord,
+  type EngineSubscriptionOptions,
+  type TransportConnectionUpdate,
+  type WireEngineEvent,
+} from "./transport"
+
+const TOKEN_FILE_LIMIT = 64 * 1024
+const CURSOR_FILE_LIMIT = 128
+const MAX_U64 = 18_446_744_073_709_551_615n
+const SESSION_PREPARE_ATTEMPTS = 24
+const SESSION_PREPARE_INITIAL_DELAY_MS = 10
+const SESSION_PREPARE_MAXIMUM_DELAY_MS = 250
+
+export interface EngineRuntimeEnvironment {
+  readonly [name: string]: string | undefined
+}
+
+export interface RuntimeFileSystem {
+  readText(path: string, maximumBytes: number): Promise<string | null>
+  writePrivateTextAtomic(path: string, content: string): Promise<void>
+}
+
+export interface EngineRuntimeConfig {
+  readonly socketPath: string
+  readonly bootstrapToken: string
+  readonly sessionId: string
+  readonly lastSeenSequence: string | null
+  readonly lastSeenFile: string | null
+}
+
+export interface RuntimeApp {
+  readonly state: RottweilerState
+  handleEvent(event: WireEngineEvent): void
+  setState(state: RottweilerState): void
+  setSessionId(sessionId: string): void
+}
+
+export interface RuntimeEngineClient {
+  postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome | null>
+  subscribe(options: EngineSubscriptionOptions): Promise<void>
+}
+
+export interface CreateEngineRuntimeOptions {
+  readonly environment?: EngineRuntimeEnvironment
+  readonly files?: RuntimeFileSystem
+  readonly fetch?: typeof fetch
+  readonly client?: RuntimeEngineClient
+  readonly requestId?: () => string
+  readonly sleep?: RuntimeSleep
+  readonly onDriverReady?: (sessionId: string) => void
+}
+
+export type RuntimeSleep = (delayMs: number, signal: AbortSignal) => Promise<void>
+
+export const systemRuntimeFiles: RuntimeFileSystem = {
+  async readText(path, maximumBytes) {
+    const metadata = await lstat(path).catch((error: unknown) => {
+      if (hasErrorCode(error, "ENOENT")) {
+        return null
+      }
+      throw error
+    })
+    if (metadata === null) {
+      return null
+    }
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      throw new EngineRuntimeError("runtime handoff path is not a regular file")
+    }
+    assertOwnerPrivate(metadata.mode, metadata.uid, "runtime handoff file")
+    if (metadata.size > maximumBytes) {
+      throw new EngineRuntimeError("runtime handoff file exceeds its size limit")
+    }
+    return readFile(path, "utf8")
+  },
+
+  async writePrivateTextAtomic(path, content) {
+    const parent = dirname(path)
+    await mkdir(parent, { recursive: true, mode: 0o700 })
+    const parentMetadata = await lstat(parent)
+    if (!parentMetadata.isDirectory() || parentMetadata.isSymbolicLink()) {
+      throw new EngineRuntimeError("runtime handoff parent is not a private directory")
+    }
+    assertOwnerPrivate(parentMetadata.mode, parentMetadata.uid, "runtime handoff parent")
+
+    const temporary = join(parent, `.${basename(path)}.${crypto.randomUUID()}.tmp`)
+    let handle: Awaited<ReturnType<typeof open>> | null = null
+    try {
+      handle = await open(temporary, "wx", 0o600)
+      await handle.writeFile(content, { encoding: "utf8" })
+      await handle.sync()
+      await handle.close()
+      handle = null
+      await rename(temporary, path)
+      await chmod(path, 0o600)
+    } catch (error) {
+      await handle?.close().catch(() => {})
+      await rm(temporary, { force: true }).catch(() => {})
+      throw error
+    }
+  },
+}
+
+export class EngineRuntimeError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "EngineRuntimeError"
+  }
+}
+
+/**
+ * Owns the TUI's single authenticated engine connection. Rendering remains
+ * synchronous; durable cursor persistence is coalesced in the background.
+ */
+export class TuiEngineRuntime {
+  readonly #config: EngineRuntimeConfig
+  readonly #client: RuntimeEngineClient
+  readonly #requestId: () => string
+  readonly #controller = new AbortController()
+  readonly #handoff: SequenceHandoff | null
+  readonly #sleep: RuntimeSleep
+  readonly #onDriverReady: ((sessionId: string) => void) | undefined
+  readonly #ready: Promise<void>
+  readonly #resolveReady: () => void
+  readonly #rejectReady: (reason: unknown) => void
+  #app: RuntimeApp | null = null
+  #started = false
+  #sessionId: string
+  #sessionGeneration = 0
+  #driverReady = false
+  #transitionController: AbortController | null = null
+  #subscriptionController: AbortController | null = null
+  #subscription: Promise<void> | null = null
+
+  constructor(
+    config: EngineRuntimeConfig,
+    client: RuntimeEngineClient,
+    files: RuntimeFileSystem = systemRuntimeFiles,
+    requestId: () => string = () => crypto.randomUUID(),
+    sleep: RuntimeSleep = abortableSleep,
+    onDriverReady?: (sessionId: string) => void,
+  ) {
+    this.#config = config
+    this.#sessionId = config.sessionId
+    this.#client = client
+    this.#requestId = requestId
+    this.#sleep = sleep
+    this.#onDriverReady = onDriverReady
+    let resolveReady!: () => void
+    let rejectReady!: (reason: unknown) => void
+    this.#ready = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve
+      rejectReady = reject
+    })
+    this.#resolveReady = resolveReady
+    this.#rejectReady = rejectReady
+    void this.#ready.catch(() => {
+      // Command callers receive the same initialization failure when they
+      // await readiness; this observer prevents a standalone rejected
+      // readiness promise from becoming an unhandled process rejection.
+    })
+    this.#handoff =
+      config.lastSeenFile === null ? null : new SequenceHandoff(config.lastSeenFile, files)
+  }
+
+  bind(app: RuntimeApp): void {
+    if (this.#app !== null && this.#app !== app) {
+      throw new EngineRuntimeError("engine runtime is already bound to an application")
+    }
+    this.#app = app
+    // A cursor is meaningful only together with the reducer projection that
+    // produced it. A freshly spawned TUI has an empty projection, so importing
+    // the supervisor's cursor here would permanently omit earlier transcript
+    // events. Reconnects in this process still use app.state.lastSequence.
+  }
+
+  async start(): Promise<void> {
+    this.#requiredApp()
+    if (this.#started) {
+      throw new EngineRuntimeError("engine runtime has already started")
+    }
+    this.#started = true
+    this.#apply(transportConnecting(0))
+
+    try {
+      await this.#activateSession(this.#config.sessionId, false)
+      this.#resolveReady()
+      await this.#subscription
+    } catch (error) {
+      this.#rejectReady(error)
+      if (!this.#controller.signal.aborted) {
+        this.#apply(transportDisconnected(0, safeErrorMessage(error)))
+        throw error
+      }
+    } finally {
+      await this.#handoff?.close()
+    }
+  }
+
+  async sendCommand(command: ClientCommand): Promise<CommandOutcome | null> {
+    try {
+      await this.#ready
+      if (!this.#driverReady || this.#subscriptionController === null) {
+        return null
+      }
+      const generation = this.#sessionGeneration
+      const sessionId = commandSessionId(command)
+      if (sessionId !== null && sessionId !== this.#sessionId) {
+        return null
+      }
+      const outcome = await this.#client.postCommand(
+        command,
+        this.#subscriptionController.signal,
+      )
+      return generation === this.#sessionGeneration && this.#driverReady ? outcome : null
+    } catch (error) {
+      if (!this.#controller.signal.aborted) {
+        this.#apply(
+          transportDisconnected(this.#requiredApp().state.connection.attempt, safeErrorMessage(error)),
+        )
+      }
+      return null
+    }
+  }
+
+  async stop(): Promise<void> {
+    if (!this.#controller.signal.aborted) {
+      this.#controller.abort(new DOMException("TUI engine runtime stopped", "AbortError"))
+    }
+    this.#driverReady = false
+    this.#transitionController?.abort(this.#controller.signal.reason)
+    this.#subscriptionController?.abort(this.#controller.signal.reason)
+    await this.#handoff?.close()
+  }
+
+  /**
+   * Move the live client to another durable session without allowing a command
+   * built for the previous session to cross the transition.
+   */
+  async switchSession(sessionId: string): Promise<boolean> {
+    if (sessionId.length === 0) {
+      return false
+    }
+    if (sessionId === this.#sessionId && this.#driverReady) {
+      return true
+    }
+    try {
+      await this.#activateSession(sessionId, true)
+      return true
+    } catch (error) {
+      if (isAbortError(error) || this.#controller.signal.aborted) {
+        return false
+      }
+      this.#apply(
+        transportDisconnected(
+          this.#requiredApp().state.connection.attempt,
+          `session switch failed: ${safeErrorMessage(error)}`,
+        ),
+      )
+      return false
+    }
+  }
+
+  async #activateSession(sessionId: string, resetProjection: boolean): Promise<void> {
+    const generation = ++this.#sessionGeneration
+    this.#driverReady = false
+    this.#transitionController?.abort(
+      new DOMException("session transition superseded", "AbortError"),
+    )
+    this.#subscriptionController?.abort(
+      new DOMException("session subscription replaced", "AbortError"),
+    )
+    const previousSubscription = this.#subscription
+    this.#subscription = null
+    if (previousSubscription !== null) {
+      await previousSubscription.catch(() => {})
+    }
+    if (generation !== this.#sessionGeneration) {
+      throw new DOMException("session transition superseded", "AbortError")
+    }
+
+    if (resetProjection) {
+      this.#requiredApp().setState(
+        reduceRottweilerState(createInitialState(), transportConnecting(0)),
+      )
+    }
+
+    const transition = new AbortController()
+    this.#transitionController = transition
+    const abortTransition = () => transition.abort(this.#controller.signal.reason)
+    this.#controller.signal.addEventListener("abort", abortTransition, { once: true })
+    try {
+      await this.#resumeAndTakeDriver(sessionId, transition.signal)
+      if (generation !== this.#sessionGeneration || transition.signal.aborted) {
+        throw transition.signal.reason ?? new DOMException("session transition superseded", "AbortError")
+      }
+
+      const subscriptionController = new AbortController()
+      const abortSubscription = () =>
+        subscriptionController.abort(this.#controller.signal.reason)
+      this.#controller.signal.addEventListener("abort", abortSubscription, { once: true })
+      this.#subscriptionController = subscriptionController
+      this.#sessionId = sessionId
+
+      const subscription = this.#client
+        .subscribe({
+          attach: {
+            type: "attach_session",
+            meta: this.#meta(),
+            session_id: sessionId,
+            last_seen_sequence: null,
+            role: "driver",
+          },
+          signal: subscriptionController.signal,
+          getLastSeenSequence: () => this.#requiredApp().state.lastSequence,
+          requestId: this.#requestId,
+          onReconnect: async () => {
+            const takeover = await this.#client.postCommand(
+              {
+                type: "take_driver",
+                meta: this.#meta(),
+                session_id: sessionId,
+              },
+              subscriptionController.signal,
+            )
+            if (takeover?.type === "rejected") {
+              throw new EngineRuntimeError(
+                `engine rejected reconnect driver takeover: ${takeover.error.message}`,
+              )
+            }
+          },
+          onConnection: (update) => {
+            if (generation === this.#sessionGeneration) {
+              this.#onConnection(update)
+            }
+          },
+          onEvent: (event) => {
+            if (
+              generation !== this.#sessionGeneration ||
+              !eventBelongsToSession(event, sessionId)
+            ) {
+              return
+            }
+            const bound = this.#requiredApp()
+            bound.handleEvent(event)
+            if (bound.state.lastSequence !== null) {
+              this.#handoff?.record(bound.state.lastSequence)
+            }
+          },
+        })
+        .catch((error: unknown) => {
+          if (
+            generation === this.#sessionGeneration &&
+            !subscriptionController.signal.aborted
+          ) {
+            this.#apply(
+              transportDisconnected(
+                this.#requiredApp().state.connection.attempt,
+                safeErrorMessage(error),
+              ),
+            )
+          }
+        })
+      this.#subscription = subscription
+
+      // Starting the stream precedes exposing the new session id to command
+      // construction. Commands remain gated until both operations complete.
+      this.#requiredApp().setSessionId(sessionId)
+      this.#driverReady = true
+      this.#onDriverReady?.(sessionId)
+      await this.#requestInitialProjections(sessionId, subscriptionController.signal)
+    } finally {
+      this.#controller.signal.removeEventListener("abort", abortTransition)
+      if (this.#transitionController === transition) {
+        this.#transitionController = null
+      }
+    }
+  }
+
+  async #resumeAndTakeDriver(sessionId: string, signal: AbortSignal): Promise<void> {
+    let delay = SESSION_PREPARE_INITIAL_DELAY_MS
+    for (let attempt = 0; attempt < SESSION_PREPARE_ATTEMPTS; attempt += 1) {
+      const resume = await this.#client.postCommand(
+        {
+          type: "resume_session",
+          meta: this.#meta(),
+          session_id: sessionId,
+          last_seen_sequence: null,
+          role: "observer",
+        },
+        signal,
+      )
+      if (resume?.type === "accepted" || resume === null) {
+        const takeover = await this.#client.postCommand(
+          {
+            type: "take_driver",
+            meta: this.#meta(),
+            session_id: sessionId,
+          },
+          signal,
+        )
+        if (takeover?.type === "accepted" || takeover === null) {
+          return
+        }
+        if (!isTransientSessionPreparationRejection(takeover)) {
+          throw new EngineRuntimeError(
+            `engine rejected driver takeover: ${takeover.error.message}`,
+          )
+        }
+      } else if (!isTransientSessionPreparationRejection(resume)) {
+        throw new EngineRuntimeError(`engine rejected session resume: ${resume.error.message}`)
+      }
+
+      if (attempt + 1 === SESSION_PREPARE_ATTEMPTS) {
+        break
+      }
+      this.#onConnection({ phase: "reconnecting", attempt: attempt + 1 })
+      await this.#sleep(delay, signal)
+      delay = Math.min(delay * 2, SESSION_PREPARE_MAXIMUM_DELAY_MS)
+    }
+    throw new EngineRuntimeError("engine session preparation did not finish before retry budget")
+  }
+
+  async #requestInitialProjections(sessionId: string, signal: AbortSignal): Promise<void> {
+    const commands: ClientCommand[] = [
+      { type: "get_context", meta: this.#meta(), session_id: sessionId },
+      { type: "get_cost", meta: this.#meta(), session_id: sessionId },
+      { type: "get_workspace_status", meta: this.#meta(), session_id: sessionId },
+      { type: "list_models", meta: this.#meta() },
+      { type: "list_commands", meta: this.#meta() },
+    ]
+    for (const command of commands) {
+      if (signal.aborted || sessionId !== this.#sessionId) {
+        return
+      }
+      try {
+        await this.#client.postCommand(command, signal)
+      } catch (error) {
+        if (signal.aborted || isAbortError(error)) {
+          return
+        }
+        // These read projections are opportunistic. Their individual command
+        // acknowledgements carry actionable failures when the engine is live;
+        // a missing panel must not discard the composer draft or driver lease.
+      }
+    }
+  }
+
+  #meta() {
+    return {
+      protocol_version: PROTOCOL_VERSION,
+      client_id: "tui-runtime",
+      request_id: this.#requestId(),
+    }
+  }
+
+  #onConnection(update: TransportConnectionUpdate): void {
+    switch (update.phase) {
+      case "connecting":
+        this.#apply(transportConnecting(update.attempt))
+        break
+      case "reconnecting":
+        this.#apply(transportReconnecting(update.attempt))
+        break
+      case "connected":
+        this.#apply(transportConnected(update.attempt))
+        break
+      case "disconnected":
+        this.#apply(transportDisconnected(update.attempt, update.error))
+        break
+      case "closed":
+        this.#apply(transportClosed())
+        break
+    }
+  }
+
+  #apply(action: RottweilerAction): void {
+    const app = this.#requiredApp()
+    app.setState(reduceRottweilerState(app.state, action))
+  }
+
+  #requiredApp(): RuntimeApp {
+    if (this.#app === null) {
+      throw new EngineRuntimeError("engine runtime is not bound to an application")
+    }
+    return this.#app
+  }
+}
+
+export async function createEngineRuntimeFromEnvironment(
+  options: CreateEngineRuntimeOptions = {},
+): Promise<TuiEngineRuntime | null> {
+  const files = options.files ?? systemRuntimeFiles
+  const environment = options.environment ?? process.env
+  const config = await loadEngineRuntimeConfigWithHandoffRetry(
+    environment,
+    files,
+    options.sleep ?? abortableSleep,
+  )
+  if (config === null) {
+    return null
+  }
+  const client =
+    options.client ??
+    new EngineHttpSseClient({
+      socketPath: config.socketPath,
+      bootstrapToken: async () => {
+        const tokenFile = nonEmpty(environment.ROTTWEILER_ENGINE_TOKEN_FILE)
+        if (tokenFile === null) {
+          throw new EngineRuntimeError("engine bootstrap token file is not configured")
+        }
+        return await readBootstrapToken(tokenFile, files)
+      },
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    })
+  return new TuiEngineRuntime(
+    config,
+    client,
+    files,
+    options.requestId,
+    options.sleep,
+    options.onDriverReady,
+  )
+}
+
+async function loadEngineRuntimeConfigWithHandoffRetry(
+  environment: EngineRuntimeEnvironment,
+  files: RuntimeFileSystem,
+  sleep: RuntimeSleep,
+): Promise<EngineRuntimeConfig | null> {
+  let delay = SESSION_PREPARE_INITIAL_DELAY_MS
+  const signal = new AbortController().signal
+  for (let attempt = 0; attempt < SESSION_PREPARE_ATTEMPTS; attempt += 1) {
+    try {
+      return await loadEngineRuntimeConfig(environment, files)
+    } catch (error) {
+      if (
+        !(error instanceof EngineRuntimeError) ||
+        error.message !== "engine bootstrap token file is missing or empty" ||
+        attempt + 1 === SESSION_PREPARE_ATTEMPTS
+      ) {
+        throw error
+      }
+      await sleep(delay, signal)
+      delay = Math.min(delay * 2, SESSION_PREPARE_MAXIMUM_DELAY_MS)
+    }
+  }
+  throw new EngineRuntimeError("engine bootstrap token handoff did not become ready")
+}
+
+function isTransientSessionPreparationRejection(outcome: CommandOutcome): boolean {
+  return (
+    outcome.type === "rejected" &&
+    [
+      "session_not_loaded",
+      "host_persistence_failure",
+      "session_persistence_failure",
+      "host_shutting_down",
+    ].includes(outcome.error.code)
+  )
+}
+
+async function abortableSleep(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) {
+    throw signal.reason
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, delayMs)
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer)
+        reject(signal.reason)
+      },
+      { once: true },
+    )
+  })
+}
+
+export async function loadEngineRuntimeConfig(
+  environment: EngineRuntimeEnvironment,
+  files: RuntimeFileSystem = systemRuntimeFiles,
+): Promise<EngineRuntimeConfig | null> {
+  const socketPath = nonEmpty(environment.ROTTWEILER_ENGINE_SOCKET)
+  const tokenFile = nonEmpty(environment.ROTTWEILER_ENGINE_TOKEN_FILE)
+  const sessionId = nonEmpty(environment.ROTTWEILER_SESSION_ID)
+  const lastSeenFile = nonEmpty(environment.ROTTWEILER_LAST_SEEN_FILE)
+  const lastSeenFromEnvironment = optionalSequence(
+    environment.ROTTWEILER_LAST_SEEN_SEQUENCE,
+    "ROTTWEILER_LAST_SEEN_SEQUENCE",
+  )
+
+  const configured = [socketPath, tokenFile, sessionId, lastSeenFile].some(
+    (value) => value !== null,
+  ) || lastSeenFromEnvironment !== null
+  if (!configured) {
+    return null
+  }
+  if (socketPath === null || tokenFile === null || sessionId === null) {
+    throw new EngineRuntimeError(
+      "engine runtime requires ROTTWEILER_ENGINE_SOCKET, ROTTWEILER_ENGINE_TOKEN_FILE, and ROTTWEILER_SESSION_ID",
+    )
+  }
+
+  const token = await readBootstrapToken(tokenFile, files)
+
+  const lastSeenFromFile =
+    lastSeenFile === null
+      ? null
+      : optionalSequence(
+          (await files.readText(lastSeenFile, CURSOR_FILE_LIMIT))?.trim(),
+          "ROTTWEILER_LAST_SEEN_FILE",
+        )
+
+  return {
+    socketPath,
+    bootstrapToken: token,
+    sessionId,
+    lastSeenSequence: newestSequence(lastSeenFromEnvironment, lastSeenFromFile),
+    lastSeenFile,
+  }
+}
+
+async function readBootstrapToken(
+  tokenFile: string,
+  files: RuntimeFileSystem,
+): Promise<string> {
+  const token = (await files.readText(tokenFile, TOKEN_FILE_LIMIT))?.trim() ?? ""
+  if (token.length === 0) {
+    throw new EngineRuntimeError("engine bootstrap token file is missing or empty")
+  }
+  return token
+}
+
+class SequenceHandoff {
+  readonly #path: string
+  readonly #files: RuntimeFileSystem
+  #pending: string | null = null
+  #written: string | null = null
+  #flush: Promise<void> | null = null
+
+  constructor(path: string, files: RuntimeFileSystem) {
+    this.#path = path
+    this.#files = files
+  }
+
+  record(sequence: string): void {
+    if (parseSequence(sequence) === null) {
+      return
+    }
+    this.#pending = newestSequence(this.#pending, sequence)
+    this.#startFlush()
+  }
+
+  async close(): Promise<void> {
+    while (this.#flush !== null) {
+      await this.#flush
+    }
+  }
+
+  #startFlush(): void {
+    if (this.#flush !== null) {
+      return
+    }
+    this.#flush = this.#drain()
+      .catch(() => {
+        // Cursor persistence must never crash or stall the render/event loop.
+        // Reconnect still uses the last in-memory cursor when this optional
+        // supervisor handoff cannot be written.
+      })
+      .finally(() => {
+        this.#flush = null
+        if (this.#pending !== null && this.#pending !== this.#written) {
+          this.#startFlush()
+        }
+      })
+  }
+
+  async #drain(): Promise<void> {
+    while (this.#pending !== null && this.#pending !== this.#written) {
+      const next = this.#pending
+      this.#pending = null
+      await this.#files.writePrivateTextAtomic(this.#path, `${next}\n`)
+      this.#written = next
+    }
+  }
+}
+
+function optionalSequence(value: string | undefined, source: string): string | null {
+  const normalized = nonEmpty(value)
+  if (normalized === null) {
+    return null
+  }
+  if (parseSequence(normalized) === null) {
+    throw new EngineRuntimeError(`${source} must contain a decimal u64 sequence`)
+  }
+  return normalized
+}
+
+function parseSequence(value: string | null): bigint | null {
+  if (value === null || !/^(0|[1-9][0-9]*)$/.test(value)) {
+    return null
+  }
+  const parsed = BigInt(value)
+  return parsed <= MAX_U64 ? parsed : null
+}
+
+function newestSequence(left: string | null, right: string | null): string | null {
+  const leftValue = parseSequence(left)
+  const rightValue = parseSequence(right)
+  if (leftValue === null) {
+    return rightValue === null ? null : right
+  }
+  if (rightValue === null || leftValue >= rightValue) {
+    return left
+  }
+  return right
+}
+
+function nonEmpty(value: string | undefined): string | null {
+  if (value === undefined || value.length === 0) {
+    return null
+  }
+  return value
+}
+
+function safeErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "engine runtime failed"
+}
+
+function commandSessionId(command: ClientCommand): string | null {
+  return "session_id" in command ? command.session_id : null
+}
+
+function eventBelongsToSession(event: WireEngineEvent, sessionId: string): boolean {
+  if (isRecord(event.meta) && typeof event.meta.session_id === "string") {
+    return event.meta.session_id === sessionId
+  }
+  return !("session_id" in event) || event.session_id === undefined || event.session_id === sessionId
+}
+
+function isAbortError(error: unknown): boolean {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (isRecord(error) && error.name === "AbortError")
+  )
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === code
+  )
+}
+
+function assertOwnerPrivate(mode: number, uid: number, label: string): void {
+  if ((mode & 0o077) !== 0) {
+    throw new EngineRuntimeError(`${label} must not be accessible by group or other users`)
+  }
+  const effectiveUid = process.geteuid?.()
+  if (effectiveUid !== undefined && uid !== effectiveUid) {
+    throw new EngineRuntimeError(`${label} is not owned by the current user`)
+  }
+}

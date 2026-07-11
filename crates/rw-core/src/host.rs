@@ -11,11 +11,11 @@ use async_trait::async_trait;
 use rw_types::{
     ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta,
     CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, ModelAlias, ModelDescriptor,
-    RequestId, SequenceId, SessionDescriptor, SessionId, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceStatus,
+    RequestId, SequenceId, SessionDescriptor, SessionId, ShellId, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceStatus,
 };
 use thiserror::Error;
-use tokio::sync::{Notify, broadcast, mpsc};
+use tokio::sync::{Notify, broadcast, mpsc, watch};
 
 use crate::{AgentLoopError, EventClock, SessionHandle, SystemEventClock};
 
@@ -97,11 +97,48 @@ impl HostedSession {
             .driver_client_id = client_id;
     }
 
-    fn set_model(&self, model: ModelAlias) {
+    fn set_shell_active(&self, active: bool) {
         self.descriptor
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .model = model;
+            .shell_active = active;
+    }
+
+    /// Starts a projection of the actor's durable state changes into the
+    /// lightweight host descriptor. The subscription is created before the
+    /// task is spawned, so events committed between registration and the
+    /// first poll are either replayed from the sink or retained by broadcast.
+    async fn project_durable_descriptor(&self) -> Result<(), HostError> {
+        let descriptor = Arc::clone(&self.descriptor);
+        // The factory-provided descriptor already represents recovered state.
+        // Start at the current durable tail so it is never rolled backward by
+        // replaying historical state transitions. The session is not visible
+        // in the host registry until this subscription has been installed.
+        let tail = self.handle.last_sequence().await.map_err(HostError::from)?;
+        let mut events = self
+            .handle
+            .subscribe_client(ClientId("host-descriptor-projector".to_owned()), tail);
+        tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                let mut descriptor = descriptor
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match event {
+                    EngineEvent::SessionCreated {
+                        driver_client_id, ..
+                    }
+                    | EngineEvent::DriverChanged {
+                        driver_client_id, ..
+                    } => descriptor.driver_client_id = Some(driver_client_id),
+                    EngineEvent::ModelChanged { model, .. } => descriptor.model = model,
+                    EngineEvent::UserShellStateChanged { active, .. } => {
+                        descriptor.shell_active = active;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        Ok(())
     }
 }
 
@@ -181,7 +218,7 @@ impl From<AgentLoopError> for HostError {
 
 #[derive(Debug)]
 enum SessionSlot {
-    Opening(Arc<Notify>),
+    Opening(watch::Sender<bool>),
     Ready(Arc<HostedSession>),
 }
 
@@ -279,6 +316,59 @@ impl EngineHost {
             Some(SessionSlot::Ready(session)) => Some(Arc::clone(session)),
             Some(SessionSlot::Opening(_)) | None => None,
         }
+    }
+
+    /// Releases a durable foreground-shell gate from the trusted CLI broker.
+    ///
+    /// The broker observes the normal authenticated event stream but must not
+    /// take the TUI driver's lease merely to report the real TTY child's exit.
+    /// The session actor validates the engine-generated shell id before it
+    /// persists the inactive event.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed host error when the session is not loaded, the shell id
+    /// is stale, captured output is invalid, or the durable write fails.
+    pub async fn complete_user_shell(
+        &self,
+        session_id: &SessionId,
+        shell_id: ShellId,
+        status: i32,
+        captured_output: Option<String>,
+    ) -> Result<(), HostError> {
+        let session = self.ready_session(session_id).await?;
+        session
+            .handle()
+            .complete_user_shell(shell_id, status, captured_output)
+            .await
+            .map_err(HostError::from)?;
+        // Trusted completion returns only after the inactive shell event is
+        // durable, so this eager update cannot get ahead of persistence. The
+        // descriptor projector independently observes the same event.
+        session.set_shell_active(false);
+        Ok(())
+    }
+
+    /// Opens the supervisor-selected initial session before accepting client
+    /// traffic. A fresh engine creates it; a restarted engine resumes the same
+    /// durable identity. Driver ownership remains unset until an authenticated
+    /// client attaches.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed host error when capacity, persistence, recovery, or
+    /// session identity validation fails.
+    pub async fn prepare_session(
+        &self,
+        request: CreateSessionRequest,
+        resume: bool,
+    ) -> Result<SessionDescriptor, HostError> {
+        let session = if resume {
+            self.resume_session(&request.session_id).await?
+        } else {
+            self.create_session(request).await?
+        };
+        Ok(session.descriptor())
     }
 
     /// Dispatches a command under a transport-authenticated identity. Duplicate
@@ -628,8 +718,29 @@ impl EngineHost {
                 ))
             }
             ClientCommand::ShutdownHost { meta } => {
-                self.shutting_down.store(true, Ordering::Release);
-                self.registry.lock().await.sessions.clear();
+                let opening_waiters = {
+                    let mut registry = self.registry.lock().await;
+                    // The shutdown flag and registry transition share this
+                    // lock with every post-factory insertion check. This is
+                    // the host's shutdown linearization point: an opener
+                    // either inserts before it and is drained, or observes
+                    // shutdown and can never insert.
+                    self.shutting_down.store(true, Ordering::Release);
+                    registry
+                        .sessions
+                        .drain()
+                        .filter_map(|(_, slot)| match slot {
+                            SessionSlot::Opening(completed) => Some(completed),
+                            SessionSlot::Ready(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                };
+                // Clearing an Opening reservation without completing its
+                // signal strands waiters forever. Cancel every opening before awaiting
+                // factory shutdown; each rechecks `shutting_down` and exits.
+                for completed in opening_waiters {
+                    completed.send_replace(true);
+                }
                 self.factory.shutdown().await?;
                 Ok((
                     CommandOutcome::Accepted,
@@ -643,15 +754,19 @@ impl EngineHost {
                 let session_id = command_session_id(&command)
                     .ok_or_else(|| HostError::Protocol("command has no session id".to_owned()))?;
                 let session = self.ready_session(&session_id).await?;
-                let model = match &command {
-                    ClientCommand::SwitchModel { model, .. } => Some(model.clone()),
+                let driver = match &command {
+                    ClientCommand::TakeDriver { meta, .. } => Some(meta.client_id.clone()),
                     _ => None,
                 };
                 let outcome = session.handle().dispatch(command).await?;
-                if outcome == CommandOutcome::Accepted
-                    && let Some(model) = model
-                {
-                    session.set_model(model);
+                if outcome == CommandOutcome::Accepted {
+                    // TakeDriver persists its lease before returning Accepted.
+                    // Model and shell commands acknowledge before their
+                    // durable event; those descriptor fields are therefore
+                    // updated only by `project_durable_descriptor`.
+                    if let Some(driver) = driver {
+                        session.set_driver(Some(driver));
+                    }
                 }
                 Ok((outcome, Some(session_id), Vec::new()))
             }
@@ -682,15 +797,26 @@ impl EngineHost {
             }
             registry.anonymous_openings = registry.anonymous_openings.saturating_add(1);
         }
-        let created = self.factory.create(request.clone()).await;
+        let created = match self.factory.create(request.clone()).await {
+            Ok(session)
+                if session.descriptor().session_id == request.session_id
+                    && session.handle().session_id() == &request.session_id =>
+            {
+                let session = Arc::new(session);
+                match session.project_durable_descriptor().await {
+                    Ok(()) => Ok(session),
+                    Err(error) => Err(error),
+                }
+            }
+            Ok(_) => Err(HostError::SessionIdentityMismatch),
+            Err(error) => Err(error),
+        };
         let mut registry = self.registry.lock().await;
         registry.anonymous_openings = registry.anonymous_openings.saturating_sub(1);
-        let session = Arc::new(created?);
-        if session.descriptor().session_id != request.session_id
-            || session.handle().session_id() != &request.session_id
-        {
-            return Err(HostError::SessionIdentityMismatch);
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(HostError::ShuttingDown);
         }
+        let session = created?;
         registry
             .sessions
             .insert(request.session_id, SessionSlot::Ready(Arc::clone(&session)));
@@ -709,7 +835,7 @@ impl EngineHost {
                 }
                 match registry.sessions.get(session_id) {
                     Some(SessionSlot::Ready(session)) => return Ok(Arc::clone(session)),
-                    Some(SessionSlot::Opening(notify)) => Some(Arc::clone(notify).notified_owned()),
+                    Some(SessionSlot::Opening(completed)) => Some(completed.subscribe()),
                     None => {
                         if registry
                             .sessions
@@ -719,24 +845,39 @@ impl EngineHost {
                         {
                             return Err(HostError::SessionCapacity);
                         }
-                        let notify = Arc::new(Notify::new());
-                        registry.sessions.insert(
-                            session_id.clone(),
-                            SessionSlot::Opening(Arc::clone(&notify)),
-                        );
+                        let (completed, receiver) = watch::channel(false);
+                        drop(receiver);
+                        registry
+                            .sessions
+                            .insert(session_id.clone(), SessionSlot::Opening(completed));
                         None
                     }
                 }
             };
-            if let Some(wait) = wait {
-                wait.await;
+            if let Some(mut completed) = wait {
+                if !*completed.borrow_and_update() {
+                    let _ = completed.changed().await;
+                }
                 continue;
             }
 
-            let opened = self.factory.resume(session_id).await;
+            let opened = match self.factory.resume(session_id).await {
+                Ok(session)
+                    if session.descriptor().session_id == *session_id
+                        && session.handle().session_id() == session_id =>
+                {
+                    let session = Arc::new(session);
+                    match session.project_durable_descriptor().await {
+                        Ok(()) => Ok(session),
+                        Err(error) => Err(error),
+                    }
+                }
+                Ok(_) => Err(HostError::SessionIdentityMismatch),
+                Err(error) => Err(error),
+            };
             let mut registry = self.registry.lock().await;
-            let notify = match registry.sessions.remove(session_id) {
-                Some(SessionSlot::Opening(notify)) => Some(notify),
+            let completed = match registry.sessions.remove(session_id) {
+                Some(SessionSlot::Opening(completed)) => Some(completed),
                 Some(SessionSlot::Ready(session)) => {
                     registry
                         .sessions
@@ -745,23 +886,22 @@ impl EngineHost {
                 }
                 None => None,
             };
-            let result = match opened {
-                Ok(session)
-                    if session.descriptor().session_id == *session_id
-                        && session.handle().session_id() == session_id =>
-                {
-                    let session = Arc::new(session);
-                    registry
-                        .sessions
-                        .insert(session_id.clone(), SessionSlot::Ready(Arc::clone(&session)));
-                    Ok(session)
+            let result = if self.shutting_down.load(Ordering::Acquire) {
+                Err(HostError::ShuttingDown)
+            } else {
+                match opened {
+                    Ok(session) => {
+                        registry
+                            .sessions
+                            .insert(session_id.clone(), SessionSlot::Ready(Arc::clone(&session)));
+                        Ok(session)
+                    }
+                    Err(error) => Err(error),
                 }
-                Ok(_) => Err(HostError::SessionIdentityMismatch),
-                Err(error) => Err(error),
             };
             drop(registry);
-            if let Some(notify) = notify {
-                notify.notify_waiters();
+            if let Some(completed) = completed {
+                completed.send_replace(true);
             }
             return result;
         }
@@ -1007,7 +1147,10 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
+    use std::{
+        sync::atomic::{AtomicU8, AtomicUsize},
+        time::Duration,
+    };
 
     use futures_util::stream;
     use rw_types::{
@@ -1018,7 +1161,7 @@ mod tests {
     use super::*;
     use crate::{
         ModelDriver, NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink,
-        PermissionGate, SessionActor, SessionActorConfig, SessionRecoveredState,
+        PermissionGate, SessionActor, SessionActorConfig, SessionEventSink, SessionRecoveredState,
         builtin_command_registry, builtin_hook_dispatcher,
         runtime_support::{
             BoxEventStream, PermissionDecision, ProviderRequest, ThinkingLevel, ToolRegistry,
@@ -1046,6 +1189,14 @@ mod tests {
         next: AtomicUsize,
         resumes: AtomicUsize,
         fail_resume_once: AtomicBool,
+        block_create: AtomicBool,
+        block_resume: AtomicBool,
+        create_started: Notify,
+        create_release: Notify,
+        resume_started: Notify,
+        resume_release: Notify,
+        shutdowns: AtomicUsize,
+        event_sink: Option<Arc<dyn SessionEventSink>>,
     }
 
     impl StubFactory {
@@ -1055,6 +1206,21 @@ mod tests {
                 next: AtomicUsize::new(1),
                 resumes: AtomicUsize::new(0),
                 fail_resume_once: AtomicBool::new(false),
+                block_create: AtomicBool::new(false),
+                block_resume: AtomicBool::new(false),
+                create_started: Notify::new(),
+                create_release: Notify::new(),
+                resume_started: Notify::new(),
+                resume_release: Notify::new(),
+                shutdowns: AtomicUsize::new(0),
+                event_sink: None,
+            }
+        }
+
+        fn with_event_sink(event_sink: Arc<dyn SessionEventSink>) -> Self {
+            Self {
+                event_sink: Some(event_sink),
+                ..Self::new()
             }
         }
 
@@ -1071,7 +1237,10 @@ mod tests {
                 permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
                 hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
                 commands: Arc::new(builtin_command_registry().expect("commands")),
-                event_sink: Arc::new(NoopSessionEventSink::default()),
+                event_sink: self
+                    .event_sink
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(NoopSessionEventSink::default())),
                 event_clock: Arc::new(SystemEventClock),
                 secret_redactor: Arc::new(NoopSecretRedactor),
                 checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
@@ -1106,16 +1275,80 @@ mod tests {
         }
 
         async fn create(&self, request: CreateSessionRequest) -> Result<HostedSession, HostError> {
+            if self.block_create.load(Ordering::Acquire) {
+                self.create_started.notify_one();
+                self.create_release.notified().await;
+            }
             Ok(self.session(&request.session_id))
         }
 
         async fn resume(&self, session_id: &SessionId) -> Result<HostedSession, HostError> {
             self.resumes.fetch_add(1, Ordering::Relaxed);
-            tokio::task::yield_now().await;
+            if self.block_resume.load(Ordering::Acquire) {
+                self.resume_started.notify_one();
+                self.resume_release.notified().await;
+            } else {
+                tokio::task::yield_now().await;
+            }
             if self.fail_resume_once.swap(false, Ordering::AcqRel) {
                 return Err(HostError::Persistence("injected resume failure".to_owned()));
             }
             Ok(self.session(session_id))
+        }
+
+        async fn shutdown(&self) -> Result<(), HostError> {
+            self.shutdowns.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    const BLOCK_MODEL: u8 = 1;
+    const BLOCK_SHELL_ACTIVE: u8 = 2;
+    const BLOCK_SHELL_INACTIVE: u8 = 3;
+
+    #[derive(Default)]
+    struct BlockingDescriptorSink {
+        inner: NoopSessionEventSink,
+        block: AtomicU8,
+        append_started: Notify,
+        append_release: Notify,
+    }
+
+    impl BlockingDescriptorSink {
+        fn block(&self, target: u8) {
+            self.block.store(target, Ordering::Release);
+        }
+
+        fn release(&self) {
+            self.append_release.notify_one();
+        }
+
+        fn event_target(event: &EngineEvent) -> u8 {
+            match event {
+                EngineEvent::ModelChanged { .. } => BLOCK_MODEL,
+                EngineEvent::UserShellStateChanged { active: true, .. } => BLOCK_SHELL_ACTIVE,
+                EngineEvent::UserShellStateChanged { active: false, .. } => BLOCK_SHELL_INACTIVE,
+                _ => 0,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SessionEventSink for BlockingDescriptorSink {
+        async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
+            let target = Self::event_target(&event);
+            if target != 0 && target == self.block.load(Ordering::Acquire) {
+                self.append_started.notify_one();
+                self.append_release.notified().await;
+            }
+            self.inner.append(event).await
+        }
+
+        async fn read_after(
+            &self,
+            last_seen: Option<SequenceId>,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            self.inner.read_after(last_seen).await
         }
     }
 
@@ -1330,5 +1563,338 @@ mod tests {
             conflict,
             CommandOutcome::Rejected { error } if error.code == "request_id_conflict"
         ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_wakes_opening_waiters_and_never_inserts_late_resume() {
+        let (host, factory) = host(2);
+        factory.block_resume.store(true, Ordering::Release);
+        let session_id = SessionId("shutdown-resume-race".to_owned());
+        let owner = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            async move { host.resume_session(&session_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), factory.resume_started.notified())
+            .await
+            .expect("resume entered factory");
+
+        let opening = {
+            let registry = host.registry.lock().await;
+            match registry.sessions.get(&session_id) {
+                Some(SessionSlot::Opening(completed)) => completed.clone(),
+                Some(SessionSlot::Ready(_)) | None => panic!("opening reservation"),
+            }
+        };
+        let waiter = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            async move { host.resume_session(&session_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while opening.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second resume registered as an opening waiter");
+
+        assert_eq!(
+            host.dispatch(
+                BoundClient {
+                    client_id: ClientId("shutdown-client".to_owned()),
+                },
+                ClientCommand::ShutdownHost {
+                    meta: meta("spoofed", "shutdown-resume"),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("opening waiter woke")
+                .expect("waiter task"),
+            Err(HostError::ShuttingDown)
+        ));
+
+        factory.resume_release.notify_one();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), owner)
+                .await
+                .expect("resume owner finished")
+                .expect("owner task"),
+            Err(HostError::ShuttingDown)
+        ));
+        assert!(host.session(&session_id).await.is_none());
+        assert!(host.registry.lock().await.sessions.is_empty());
+        assert_eq!(factory.shutdowns.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_never_inserts_a_session_created_after_shutdown_started() {
+        let (host, factory) = host(1);
+        factory.block_create.store(true, Ordering::Release);
+        let session_id = SessionId("shutdown-create-race".to_owned());
+        let create = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            async move {
+                host.create_session(CreateSessionRequest {
+                    session_id,
+                    workspace: "workspace".to_owned(),
+                    model: None,
+                })
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), factory.create_started.notified())
+            .await
+            .expect("create entered factory");
+        assert_eq!(
+            host.dispatch(
+                BoundClient {
+                    client_id: ClientId("shutdown-client".to_owned()),
+                },
+                ClientCommand::ShutdownHost {
+                    meta: meta("spoofed", "shutdown-create"),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        factory.create_release.notify_one();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), create)
+                .await
+                .expect("create finished")
+                .expect("create task"),
+            Err(HostError::ShuttingDown)
+        ));
+        assert!(host.session(&session_id).await.is_none());
+        let registry = host.registry.lock().await;
+        assert!(registry.sessions.is_empty());
+        assert_eq!(registry.anonymous_openings, 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn descriptors_follow_only_durable_driver_model_and_shell_state() {
+        let sink = Arc::new(BlockingDescriptorSink::default());
+        let factory = Arc::new(StubFactory::with_event_sink(sink.clone()));
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 1,
+                max_deduplicated_requests: 32,
+            },
+            factory,
+            Arc::new(StubQueries),
+        )
+        .expect("host");
+        let session_id = SessionId("descriptor-state".to_owned());
+        host.prepare_session(
+            CreateSessionRequest {
+                session_id: session_id.clone(),
+                workspace: "workspace".to_owned(),
+                model: None,
+            },
+            false,
+        )
+        .await
+        .expect("prepared session");
+        let driver = BoundClient {
+            client_id: ClientId("driver".to_owned()),
+        };
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::TakeDriver {
+                    meta: meta("spoofed", "take-driver"),
+                    session_id: session_id.clone(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let session = host.session(&session_id).await.expect("ready session");
+        assert_eq!(
+            session.descriptor().driver_client_id,
+            Some(driver.client_id.clone())
+        );
+
+        sink.block(BLOCK_MODEL);
+        let switch = tokio::spawn({
+            let host = host.clone();
+            let driver = driver.clone();
+            let session_id = session_id.clone();
+            async move {
+                host.dispatch(
+                    driver,
+                    ClientCommand::SwitchModel {
+                        meta: meta("spoofed", "switch-model"),
+                        session_id,
+                        model: ModelAlias("big".to_owned()),
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), sink.append_started.notified())
+            .await
+            .expect("model append blocked");
+        assert_eq!(switch.await.expect("switch task"), CommandOutcome::Accepted);
+        assert_eq!(session.descriptor().model, ModelAlias("fast".to_owned()));
+        sink.release();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while session.descriptor().model != ModelAlias("big".to_owned()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durable model projected");
+
+        let tail = session.handle().last_sequence().await.expect("tail");
+        let mut shell_events = session
+            .handle()
+            .subscribe_client(ClientId("shell-test".to_owned()), tail);
+        sink.block(BLOCK_SHELL_ACTIVE);
+        let start = tokio::spawn({
+            let host = host.clone();
+            let driver = driver.clone();
+            let session_id = session_id.clone();
+            async move {
+                host.dispatch(
+                    driver,
+                    ClientCommand::UserShellStarted {
+                        meta: meta("spoofed", "shell-start-one"),
+                        session_id,
+                        command: "python --version".to_owned(),
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), sink.append_started.notified())
+            .await
+            .expect("shell-active append blocked");
+        assert_eq!(start.await.expect("start task"), CommandOutcome::Accepted);
+        assert!(!session.descriptor().shell_active);
+        sink.release();
+        let shell_id = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::UserShellStateChanged {
+                    shell_id,
+                    active: true,
+                    ..
+                } = shell_events.recv().await.expect("shell event")
+                {
+                    break shell_id;
+                }
+            }
+        })
+        .await
+        .expect("active shell event");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.descriptor().shell_active {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durable active shell projected");
+
+        sink.block(BLOCK_SHELL_INACTIVE);
+        let end = tokio::spawn({
+            let host = host.clone();
+            let driver = driver.clone();
+            let session_id = session_id.clone();
+            let shell_id = shell_id.clone();
+            async move {
+                host.dispatch(
+                    driver,
+                    ClientCommand::UserShellEnded {
+                        meta: meta("spoofed", "shell-end-one"),
+                        session_id,
+                        shell_id,
+                        status: 0,
+                        captured_output: None,
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), sink.append_started.notified())
+            .await
+            .expect("shell-inactive append blocked");
+        assert_eq!(end.await.expect("end task"), CommandOutcome::Accepted);
+        assert!(session.descriptor().shell_active);
+        sink.release();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while session.descriptor().shell_active {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durable inactive shell projected");
+
+        let tail = session.handle().last_sequence().await.expect("tail");
+        let mut broker_events = session
+            .handle()
+            .subscribe_client(ClientId("broker-test".to_owned()), tail);
+        sink.block(0);
+        assert_eq!(
+            host.dispatch(
+                driver,
+                ClientCommand::UserShellStarted {
+                    meta: meta("spoofed", "shell-start-two"),
+                    session_id: session_id.clone(),
+                    command: "python --version".to_owned(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let broker_shell_id = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::UserShellStateChanged {
+                    shell_id,
+                    active: true,
+                    ..
+                } = broker_events.recv().await.expect("broker shell event")
+                {
+                    break shell_id;
+                }
+            }
+        })
+        .await
+        .expect("broker active shell event");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.descriptor().shell_active {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second active shell projected");
+
+        sink.block(BLOCK_SHELL_INACTIVE);
+        let completion = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            async move {
+                host.complete_user_shell(&session_id, broker_shell_id, 0, None)
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), sink.append_started.notified())
+            .await
+            .expect("trusted completion append blocked");
+        assert!(session.descriptor().shell_active);
+        assert!(!completion.is_finished());
+        sink.release();
+        completion
+            .await
+            .expect("completion task")
+            .expect("trusted completion");
+        assert!(!session.descriptor().shell_active);
     }
 }

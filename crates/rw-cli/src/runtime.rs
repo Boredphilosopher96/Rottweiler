@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
 use rustyline::{DefaultEditor, error::ReadlineError};
 use rw_core::runtime_support::{
-    ApprovalDecision, AskUserInput, AskUserTool, BashTool, Block, BoxEventStream,
+    ApprovalBinding, ApprovalDecision, AskUserInput, AskUserTool, BashTool, Block, BoxEventStream,
     CacheBreakpointSupport, CacheHint, CancellationToken, Capabilities, CapabilityManifest,
     CommandFixtureRedactor, EditTool, ExecutionLease, FetchRequest, FetchResponse, FixtureRedactor,
     GlobTool, GrepTool, GuardedHttpFetchError, GuardedHttpFetchRequest, LsTool, MultiEditTool,
@@ -28,8 +28,8 @@ use rw_core::runtime_support::{
     deny_outbound_network_for_process, guarded_http_fetch,
 };
 use rw_core::{
-    AccountingAttribution, AgentLoopError, BudgetLedgerQuery, BudgetLedgerTotals, EngineEvent,
-    EventClock, EventMeta, MessageDisposition, ModelDriver, MutationCheckpoint,
+    AccountingAttribution, AgentLoopError, BudgetLedgerQuery, BudgetLedgerTotals, Config,
+    EngineEvent, EventClock, EventMeta, MessageDisposition, ModelDriver, MutationCheckpoint,
     MutationCheckpointCoordinator, MutationCheckpointOutcome, PermissionGate, ProviderFactory,
     QuestionId, RewindCheckpoint, SESSION_EVENT_VERSION, SequenceId, SessionActor,
     SessionActorConfig, SessionEventSink, SystemEventClock, ToolOutputStream, TurnStatus,
@@ -77,6 +77,36 @@ pub(crate) struct RunOptions {
 pub(crate) enum RunAction {
     Agent,
     PromptDump { turn: Option<u64> },
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(crate) enum HostedProviderMode {
+    Live,
+    DeterministicReplay {
+        provider_name: String,
+        scripts: Vec<Vec<ProviderEvent>>,
+    },
+}
+
+pub(crate) struct HostedSessionComposition {
+    pub workspace: PathBuf,
+    pub storage_root: PathBuf,
+    pub credentials_path: PathBuf,
+    pub config: Config,
+    pub session_id: SessionId,
+    pub requested_model: Option<String>,
+    pub resume: bool,
+    pub permission_mode: Option<PermissionMode>,
+    pub max_turns: usize,
+    pub provider_mode: HostedProviderMode,
+}
+
+pub(crate) struct HostedActorRuntime {
+    pub handle: rw_core::SessionHandle,
+    pub model_alias: String,
+    pub driver_client_id: Option<rw_core::ClientId>,
+    pub shell_active: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -506,6 +536,234 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     Ok(())
 }
 
+/// Composes one durable hosted actor through the same storage, tool, provider,
+/// checkpoint, prompt-shape, accounting, and recovery boundaries used by the
+/// CLI runtime. Presentation and transport stay outside this function.
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn compose_hosted_actor(
+    options: HostedSessionComposition,
+) -> Result<HostedActorRuntime> {
+    if options.max_turns == 0 {
+        return Err(miette!("--max-turns must be greater than zero"));
+    }
+    validate_session_id(&options.session_id.0)?;
+    let workspace = std::fs::canonicalize(&options.workspace).into_diagnostic()?;
+    if workspace != options.workspace {
+        return Err(miette!("hosted workspace must already be canonical"));
+    }
+    if options.permission_mode == Some(PermissionMode::Yolo)
+        && workspace == Path::new("/")
+        && rustix::process::geteuid().is_root()
+    {
+        return Err(miette!(
+            "--permission-mode yolo is refused for root while the workspace is /"
+        ));
+    }
+    std::fs::create_dir_all(&options.storage_root).into_diagnostic()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(
+            &options.storage_root,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .into_diagnostic()?;
+    }
+
+    let session_id = options.session_id.0.clone();
+    let log = SessionEventLog::open(&options.storage_root, &session_id)
+        .map_err(|error| miette!("session log could not open: {error}"))?;
+    let execution_lease_path = options
+        .storage_root
+        .join("sessions")
+        .join(&session_id)
+        .join("execution.lock");
+    let execution_lease = Arc::new(
+        tokio::task::spawn_blocking(move || ExecutionLease::acquire(execution_lease_path))
+            .await
+            .map_err(|error| miette!("execution lease worker failed: {error}"))?
+            .map_err(|error| miette!("execution lease could not lock: {error}"))?,
+    );
+
+    let configured_model_alias = options
+        .requested_model
+        .clone()
+        .unwrap_or_else(|| options.config.models.default.clone());
+    let (initial_context, persisted_model_alias) = if options.resume {
+        let metadata = load_session_metadata(&options.storage_root, &session_id, &workspace)?;
+        (metadata.initial_session_context, metadata.model_alias)
+    } else {
+        let context = initial_session_context(&workspace)
+            .map_err(|error| miette!("project instructions could not load: {error}"))?;
+        persist_session_metadata(
+            &options.storage_root,
+            &session_id,
+            &workspace,
+            &configured_model_alias,
+            &context,
+        )?;
+        (context, configured_model_alias)
+    };
+
+    let checkpoint_store = Arc::new(
+        CheckpointStore::open(
+            &checkpoint_root(&options.storage_root, &workspace, &session_id),
+            &workspace,
+        )
+        .map_err(|error| miette!("checkpoint store could not open: {error}"))?,
+    );
+    let recovery_store = Arc::clone(&checkpoint_store);
+    tokio::task::spawn_blocking(move || recovery_store.recover_opaque_mutations())
+        .await
+        .map_err(|error| miette!("checkpoint recovery worker failed: {error}"))?
+        .map_err(|error| miette!("checkpoint recovery failed: {error}"))?;
+    let rewind_store = Arc::clone(&checkpoint_store);
+    let log = tokio::task::spawn_blocking(move || {
+        let mut log = log;
+        recover_rewind_transactions(&rewind_store, &mut log)?;
+        Ok::<_, miette::Report>(log)
+    })
+    .await
+    .map_err(|error| miette!("rewind recovery worker failed: {error}"))??;
+    let recovered_events = load_session_events(&log)?;
+    let recovered = project_session_events(&recovered_events)
+        .map_err(|error| miette!("session log projection failed: {error}"))?;
+    let descriptor_model = recovered
+        .model_alias
+        .clone()
+        .unwrap_or_else(|| persisted_model_alias.clone());
+    let driver_client_id = recovered.driver_client_id.clone();
+    let shell_active = recovered.active_shell.is_some();
+    let durable_sink = Arc::new(DurableEventSink::new(
+        log,
+        options.storage_root.clone(),
+        session_id.clone(),
+    )?);
+    durable_sink.reconcile_accounting(&recovered_events)?;
+    let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::new(checkpoint_store));
+
+    let offline = matches!(
+        options.provider_mode,
+        HostedProviderMode::DeterministicReplay { .. }
+    );
+    let fixture_redactor = FixtureRedactor::default();
+    let command_fixture_mode = if offline {
+        CommandFixtureMode::Offline
+    } else {
+        CommandFixtureMode::Live
+    };
+    let global_proxy = options
+        .config
+        .network
+        .proxy
+        .as_deref()
+        .map(Url::parse)
+        .transpose()
+        .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
+    let tool_workspace = workspace.clone();
+    let tool_execution_lease = Arc::clone(&execution_lease);
+    let built_tools = tokio::task::spawn_blocking(move || {
+        build_tools(
+            &tool_workspace,
+            Arc::new(HeadlessQuestionAsker),
+            offline,
+            global_proxy,
+            command_fixture_mode,
+            tool_execution_lease,
+        )
+    })
+    .await
+    .map_err(|error| miette!("tool startup worker failed: {error}"))??;
+    restore_todo_state(
+        &recovered.conversation,
+        &workspace,
+        &options.session_id,
+        &built_tools.todo,
+    )
+    .await?;
+    durable_sink.bind_todo(TodoRestoreBinding {
+        todo: Arc::clone(&built_tools.todo),
+        workspace: workspace.clone(),
+        session_id: options.session_id.clone(),
+    });
+
+    let (model, engine_redactor): (Arc<dyn ModelDriver>, FixtureRedactor) = match options
+        .provider_mode
+    {
+        HostedProviderMode::Live => {
+            let pricing = PricingTable::bundled()
+                .map_err(|error| miette!("bundled model catalog is invalid: {error}"))?;
+            match ProviderFactory::system(options.credentials_path, pricing).build(&options.config)
+            {
+                Ok(runtime) => {
+                    let redactor = runtime.fixture_redactor();
+                    (Arc::new(runtime), redactor)
+                }
+                Err(error) => (
+                    Arc::new(UnavailableHostedModel {
+                        alias: persisted_model_alias.clone(),
+                        reason: error.to_string(),
+                        compaction: options.config.compaction.clone(),
+                        budget: options.config.budget.clone(),
+                    }),
+                    fixture_redactor,
+                ),
+            }
+        }
+        HostedProviderMode::DeterministicReplay {
+            provider_name,
+            scripts,
+        } => {
+            let provider: Arc<dyn Provider> =
+                Arc::new(ScriptProvider::new(provider_name, scripts, 0));
+            (
+                Arc::new(ProviderModel::new(
+                    provider,
+                    options.config.compaction.clone(),
+                    options.config.budget.clone(),
+                )),
+                fixture_redactor,
+            )
+        }
+    };
+    let model: Arc<dyn ModelDriver> = Arc::new(PromptRecordingModel {
+        inner: model,
+        journal: Arc::clone(&durable_sink.prompt_shapes),
+    });
+    let permissions = match options.permission_mode {
+        Some(mode) => Arc::new(PermissionGate::for_headless_mode(mode.into())),
+        None => Arc::new(PermissionGate::new(options.config.permissions.default)),
+    };
+    let handle = SessionActor::spawn(SessionActorConfig {
+        session_id: options.session_id,
+        workspace_root: workspace,
+        initial_session_context: initial_context,
+        model_alias: persisted_model_alias,
+        model,
+        tools: built_tools.registry,
+        permissions,
+        hooks: Arc::new(builtin_hook_dispatcher().map_err(display_agent_error)?),
+        commands: Arc::new(builtin_command_registry().map_err(display_agent_error)?),
+        event_sink: durable_sink,
+        event_clock: Arc::new(SystemEventClock),
+        secret_redactor: Arc::new(SharedEngineSecretRedactor(engine_redactor)),
+        checkpoints: checkpoint_coordinator,
+        recovered,
+        max_turns: options.max_turns,
+        identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
+        max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+        thinking: ThinkingLevel::Off,
+        event_capacity: DEFAULT_EVENT_CAPACITY,
+    })
+    .map_err(display_agent_error)?;
+    Ok(HostedActorRuntime {
+        handle,
+        model_alias: descriptor_model,
+        driver_client_id,
+        shell_active,
+    })
+}
+
 fn load_provider_script(path: &Path) -> Result<Vec<Vec<ProviderEvent>>> {
     serde_json::from_slice(&std::fs::read(path).into_diagnostic()?).into_diagnostic()
 }
@@ -527,11 +785,11 @@ impl From<PermissionMode> for rw_core::HeadlessPermissionMode {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct SessionMetadata {
+pub(crate) struct SessionMetadata {
     version: u16,
     session_id: String,
-    workspace: PathBuf,
-    model_alias: String,
+    pub workspace: PathBuf,
+    pub model_alias: String,
     initial_session_context: Vec<Turn>,
 }
 
@@ -898,6 +1156,28 @@ fn select_session(storage_root: &Path, workspace: &Path, options: &RunOptions) -
     new_session_id()
 }
 
+pub(crate) fn select_interactive_session(
+    storage_root: &Path,
+    workspace: &Path,
+    resume: Option<&str>,
+    continue_latest: bool,
+) -> Result<String> {
+    if let Some(session) = resume {
+        validate_session_id(session)?;
+        return Ok(session.to_owned());
+    }
+    if continue_latest {
+        refresh_session_index(storage_root)?;
+        return latest_workspace_session(storage_root, workspace)?.ok_or_else(|| {
+            miette!(
+                "there is no previous session for workspace {} to continue",
+                workspace.display()
+            )
+        });
+    }
+    new_session_id()
+}
+
 fn is_zero_turn_prompt_dump(options: &RunOptions) -> bool {
     matches!(options.action, RunAction::PromptDump { turn: None })
 }
@@ -986,6 +1266,19 @@ fn load_session_metadata(
     session_id: &str,
     expected_workspace: &Path,
 ) -> Result<SessionMetadata> {
+    let metadata = load_session_metadata_any(storage_root, session_id)?;
+    if metadata.workspace != expected_workspace {
+        return Err(miette!(
+            "session metadata identity does not match this session and canonical workspace"
+        ));
+    }
+    Ok(metadata)
+}
+
+pub(crate) fn load_session_metadata_any(
+    storage_root: &Path,
+    session_id: &str,
+) -> Result<SessionMetadata> {
     validate_session_id(session_id)?;
     let sessions = storage_root.join("sessions");
     ensure_real_directory(&sessions, false)?;
@@ -1003,10 +1296,7 @@ fn load_session_metadata(
         std::fs::read(&path).into_diagnostic()?
     };
     let metadata: SessionMetadata = serde_json::from_slice(&bytes).into_diagnostic()?;
-    if metadata.version != SESSION_METADATA_VERSION
-        || metadata.session_id != session_id
-        || metadata.workspace != expected_workspace
-    {
+    if metadata.version != SESSION_METADATA_VERSION || metadata.session_id != session_id {
         return Err(miette!(
             "session metadata identity does not match this session and canonical workspace"
         ));
@@ -1120,7 +1410,7 @@ fn sync_file(file: &std::fs::File) -> Result<()> {
     }
 }
 
-fn new_session_id() -> Result<String> {
+pub(crate) fn new_session_id() -> Result<String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|error| miette!("session id entropy failed: {error}"))?;
     let mut id = String::with_capacity(40);
@@ -1570,6 +1860,38 @@ struct ProviderModel {
     model_metadata: Option<rw_core::ProviderModelMetadata>,
     compaction: rw_core::CompactionConfig,
     budget: rw_core::BudgetConfig,
+}
+
+struct UnavailableHostedModel {
+    alias: String,
+    reason: String,
+    compaction: rw_core::CompactionConfig,
+    budget: rw_core::BudgetConfig,
+}
+
+impl ModelDriver for UnavailableHostedModel {
+    fn stream(
+        &self,
+        _alias: &str,
+        _request: ProviderRequest,
+    ) -> std::result::Result<BoxEventStream, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(format!(
+            "the interactive engine is ready, but its provider is unavailable: {}",
+            self.reason
+        )))
+    }
+
+    fn has_model_alias(&self, alias: &str) -> bool {
+        alias == self.alias
+    }
+
+    fn compaction_config(&self) -> rw_core::CompactionConfig {
+        self.compaction.clone()
+    }
+
+    fn budget_config(&self) -> rw_core::BudgetConfig {
+        self.budget.clone()
+    }
 }
 
 impl ProviderModel {
@@ -2330,9 +2652,18 @@ async fn run_print(
                 }
             }
         };
-        if let EngineEvent::ToolApprovalNeeded { tool_call_id, .. } = &event {
+        if let EngineEvent::ToolApprovalNeeded {
+            tool_call_id, diff, ..
+        } = &event
+        {
+            let binding = diff.as_ref().map(|diff| ApprovalBinding {
+                proposal_id: diff.proposal_id.clone(),
+                arguments_hash: diff.arguments_hash.clone(),
+                base_hash: diff.base_hash.clone(),
+                diff_hash: diff.diff_hash.clone(),
+            });
             actor
-                .approve(tool_call_id.0.clone(), ApprovalDecision::Deny)
+                .approve_bound(tool_call_id.0.clone(), ApprovalDecision::Deny, binding)
                 .await
                 .map_err(display_agent_error)?;
         }
@@ -2595,10 +2926,10 @@ async fn run_repl(
                                         .await
                                         .map_err(display_agent_error)?;
                                 }
-                                PendingInteraction::Permission { tool_call_id, .. } => {
+                                PendingInteraction::Permission { tool_call_id, binding, .. } => {
                                     let decision = parse_approval(&line);
                                     let _ = actor
-                                        .approve(tool_call_id, decision)
+                                        .approve_bound(tool_call_id, decision, binding)
                                         .await
                                         .map_err(display_agent_error)?;
                                 }
@@ -2635,6 +2966,7 @@ async fn run_repl(
                     tool_call_id,
                     capabilities,
                     rationale,
+                    diff,
                     ..
                 } = &event {
                     let announce = interactions.is_empty();
@@ -2642,6 +2974,12 @@ async fn run_repl(
                         tool_call_id: tool_call_id.0.clone(),
                         capabilities: capabilities.clone(),
                         rationale: rationale.clone(),
+                        binding: diff.as_ref().map(|diff| ApprovalBinding {
+                            proposal_id: diff.proposal_id.clone(),
+                            arguments_hash: diff.arguments_hash.clone(),
+                            base_hash: diff.base_hash.clone(),
+                            diff_hash: diff.diff_hash.clone(),
+                        }),
                     });
                     if announce {
                         display_next_interaction(interactions.front(), printer.as_mut())?;
@@ -2691,6 +3029,7 @@ enum PendingInteraction {
         tool_call_id: String,
         capabilities: Vec<ToolCapability>,
         rationale: String,
+        binding: Option<ApprovalBinding>,
     },
 }
 
@@ -3434,6 +3773,7 @@ mod tests {
                 tool_call_id: "permission-second".to_owned(),
                 capabilities: vec![ToolCapability::ReadFilesystem],
                 rationale: "fixture".to_owned(),
+                binding: None,
             },
         ]);
         let Some(PendingInteraction::Question { id, .. }) = interactions.pop_front() else {

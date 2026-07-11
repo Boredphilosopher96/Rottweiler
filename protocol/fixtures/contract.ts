@@ -157,7 +157,8 @@ export const contractFixture = {
       },
       "session_id": "session-fixture",
       "tool_call_id": "tool-1",
-      "decision": "allow_once"
+      "decision": "allow_once",
+      "binding": null
     },
     {
       "type": "answer_question",

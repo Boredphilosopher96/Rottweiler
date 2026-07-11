@@ -27,9 +27,9 @@ pub use interaction::{
     AskUserInput, AskUserTool, QuestionAsker, TodoAction, TodoInput, TodoItem, TodoStatus, TodoTool,
 };
 pub use registry::{
-    CancellationToken, CapabilityManifest, MutationScope, NoopOutputSink, Tool, ToolContext,
-    ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink, ToolRegistry,
-    ToolResult,
+    ApprovalPreview, CancellationToken, CapabilityManifest, MutationScope, NoopOutputSink, Tool,
+    ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
+    ToolRegistry, ToolResult,
 };
 pub use rw_intel::SymbolIndex;
 pub use search::{GlobInput, GlobTool, GrepInput, GrepTool, LsInput, LsTool};

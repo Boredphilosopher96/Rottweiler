@@ -1,28 +1,41 @@
 use std::{
+    fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
+use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
-use miette::{IntoDiagnostic, Result};
+use miette::{IntoDiagnostic, Result, miette};
 use rw_core::{
-    DEFAULT_MODEL_CATALOG_URL, GitHubCopilotLogin, OAuthLogin, ProviderApiKey, ProviderLogin,
-    ProviderLoginCancellation, begin_provider_login, refresh_model_catalog, store_provider_api_key,
+    ClientCommand, ClientId, CommandOutcome, CreateSessionRequest, DEFAULT_MODEL_CATALOG_URL,
+    EngineEvent, EngineHost, EngineHostConfig, GitHubCopilotLogin, OAuthLogin, ProviderApiKey,
+    ProviderLogin, ProviderLoginCancellation, SequenceId, SessionId, begin_provider_login,
+    refresh_model_catalog, store_provider_api_key,
 };
 use tracing_subscriber::EnvFilter;
 
+#[allow(dead_code)]
+mod host_runtime;
+#[allow(dead_code)]
+mod remote;
 mod runtime;
 #[allow(dead_code)]
 mod server;
 #[allow(dead_code)]
-mod supervisor;
+mod shell_broker;
 #[allow(dead_code)]
-mod remote;
+mod supervisor;
 #[allow(dead_code)]
 mod tty;
 
 #[derive(Debug, Parser)]
 #[command(name = "rw", version, about = "Rottweiler coding-agent harness")]
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Run one prompt without starting the interactive line-mode client.
     #[arg(short = 'p', long, value_name = "PROMPT")]
@@ -31,11 +44,23 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text, global = true)]
     output_format: OutputFormat,
     /// Non-interactive permission policy. Omitted means the loaded config policy.
-    #[arg(long, value_enum)]
+    #[arg(long, value_enum, global = true)]
     permission_mode: Option<PermissionMode>,
     /// Maximum provider iterations permitted in one user turn.
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = 32, global = true)]
     max_turns: usize,
+    /// Run the `OpenTUI` locally against an engine reached over SSH.
+    #[arg(long, value_name = "HOST", global = true)]
+    remote: Option<String>,
+    /// Workspace path on the remote engine host; defaults to the local path.
+    #[arg(long, value_name = "PATH", requires = "remote", global = true)]
+    remote_workspace: Option<PathBuf>,
+    /// Keep the engine alive after the interactive client exits.
+    #[arg(long, global = true)]
+    detach: bool,
+    /// Use the pre-M4 readline client instead of `OpenTUI`.
+    #[arg(long, global = true)]
+    line: bool,
     /// Resume an exact durable session id.
     #[arg(
         long,
@@ -86,14 +111,39 @@ enum OutputFormat {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-enum PermissionMode {
+pub(crate) enum PermissionMode {
     Strict,
     AutoSafe,
     Yolo,
 }
 
+impl PermissionMode {
+    const fn as_cli_value(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::AutoSafe => "auto-safe",
+            Self::Yolo => "yolo",
+        }
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run the authenticated headless engine server.
+    Serve {
+        /// Unix socket path; defaults to `ROTTWEILER_ENGINE_SOCKET`.
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+        /// Private bootstrap-token path; defaults to `ROTTWEILER_ENGINE_TOKEN_FILE`.
+        #[arg(long, value_name = "PATH")]
+        token_file: Option<PathBuf>,
+        /// Initial durable session id; defaults to `ROTTWEILER_SESSION_ID`.
+        #[arg(long, value_name = "SESSION")]
+        session: Option<String>,
+        /// Engine-host workspace; defaults to the current directory.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+    },
     /// Inspect an assembled model prompt without calling a provider.
     Prompt {
         #[command(subcommand)]
@@ -164,14 +214,40 @@ enum AuthCommand {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
-    match cli.command {
+    let mut cli = Cli::parse();
+    if let Some(host) = cli.remote.as_deref() {
+        if cli.command.is_some() || cli.prompt.is_some() || cli.line {
+            return Err(miette!("--remote is available only for the OpenTUI client"));
+        }
+        run_remote_tui(host, &cli).await?;
+        return Ok(());
+    }
+    match cli.command.take() {
+        Some(Command::Serve {
+            socket,
+            token_file,
+            session,
+            workspace,
+        }) => {
+            run_serve(
+                socket,
+                token_file,
+                session,
+                workspace,
+                cli.permission_mode,
+                cli.max_turns,
+                cli.model,
+                cli.detach,
+            )
+            .await?;
+        }
         Some(Command::Prompt {
             command: PromptCommand::Dump { turn },
         }) => {
@@ -229,27 +305,879 @@ async fn main() -> Result<()> {
             command: AuthCommand::SetKey { provider },
         }) => auth_set_key(&provider)?,
         None => {
-            runtime::run(runtime::RunOptions {
-                prompt: cli.prompt,
-                output_format: cli.output_format,
-                permission_mode: cli.permission_mode,
-                max_turns: cli.max_turns,
-                resume: cli.resume,
-                continue_latest: cli.continue_latest,
-                replay_dir: cli.replay_dir,
-                record_replay_script: cli.record_replay_script,
-                in_memory_replay_script: cli.in_memory_replay_script,
-                record_script_delay_ms: cli.record_script_delay_ms,
-                perf_markers: cli.perf_markers,
-                replay_provider: cli.replay_provider,
-                model: cli.model,
-                action: runtime::RunAction::Agent,
-            })
-            .await?;
+            let headless_or_line = cli.prompt.is_some()
+                || cli.line
+                || cli.replay_dir.is_some()
+                || cli.record_replay_script.is_some()
+                || cli.in_memory_replay_script.is_some()
+                || cli.record_script_delay_ms != 0
+                || cli.perf_markers;
+            if headless_or_line {
+                runtime::run(runtime::RunOptions {
+                    prompt: cli.prompt,
+                    output_format: cli.output_format,
+                    permission_mode: cli.permission_mode,
+                    max_turns: cli.max_turns,
+                    resume: cli.resume,
+                    continue_latest: cli.continue_latest,
+                    replay_dir: cli.replay_dir,
+                    record_replay_script: cli.record_replay_script,
+                    in_memory_replay_script: cli.in_memory_replay_script,
+                    record_script_delay_ms: cli.record_script_delay_ms,
+                    perf_markers: cli.perf_markers,
+                    replay_provider: cli.replay_provider,
+                    model: cli.model,
+                    action: runtime::RunAction::Agent,
+                })
+                .await?;
+            } else {
+                run_local_tui(&cli).await?;
+            }
         }
     }
 
     Ok(())
+}
+
+async fn run_local_tui(cli: &Cli) -> Result<()> {
+    let workspace =
+        fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
+    let storage_root = configuration_root()?;
+    let session_id = runtime::select_interactive_session(
+        &storage_root,
+        &workspace,
+        cli.resume.as_deref(),
+        cli.continue_latest,
+    )?;
+    if (cli.resume.is_some() || cli.continue_latest)
+        && !session_metadata_path(&storage_root, &session_id).is_file()
+    {
+        return Err(miette!("session {session_id:?} does not exist"));
+    }
+    let paths = allocate_runtime_paths(&storage_root.join("run"))?;
+    let supervisor = supervisor::Supervisor::new(
+        supervisor::SupervisorConfig {
+            rw_executable: std::env::current_exe().into_diagnostic()?,
+            tui_executable: locate_tui_executable()?,
+            socket: paths.socket,
+            token_file: paths.token,
+            last_seen_file: paths.directory.join("last-seen"),
+            session_id,
+            permission_mode: cli.permission_mode,
+            max_turns: cli.max_turns,
+            model: cli.model.clone(),
+            shell_target: Some(shell_broker::ShellTarget::Local),
+            detach: cli.detach,
+            restart_policy: supervisor::RestartPolicy::default(),
+        },
+        supervisor::TokioProcessBackend,
+        supervisor::ResumeHandoff::default(),
+    )
+    .map_err(|error| miette!(error.to_string()))?;
+    supervisor
+        .run()
+        .await
+        .map_err(|error| miette!(error.to_string()))
+}
+
+#[derive(Clone, Default)]
+struct DeferredHostedEngine {
+    inner: Arc<tokio::sync::RwLock<Option<server::HostedEngine>>>,
+    ready: Arc<AtomicBool>,
+}
+
+impl DeferredHostedEngine {
+    async fn install(&self, engine: server::HostedEngine) {
+        *self.inner.write().await = Some(engine);
+        self.ready.store(true, Ordering::Release);
+    }
+
+    async fn loaded(&self) -> std::result::Result<server::HostedEngine, String> {
+        self.inner
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| "engine session runtime is still starting".to_owned())
+    }
+}
+
+#[async_trait]
+impl server::ServerEngine for DeferredHostedEngine {
+    fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
+
+    async fn dispatch(
+        &self,
+        bound_client: ClientId,
+        command: ClientCommand,
+    ) -> std::result::Result<CommandOutcome, String> {
+        self.loaded().await?.dispatch(bound_client, command).await
+    }
+
+    async fn subscribe(
+        &self,
+        bound_client: ClientId,
+        session_id: Option<SessionId>,
+        last_seen: Option<SequenceId>,
+    ) -> std::result::Result<
+        tokio::sync::mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+        String,
+    > {
+        self.loaded()
+            .await?
+            .subscribe(bound_client, session_id, last_seen)
+            .await
+    }
+
+    async fn complete_shell(
+        &self,
+        session_id: SessionId,
+        shell_id: rw_core::ShellId,
+        status: i32,
+        captured_output: Option<String>,
+    ) -> std::result::Result<(), String> {
+        self.loaded()
+            .await?
+            .complete_shell(session_id, shell_id, status, captured_output)
+            .await
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_serve(
+    socket: Option<PathBuf>,
+    token_file: Option<PathBuf>,
+    session: Option<String>,
+    workspace: Option<PathBuf>,
+    permission_mode: Option<PermissionMode>,
+    max_turns: usize,
+    model: Option<String>,
+    detach: bool,
+) -> Result<()> {
+    let storage_root = configuration_root_path()?;
+    let paths = resolve_server_paths(socket, token_file, &storage_root)?;
+    let session_id = session
+        .or_else(|| std::env::var("ROTTWEILER_SESSION_ID").ok())
+        .map_or_else(runtime::new_session_id, Ok)?;
+    let workspace = workspace.unwrap_or(std::env::current_dir().into_diagnostic()?);
+
+    if detach {
+        let workspace = fs::canonicalize(workspace).into_diagnostic()?;
+        return spawn_detached_server(
+            &paths,
+            &session_id,
+            &workspace,
+            permission_mode,
+            max_turns,
+            model.as_deref(),
+        )
+        .await;
+    }
+
+    let (runtime, listener) = server::ServerRuntime::create_for_session(paths, Some(&session_id))?;
+    let deferred = DeferredHostedEngine::default();
+    let state = server::ServerState::new(Arc::new(deferred.clone()), &runtime);
+    let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+    let serve_task = tokio::spawn(server::serve(listener, state, shutdown_rx));
+    let preparation: Result<()> = async {
+        ensure_configuration_root(&storage_root)?;
+        let workspace = fs::canonicalize(workspace).into_diagnostic()?;
+        let options = host_runtime::CliHostOptions::from_environment(
+            vec![workspace.clone()],
+            permission_mode,
+            max_turns,
+            runtime::HostedProviderMode::Live,
+        )
+        .map_err(|error| miette!(error.to_string()))?;
+        let max_sessions = options.config.engine.max_concurrent_sessions;
+        let factory = Arc::new(
+            host_runtime::CliSessionFactory::new(options)
+                .map_err(|error| miette!(error.to_string()))?,
+        );
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions,
+                ..EngineHostConfig::default()
+            },
+            factory.clone(),
+            factory,
+        )
+        .map_err(|error| miette!(error.to_string()))?;
+        deferred
+            .install(server::HostedEngine::new(host.clone()))
+            .await;
+        let resume = session_metadata_path(&storage_root, &session_id).is_file();
+        host.prepare_session(
+            CreateSessionRequest {
+                session_id: SessionId(session_id),
+                workspace: workspace.display().to_string(),
+                model: model.map(rw_core::ModelAlias),
+            },
+            resume,
+        )
+        .await
+        .map_err(|error| miette!(error.to_string()))?;
+        Ok(())
+    }
+    .await;
+    match preparation {
+        Ok(()) => {}
+        Err(error) => {
+            let _ = shutdown.send(true);
+            serve_task.await.into_diagnostic()??;
+            return Err(error);
+        }
+    }
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = shutdown.send(true);
+        }
+    });
+    serve_task.await.into_diagnostic()?
+}
+
+fn configuration_root() -> Result<PathBuf> {
+    let root = configuration_root_path()?;
+    ensure_configuration_root(&root)?;
+    Ok(root)
+}
+
+fn configuration_root_path() -> Result<PathBuf> {
+    let loader = rw_store::config::ConfigLoader::from_environment().into_diagnostic()?;
+    let root = loader
+        .credentials_path()
+        .parent()
+        .ok_or_else(|| miette!("configuration root has no parent"))?
+        .to_path_buf();
+    Ok(root)
+}
+
+fn ensure_configuration_root(root: &Path) -> Result<()> {
+    fs::create_dir_all(root).into_diagnostic()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).into_diagnostic()?;
+    }
+    Ok(())
+}
+
+fn allocate_runtime_paths(root: &Path) -> Result<server::ServerRuntimePaths> {
+    fs::create_dir_all(root).into_diagnostic()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).into_diagnostic()?;
+    }
+    for _ in 0..32 {
+        let mut random = [0_u8; 8];
+        getrandom::fill(&mut random).into_diagnostic()?;
+        let suffix = random
+            .iter()
+            .fold(String::with_capacity(16), |mut value, byte| {
+                use std::fmt::Write as _;
+                let _ = write!(&mut value, "{byte:02x}");
+                value
+            });
+        let directory = root.join(format!("engine-{suffix}"));
+        match fs::create_dir(&directory) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+                        .into_diagnostic()?;
+                }
+                return Ok(server::ServerRuntimePaths {
+                    socket: directory.join("engine.sock"),
+                    token: directory.join("auth.token"),
+                    descriptor: directory.join("runtime.json"),
+                    directory,
+                });
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error).into_diagnostic(),
+        }
+    }
+    Err(miette!("could not allocate an engine runtime directory"))
+}
+
+fn resolve_server_paths(
+    socket: Option<PathBuf>,
+    token_file: Option<PathBuf>,
+    storage_root: &Path,
+) -> Result<server::ServerRuntimePaths> {
+    let socket = socket.or_else(|| std::env::var_os("ROTTWEILER_ENGINE_SOCKET").map(PathBuf::from));
+    if let Some(socket) = socket {
+        let directory = socket
+            .parent()
+            .ok_or_else(|| miette!("engine socket has no parent directory"))?
+            .to_path_buf();
+        let token = token_file
+            .or_else(|| std::env::var_os("ROTTWEILER_ENGINE_TOKEN_FILE").map(PathBuf::from))
+            .unwrap_or_else(|| directory.join("auth.token"));
+        return Ok(server::ServerRuntimePaths {
+            socket,
+            token,
+            descriptor: directory.join("runtime.json"),
+            directory,
+        });
+    }
+    if token_file.is_some() {
+        return Err(miette!("--token-file requires --socket"));
+    }
+    allocate_runtime_paths(&storage_root.join("run"))
+}
+
+fn locate_tui_executable() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("ROTTWEILER_TUI_BIN").map(PathBuf::from) {
+        return require_executable(path);
+    }
+    let current = std::env::current_exe().into_diagnostic()?;
+    if let Some(sibling) = current.parent().map(|parent| parent.join("rottweiler-tui"))
+        && sibling.is_file()
+    {
+        return require_executable(sibling);
+    }
+    let development =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/tui/dist/rottweiler-tui");
+    require_executable(development)
+}
+
+fn require_executable(path: PathBuf) -> Result<PathBuf> {
+    if !path.is_file() {
+        return Err(miette!(
+            "compiled OpenTUI executable was not found at {}; run `bun run build` in packages/tui or set ROTTWEILER_TUI_BIN",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+fn session_metadata_path(storage_root: &Path, session_id: &str) -> PathBuf {
+    storage_root
+        .join("sessions")
+        .join(session_id)
+        .join("metadata.json")
+}
+
+async fn spawn_detached_server(
+    paths: &server::ServerRuntimePaths,
+    session_id: &str,
+    workspace: &Path,
+    permission_mode: Option<PermissionMode>,
+    max_turns: usize,
+    model: Option<&str>,
+) -> Result<()> {
+    use std::process::Stdio;
+
+    if runtime_is_live(paths).await {
+        let token = read_private_bootstrap_token(&paths.token)?
+            .ok_or_else(|| miette!("live engine bootstrap token failed validation"))?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "version": 1,
+                "socket": paths.socket,
+                "token": token,
+                "session_id": session_id,
+            })
+        );
+        return Ok(());
+    }
+    let mut command = tokio::process::Command::new(std::env::current_exe().into_diagnostic()?);
+    command
+        .arg("serve")
+        .arg("--socket")
+        .arg(&paths.socket)
+        .arg("--token-file")
+        .arg(&paths.token)
+        .arg("--session")
+        .arg(session_id)
+        .arg("--workspace")
+        .arg(workspace)
+        .arg("--max-turns")
+        .arg(max_turns.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(mode) = permission_mode {
+        command.arg("--permission-mode").arg(mode.as_cli_value());
+    }
+    if let Some(model) = model {
+        command.arg("--model").arg(model);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.as_std_mut().process_group(0);
+    }
+    let mut child = command.spawn().into_diagnostic()?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if runtime_artifacts_ready(paths) {
+            let token = read_private_bootstrap_token(&paths.token)?
+                .ok_or_else(|| miette!("new engine bootstrap token failed validation"))?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "version": 1,
+                    "socket": paths.socket,
+                    "token": token,
+                    "session_id": session_id,
+                })
+            );
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().into_diagnostic()? {
+            return Err(miette!(
+                "detached engine exited before becoming ready with status {status}"
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = child.kill().await;
+            return Err(miette!(
+                "detached engine did not become ready within 5 seconds"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+}
+
+async fn runtime_is_live(paths: &server::ServerRuntimePaths) -> bool {
+    if !runtime_artifacts_ready(paths) {
+        return false;
+    }
+    let Ok(Some(token)) = read_private_bootstrap_token(&paths.token) else {
+        return false;
+    };
+    remote::probe_authenticated_health(&paths.socket, &token, std::time::Duration::from_millis(500))
+        .await
+        .unwrap_or(false)
+}
+
+fn runtime_artifacts_ready(paths: &server::ServerRuntimePaths) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt as _;
+        let socket_ready = fs::symlink_metadata(&paths.socket).is_ok_and(|metadata| {
+            !metadata.file_type().is_symlink() && metadata.file_type().is_socket()
+        });
+        let token_ready = fs::symlink_metadata(&paths.token).is_ok_and(|metadata| {
+            !metadata.file_type().is_symlink() && metadata.is_file() && metadata.len() == 64
+        });
+        socket_ready && token_ready
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
+    if cli
+        .permission_mode
+        .is_some_and(|mode| mode != PermissionMode::Strict)
+    {
+        return Err(miette!("remote sessions require --permission-mode strict"));
+    }
+    if cli.continue_latest {
+        return Err(miette!(
+            "--continue is ambiguous for a remote host; use --resume <session> or the session picker"
+        ));
+    }
+    let local_workspace =
+        fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
+    let remote_workspace = cli.remote_workspace.clone().unwrap_or(local_workspace);
+    let session_id = cli
+        .resume
+        .clone()
+        .map_or_else(runtime::new_session_id, Ok)?;
+    let storage_root = configuration_root()?;
+    let local_paths = allocate_runtime_paths(&storage_root.join("run"))?;
+    let uid = rustix::process::geteuid().as_raw();
+    let session_key = blake3::hash(session_id.as_bytes()).to_hex();
+    let remote_socket = PathBuf::from(format!(
+        "/tmp/rottweiler-{uid}/engine-{}/engine.sock",
+        &session_key[..16]
+    ));
+    let config = remote::RemoteConfig {
+        ssh_executable: std::env::var_os("ROTTWEILER_SSH_BIN")
+            .map_or_else(|| PathBuf::from("/usr/bin/ssh"), PathBuf::from),
+        host: host.to_owned(),
+        remote_rw_executable: std::env::var_os("ROTTWEILER_REMOTE_RW")
+            .map_or_else(|| PathBuf::from("/usr/local/bin/rw"), PathBuf::from),
+        remote_socket,
+        local_socket: local_paths.socket.clone(),
+        session_id: session_id.clone(),
+        remote_workspace,
+        model: cli.model.clone(),
+        permission_mode: remote::RemotePermissionMode::Strict,
+    };
+    let tui_executable = locate_tui_executable()?;
+    let mut remote_runtime = TokioRemoteRecoveryRuntime::new(config, local_paths.clone());
+    remote::initialize_remote(&mut remote_runtime)
+        .await
+        .map_err(|error| miette!(error))?;
+    let (watchdog_shutdown, watchdog_shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut watchdog = tokio::spawn(remote::run_watchdog(
+        remote_runtime,
+        watchdog_shutdown_rx,
+        remote::WatchdogPolicy::default(),
+    ));
+    let (broker_ready, broker_ready_rx) = tokio::sync::oneshot::channel();
+    let mut broker = tokio::spawn(shell_broker::run(
+        shell_broker::ShellBrokerConfig {
+            socket: local_paths.socket.clone(),
+            token_file: local_paths.token.clone(),
+            session_id: SessionId(session_id.clone()),
+            target: shell_broker::ShellTarget::Remote {
+                host: host.to_owned(),
+            },
+        },
+        broker_ready,
+    ));
+    let broker_readiness = tokio::select! {
+        readiness = broker_ready_rx => match readiness {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(miette!(error)),
+            Err(error) => Err(error).into_diagnostic(),
+        },
+        result = &mut watchdog => {
+            broker.abort();
+            return match result {
+                Ok(Ok(())) => Err(miette!("remote connection watchdog stopped before broker readiness")),
+                Ok(Err(error)) => Err(miette!(error)),
+                Err(error) => Err(miette!(error.to_string())),
+            };
+        }
+    };
+    if let Err(error) = broker_readiness {
+        broker.abort();
+        let _ = watchdog_shutdown.send(true);
+        watchdog.abort();
+        let _ = watchdog.await;
+        return Err(error);
+    }
+    let tui = run_remote_tui_process(tui_executable, &local_paths, &session_id, cli.detach);
+    tokio::pin!(tui);
+    let result = tokio::select! {
+        result = &mut tui => result,
+        result = &mut broker => match result {
+            Ok(Ok(())) => Err(miette!("foreground-shell broker stopped unexpectedly")),
+            Ok(Err(error)) => Err(miette!(error.to_string())),
+            Err(error) => Err(miette!(error.to_string())),
+        },
+        result = &mut watchdog => match result {
+            Ok(Ok(())) => Err(miette!("remote connection watchdog stopped unexpectedly")),
+            Ok(Err(error)) => Err(miette!(error)),
+            Err(error) => Err(miette!(error.to_string())),
+        },
+    };
+    broker.abort();
+    let _ = watchdog_shutdown.send(true);
+    if !watchdog.is_finished() {
+        watchdog.abort();
+        let _ = watchdog.await;
+    }
+    result
+}
+
+struct TokioRemoteRecoveryRuntime {
+    config: remote::RemoteConfig,
+    paths: server::ServerRuntimePaths,
+    tunnel: Option<tokio::process::Child>,
+}
+
+impl TokioRemoteRecoveryRuntime {
+    const HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+    fn new(config: remote::RemoteConfig, paths: server::ServerRuntimePaths) -> Self {
+        Self {
+            config,
+            paths,
+            tunnel: None,
+        }
+    }
+
+    async fn stop_tunnel(&mut self) {
+        if let Some(mut child) = self.tunnel.take() {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+    }
+}
+
+#[async_trait]
+impl remote::RemoteRecoveryRuntime for TokioRemoteRecoveryRuntime {
+    async fn authenticated_health(&mut self) -> std::result::Result<bool, String> {
+        let Some(token) =
+            read_private_bootstrap_token(&self.paths.token).map_err(|error| error.to_string())?
+        else {
+            return Ok(false);
+        };
+        match remote::probe_authenticated_health(&self.paths.socket, &token, Self::HEALTH_TIMEOUT)
+            .await
+        {
+            Ok(healthy) => Ok(healthy),
+            Err(error) => {
+                tracing::debug!(reason = %error, "forwarded remote engine health probe failed");
+                Ok(false)
+            }
+        }
+    }
+
+    async fn tunnel_alive(&mut self) -> std::result::Result<bool, String> {
+        let Some(tunnel) = self.tunnel.as_mut() else {
+            return Ok(false);
+        };
+        let exited = tunnel
+            .try_wait()
+            .map_err(|error| format!("could not inspect SSH forwarding process: {error}"))?
+            .is_some();
+        if exited {
+            self.tunnel = None;
+            Ok(false)
+        } else {
+            Ok(true)
+        }
+    }
+
+    async fn restart_tunnel(&mut self) -> std::result::Result<(), String> {
+        use std::process::Stdio;
+
+        self.stop_tunnel().await;
+        remove_stale_forward_socket(&self.paths.socket)?;
+        let forward = self
+            .config
+            .forward_command()
+            .map_err(|error| error.to_string())?;
+        let mut command = tokio::process::Command::new(&forward.program);
+        command
+            .args(&forward.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            command.as_std_mut().process_group(0);
+        }
+        let mut tunnel = command
+            .spawn()
+            .map_err(|error| format!("could not start SSH socket forwarding: {error}"))?;
+        if let Err(error) = wait_for_socket_or_child(&self.paths.socket, &mut tunnel).await {
+            let _ = tunnel.kill().await;
+            let _ = tunnel.wait().await;
+            return Err(error.to_string());
+        }
+        self.tunnel = Some(tunnel);
+        Ok(())
+    }
+
+    async fn attach_or_start(&mut self) -> std::result::Result<String, String> {
+        use std::process::Stdio;
+
+        let start = self
+            .config
+            .engine_start_command()
+            .map_err(|error| error.to_string())?;
+        let mut command = tokio::process::Command::new(&start.program);
+        command
+            .args(&start.args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
+            .await
+            .map_err(|_| "remote attach-or-start command timed out".to_owned())?
+            .map_err(|error| format!("could not run remote attach-or-start command: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "remote engine attach-or-start failed with SSH status {}",
+                output.status
+            ));
+        }
+        let ready: DetachedServerReady = serde_json::from_slice(&output.stdout)
+            .map_err(|_| "remote engine returned an invalid readiness descriptor".to_owned())?;
+        if ready.version != 1
+            || ready.session_id != self.config.session_id
+            || !valid_bootstrap_token(&ready.token)
+        {
+            return Err("remote engine readiness descriptor failed validation".to_owned());
+        }
+        Ok(ready.token)
+    }
+
+    async fn install_bootstrap_token(&mut self, token: &str) -> std::result::Result<(), String> {
+        if !valid_bootstrap_token(token) {
+            return Err("refusing to install invalid remote bootstrap token".to_owned());
+        }
+        write_private_file_atomic(&self.paths.token, token.as_bytes())
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DetachedServerReady {
+    version: u16,
+    token: String,
+    session_id: String,
+}
+
+fn valid_bootstrap_token(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn read_private_bootstrap_token(path: &Path) -> Result<Option<String>> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).into_diagnostic(),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(miette!(
+            "remote bootstrap-token file is not private and regular"
+        ));
+    }
+    let token = fs::read_to_string(path).into_diagnostic()?;
+    let token = token.trim();
+    if valid_bootstrap_token(token) {
+        Ok(Some(token.to_owned()))
+    } else {
+        Ok(None)
+    }
+}
+
+fn write_private_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.uid() != rustix::process::geteuid().as_raw()
+                || metadata.permissions().mode() & 0o077 != 0
+            {
+                return Err(miette!(
+                    "refusing to replace an unsafe remote bootstrap-token file"
+                ));
+            }
+            if fs::read(path).into_diagnostic()? == bytes {
+                return Ok(());
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).into_diagnostic(),
+    }
+
+    let parent = path
+        .parent()
+        .ok_or_else(|| miette!("remote bootstrap-token file has no parent"))?;
+    let mut random = [0_u8; 8];
+    getrandom::fill(&mut random).into_diagnostic()?;
+    let suffix = random.iter().fold(String::new(), |mut output, byte| {
+        use std::fmt::Write as _;
+        let _ = write!(&mut output, "{byte:02x}");
+        output
+    });
+    let temporary = parent.join(format!(".auth.token.{suffix}.tmp"));
+
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)
+        .into_diagnostic()?;
+    file.write_all(bytes).into_diagnostic()?;
+    file.sync_all().into_diagnostic()?;
+    drop(file);
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error).into_diagnostic();
+    }
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .into_diagnostic()
+}
+
+fn remove_stale_forward_socket(path: &Path) -> std::result::Result<(), String> {
+    use std::os::unix::fs::FileTypeExt as _;
+
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.file_type().is_socket() => {
+            fs::remove_file(path)
+                .map_err(|error| format!("could not remove stale forwarded socket: {error}"))
+        }
+        Ok(_) => Err("refusing to replace an unexpected forwarded-socket artifact".to_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("could not inspect forwarded socket: {error}")),
+    }
+}
+
+async fn wait_for_socket_or_child(socket: &Path, child: &mut tokio::process::Child) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if fs::symlink_metadata(socket).is_ok() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().into_diagnostic()? {
+            return Err(miette!(
+                "SSH socket forwarding exited before becoming ready with status {status}"
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(miette!(
+                "SSH socket forwarding did not become ready within 5 seconds"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+}
+
+async fn run_remote_tui_process(
+    tui: PathBuf,
+    paths: &server::ServerRuntimePaths,
+    session_id: &str,
+    _detach: bool,
+) -> Result<()> {
+    use std::process::Stdio;
+
+    let cursor = paths.directory.join("last-seen");
+    for attempt in 0..=5_u8 {
+        let status = tokio::process::Command::new(&tui)
+            .env("ROTTWEILER_ENGINE_SOCKET", &paths.socket)
+            .env("ROTTWEILER_ENGINE_TOKEN_FILE", &paths.token)
+            .env("ROTTWEILER_SESSION_ID", session_id)
+            .env("ROTTWEILER_LAST_SEEN_FILE", &cursor)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .await
+            .into_diagnostic()?;
+        if status.success() {
+            return Ok(());
+        }
+        if attempt == 5 {
+            return Err(miette!("remote TUI restart budget exhausted"));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(
+            50_u64.saturating_mul(1_u64 << attempt),
+        ))
+        .await;
+    }
+    Err(miette!("remote TUI stopped unexpectedly"))
 }
 
 fn auth_set_key(provider_name: &str) -> Result<()> {
@@ -339,7 +1267,7 @@ fn write_github_device_prompt(
 
 #[cfg(test)]
 mod tests {
-    use super::write_github_device_prompt;
+    use super::{valid_bootstrap_token, write_github_device_prompt, write_private_file_atomic};
 
     #[test]
     fn copilot_device_prompt_surfaces_only_the_user_facing_values() {
@@ -350,6 +1278,61 @@ mod tests {
             String::from_utf8(output)
                 .unwrap_or_else(|error| panic!("device prompt must be UTF-8: {error}")),
             "Open https://github.com/login/device\nEnter code: ABCD-EFGH\n"
+        );
+    }
+
+    #[test]
+    fn remote_bootstrap_token_rotation_is_atomic_private_and_idempotent() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary directory must exist: {error}"));
+        let path = directory.path().join("auth.token");
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        write_private_file_atomic(&path, first.as_bytes())
+            .unwrap_or_else(|error| panic!("first token install must succeed: {error}"));
+        write_private_file_atomic(&path, first.as_bytes())
+            .unwrap_or_else(|error| panic!("same token install must be idempotent: {error}"));
+        write_private_file_atomic(&path, second.as_bytes())
+            .unwrap_or_else(|error| panic!("token rotation must succeed: {error}"));
+
+        assert_eq!(
+            std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("token must be readable: {error}")),
+            second
+        );
+        let mode = std::fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("token metadata must exist: {error}"))
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0);
+        assert!(valid_bootstrap_token(&first));
+        assert!(!valid_bootstrap_token("not-a-token"));
+    }
+
+    #[test]
+    fn remote_bootstrap_rotation_refuses_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary directory must exist: {error}"));
+        let outside = directory.path().join("outside");
+        std::fs::write(&outside, "unchanged")
+            .unwrap_or_else(|error| panic!("outside fixture must exist: {error}"));
+        let path = directory.path().join("auth.token");
+        symlink(&outside, &path)
+            .unwrap_or_else(|error| panic!("symlink fixture must exist: {error}"));
+
+        let error = match write_private_file_atomic(&path, "c".repeat(64).as_bytes()) {
+            Ok(()) => panic!("symlink token must be refused"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unsafe remote bootstrap-token"));
+        assert_eq!(
+            std::fs::read_to_string(outside)
+                .unwrap_or_else(|read_error| panic!("outside must remain readable: {read_error}")),
+            "unchanged"
         );
     }
 }

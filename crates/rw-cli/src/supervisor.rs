@@ -19,6 +19,7 @@ const SOCKET_ENV: &str = "ROTTWEILER_ENGINE_SOCKET";
 const TOKEN_FILE_ENV: &str = "ROTTWEILER_ENGINE_TOKEN_FILE";
 const SESSION_ENV: &str = "ROTTWEILER_SESSION_ID";
 const LAST_SEEN_ENV: &str = "ROTTWEILER_LAST_SEEN_SEQUENCE";
+const LAST_SEEN_FILE_ENV: &str = "ROTTWEILER_LAST_SEEN_FILE";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StdioMode {
@@ -41,7 +42,12 @@ pub struct SupervisorConfig {
     pub tui_executable: PathBuf,
     pub socket: PathBuf,
     pub token_file: PathBuf,
+    pub last_seen_file: PathBuf,
     pub session_id: String,
+    pub permission_mode: Option<crate::PermissionMode>,
+    pub max_turns: usize,
+    pub model: Option<String>,
+    pub shell_target: Option<crate::shell_broker::ShellTarget>,
     pub detach: bool,
     pub restart_policy: RestartPolicy,
 }
@@ -75,6 +81,8 @@ pub enum SupervisorError {
         source: io::Error,
     },
     RestartBudgetExhausted,
+    Readiness(io::Error),
+    ShellBroker(String),
 }
 
 impl std::fmt::Display for SupervisorError {
@@ -88,6 +96,10 @@ impl std::fmt::Display for SupervisorError {
                 write!(formatter, "could not wait for {component}: {source}")
             }
             Self::RestartBudgetExhausted => formatter.write_str("restart budget exhausted"),
+            Self::Readiness(error) => write!(formatter, "engine did not become ready: {error}"),
+            Self::ShellBroker(error) => {
+                write!(formatter, "foreground-shell broker failed: {error}")
+            }
         }
     }
 }
@@ -138,6 +150,10 @@ pub trait ProcessBackend: Send + Sync {
     async fn sleep(&self, duration: Duration) {
         tokio::time::sleep(duration).await;
     }
+
+    async fn wait_ready(&self, _socket: &Path, _token_file: &Path) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -145,6 +161,7 @@ pub struct TokioProcessBackend;
 
 pub struct TokioManagedChild {
     child: Child,
+    pid: Option<rustix::process::Pid>,
     process_group: Option<rustix::process::Pid>,
 }
 
@@ -155,10 +172,10 @@ impl ManagedChild for TokioManagedChild {
     }
 
     fn signal_group(&self, signal: ProcessSignal) -> io::Result<()> {
-        let Some(group) = self.process_group else {
+        let Some(pid) = self.pid else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "child has no process group",
+                "child has no process id",
             ));
         };
         let signal = match signal {
@@ -166,7 +183,11 @@ impl ManagedChild for TokioManagedChild {
             ProcessSignal::Terminate => rustix::process::Signal::TERM,
             ProcessSignal::WindowChanged => rustix::process::Signal::WINCH,
         };
-        Ok(rustix::process::kill_process_group(group, signal)?)
+        if let Some(group) = self.process_group {
+            Ok(rustix::process::kill_process_group(group, signal)?)
+        } else {
+            Ok(rustix::process::kill_process(pid, signal)?)
+        }
     }
 }
 
@@ -195,14 +216,39 @@ impl ProcessBackend for TokioProcessBackend {
             command.as_std_mut().process_group(0);
         }
         let child = command.spawn()?;
-        let process_group = child
+        let pid = child
             .id()
             .and_then(|id| i32::try_from(id).ok())
             .and_then(rustix::process::Pid::from_raw);
+        let process_group = spec.new_process_group.then_some(pid).flatten();
         Ok(TokioManagedChild {
             child,
+            pid,
             process_group,
         })
+    }
+
+    async fn wait_ready(&self, socket: &Path, token_file: &Path) -> io::Result<()> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let socket_ready = std::fs::symlink_metadata(socket).is_ok_and(|metadata| {
+                use std::os::unix::fs::FileTypeExt as _;
+                !metadata.file_type().is_symlink() && metadata.file_type().is_socket()
+            });
+            let token_ready = std::fs::symlink_metadata(token_file).is_ok_and(|metadata| {
+                !metadata.file_type().is_symlink() && metadata.is_file() && metadata.len() == 64
+            });
+            if socket_ready && token_ready {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "engine socket and token were not ready within 5 seconds",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
     }
 }
 
@@ -249,9 +295,15 @@ impl<B: ProcessBackend> Supervisor<B> {
     ) -> Result<Self, SupervisorError> {
         validate_private_path(&config.socket)?;
         validate_private_path(&config.token_file)?;
+        validate_private_path(&config.last_seen_file)?;
         if config.session_id.is_empty() {
             return Err(SupervisorError::InvalidConfig(
                 "session id must not be empty",
+            ));
+        }
+        if config.max_turns == 0 {
+            return Err(SupervisorError::InvalidConfig(
+                "maximum provider turns must not be zero",
             ));
         }
         if config.restart_policy.max_consecutive_failures == 0 {
@@ -270,6 +322,9 @@ impl<B: ProcessBackend> Supervisor<B> {
         let mut budget = RestartBudget::new(self.config.restart_policy);
         let mut engine = self.spawn_engine().await?;
         let mut tui = self.spawn_tui_guarded(&mut engine).await?;
+        self.wait_engine_ready_guarded(&mut engine, &mut tui)
+            .await?;
+        let mut shell_broker = self.spawn_shell_broker().await?;
         loop {
             tokio::select! {
                 status = engine.wait() => {
@@ -278,6 +333,7 @@ impl<B: ProcessBackend> Supervisor<B> {
                     self.backend.sleep(budget.failure_delay()?).await;
                     engine = self.spawn_engine().await?;
                     tui = self.spawn_tui_guarded(&mut engine).await?;
+                    self.wait_engine_ready_guarded(&mut engine, &mut tui).await?;
                 }
                 status = tui.wait() => {
                     let status = status.map_err(|source| SupervisorError::Wait { component: "TUI", source })?;
@@ -287,16 +343,61 @@ impl<B: ProcessBackend> Supervisor<B> {
                         } else {
                             terminate_and_reap(&mut engine, "engine").await?;
                         }
+                        shell_broker.abort();
                         return Ok(());
                     }
                     self.backend.sleep(budget.failure_delay()?).await;
                     tui = self.spawn_tui_guarded(&mut engine).await?;
                 }
+                broker = &mut shell_broker => {
+                    let message = match broker {
+                        Ok(Ok(())) => "foreground-shell broker stopped unexpectedly".to_owned(),
+                        Ok(Err(error)) => error.to_string(),
+                        Err(error) => error.to_string(),
+                    };
+                    terminate_and_reap(&mut tui, "TUI").await?;
+                    terminate_and_reap(&mut engine, "engine").await?;
+                    return Err(SupervisorError::ShellBroker(message));
+                }
+            }
+        }
+    }
+
+    async fn spawn_shell_broker(
+        &self,
+    ) -> Result<
+        tokio::task::JoinHandle<Result<(), crate::shell_broker::ShellBrokerError>>,
+        SupervisorError,
+    > {
+        let Some(target) = self.config.shell_target.clone() else {
+            return Ok(tokio::spawn(std::future::pending()));
+        };
+        let (ready, ready_rx) = tokio::sync::oneshot::channel();
+        let config = crate::shell_broker::ShellBrokerConfig {
+            socket: self.config.socket.clone(),
+            token_file: self.config.token_file.clone(),
+            session_id: rw_core::SessionId(self.config.session_id.clone()),
+            target,
+        };
+        let task = tokio::spawn(crate::shell_broker::run(config, ready));
+        match ready_rx.await {
+            Ok(Ok(())) => Ok(task),
+            Ok(Err(error)) => {
+                task.abort();
+                Err(SupervisorError::ShellBroker(error))
+            }
+            Err(error) => {
+                task.abort();
+                Err(SupervisorError::ShellBroker(error.to_string()))
             }
         }
     }
 
     async fn spawn_engine(&self) -> Result<B::Child, SupervisorError> {
+        remove_stale_runtime_file(&self.config.socket, RuntimeFileKind::Socket)
+            .map_err(SupervisorError::Readiness)?;
+        remove_stale_runtime_file(&self.config.token_file, RuntimeFileKind::Regular)
+            .map_err(SupervisorError::Readiness)?;
         self.backend
             .spawn(engine_spec(&self.config))
             .await
@@ -306,9 +407,30 @@ impl<B: ProcessBackend> Supervisor<B> {
             })
     }
 
+    async fn wait_engine_ready_guarded(
+        &self,
+        engine: &mut B::Child,
+        tui: &mut B::Child,
+    ) -> Result<(), SupervisorError> {
+        if let Err(error) = self
+            .backend
+            .wait_ready(&self.config.socket, &self.config.token_file)
+            .await
+        {
+            let _ = terminate_and_reap(tui, "TUI").await;
+            let _ = terminate_and_reap(engine, "engine").await;
+            return Err(SupervisorError::Readiness(error));
+        }
+        Ok(())
+    }
+
     async fn spawn_tui(&self) -> Result<B::Child, SupervisorError> {
+        let persisted = read_resume_handoff(&self.config.last_seen_file);
         self.backend
-            .spawn(tui_spec(&self.config, self.handoff.last_seen()))
+            .spawn(tui_spec(
+                &self.config,
+                persisted.or_else(|| self.handoff.last_seen()),
+            ))
             .await
             .map_err(|source| SupervisorError::Spawn {
                 component: "TUI",
@@ -327,10 +449,51 @@ impl<B: ProcessBackend> Supervisor<B> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RuntimeFileKind {
+    Socket,
+    Regular,
+}
+
+fn remove_stale_runtime_file(path: &Path, expected: RuntimeFileKind) -> io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            use std::os::unix::fs::FileTypeExt as _;
+            let matches = match expected {
+                RuntimeFileKind::Socket => metadata.file_type().is_socket(),
+                RuntimeFileKind::Regular => metadata.is_file(),
+            };
+            if metadata.file_type().is_symlink() || !matches {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected runtime artifact type",
+                ));
+            }
+            std::fs::remove_file(path)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn engine_spec(config: &SupervisorConfig) -> ChildSpec {
+    let mut args = vec![
+        OsString::from("serve"),
+        OsString::from("--max-turns"),
+        OsString::from(config.max_turns.to_string()),
+    ];
+    if let Some(mode) = config.permission_mode {
+        args.extend([
+            OsString::from("--permission-mode"),
+            OsString::from(mode.as_cli_value()),
+        ]);
+    }
+    if let Some(model) = &config.model {
+        args.extend([OsString::from("--model"), OsString::from(model)]);
+    }
     ChildSpec {
         program: config.rw_executable.clone(),
-        args: vec![OsString::from("serve")],
+        args,
         env: connection_env(config, None),
         stdio: StdioMode::Null,
         new_process_group: true,
@@ -343,7 +506,10 @@ fn tui_spec(config: &SupervisorConfig, last_seen: Option<SequenceId>) -> ChildSp
         args: Vec::new(),
         env: connection_env(config, last_seen),
         stdio: StdioMode::Inherit,
-        new_process_group: true,
+        // The TUI must remain in `rw`'s foreground process group so it can
+        // actually own the controlling terminal. Foreground shell handover
+        // creates its own child group at the broker boundary.
+        new_process_group: false,
     }
 }
 
@@ -364,6 +530,10 @@ fn connection_env(
             OsString::from(SESSION_ENV),
             OsString::from(&config.session_id),
         ),
+        (
+            OsString::from(LAST_SEEN_FILE_ENV),
+            config.last_seen_file.as_os_str().to_owned(),
+        ),
     ]);
     if let Some(last_seen) = last_seen {
         env.insert(
@@ -372,6 +542,15 @@ fn connection_env(
         );
     }
     env
+}
+
+fn read_resume_handoff(path: &Path) -> Option<SequenceId> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 128 {
+        return None;
+    }
+    let value = std::fs::read_to_string(path).ok()?;
+    value.trim().parse::<u64>().ok().map(SequenceId)
 }
 
 async fn terminate_and_reap(
@@ -414,7 +593,12 @@ mod tests {
             tui_executable: PathBuf::from("/bin/rottweiler-tui"),
             socket: PathBuf::from("/private/run/engine.sock"),
             token_file: PathBuf::from("/private/run/auth.token"),
+            last_seen_file: PathBuf::from("/private/run/last-seen"),
             session_id: "session-1".to_owned(),
+            permission_mode: Some(crate::PermissionMode::Strict),
+            max_turns: 32,
+            model: None,
+            shell_target: None,
             detach: false,
             restart_policy: RestartPolicy::default(),
         }
@@ -432,12 +616,21 @@ mod tests {
                 spec.env.get(&OsString::from(TOKEN_FILE_ENV)),
                 Some(&OsString::from("/private/run/auth.token"))
             );
-            assert!(spec.new_process_group);
         }
+        assert!(engine_spec(&config).new_process_group);
+        assert!(!tui_spec(&config, None).new_process_group);
         let tui = tui_spec(&config, Some(SequenceId(41)));
         assert_eq!(
             tui.env.get(&OsString::from(LAST_SEEN_ENV)),
             Some(&OsString::from("41"))
+        );
+        assert_eq!(
+            tui.env.get(&OsString::from(LAST_SEEN_FILE_ENV)),
+            Some(&OsString::from("/private/run/last-seen"))
+        );
+        assert_eq!(
+            engine_spec(&config).args,
+            ["serve", "--max-turns", "32", "--permission-mode", "strict",].map(OsString::from)
         );
     }
 
@@ -517,6 +710,10 @@ mod tests {
             let index = self.count.fetch_add(1, Ordering::Relaxed);
             let engine = spec.stdio == StdioMode::Null;
             self.spawned.lock().expect("spawns").push(spec);
+            self.lifecycle
+                .lock()
+                .expect("lifecycle")
+                .push(if engine { "spawn:engine" } else { "spawn:tui" }.to_owned());
             let (name, outcome) = match (self.scenario, index, engine) {
                 (Scenario::EngineCrash, 0, true) => {
                     ("engine-1", Some(ExitStatus::from_raw(1 << 8)))
@@ -544,6 +741,14 @@ mod tests {
                 .expect("lifecycle")
                 .push("backoff".to_owned());
         }
+
+        async fn wait_ready(&self, _socket: &Path, _token_file: &Path) -> io::Result<()> {
+            self.lifecycle
+                .lock()
+                .expect("lifecycle")
+                .push("ready:engine".to_owned());
+            Ok(())
+        }
     }
 
     async fn run_scenario(scenario: Scenario) -> (Vec<ChildSpec>, Vec<String>) {
@@ -569,6 +774,10 @@ mod tests {
     async fn engine_crash_reaps_tui_restarts_both_and_normal_tui_exit_reaps_engine() {
         let (specs, lifecycle) = run_scenario(Scenario::EngineCrash).await;
         assert_eq!(specs.len(), 4);
+        assert_eq!(
+            &lifecycle[..3],
+            ["spawn:engine", "spawn:tui", "ready:engine"]
+        );
         assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
         assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
         assert!(lifecycle.contains(&"signal:engine-2:Terminate".to_owned()));
@@ -579,6 +788,10 @@ mod tests {
     async fn tui_crash_restarts_with_same_connection_environment_and_reaps_engine_on_exit() {
         let (specs, lifecycle) = run_scenario(Scenario::TuiCrash).await;
         assert_eq!(specs.len(), 3);
+        assert_eq!(
+            &lifecycle[..3],
+            ["spawn:engine", "spawn:tui", "ready:engine"]
+        );
         assert_eq!(specs[1].env, specs[2].env);
         assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
         assert!(lifecycle.contains(&"wait:engine-1".to_owned()));

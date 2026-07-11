@@ -99,8 +99,13 @@ describe("M4 retained components", () => {
           capabilities: ["write_filesystem"],
           rationale: "Apply change",
           diff: {
+            proposal_id: "proposal-hash",
             path: "src/main.rs",
             unified_diff: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            arguments_hash: "arguments-hash",
+            base_hash: "base-hash",
+            diff_hash: "diff-hash",
+            truncated: false,
           },
           chunks: [],
           output: null,
@@ -153,6 +158,12 @@ describe("M4 retained components", () => {
       session_id: "session-components",
       tool_call_id: "edit",
       decision: "allow_once",
+      binding: {
+        proposal_id: "proposal-hash",
+        arguments_hash: "arguments-hash",
+        base_hash: "base-hash",
+        diff_hash: "diff-hash",
+      },
     })
     expect(commands).toContainEqual({
       type: "pin_context",
@@ -164,6 +175,27 @@ describe("M4 retained components", () => {
       session_id: "session-components",
       item_id: "context-1",
     })
+
+    commands.length = 0
+    app.setState({
+      ...state,
+      tools: {
+        edit: {
+          ...state.tools.edit!,
+          diff: { ...state.tools.edit!.diff!, truncated: true },
+        },
+      },
+    })
+    await setup.renderOnce()
+    expect(app.interactionPanel.select.options.map((option) => option.value)).toEqual(["deny"])
+    app.interactionPanel.select.selectCurrent()
+    expect(commands).toContainEqual(
+      expect.objectContaining({
+        type: "approve_tool",
+        tool_call_id: "edit",
+        decision: "deny",
+      }),
+    )
   })
 
   test("notifies only while terminal focus is away", async () => {

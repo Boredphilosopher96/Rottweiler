@@ -167,6 +167,17 @@
         "decision": {
           "$ref": "#/$defs/ApprovalDecision"
         },
+        "binding": {
+          "description": "Required when the pending approval displayed a unified diff. The\nactor rejects missing or stale bindings without consuming the ask.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "type": {
           "type": "string",
           "const": "approve_tool"
@@ -801,6 +812,30 @@
         "allow_once",
         "allow_session",
         "deny"
+      ]
+    },
+    "ApprovalBinding": {
+      "description": "Optional structured unified diff attached to a mutating-tool approval.",
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "string"
+        },
+        "arguments_hash": {
+          "type": "string"
+        },
+        "base_hash": {
+          "type": "string"
+        },
+        "diff_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "arguments_hash",
+        "base_hash",
+        "diff_hash"
       ]
     },
     "QuestionId": {

@@ -16,6 +16,7 @@ import type {
   ToolOutputStream,
   Turn,
   TurnStatus,
+  UnifiedDiff,
   Usage,
 } from "../protocol"
 
@@ -86,7 +87,7 @@ export interface ToolProjection {
   readonly status: ToolStatus
   readonly capabilities: readonly ToolCapability[]
   readonly rationale: string | null
-  readonly diff: unknown | null
+  readonly diff: UnifiedDiff | null
   readonly chunks: readonly ToolOutputChunkProjection[]
   readonly output: ToolOutput | null
   readonly isError: boolean | null

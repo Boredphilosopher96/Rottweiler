@@ -8,6 +8,7 @@ export type {
   Answer,
   Attachment,
   AttachmentData,
+  ApprovalBinding,
   ApprovalDecision,
   BudgetLevel,
   BudgetScope,
@@ -26,6 +27,7 @@ export type {
   Turn,
   TurnStatus,
   Usage,
+  UnifiedDiff,
 } from "../../../protocol/types"
 
 /**

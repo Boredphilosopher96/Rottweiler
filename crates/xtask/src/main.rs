@@ -3,9 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rw_types::{
-    AccountingAttribution, Answer, ApprovalDecision, Attachment, AttachmentData, Block,
-    BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId, ClientRole,
-    CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CompactionReason,
+    AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
+    Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
+    ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CompactionReason,
     ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost,
     CostSnapshot, EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias,
     ModelCacheBehavior, ModelCapabilities, ModelDescriptor, PromptDump, PromptTool, Question,
@@ -172,6 +172,7 @@ fn generate_typescript() -> String {
     declaration!(WorkspaceFilePreview);
     declaration!(WorkspaceStatus);
     declaration!(UnifiedDiff);
+    declaration!(ApprovalBinding);
     declaration!(ApprovalDecision);
     declaration!(RewindTarget);
     declaration!(QuestionResponseKind);
@@ -363,6 +364,7 @@ fn contract_fixture() -> ContractFixture {
                 session_id: SessionId("session-fixture".to_owned()),
                 tool_call_id: ToolCallId("tool-1".to_owned()),
                 decision: ApprovalDecision::AllowOnce,
+                binding: None,
             },
             ClientCommand::AnswerQuestion {
                 meta: command_meta.clone(),

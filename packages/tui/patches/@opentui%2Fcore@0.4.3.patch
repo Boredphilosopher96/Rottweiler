@@ -1,0 +1,78 @@
+diff --git a/node_modules/@opentui/core/.bun-tag-62ce12d3fab8c607 b/.bun-tag-62ce12d3fab8c607
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@opentui/core/.bun-tag-859d518edbe983ee b/.bun-tag-859d518edbe983ee
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/index-d5xqskty.js b/index-d5xqskty.js
+index b3c986b0ded01ca864ae9547f7b7b85b23934273..26f5a1dd50268646182afa718a46f420c0c1ce01 100644
+--- a/index-d5xqskty.js
++++ b/index-d5xqskty.js
+@@ -1,4 +1,5 @@
+ import { createRequire } from "node:module";
++import { ptr as bunPtr, toArrayBuffer as bunToArrayBuffer } from "bun:ffi";
+ var __create = Object.create;
+ var __getProtoOf = Object.getPrototypeOf;
+ var __defProp = Object.defineProperty;
+@@ -10823,7 +10824,7 @@ class TextBuffer {
+ 
+ // ../../node_modules/.bun/bun-ffi-structs@0.2.4+1fb4c65d43e298b9/node_modules/bun-ffi-structs/dist/index.js
+ var FFI_LOAD_ERROR = "bun-ffi-structs requires Bun or Node.js with node:ffi enabled (--experimental-ffi --allow-ffi).";
+-var backend2 = await loadBackend2();
++var backend2 = createBunBackend2({ ptr: bunPtr, toArrayBuffer: bunToArrayBuffer });
+ function unavailable2(cause) {
+   throw new Error(FFI_LOAD_ERROR, {
+     cause: cause instanceof Error ? cause : undefined
+@@ -11810,40 +11811,20 @@ function validateLinuxLibcOverride() {
+     return;
+   throw new Error(`On Linux, OPENTUI_LIBC must be unset, empty, "glibc", or "musl", got "${libc}"`);
+ }
+-async function resolveNativePackage() {
+-  if (process.platform === "darwin") {
+-    if (process.arch === "x64")
+-      return await import("@opentui/core-darwin-x64");
+-    if (process.arch === "arm64")
+-      return await import("@opentui/core-darwin-arm64");
+-  }
+-  if (process.platform === "linux") {
+-    validateLinuxLibcOverride();
+-    if (process.arch === "x64") {
+-      if (process.env.OPENTUI_LIBC === "musl") {
+-        return await import("@opentui/core-linux-x64-musl");
+-      } else {
+-        return await import("@opentui/core-linux-x64");
+-      }
+-    }
+-    if (process.arch === "arm64") {
+-      if (process.env.OPENTUI_LIBC === "musl") {
+-        return await import("@opentui/core-linux-arm64-musl");
+-      } else {
+-        return await import("@opentui/core-linux-arm64");
+-      }
+-    }
+-  }
+-  if (process.platform === "win32") {
+-    if (process.arch === "x64")
+-      return await import("@opentui/core-win32-x64");
+-    if (process.arch === "arm64")
+-      return await import("@opentui/core-win32-arm64");
++var targetLibPath = globalThis.__rottweilerOpenTuiNativeLibrary;
++if (typeof targetLibPath !== "string" && typeof Bun !== "undefined") {
++  var libcSuffix = process.platform === "linux" && process.env.OPENTUI_LIBC === "musl" ? "-musl" : "";
++  var nativePackageName = `@opentui/core-${process.platform}-${process.arch}${libcSuffix}`;
++  var nativePackageDirectory = nativePackageName.slice("@opentui/".length);
++  var nativePackageIndex = resolve(import.meta.dirname, "..", nativePackageDirectory, "index.js");
++  if (!existsSync3(nativePackageIndex)) {
++    nativePackageIndex = resolve(process.cwd(), "node_modules", "@opentui", nativePackageDirectory, "index.js");
+   }
+-  throw new Error(`opentui is not supported on the current platform: ${process.platform}-${process.arch}`);
++  targetLibPath = __require(nativePackageIndex).default;
++}
++if (typeof targetLibPath !== "string") {
++  throw new Error("OpenTUI native library could not be resolved");
+ }
+-var nativePackage = await resolveNativePackage();
+-var targetLibPath = nativePackage.default;
+ if (isBunfsPath(targetLibPath)) {
+   targetLibPath = targetLibPath.replace("../", "");
+ }

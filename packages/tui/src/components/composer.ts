@@ -13,7 +13,10 @@ import { ImageAttachmentRenderable } from "./image"
 export interface ComposerOptions {
   readonly editor: EditorAdapter
   readonly imagePaste: ImagePasteAdapter
-  readonly onSubmit: (content: string, attachments: readonly Attachment[]) => void
+  readonly onSubmit: (
+    content: string,
+    attachments: readonly Attachment[],
+  ) => boolean | Promise<boolean>
   readonly onFileMention: (query: string) => void
   readonly onInput?: (value: string) => void
 }
@@ -26,6 +29,7 @@ export class ComposerRenderable extends BoxRenderable {
   #imagePreview: ImageAttachmentRenderable | null = null
   #options: ComposerOptions
   #theme: RottweilerTheme
+  #submitting = false
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, options: ComposerOptions) {
     super(ctx, {
@@ -99,15 +103,28 @@ export class ComposerRenderable extends BoxRenderable {
     this.editor.focus()
   }
 
-  submit(): void {
+  async submit(): Promise<boolean> {
     const content = this.editor.plainText.trim()
-    if (content.length === 0 && this.#attachments.length === 0) {
-      return
+    if ((content.length === 0 && this.#attachments.length === 0) || this.#submitting) {
+      return false
     }
-    this.#options.onSubmit(content, this.#attachments)
-    this.editor.clear()
-    this.#attachments = []
-    this.#refreshAttachments()
+    const submittedAttachments = this.#attachments
+    this.#submitting = true
+    try {
+      const accepted = await this.#options.onSubmit(content, submittedAttachments)
+      if (
+        accepted &&
+        this.editor.plainText.trim() === content &&
+        this.#attachments === submittedAttachments
+      ) {
+        this.editor.clear()
+        this.#attachments = []
+        this.#refreshAttachments()
+      }
+      return accepted
+    } finally {
+      this.#submitting = false
+    }
   }
 
   addAttachment(attachment: Attachment): void {

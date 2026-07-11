@@ -1,4 +1,4 @@
-import type { ClientCommand } from "../protocol"
+import type { ClientCommand, CommandOutcome } from "../protocol"
 import {
   DEFAULT_BACKOFF_POLICY,
   backoffDelay,
@@ -19,32 +19,36 @@ import {
 
 export interface EngineTransportOptions {
   readonly socketPath: string
-  readonly bootstrapToken: string
+  readonly bootstrapToken: string | BootstrapTokenProvider
   readonly origin?: string
   readonly connectPath?: string
   readonly commandPath?: string
-  readonly eventsPath?: (sessionId: string) => string
+  readonly eventsPath?: (sessionId: string, lastSeenSequence: string | null) => string
   readonly backoff?: BackoffPolicy
   readonly scheduler?: BackoffScheduler
   readonly sse?: SseParserOptions
   readonly fetch?: typeof fetch
 }
 
+export type BootstrapTokenProvider = () => string | Promise<string>
+
 export interface EngineSubscriptionOptions {
   readonly attach: AttachSessionCommand
   readonly signal: AbortSignal
   readonly onEvent: (event: WireEngineEvent) => void | Promise<void>
   readonly onConnection?: (update: TransportConnectionUpdate) => void
+  readonly onReconnect?: () => void | Promise<void>
   readonly getLastSeenSequence?: () => string | null
+  readonly requestId?: () => string
 }
 
 export class EngineHttpSseClient {
   readonly #socketPath: string
-  readonly #bootstrapToken: string
+  readonly #bootstrapToken: BootstrapTokenProvider
   readonly #origin: string
   readonly #connectPath: string
   readonly #commandPath: string
-  readonly #eventsPath: (sessionId: string) => string
+  readonly #eventsPath: (sessionId: string, lastSeenSequence: string | null) => string
   readonly #backoff: BackoffPolicy
   readonly #scheduler: BackoffScheduler
   readonly #sse: SseParserOptions
@@ -56,11 +60,14 @@ export class EngineHttpSseClient {
     if (options.socketPath.length === 0) {
       throw new TypeError("engine Unix socket path must not be empty")
     }
-    if (options.bootstrapToken.length === 0) {
+    if (typeof options.bootstrapToken === "string" && options.bootstrapToken.length === 0) {
       throw new TypeError("engine bootstrap token must not be empty")
     }
     this.#socketPath = options.socketPath
-    this.#bootstrapToken = options.bootstrapToken
+    this.#bootstrapToken =
+      typeof options.bootstrapToken === "string"
+        ? () => options.bootstrapToken as string
+        : options.bootstrapToken
     this.#origin = (options.origin ?? "http://rottweiler.local").replace(/\/$/, "")
     this.#connectPath = options.connectPath ?? "/v1/connect"
     this.#commandPath = options.commandPath ?? "/v1/command"
@@ -72,7 +79,10 @@ export class EngineHttpSseClient {
     validateBackoffPolicy(this.#backoff)
   }
 
-  async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<unknown | null> {
+  async postCommand(
+    command: ClientCommand,
+    signal?: AbortSignal,
+  ): Promise<CommandOutcome | null> {
     const auth = await this.#ensureClientAuth(signal)
     const authenticatedCommand: ClientCommand = {
       ...command,
@@ -95,7 +105,14 @@ export class EngineHttpSseClient {
       return null
     }
     const contentType = response.headers.get("Content-Type") ?? ""
-    return contentType.toLowerCase().includes("application/json") ? response.json() : null
+    if (!contentType.toLowerCase().includes("application/json")) {
+      return null
+    }
+    const outcome: unknown = await response.json()
+    if (!isCommandOutcome(outcome)) {
+      throw new EngineTransportError("engine returned an invalid command outcome")
+    }
+    return outcome
   }
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
@@ -119,18 +136,23 @@ export class EngineHttpSseClient {
       try {
         const attach: AttachSessionCommand = {
           ...options.attach,
+          role: reconnecting ? "observer" : options.attach.role,
+          meta: {
+            ...options.attach.meta,
+            request_id: options.requestId?.() ?? crypto.randomUUID(),
+          },
           ...(lastSeen === null ? { last_seen_sequence: null } : { last_seen_sequence: lastSeen }),
         }
-        const acknowledgement = await this.postCommand(attach, options.signal)
-        if (acknowledgement !== null) {
-          if (!isWireEngineEvent(acknowledgement)) {
-            throw new EngineTransportError("engine returned an invalid command acknowledgement")
-          }
-          await options.onEvent(acknowledgement)
+        const outcome = await this.postCommand(attach, options.signal)
+        if (outcome?.type === "rejected") {
+          throw new EngineTransportError(`engine rejected session attach: ${outcome.error.message}`)
+        }
+        if (reconnecting) {
+          await options.onReconnect?.()
         }
 
         const response = await this.#fetch(
-          this.#url(this.#eventsPath(options.attach.session_id)),
+          this.#url(this.#eventsPath(options.attach.session_id, lastSeen)),
           {
             unix: this.#socketPath,
             method: "GET",
@@ -221,10 +243,14 @@ export class EngineHttpSseClient {
   }
 
   async #mintClientAuth(signal?: AbortSignal): Promise<ClientAuth> {
+    const bootstrapToken = await this.#bootstrapToken()
+    if (bootstrapToken.length === 0) {
+      throw new EngineTransportError("engine bootstrap token source returned an empty token")
+    }
     const response = await this.#fetch(this.#url(this.#connectPath), {
       unix: this.#socketPath,
       method: "POST",
-      headers: this.#bootstrapHeaders(),
+      headers: this.#bootstrapHeaders(bootstrapToken),
       ...(signal === undefined ? {} : { signal }),
     })
     if (!response.ok) {
@@ -243,9 +269,9 @@ export class EngineHttpSseClient {
     return { clientId: value.client_id, token: value.token }
   }
 
-  #bootstrapHeaders(): Headers {
+  #bootstrapHeaders(bootstrapToken: string): Headers {
     const headers = new Headers()
-    headers.set("Authorization", `Bearer ${this.#bootstrapToken}`)
+    headers.set("Authorization", `Bearer ${bootstrapToken}`)
     return headers
   }
 
@@ -267,9 +293,29 @@ export class EngineTransportError extends Error {
   }
 }
 
-function defaultEventsPath(sessionId: string): string {
-  void sessionId
-  return "/v1/events"
+function defaultEventsPath(sessionId: string, lastSeenSequence: string | null): string {
+  const query = new URLSearchParams({ session_id: sessionId })
+  if (lastSeenSequence !== null) {
+    query.set("last_seen_sequence", lastSeenSequence)
+  }
+  return `/v1/events?${query.toString()}`
+}
+
+function isCommandOutcome(value: unknown): value is CommandOutcome {
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return false
+  }
+  if (value.type === "accepted") {
+    return true
+  }
+  return (
+    value.type === "rejected" &&
+    isRecord(value.error) &&
+    typeof value.error.category === "string" &&
+    typeof value.error.code === "string" &&
+    typeof value.error.message === "string" &&
+    typeof value.error.retryable === "boolean"
+  )
 }
 
 function parseEventJson(data: string): unknown {

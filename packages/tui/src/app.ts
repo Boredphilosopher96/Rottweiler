@@ -26,8 +26,10 @@ import {
 import {
   PROTOCOL_VERSION,
   type ApprovalDecision,
+  type ApprovalBinding,
   type Attachment,
   type ClientCommand,
+  type CommandOutcome,
   type EngineEvent,
 } from "./protocol"
 import {
@@ -39,19 +41,29 @@ import {
   type ToolProjection,
 } from "./state"
 import { createSyntaxStyle, kennelTheme, type RottweilerTheme } from "./theme"
+import type { WireEngineEvent } from "./transport"
 
 export interface RottweilerAppOptions {
   readonly initialEvent?: EngineEvent
   readonly initialState?: RottweilerState
   readonly sessionId?: string
   readonly clientId?: string
-  readonly onCommand?: (command: ClientCommand) => void | Promise<void>
+  readonly onCommand?: (
+    command: ClientCommand,
+  ) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
   readonly requestId?: () => string
   readonly theme?: RottweilerTheme
   readonly treeSitterClient?: TreeSitterClient
   readonly notifications?: NotificationAdapter
   readonly editor?: EditorAdapter
   readonly imagePaste?: ImagePasteAdapter
+  readonly terminalHandover?: TerminalHandoverAdapter
+  readonly onSessionSelect?: (sessionId: string) => void | Promise<void>
+}
+
+export interface TerminalHandoverAdapter {
+  suspend(): void
+  resume(): void
 }
 
 type PickerKind = "commands" | "files" | "modes" | "models" | "sessions"
@@ -72,9 +84,12 @@ export class RottweilerApp extends BoxRenderable {
   > &
     RottweilerAppOptions
   #syntaxStyle: ReturnType<typeof createSyntaxStyle>
+  #sessionId: string
   #terminalFocused = true
   #pickerKind: PickerKind | null = null
   #pendingFilePreview: string | null = null
+  #terminalSuspended = false
+  #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #onTerminalFocus = () => {
     this.#terminalFocused = true
   }
@@ -101,6 +116,7 @@ export class RottweilerApp extends BoxRenderable {
       imagePaste: options.imagePaste ?? noImagePaste,
     }
     this.#syntaxStyle = createSyntaxStyle(theme)
+    this.#sessionId = this.#options.sessionId
     this.#state = options.initialState ?? createInitialState()
     if (options.initialEvent !== undefined) {
       this.#state = reduceRottweilerState(this.#state, engineEvent(options.initialEvent))
@@ -190,16 +206,33 @@ export class RottweilerApp extends BoxRenderable {
     return this.#state
   }
 
-  handleEvent(event: EngineEvent): void {
+  /** Update command routing only after the runtime owns the new driver lease. */
+  setSessionId(sessionId: string): void {
+    this.#sessionId = sessionId
+  }
+
+  handleEvent(event: WireEngineEvent): void {
     const previous = this.#state
     const next = reduceRottweilerState(previous, engineEvent(event))
     this.setState(next)
     this.#notify(previous, next)
-    if (event.type === "workspace_file_preview_ready" && this.#pendingFilePreview !== null) {
-      const preview = event.preview
+    if (event.type === "user_shell_state_changed") {
+      if (event.active) {
+        this.#clearPendingShellTimer()
+        this.#suspendTerminal()
+      } else {
+        this.#resumeTerminal()
+      }
+    }
+    if (
+      next.workspacePreview !== previous.workspacePreview &&
+      next.workspacePreview !== null &&
+      this.#pendingFilePreview !== null
+    ) {
+      const preview = next.workspacePreview
       this.composer.addAttachment({
         name: preview.path,
-        media_type: preview.media_type,
+        media_type: preview.mediaType,
         data: preview.data,
       })
       this.#pendingFilePreview = null
@@ -269,6 +302,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   override destroy(): void {
+    this.#clearPendingShellTimer()
     this.ctx.off(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     this.ctx.off(CliRenderEvents.BLUR, this.#onTerminalBlur)
     this.#syntaxStyle.destroy()
@@ -357,7 +391,7 @@ export class RottweilerApp extends BoxRenderable {
             this.#emit({
               type: "switch_mode",
               meta: this.#meta(),
-              session_id: this.#options.sessionId,
+              session_id: this.#sessionId,
               mode: item.value as string,
             })
             this.closePicker()
@@ -375,13 +409,7 @@ export class RottweilerApp extends BoxRenderable {
           })),
           (item) => {
             const session = item.value as RottweilerState["sessions"][number]
-            this.#emit({
-              type: "attach_session",
-              meta: this.#meta(),
-              session_id: session.sessionId,
-              last_seen_sequence: null,
-              role: "driver",
-            })
+            void this.#options.onSessionSelect?.(session.sessionId)
             this.closePicker()
           },
         )
@@ -401,23 +429,58 @@ export class RottweilerApp extends BoxRenderable {
     )
   }
 
-  #sendMessage(content: string, attachments: readonly Attachment[]): void {
-    this.#emit({
+  async #sendMessage(content: string, attachments: readonly Attachment[]): Promise<boolean> {
+    if (content.startsWith("!")) {
+      const command = content.slice(1).trim()
+      if (command.length === 0 || attachments.length > 0) {
+        return false
+      }
+      this.#suspendTerminal()
+      this.#clearPendingShellTimer()
+      this.#pendingShellTimer = setTimeout(() => {
+        this.#pendingShellTimer = null
+        if (!this.#state.shell.active) {
+          this.#resumeTerminal()
+        }
+      }, 5_000)
+      const outcome = await this.#emit({
+        type: "user_shell_started",
+        meta: this.#meta(),
+        session_id: this.#sessionId,
+        command,
+      })
+      if (outcome?.type !== "accepted") {
+        this.#clearPendingShellTimer()
+        if (!this.#state.shell.active) {
+          this.#resumeTerminal()
+        }
+        this.#projectRejection(outcome)
+        return false
+      }
+      return true
+    }
+    const outcome = await this.#emit({
       type: "send_message",
       meta: this.#meta(),
-      session_id: this.#options.sessionId,
+      session_id: this.#sessionId,
       content,
       attachments: [...attachments],
     })
+    if (outcome?.type !== "accepted") {
+      this.#projectRejection(outcome)
+      return false
+    }
+    return true
   }
 
   #approve(tool: ToolProjection, decision: ApprovalDecision): void {
     this.#emit({
       type: "approve_tool",
       meta: this.#meta(),
-      session_id: this.#options.sessionId,
+      session_id: this.#sessionId,
       tool_call_id: tool.toolCallId,
       decision,
+      binding: approvalBinding(tool.diff),
     })
   }
 
@@ -425,7 +488,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#emit({
       type: "answer_question",
       meta: this.#meta(),
-      session_id: this.#options.sessionId,
+      session_id: this.#sessionId,
       question_id: question.questionId,
       answers: [{ question_id: question.questionId, values: [...values] }],
     })
@@ -452,7 +515,7 @@ export class RottweilerApp extends BoxRenderable {
         this.#emit({
           type: command.type,
           meta,
-          session_id: this.#options.sessionId,
+          session_id: this.#sessionId,
           item_id: command.item_id,
         })
         break
@@ -460,21 +523,21 @@ export class RottweilerApp extends BoxRenderable {
         this.#emit({
           ...command,
           meta,
-          session_id: this.#options.sessionId,
+          session_id: this.#sessionId,
         })
         break
       case "preview_workspace_file":
         this.#emit({
           ...command,
           meta,
-          session_id: this.#options.sessionId,
+          session_id: this.#sessionId,
         })
         break
       case "switch_model":
         this.#emit({
           ...command,
           meta,
-          session_id: this.#options.sessionId,
+          session_id: this.#sessionId,
         })
         break
     }
@@ -488,8 +551,43 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
-  #emit(command: ClientCommand): void {
-    void this.#options.onCommand?.(command)
+  async #emit(command: ClientCommand): Promise<void | CommandOutcome | null> {
+    return this.#options.onCommand?.(command)
+  }
+
+  #suspendTerminal(): void {
+    if (this.#terminalSuspended) {
+      return
+    }
+    this.#options.terminalHandover?.suspend()
+    this.#terminalSuspended = true
+  }
+
+  #resumeTerminal(): void {
+    this.#clearPendingShellTimer()
+    if (!this.#terminalSuspended) {
+      return
+    }
+    this.#options.terminalHandover?.resume()
+    this.#terminalSuspended = false
+    this.composer.focus()
+  }
+
+  #clearPendingShellTimer(): void {
+    if (this.#pendingShellTimer !== null) {
+      clearTimeout(this.#pendingShellTimer)
+      this.#pendingShellTimer = null
+    }
+  }
+
+  #projectRejection(outcome: void | CommandOutcome | null): void {
+    if (outcome?.type !== "rejected") {
+      return
+    }
+    this.setState({
+      ...this.#state,
+      errors: [...this.#state.errors.slice(-63), outcome.error],
+    })
   }
 
   #notify(previous: RottweilerState, next: RottweilerState): void {
@@ -526,6 +624,27 @@ export class RottweilerApp extends BoxRenderable {
         body: `Turn ${finished.turnId} · ${finished.status}`,
       })
     }
+  }
+}
+
+function approvalBinding(diff: unknown): ApprovalBinding | null {
+  if (typeof diff !== "object" || diff === null) {
+    return null
+  }
+  const value = diff as Record<string, unknown>
+  if (
+    typeof value.proposal_id !== "string" ||
+    typeof value.arguments_hash !== "string" ||
+    typeof value.base_hash !== "string" ||
+    typeof value.diff_hash !== "string"
+  ) {
+    return null
+  }
+  return {
+    proposal_id: value.proposal_id,
+    arguments_hash: value.arguments_hash,
+    base_hash: value.base_hash,
+    diff_hash: value.diff_hash,
   }
 }
 

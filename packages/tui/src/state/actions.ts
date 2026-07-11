@@ -3,6 +3,7 @@ import type { WireEngineEvent } from "../transport"
 export type RottweilerAction =
   | { readonly type: "engine_event"; readonly event: WireEngineEvent }
   | { readonly type: "transport_connecting"; readonly attempt: number }
+  | { readonly type: "transport_reconnecting"; readonly attempt: number }
   | { readonly type: "transport_connected"; readonly attempt: number }
   | {
       readonly type: "transport_disconnected"
@@ -23,6 +24,11 @@ export const transportConnecting = (attempt: number): RottweilerAction => ({
 
 export const transportConnected = (attempt: number): RottweilerAction => ({
   type: "transport_connected",
+  attempt,
+})
+
+export const transportReconnecting = (attempt: number): RottweilerAction => ({
+  type: "transport_reconnecting",
   attempt,
 })
 

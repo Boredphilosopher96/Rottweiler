@@ -104,14 +104,21 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#activeQuestion = null
     this.visible = true
     this.title = " Permission required "
-    this.prompt.content = `${tool.name} requests ${tool.capabilities.join(", ") || "permission"}\n${tool.rationale ?? "Review this action."}`
-    this.select.options = [
-      { name: "Allow once", description: "Run only this invocation", value: "allow_once" },
-      { name: "Allow session", description: "Remember for this session", value: "allow_session" },
-      { name: "Deny", description: "Do not run the tool", value: "deny" },
-    ]
-    this.select.setSelectedIndex(0)
     const diff = readUnifiedDiff(tool.diff)
+    const truncated = diff?.truncated === true
+    this.prompt.content = `${tool.name} requests ${tool.capabilities.join(", ") || "permission"}\n${
+      truncated
+        ? "Diff exceeds the review limit. Approval is disabled until the complete change can be reviewed."
+        : (tool.rationale ?? "Review this action.")
+    }`
+    this.select.options = truncated
+      ? [{ name: "Deny", description: "A truncated change cannot be approved", value: "deny" }]
+      : [
+          { name: "Allow once", description: "Run only this invocation", value: "allow_once" },
+          { name: "Allow session", description: "Remember for this session", value: "allow_session" },
+          { name: "Deny", description: "Do not run the tool", value: "deny" },
+        ]
+    this.select.setSelectedIndex(0)
     if (diff !== null) {
       if (this.#diff === null) {
         const filetype = extension(diff.path)
@@ -158,8 +165,11 @@ export class InteractionPanelRenderable extends BoxRenderable {
 
   #selected(index: number): void {
     if (this.#activeTool !== null) {
+      const selected = this.select.options[index]?.value
+      const requested: ApprovalDecision =
+        selected === "allow_once" || selected === "allow_session" ? selected : "deny"
       const decision: ApprovalDecision =
-        index === 0 ? "allow_once" : index === 1 ? "allow_session" : "deny"
+        this.#activeTool.diff?.truncated === true ? "deny" : requested
       this.#callbacks.onApproval(this.#activeTool, decision)
       return
     }
@@ -350,13 +360,17 @@ function questionOptions(question: Question | undefined) {
   }))
 }
 
-function readUnifiedDiff(value: unknown): { path: string; unifiedDiff: string } | null {
+function readUnifiedDiff(
+  value: unknown,
+): { path: string; unifiedDiff: string; truncated: boolean } | null {
   if (typeof value !== "object" || value === null) {
     return null
   }
   const record = value as Record<string, unknown>
-  return typeof record.path === "string" && typeof record.unified_diff === "string"
-    ? { path: record.path, unifiedDiff: record.unified_diff }
+  return typeof record.path === "string" &&
+    typeof record.unified_diff === "string" &&
+    typeof record.truncated === "boolean"
+    ? { path: record.path, unifiedDiff: record.unified_diff, truncated: record.truncated }
     : null
 }
 

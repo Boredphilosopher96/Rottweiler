@@ -13,6 +13,10 @@
       },
     },
   },
+  "patchedDependencies": {
+    "@opentui/core@0.4.3": "patches/@opentui%2Fcore@0.4.3.patch",
+    "bun-ffi-structs@0.2.4": "patches/bun-ffi-structs@0.2.4.patch",
+  },
   "packages": {
     "@opentui/core": ["@opentui/core@0.4.3", "", { "dependencies": { "bun-ffi-structs": "0.2.4", "diff": "9.0.0", "marked": "17.0.1", "string-width": "7.2.0", "strip-ansi": "7.1.2" }, "optionalDependencies": { "@opentui/core-darwin-arm64": "0.4.3", "@opentui/core-darwin-x64": "0.4.3", "@opentui/core-linux-arm64": "0.4.3", "@opentui/core-linux-arm64-musl": "0.4.3", "@opentui/core-linux-x64": "0.4.3", "@opentui/core-linux-x64-musl": "0.4.3", "@opentui/core-win32-arm64": "0.4.3", "@opentui/core-win32-x64": "0.4.3" }, "peerDependencies": { "web-tree-sitter": "0.25.10" } }, "sha512-rrJfAk13tALDqldYjhc78eWQ+aKq1iknJgffIOg3OwyZoqQo+p6gtuqyhmWvXIfQzlNUbpgpCPcxbXlhMnlaHQ=="],
 

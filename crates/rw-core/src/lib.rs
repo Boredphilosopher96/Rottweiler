@@ -9,9 +9,11 @@ mod permission;
 mod provider_factory;
 mod subscription_credentials;
 
-pub use rw_types::config::{BudgetConfig, CompactionConfig};
+pub use rw_types::config::{BudgetConfig, CompactionConfig, Config};
 pub use rw_types::{
-    AccountingAttribution, ContextItemId, ContextSnapshot, CostSnapshot, PromptDump,
+    AccountingAttribution, AttachmentData, CommandDescriptor, ContextItemId, ContextSnapshot,
+    CostSnapshot, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor, PromptDump,
+    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
 };
 
 pub use admin::{
@@ -50,13 +52,13 @@ pub use provider_factory::{
 pub use rw_providers::{
     ProviderModelMetadata, TokenUsage as ModelTokenUsage, UsageAccounting as ModelAccounting,
 };
+pub use rw_types::PROTOCOL_VERSION;
 pub use rw_types::{
     Answer, ClientCommand, ClientId, CommandAckMeta, CommandMeta, CommandOutcome, Cost,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, RequestId, SequenceId,
     SessionDescriptor, SessionId, ShellId, ToolOutputStream, TurnId, TurnStatus, UnrestorablePath,
     Usage,
 };
-pub use rw_types::PROTOCOL_VERSION;
 
 /// Stable construction and protocol surface for executable frontends.
 ///
@@ -81,10 +83,10 @@ pub mod runtime_support {
         ToolRegistry, ToolResult, WebFetchTool, WebFetcher, WriteTool,
     };
     pub use rw_types::{
-        Answer, ApprovalDecision, Block, ClientCommand, ClientId, CommandOutcome, Cost,
-        EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, Role, SequenceId,
-        SessionId, ToolCallId, ToolCapability, ToolOutput, ToolOutputStream, Turn, TurnId,
-        TurnMeta, TurnStatus, UnrestorablePath, Usage, config::PermissionDecision,
+        Answer, ApprovalBinding, ApprovalDecision, Block, ClientCommand, ClientId, CommandOutcome,
+        Cost, EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, Role,
+        SequenceId, SessionId, ToolCallId, ToolCapability, ToolOutput, ToolOutputStream, Turn,
+        TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage, config::PermissionDecision,
     };
 }
 

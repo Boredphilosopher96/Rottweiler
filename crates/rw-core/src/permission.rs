@@ -1,7 +1,7 @@
 use std::{collections::BTreeSet, fmt, sync::RwLock};
 
 use async_trait::async_trait;
-use rw_types::{ApprovalDecision, ToolCapability, config::PermissionDecision};
+use rw_types::{ApprovalDecision, ToolCapability, UnifiedDiff, config::PermissionDecision};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -16,6 +16,9 @@ pub struct PermissionRequest {
     pub arguments: Value,
     /// Declared effects used by policy and the active client.
     pub capabilities: Vec<ToolCapability>,
+    /// Exact visual proposal, when this invocation supports a diff-bound ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_diff: Option<UnifiedDiff>,
 }
 
 /// Result of the one mandatory permission check before tool execution.
@@ -210,6 +213,7 @@ mod tests {
             tool_name: "write".to_owned(),
             arguments: serde_json::json!({"path": "fixture"}),
             capabilities: vec![ToolCapability::WriteFilesystem],
+            approval_diff: None,
         }
     }
 

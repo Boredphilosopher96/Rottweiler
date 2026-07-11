@@ -47,7 +47,7 @@ jobs:
         working-directory: packages/tui
 
   performance:
-    name: M2 performance budgets
+    name: M2 and M4 performance budgets
     runs-on: macos-15
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
@@ -56,7 +56,56 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
       - run: rustup override set 1.94.1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+        working-directory: packages/tui
       - run: crates/rw-cli/tests/perf_gate.sh
+      - run: crates/rw-cli/tests/m4_release_gate.sh
+      - run: scripts/build-release.sh
+
+  m4-ssh-loopback:
+    name: M4 SSH loopback contract
+    runs-on: ubuntu-latest
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+      ROTTWEILER_M4_SKIP_PERFORMANCE: 1
+      ROTTWEILER_M4_SKIP_SUPERVISOR: 1
+      ROTTWEILER_M4_SKIP_SHELL: 1
+      ROTTWEILER_M4_SSH_LOOPBACK_HOST: rottweiler-ci
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+        working-directory: packages/tui
+      - name: Configure required SSH loopback
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openssh-server
+          install -d -m 700 "$HOME/.ssh"
+          ssh-keygen -q -t ed25519 -N '' -f "$HOME/.ssh/id_ed25519"
+          cp "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/authorized_keys"
+          chmod 600 "$HOME/.ssh/authorized_keys"
+          cat >> "$HOME/.ssh/config" <<EOF
+          Host rottweiler-ci
+            HostName 127.0.0.1
+            User $USER
+            IdentityFile $HOME/.ssh/id_ed25519
+            BatchMode yes
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          EOF
+          chmod 600 "$HOME/.ssh/config"
+          sudo install -d -m 755 /run/sshd
+          sudo service ssh restart
+          ssh rottweiler-ci true
+      - run: crates/rw-cli/tests/m4_release_gate.sh
 
   supply-chain:
     name: Supply chain

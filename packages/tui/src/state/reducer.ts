@@ -89,6 +89,16 @@ export function reduceRottweilerState(
           error: null,
         },
       }
+    case "transport_reconnecting":
+      return {
+        ...state,
+        connection: {
+          ...state.connection,
+          phase: "reconnecting",
+          attempt: action.attempt,
+          error: null,
+        },
+      }
     case "transport_connected":
       return {
         ...state,

@@ -236,6 +236,15 @@ pub struct WorkspaceStatus {
 
 /// Optional structured unified diff attached to a mutating-tool approval.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ApprovalBinding {
+    pub proposal_id: String,
+    pub arguments_hash: String,
+    pub base_hash: String,
+    pub diff_hash: String,
+}
+
+/// Optional structured unified diff attached to a mutating-tool approval.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct UnifiedDiff {
     pub proposal_id: String,
     pub path: String,
@@ -530,6 +539,9 @@ pub enum ClientCommand {
         session_id: SessionId,
         tool_call_id: ToolCallId,
         decision: ApprovalDecision,
+        /// Required when the pending approval displayed a unified diff. The
+        /// actor rejects missing or stale bindings without consuming the ask.
+        binding: Option<ApprovalBinding>,
     },
     AnswerQuestion {
         meta: CommandMeta,

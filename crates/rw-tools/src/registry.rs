@@ -524,6 +524,18 @@ pub enum MutationScope {
     OpaqueWorkspace,
 }
 
+/// Exact filesystem mutation preview used to bind a visual approval.
+///
+/// Tools opt in only when they can derive the bytes they will write from the
+/// same validated input and workspace state used by execution. Core hashes
+/// this value and recomputes it immediately before invoking the tool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovalPreview {
+    pub path: PathBuf,
+    pub before: Option<Vec<u8>>,
+    pub after: Vec<u8>,
+}
+
 /// Public extension point implemented identically by first- and third-party tools.
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -543,6 +555,17 @@ pub trait Tool: Send + Sync {
         } else {
             MutationScope::None
         }
+    }
+
+    /// Return an exact, workspace-derived preview for a visually approved
+    /// mutation. The default preserves generic approvals for tools without a
+    /// meaningful unified diff.
+    async fn approval_preview(
+        &self,
+        _context: &ToolContext,
+        _input: &Value,
+    ) -> Result<Option<ApprovalPreview>, ToolError> {
+        Ok(None)
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError>;
@@ -576,6 +599,14 @@ impl Tool for GuardedTool {
         } else {
             scope
         }
+    }
+
+    async fn approval_preview(
+        &self,
+        context: &ToolContext,
+        input: &Value,
+    ) -> Result<Option<ApprovalPreview>, ToolError> {
+        self.inner.approval_preview(context, input).await
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {

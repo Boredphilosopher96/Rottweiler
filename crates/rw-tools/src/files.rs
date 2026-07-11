@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::registry::{
-    CandidateLocation, CapabilityManifest, MutationScope, Tool, ToolContext, ToolDescriptor,
-    ToolError, ToolLimits, ToolResult, input_schema, parse_input,
+    ApprovalPreview, CandidateLocation, CapabilityManifest, MutationScope, Tool, ToolContext,
+    ToolDescriptor, ToolError, ToolLimits, ToolResult, input_schema, parse_input,
 };
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -138,6 +138,26 @@ impl Tool for WriteTool {
         mutation_path(input)
     }
 
+    async fn approval_preview(
+        &self,
+        context: &ToolContext,
+        input: &Value,
+    ) -> Result<Option<ApprovalPreview>, ToolError> {
+        let input: WriteInput = parse_input(input.clone())?;
+        ensure_size(input.content.len(), self.limits.max_write_bytes)?;
+        let path = context.resolve_writable(&input.path)?;
+        let before = if path.exists() {
+            Some(read_capped(context, &path, self.limits.max_write_bytes).await?)
+        } else {
+            None
+        };
+        Ok(Some(ApprovalPreview {
+            path: context.relative_display(&path),
+            before,
+            after: input.content.into_bytes(),
+        }))
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: WriteInput = parse_input(input)?;
@@ -226,6 +246,25 @@ impl Tool for EditTool {
         mutation_path(input)
     }
 
+    async fn approval_preview(
+        &self,
+        context: &ToolContext,
+        input: &Value,
+    ) -> Result<Option<ApprovalPreview>, ToolError> {
+        let input: EditInput = parse_input(input.clone())?;
+        let path = context.resolve_existing(&input.path)?;
+        let before = read_capped(context, &path, self.limits.max_write_bytes).await?;
+        let source = String::from_utf8(before.clone())
+            .map_err(|_| ToolError::InvalidInput("edit only supports UTF-8 files".to_owned()))?;
+        let (after, _) = apply_edit(&source, &input.old, &input.new)?;
+        ensure_size(after.len(), self.limits.max_write_bytes)?;
+        Ok(Some(ApprovalPreview {
+            path: context.relative_display(&path),
+            before: Some(before),
+            after: after.into_bytes(),
+        }))
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: EditInput = parse_input(input)?;
@@ -281,6 +320,34 @@ impl Tool for MultiEditTool {
 
     fn mutation_scope(&self, input: &Value) -> MutationScope {
         mutation_path(input)
+    }
+
+    async fn approval_preview(
+        &self,
+        context: &ToolContext,
+        input: &Value,
+    ) -> Result<Option<ApprovalPreview>, ToolError> {
+        let input: MultiEditInput = parse_input(input.clone())?;
+        if input.edits.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "edits must contain at least one operation".to_owned(),
+            ));
+        }
+        let path = context.resolve_existing(&input.path)?;
+        let before = read_capped(context, &path, self.limits.max_write_bytes).await?;
+        let mut source = String::from_utf8(before.clone()).map_err(|_| {
+            ToolError::InvalidInput("multi_edit only supports UTF-8 files".to_owned())
+        })?;
+        for edit in input.edits {
+            let (next, _) = apply_edit(&source, &edit.old, &edit.new)?;
+            ensure_size(next.len(), self.limits.max_write_bytes)?;
+            source = next;
+        }
+        Ok(Some(ApprovalPreview {
+            path: context.relative_display(&path),
+            before: Some(before),
+            after: source.into_bytes(),
+        }))
     }
 
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {

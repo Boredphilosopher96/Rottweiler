@@ -94,6 +94,42 @@ describe("authenticated UDS engine transport", () => {
     )
   })
 
+  test("rereads a refreshable bootstrap token after minted auth expires", async () => {
+    const bootstrapTokens = ["bootstrap-before-restart", "bootstrap-after-restart"]
+    const bootstrapHeaders: string[] = []
+    let connectCount = 0
+    let commandCount = 0
+    const client = new EngineHttpSseClient({
+      socketPath: "/private/restarted-engine.sock",
+      bootstrapToken: async () => bootstrapTokens[connectCount] ?? "",
+      fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+        const headers = new Headers(init?.headers)
+        if (headers.get("x-rottweiler-client") === null) {
+          bootstrapHeaders.push(headers.get("Authorization") ?? "")
+          connectCount += 1
+          return Response.json({
+            client_id: `client-${connectCount}`,
+            token: `minted-${connectCount}`,
+          })
+        }
+        commandCount += 1
+        if (commandCount === 1) {
+          return new Response("engine restarted", { status: 401 })
+        }
+        return Response.json({ type: "accepted" }, { status: 202 })
+      }) as typeof fetch,
+    })
+
+    await expect(client.postCommand(attach)).rejects.toEqual(
+      new EngineTransportError("engine command rejected", 401),
+    )
+    expect(await client.postCommand(attach)).toEqual({ type: "accepted" })
+    expect(bootstrapHeaders).toEqual([
+      "Bearer bootstrap-before-restart",
+      "Bearer bootstrap-after-restart",
+    ])
+  })
+
   test("reconnects with last_seen_sequence and reducer suppresses replay duplicates", async () => {
     const first = {
       type: "mode_changed",
@@ -130,10 +166,16 @@ describe("authenticated UDS engine transport", () => {
     })
     const controller = new AbortController()
     let state = createInitialState()
+    let attachRequest = 0
+    let reconnectTakeovers = 0
 
     await client.subscribe({
       attach,
       signal: controller.signal,
+      requestId: () => `attach-reconnect-${(attachRequest += 1)}`,
+      onReconnect: () => {
+        reconnectTakeovers += 1
+      },
       getLastSeenSequence: () => state.lastSequence,
       onEvent(event) {
         state = reduceRottweilerState(state, engineEvent(event))
@@ -147,13 +189,69 @@ describe("authenticated UDS engine transport", () => {
     expect(state.mode).toBe("plan")
     expect(state.model).toBe("fast")
     expect(state.protocol.duplicateEvents).toBe(1)
+    expect(state.protocol.unknownEvents).toBe(0)
     const attaches = engine.commands.filter(
       (command): command is Extract<ClientCommand, { type: "attach_session" }> =>
         command.type === "attach_session",
     )
     expect(attaches.map((command) => command.last_seen_sequence)).toEqual([null, "1"])
+    expect(attaches.map((command) => command.role)).toEqual(["driver", "observer"])
+    expect(reconnectTakeovers).toBe(1)
+    expect(attaches.map((command) => command.meta.request_id)).toEqual([
+      "attach-reconnect-1",
+      "attach-reconnect-2",
+    ])
     expect(attaches.every((command) => command.meta.client_id === engine?.clientId)).toBe(true)
+    expect(
+      engine.requests
+        .filter((request) => request.path === "/v1/events")
+        .map((request) => request.search),
+    ).toEqual([
+      "?session_id=session-transport",
+      "?session_id=session-transport&last_seen_sequence=1",
+    ])
     expect(delays).toEqual([1])
+  })
+
+  test("encodes the session and replay cursor in the SSE request", async () => {
+    const urls: string[] = []
+    const controller = new AbortController()
+    const client = new EngineHttpSseClient({
+      socketPath: "/private/mock-engine.sock",
+      bootstrapToken: "mock-bootstrap",
+      fetch: (async (input: string | URL | Request) => {
+        const url = String(input)
+        urls.push(url)
+        if (url.endsWith("/v1/connect")) {
+          return Response.json({ client_id: "mock-client", token: "mock-token" }, { status: 201 })
+        }
+        if (url.endsWith("/v1/command")) {
+          return Response.json({ type: "accepted" }, { status: 202 })
+        }
+        controller.abort()
+        return new Response(new ReadableStream<Uint8Array>(), {
+          headers: { "Content-Type": "text/event-stream" },
+        })
+      }) as typeof fetch,
+    })
+    let events = 0
+
+    await client.subscribe({
+      attach: {
+        ...attach,
+        session_id: "session /?&",
+        last_seen_sequence: "9",
+      },
+      signal: controller.signal,
+      onEvent() {
+        events += 1
+      },
+    })
+
+    expect(events).toBe(0)
+    expect(urls[2]).toBe(
+      "http://rottweiler.local/v1/events?session_id=session+%2F%3F%26&last_seen_sequence=9",
+    )
   })
 
   test("AbortController cancellation closes a quiet subscription", async () => {

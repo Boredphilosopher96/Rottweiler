@@ -1,24 +1,32 @@
 //! Foreground real-TTY handoff with durable engine gating.
 
 use std::{
+    collections::VecDeque,
     ffi::OsString,
-    io,
-    os::unix::process::CommandExt as _,
-    process::{ExitStatus, Stdio},
+    io::{self, Read as _, Write as _},
+    os::fd::AsFd as _,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
 };
 
 use async_trait::async_trait;
+use nix::{
+    errno::Errno,
+    sys::{
+        select::{FdSet, select},
+        time::{TimeVal, TimeValLike as _},
+    },
+};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use rw_core::ShellId;
-use tokio::process::{Child, Command};
 
 const MAX_CAPTURED_TAIL_BYTES: usize = 1024 * 1024;
 
 #[async_trait]
-pub trait ShellGate: Send + Sync {
-    /// Persists shell-active state and resolves only after the durable event
-    /// yields the engine-generated shell id.
-    async fn shell_started(&self, command: &str) -> io::Result<ShellId>;
-
+pub trait ShellCompletionGate: Send + Sync {
     /// Persists shell completion after the real child has exited.
     async fn shell_ended(
         &self,
@@ -26,6 +34,13 @@ pub trait ShellGate: Send + Sync {
         status: i32,
         captured_output: Option<String>,
     ) -> io::Result<()>;
+}
+
+#[async_trait]
+pub trait ShellGate: ShellCompletionGate {
+    /// Persists shell-active state and resolves only after the durable event
+    /// yields the engine-generated shell id.
+    async fn shell_started(&self, command: &str) -> io::Result<ShellId>;
 }
 
 pub trait OutputRedactor: Send + Sync {
@@ -106,42 +121,122 @@ where
     S: TerminalSignalSource,
     R: OutputRedactor,
 {
-    let argv = parse_command_argv(command).map_err(TtyError::Parse)?;
+    validate_shell_command(command).map_err(TtyError::Parse)?;
     let shell_id = gate
         .shell_started(command)
         .await
         .map_err(TtyError::GateStart)?;
-    let mut child = match spawner.spawn_tty(&argv).await {
+    run_after_durable_shell_start(command, shell_id, gate, spawner, signals, redactor).await
+}
+
+/// Runs one foreground child after its engine shell-active event is durable.
+/// The trusted CLI broker uses this entry point after observing that event on
+/// the authenticated session stream.
+pub async fn run_after_durable_shell_start<C, P, S, R>(
+    command: &str,
+    shell_id: ShellId,
+    completion: &C,
+    spawner: &P,
+    signals: &mut S,
+    redactor: &R,
+) -> Result<i32, TtyError>
+where
+    C: ShellCompletionGate + ?Sized,
+    P: TerminalSpawner,
+    S: TerminalSignalSource,
+    R: OutputRedactor + ?Sized,
+{
+    let argv = local_shell_argv(command).map_err(TtyError::Parse)?;
+    run_argv_after_durable_shell_start(&argv, shell_id, completion, spawner, signals, redactor)
+        .await
+}
+
+fn validate_shell_command(command: &str) -> Result<(), String> {
+    if command.trim().is_empty() {
+        Err("command must not be empty".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+/// Builds the configured user shell invocation used by local `!cmd` escapes.
+/// The complete command is one argument to `-lc`, preserving ordinary shell
+/// pipelines, redirections, expansions, and interactive program behavior.
+pub fn local_shell_argv(command: &str) -> Result<Vec<OsString>, String> {
+    validate_shell_command(command)?;
+    let shell = std::env::var_os("SHELL")
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| OsString::from("/bin/sh"));
+    Ok(vec![shell, OsString::from("-lc"), OsString::from(command)])
+}
+
+/// Runs an already parsed local or remote foreground argv after the durable
+/// shell-active event has been observed.
+pub async fn run_argv_after_durable_shell_start<C, P, S, R>(
+    argv: &[OsString],
+    shell_id: ShellId,
+    completion: &C,
+    spawner: &P,
+    signals: &mut S,
+    redactor: &R,
+) -> Result<i32, TtyError>
+where
+    C: ShellCompletionGate + ?Sized,
+    P: TerminalSpawner,
+    S: TerminalSignalSource,
+    R: OutputRedactor + ?Sized,
+{
+    let mut child = match spawner.spawn_tty(argv).await {
         Ok(child) => child,
         Err(error) => {
             let captured = bounded_redacted_tail(redactor, &error.to_string());
-            gate.shell_ended(shell_id, 127, Some(captured))
+            completion
+                .shell_ended(shell_id, 127, Some(captured))
                 .await
                 .map_err(TtyError::GateEnd)?;
             return Err(TtyError::Spawn(error));
         }
     };
     let target = child.signal_target();
+    let mut signal_error = None;
     let exit = {
         let wait = child.wait();
         tokio::pin!(wait);
         loop {
-            tokio::select! {
-                exit = &mut wait => break exit.map_err(TtyError::Wait)?,
+            let result = tokio::select! {
+                exit = &mut wait => break exit,
                 signal = signals.recv() => {
-                    target.forward(signal.map_err(TtyError::Signal)?)
-                        .map_err(TtyError::Signal)?;
+                    signal.and_then(|signal| target.forward(signal))
                 }
+            };
+            if let Err(error) = result {
+                signal_error = Some(error);
+                break (&mut wait).await;
             }
+        }
+    };
+    let exit = match exit {
+        Ok(exit) => exit,
+        Err(error) => {
+            let captured = bounded_redacted_tail(redactor, &error.to_string());
+            completion
+                .shell_ended(shell_id, 1, Some(captured))
+                .await
+                .map_err(TtyError::GateEnd)?;
+            return Err(TtyError::Wait(error));
         }
     };
     let captured = exit
         .captured_tail
         .as_deref()
         .map(|tail| bounded_redacted_tail(redactor, tail));
-    gate.shell_ended(shell_id, exit.status, captured)
+    completion
+        .shell_ended(shell_id, exit.status, captured)
         .await
         .map_err(TtyError::GateEnd)?;
+    if let Some(error) = signal_error {
+        return Err(TtyError::Signal(error));
+    }
     Ok(exit.status)
 }
 
@@ -198,7 +293,7 @@ pub fn parse_command_argv(command: &str) -> Result<Vec<OsString>, String> {
     Ok(argv)
 }
 
-fn bounded_redacted_tail(redactor: &impl OutputRedactor, value: &str) -> String {
+fn bounded_redacted_tail(redactor: &(impl OutputRedactor + ?Sized), value: &str) -> String {
     let redacted = redactor.redact(value);
     if redacted.len() <= MAX_CAPTURED_TAIL_BYTES {
         return redacted;
@@ -210,42 +305,118 @@ fn bounded_redacted_tail(redactor: &impl OutputRedactor, value: &str) -> String 
     redacted.get(start..).unwrap_or_default().to_owned()
 }
 
-#[derive(Debug, Default)]
-pub struct TokioTerminalSpawner;
-
-pub struct TokioTerminalChild {
-    child: Child,
-    target: ProcessGroupTarget,
+#[derive(Debug)]
+pub struct TokioTerminalSpawner {
+    pump_terminal_input: bool,
 }
 
-#[derive(Clone, Copy)]
-pub struct ProcessGroupTarget(rustix::process::Pid);
+impl Default for TokioTerminalSpawner {
+    fn default() -> Self {
+        Self {
+            pump_terminal_input: true,
+        }
+    }
+}
 
-impl SignalTarget for ProcessGroupTarget {
+#[cfg(test)]
+impl TokioTerminalSpawner {
+    fn without_terminal_input() -> Self {
+        Self {
+            pump_terminal_input: false,
+        }
+    }
+}
+
+pub struct TokioTerminalChild {
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    target: PtySignalTarget,
+    cancelled: Arc<AtomicBool>,
+    input_thread: Option<thread::JoinHandle<io::Result<()>>>,
+    output_thread: Option<thread::JoinHandle<io::Result<()>>>,
+    idle_writer: Option<Box<dyn io::Write + Send>>,
+    captured_tail: Arc<Mutex<CapturedTail>>,
+    terminal_mode: Option<TerminalModeGuard>,
+}
+
+impl Drop for TokioTerminalChild {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        drop(self.idle_writer.take());
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+        }
+        // `TerminalModeGuard` restores the real terminal as this structure is
+        // dropped. The bounded polling input thread then observes cancellation
+        // without retaining ownership of the user's terminal.
+    }
+}
+
+#[derive(Clone)]
+pub struct PtySignalTarget {
+    process_group: rustix::process::Pid,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+}
+
+impl SignalTarget for PtySignalTarget {
     fn forward(&self, signal: TerminalSignal) -> io::Result<()> {
-        Ok(rustix::process::kill_process_group(
-            self.0,
-            match signal {
-                TerminalSignal::Interrupt => rustix::process::Signal::INT,
-                TerminalSignal::WindowChanged => rustix::process::Signal::WINCH,
-            },
-        )?)
+        match signal {
+            TerminalSignal::Interrupt => Ok(rustix::process::kill_process_group(
+                self.process_group,
+                rustix::process::Signal::INT,
+            )?),
+            TerminalSignal::WindowChanged => {
+                let size = real_terminal_size();
+                self.master
+                    .lock()
+                    .map_err(|_| io::Error::other("PTY master lock was poisoned"))?
+                    .resize(size)
+                    .map_err(io::Error::other)
+            }
+        }
     }
 }
 
 #[async_trait]
 impl TerminalChild for TokioTerminalChild {
-    type Target = ProcessGroupTarget;
+    type Target = PtySignalTarget;
 
     fn signal_target(&self) -> Self::Target {
-        self.target
+        self.target.clone()
     }
 
     async fn wait(&mut self) -> io::Result<TerminalExit> {
-        let status = self.child.wait().await?;
+        let mut child = self
+            .child
+            .take()
+            .ok_or_else(|| io::Error::other("foreground child was already awaited"))?;
+        let status = tokio::task::spawn_blocking(move || child.wait())
+            .await
+            .map_err(|error| io::Error::other(format!("PTY wait task failed: {error}")))
+            .and_then(|status| status);
+        self.cancelled.store(true, Ordering::Release);
+        let input_result = join_io_thread(&mut self.input_thread, "PTY input").await;
+        drop(self.idle_writer.take());
+        let restore_result = if let Some(mut terminal_mode) = self.terminal_mode.take() {
+            terminal_mode.restore()
+        } else {
+            Ok(())
+        };
+        // Restore the user's real terminal before waiting for the PTY reader
+        // to observe EOF. A descendant that inherited the slave cannot leave
+        // the controlling terminal in raw mode after the direct child exits.
+        let output_result = join_io_thread(&mut self.output_thread, "PTY output").await;
+        let status = status?;
+        input_result?;
+        output_result?;
+        restore_result?;
+        let captured_tail = self
+            .captured_tail
+            .lock()
+            .map_err(|_| io::Error::other("captured output lock was poisoned"))?
+            .as_string();
         Ok(TerminalExit {
-            status: exit_status_code(status),
-            captured_tail: None,
+            status: i32::try_from(status.exit_code()).unwrap_or(i32::MAX),
+            captured_tail: (!captured_tail.is_empty()).then_some(captured_tail),
         })
     }
 }
@@ -255,31 +426,249 @@ impl TerminalSpawner for TokioTerminalSpawner {
     type Child = TokioTerminalChild;
 
     async fn spawn_tty(&self, argv: &[OsString]) -> io::Result<Self::Child> {
-        let (program, arguments) = argv
-            .split_first()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
-        let mut command = Command::new(program);
-        command
-            .args(arguments)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        command.as_std_mut().process_group(0);
-        let child = command.spawn()?;
-        let pid = child
-            .id()
-            .and_then(|id| i32::try_from(id).ok())
-            .and_then(rustix::process::Pid::from_raw)
-            .ok_or_else(|| io::Error::other("foreground child has no process id"))?;
+        if argv.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty argv"));
+        }
+        let pair = native_pty_system()
+            .openpty(real_terminal_size())
+            .map_err(io::Error::other)?;
+        let mut command = CommandBuilder::from_argv(argv.to_vec());
+        command.set_controlling_tty(true);
+        let mut child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(io::Error::other)?;
+        drop(pair.slave);
+        let setup = (|| {
+            let process_group = pair
+                .master
+                .process_group_leader()
+                .or_else(|| child.process_id().and_then(|pid| i32::try_from(pid).ok()))
+                .and_then(rustix::process::Pid::from_raw)
+                .ok_or_else(|| io::Error::other("PTY child has no process group"))?;
+            let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
+            let mut writer = pair.master.take_writer().map_err(io::Error::other)?;
+            let master = Arc::new(Mutex::new(pair.master));
+            let captured_tail = Arc::new(Mutex::new(CapturedTail::default()));
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let terminal_mode = TerminalModeGuard::enter()?;
+
+            let (input_thread, idle_writer) = if self.pump_terminal_input {
+                let input_cancelled = Arc::clone(&cancelled);
+                let input_thread = thread::Builder::new()
+                    .name("rw-pty-input".to_owned())
+                    .spawn(move || pump_terminal_input(&mut writer, &input_cancelled))?;
+                (Some(input_thread), None)
+            } else {
+                (None, Some(writer))
+            };
+            let output_tail = Arc::clone(&captured_tail);
+            let output_thread = match thread::Builder::new()
+                .name("rw-pty-output".to_owned())
+                .spawn(move || pump_terminal_output(&mut reader, &output_tail))
+            {
+                Ok(thread) => thread,
+                Err(error) => {
+                    cancelled.store(true, Ordering::Release);
+                    if let Some(input_thread) = input_thread {
+                        let _ = input_thread.join();
+                    }
+                    return Err(error);
+                }
+            };
+            Ok((
+                process_group,
+                master,
+                captured_tail,
+                cancelled,
+                terminal_mode,
+                input_thread,
+                output_thread,
+                idle_writer,
+            ))
+        })();
+        let (
+            process_group,
+            master,
+            captured_tail,
+            cancelled,
+            terminal_mode,
+            input_thread,
+            output_thread,
+            idle_writer,
+        ) = match setup {
+            Ok(setup) => setup,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         Ok(TokioTerminalChild {
-            child,
-            target: ProcessGroupTarget(pid),
+            child: Some(child),
+            target: PtySignalTarget {
+                process_group,
+                master,
+            },
+            cancelled,
+            input_thread,
+            output_thread: Some(output_thread),
+            idle_writer,
+            captured_tail,
+            terminal_mode,
         })
     }
 }
 
-fn exit_status_code(status: ExitStatus) -> i32 {
-    status.code().unwrap_or(128)
+#[derive(Default)]
+struct CapturedTail {
+    bytes: VecDeque<u8>,
+}
+
+impl CapturedTail {
+    fn push(&mut self, bytes: &[u8]) {
+        let overflow = self
+            .bytes
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(MAX_CAPTURED_TAIL_BYTES);
+        self.bytes.drain(..overflow.min(self.bytes.len()));
+        let start = bytes.len().saturating_sub(MAX_CAPTURED_TAIL_BYTES);
+        self.bytes.extend(&bytes[start..]);
+    }
+
+    fn as_string(&self) -> String {
+        let bytes = self.bytes.iter().copied().collect::<Vec<_>>();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+struct TerminalModeGuard {
+    original: Option<rustix::termios::Termios>,
+}
+
+impl TerminalModeGuard {
+    fn enter() -> io::Result<Option<Self>> {
+        let stdin = io::stdin();
+        let Ok(original) = rustix::termios::tcgetattr(&stdin) else {
+            return Ok(None);
+        };
+        let mut raw = original.clone();
+        raw.make_raw();
+        rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &raw)?;
+        Ok(Some(Self {
+            original: Some(original),
+        }))
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        if let Some(original) = self.original.take() {
+            rustix::termios::tcsetattr(
+                io::stdin(),
+                rustix::termios::OptionalActions::Now,
+                &original,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TerminalModeGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn real_terminal_size() -> PtySize {
+    [
+        rustix::termios::tcgetwinsize(io::stdout()),
+        rustix::termios::tcgetwinsize(io::stdin()),
+    ]
+    .into_iter()
+    .find_map(Result::ok)
+    .map_or(
+        PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        },
+        |size| PtySize {
+            rows: size.ws_row.max(1),
+            cols: size.ws_col.max(1),
+            pixel_width: size.ws_xpixel,
+            pixel_height: size.ws_ypixel,
+        },
+    )
+}
+
+fn pump_terminal_input(
+    writer: &mut (impl io::Write + ?Sized),
+    cancelled: &AtomicBool,
+) -> io::Result<()> {
+    let mut stdin = io::stdin();
+    let mut buffer = [0_u8; 16 * 1024];
+    while !cancelled.load(Ordering::Acquire) {
+        let mut readable = FdSet::new();
+        readable.insert(stdin.as_fd());
+        let mut timeout = TimeVal::milliseconds(25);
+        match select(None, &mut readable, None, None, &mut timeout) {
+            Ok(0) | Err(Errno::EINTR) => continue,
+            Ok(_) => {}
+            Err(error) => return Err(io::Error::other(error)),
+        }
+        let count = stdin.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        if let Err(error) = writer.write_all(&buffer[..count]) {
+            if matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe | io::ErrorKind::NotConnected
+            ) {
+                break;
+            }
+            return Err(error);
+        }
+        writer.flush()?;
+    }
+    Ok(())
+}
+
+fn pump_terminal_output(
+    reader: &mut (impl io::Read + ?Sized),
+    captured_tail: &Mutex<CapturedTail>,
+) -> io::Result<()> {
+    let mut stdout = io::stdout();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.raw_os_error() == Some(5) => break,
+            Err(error) => return Err(error),
+        };
+        captured_tail
+            .lock()
+            .map_err(|_| io::Error::other("captured output lock was poisoned"))?
+            .push(&buffer[..count]);
+        stdout.write_all(&buffer[..count])?;
+        stdout.flush()?;
+    }
+    Ok(())
+}
+
+async fn join_io_thread(
+    handle: &mut Option<thread::JoinHandle<io::Result<()>>>,
+    name: &str,
+) -> io::Result<()> {
+    let Some(handle) = handle.take() else {
+        return Ok(());
+    };
+    tokio::task::spawn_blocking(move || handle.join())
+        .await
+        .map_err(|error| io::Error::other(format!("{name} join task failed: {error}")))?
+        .map_err(|_| io::Error::other(format!("{name} thread panicked")))?
 }
 
 #[cfg(unix)]
@@ -312,8 +701,10 @@ impl TerminalSignalSource for UnixTerminalSignals {
     }
 }
 
-/// Builds a dedicated `ssh -t` argv for a remote foreground child. The remote
-/// program is still passed as argv after `--`; no local shell is involved.
+/// Builds a dedicated `ssh -t` argv for a remote foreground child. The local
+/// side never invokes a shell. The single remote command argument explicitly
+/// selects the remote configured shell and quotes the user's complete command
+/// as the `-lc` payload.
 pub fn remote_tty_argv(host: &str, command: &str) -> Result<Vec<OsString>, String> {
     if host.is_empty()
         || host.starts_with('-')
@@ -323,15 +714,22 @@ pub fn remote_tty_argv(host: &str, command: &str) -> Result<Vec<OsString>, Strin
     {
         return Err("invalid SSH host".to_owned());
     }
-    let remote = parse_command_argv(command)?;
-    let mut argv = vec![
+    validate_shell_command(command)?;
+    let remote = format!(
+        "exec \"${{SHELL:-/bin/sh}}\" -lc {}",
+        posix_shell_quote(command)
+    );
+    Ok(vec![
         OsString::from("ssh"),
         OsString::from("-t"),
         OsString::from("--"),
         OsString::from(host),
-    ];
-    argv.extend(remote);
-    Ok(argv)
+        OsString::from(remote),
+    ])
+}
+
+fn posix_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -349,15 +747,7 @@ mod tests {
     struct RecordingGate(Arc<Mutex<Vec<String>>>);
 
     #[async_trait]
-    impl ShellGate for RecordingGate {
-        async fn shell_started(&self, command: &str) -> io::Result<ShellId> {
-            self.0
-                .lock()
-                .expect("events")
-                .push(format!("gate-start:{command}"));
-            Ok(ShellId("shell-1".to_owned()))
-        }
-
+    impl ShellCompletionGate for RecordingGate {
         async fn shell_ended(
             &self,
             shell_id: ShellId,
@@ -370,6 +760,17 @@ mod tests {
                 captured_output.unwrap_or_default()
             ));
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl ShellGate for RecordingGate {
+        async fn shell_started(&self, command: &str) -> io::Result<ShellId> {
+            self.0
+                .lock()
+                .expect("events")
+                .push(format!("gate-start:{command}"));
+            Ok(ShellId("shell-1".to_owned()))
         }
     }
 
@@ -476,10 +877,15 @@ mod tests {
         assert_eq!(
             events.lock().expect("events").as_slice(),
             [
-                "gate-start:python -q",
-                "spawn:python",
-                "child-exit",
-                "gate-end:shell-1:0:token=[REDACTED]",
+                "gate-start:python -q".to_owned(),
+                format!(
+                    "spawn:{}",
+                    std::env::var_os("SHELL")
+                        .unwrap_or_else(|| OsString::from("/bin/sh"))
+                        .to_string_lossy()
+                ),
+                "child-exit".to_owned(),
+                "gate-end:shell-1:0:token=[REDACTED]".to_owned(),
             ]
         );
         assert_eq!(
@@ -496,8 +902,129 @@ mod tests {
         );
         assert_eq!(
             remote_tty_argv("host", "python -q").expect("remote argv"),
-            ["ssh", "-t", "--", "host", "python", "-q"].map(OsString::from)
+            [
+                "ssh",
+                "-t",
+                "--",
+                "host",
+                "exec \"${SHELL:-/bin/sh}\" -lc 'python -q'",
+            ]
+            .map(OsString::from)
+        );
+        assert_eq!(
+            remote_tty_argv("host", "printf '%s\\n' \"$HOME\" | sed 's/a/b/'")
+                .expect("quoted remote argv")[4],
+            OsString::from(
+                "exec \"${SHELL:-/bin/sh}\" -lc 'printf '\"'\"'%s\\n'\"'\"' \"$HOME\" | sed '\"'\"'s/a/b/'\"'\"''"
+            )
         );
         assert!(remote_tty_argv("-oProxyCommand=bad", "python").is_err());
+    }
+
+    #[tokio::test]
+    async fn configured_shell_preserves_pipes_redirection_and_expansion() {
+        let temporary = tempfile::tempdir().expect("temporary shell workspace");
+        let output = temporary.path().join("shell output.txt");
+        let command = format!(
+            "printf 'pipe' | tr '[:lower:]' '[:upper:]' > {}; printf 'EXPANDED=%s\\n' \"$((2+3))\"",
+            posix_shell_quote(&output.to_string_lossy())
+        );
+        let argv = local_shell_argv(&command).expect("local shell argv");
+        assert_eq!(argv.get(1), Some(&OsString::from("-lc")));
+        assert_eq!(argv.get(2), Some(&OsString::from(&command)));
+
+        let spawner = TokioTerminalSpawner::without_terminal_input();
+        let mut child = spawner.spawn_tty(&argv).await.expect("spawn shell command");
+        let exit = tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .expect("shell command timeout")
+            .expect("shell command wait");
+        assert_eq!(exit.status, 0, "shell exit was {exit:?}");
+        assert_eq!(
+            std::fs::read_to_string(output).expect("redirected output"),
+            "PIPE"
+        );
+        assert!(
+            exit.captured_tail
+                .as_deref()
+                .is_some_and(|tail| tail.contains("EXPANDED=5"))
+        );
+    }
+
+    #[tokio::test]
+    async fn production_spawner_uses_a_real_controlling_pty_and_captures_tee_output() {
+        let spawner = TokioTerminalSpawner::without_terminal_input();
+        let argv = [
+            OsString::from("/bin/sh"),
+            OsString::from("-c"),
+            OsString::from("test -t 0 && test -t 1 && test -t 2 && printf 'PTY_CAPTURE_OK\\n'"),
+        ];
+        let mut child = spawner.spawn_tty(&argv).await.expect("spawn PTY child");
+        let exit = tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .expect("PTY child timeout")
+            .expect("PTY child wait");
+        assert_eq!(exit.status, 0);
+        assert!(
+            exit.captured_tail
+                .as_deref()
+                .is_some_and(|tail| tail.contains("PTY_CAPTURE_OK"))
+        );
+    }
+
+    #[tokio::test]
+    async fn production_spawner_forwards_interrupt_to_the_pty_process_group() {
+        let spawner = TokioTerminalSpawner::without_terminal_input();
+        let argv = [
+            OsString::from("/usr/bin/env"),
+            OsString::from("python3"),
+            OsString::from("-c"),
+            OsString::from(
+                "import signal,time\n".to_owned()
+                    + "def stop(*_):\n print('PTY_INTERRUPT_OK', flush=True); raise SystemExit(23)\n"
+                    + "signal.signal(signal.SIGINT, stop)\nprint('PTY_READY', flush=True)\n"
+                    + "while True: time.sleep(1)\n",
+            ),
+        ];
+        let mut child = spawner.spawn_tty(&argv).await.expect("spawn PTY child");
+        let target = child.signal_target();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if child
+                    .captured_tail
+                    .lock()
+                    .expect("captured output")
+                    .as_string()
+                    .contains("PTY_READY")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("PTY child readiness timeout");
+        target
+            .forward(TerminalSignal::Interrupt)
+            .expect("forward interrupt");
+        let exit = tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .expect("interrupted PTY child timeout")
+            .expect("interrupted PTY child wait");
+        assert_eq!(exit.status, 23, "PTY exit was {exit:?}");
+        assert!(
+            exit.captured_tail
+                .as_deref()
+                .is_some_and(|tail| tail.contains("PTY_INTERRUPT_OK"))
+        );
+    }
+
+    #[test]
+    fn captured_tail_is_strictly_bounded_to_the_newest_bytes() {
+        let mut tail = CapturedTail::default();
+        tail.push(&vec![b'a'; MAX_CAPTURED_TAIL_BYTES]);
+        tail.push(b"newest");
+        assert_eq!(tail.bytes.len(), MAX_CAPTURED_TAIL_BYTES);
+        assert!(tail.as_string().ends_with("newest"));
     }
 }
