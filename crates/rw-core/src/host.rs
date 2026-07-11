@@ -1119,6 +1119,7 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::SendMessage { session_id, .. }
         | ClientCommand::Interrupt { session_id, .. }
         | ClientCommand::ApproveTool { session_id, .. }
+        | ClientCommand::ApprovePlan { session_id, .. }
         | ClientCommand::AnswerQuestion { session_id, .. }
         | ClientCommand::SwitchMode { session_id, .. }
         | ClientCommand::SwitchModel { session_id, .. }
@@ -1160,9 +1161,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        ModelDriver, NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink,
-        PermissionGate, SessionActor, SessionActorConfig, SessionEventSink, SessionRecoveredState,
-        builtin_command_registry, builtin_hook_dispatcher,
+        ModelDriver, NoopFolderTrustController, NoopMutationCheckpointCoordinator,
+        NoopSecretRedactor, NoopSessionEventSink, PermissionGate, SessionActor, SessionActorConfig,
+        SessionEventSink, SessionRecoveredState, builtin_command_registry, builtin_hook_dispatcher,
         runtime_support::{
             BoxEventStream, PermissionDecision, ProviderRequest, ThinkingLevel, ToolRegistry,
         },
@@ -1230,6 +1231,7 @@ mod tests {
             let handle = SessionActor::spawn(SessionActorConfig {
                 session_id: session_id.clone(),
                 workspace_root: workspace,
+                additional_workspace_roots: Vec::new(),
                 initial_session_context: Vec::new(),
                 model_alias: "fast".to_owned(),
                 model: Arc::new(IdleModel),
@@ -1244,6 +1246,7 @@ mod tests {
                 event_clock: Arc::new(SystemEventClock),
                 secret_redactor: Arc::new(NoopSecretRedactor),
                 checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
+                folder_trust: Arc::new(NoopFolderTrustController),
                 recovered: SessionRecoveredState::default(),
                 max_turns: 2,
                 identical_tool_failure_limit: 2,

@@ -62,7 +62,7 @@ impl Tool for GrepTool {
                 "pattern must not be empty".to_owned(),
             ));
         }
-        let root = context.resolve_existing(&input.path)?;
+        let roots = context.resolve_search_roots(&input.path)?;
         let regex = RegexMatcherBuilder::new()
             .case_insensitive(input.case_insensitive)
             .build(&input.pattern)
@@ -72,56 +72,63 @@ impl Tool for GrepTool {
         let mut result_bytes = 0usize;
         let mut truncated = false;
 
-        for entry in WalkBuilder::new(&root)
-            .standard_filters(true)
-            .follow_links(false)
-            .sort_by_file_path(std::path::Path::cmp)
-            .build()
-            .filter_map(Result::ok)
-        {
-            context.cancellation.check()?;
-            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
-                continue;
-            }
-            let relative = context.relative_display(entry.path());
-            if glob
-                .as_ref()
-                .is_some_and(|matcher| !matcher.is_match(&relative))
+        for root in roots {
+            for entry in WalkBuilder::new(&root)
+                .standard_filters(true)
+                .follow_links(false)
+                .sort_by_file_path(std::path::Path::cmp)
+                .build()
+                .filter_map(Result::ok)
             {
-                continue;
+                context.cancellation.check()?;
+                if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                    continue;
+                }
+                let relative = context.relative_display(entry.path());
+                if glob
+                    .as_ref()
+                    .is_some_and(|matcher| !matcher.is_match(&relative))
+                {
+                    continue;
+                }
+                let mut searcher = SearcherBuilder::new().line_number(true).build();
+                searcher
+                    .search_path(
+                        &regex,
+                        entry.path(),
+                        UTF8(|line, text| {
+                            if context.cancellation.is_cancelled()
+                                || findings.len() >= self.limits.max_search_results
+                            {
+                                truncated = true;
+                                return Ok(false);
+                            }
+                            let text = text.trim_end_matches(['\n', '\r']).to_owned();
+                            let prospective = relative.as_os_str().len() + text.len() + 32;
+                            if result_bytes.saturating_add(prospective)
+                                > self.limits.max_result_bytes
+                            {
+                                truncated = true;
+                                return Ok(false);
+                            }
+                            result_bytes = result_bytes.saturating_add(prospective);
+                            findings.push(GrepMatch {
+                                path: relative.clone(),
+                                line,
+                                text,
+                            });
+                            Ok(true)
+                        }),
+                    )
+                    .map_err(|error| ToolError::Io {
+                        operation: "search file",
+                        path: relative,
+                        source: std::io::Error::other(error),
+                    })?;
+                if truncated {
+                    break;
+                }
             }
-            let mut searcher = SearcherBuilder::new().line_number(true).build();
-            searcher
-                .search_path(
-                    &regex,
-                    entry.path(),
-                    UTF8(|line, text| {
-                        if context.cancellation.is_cancelled()
-                            || findings.len() >= self.limits.max_search_results
-                        {
-                            truncated = true;
-                            return Ok(false);
-                        }
-                        let text = text.trim_end_matches(['\n', '\r']).to_owned();
-                        let prospective = relative.as_os_str().len() + text.len() + 32;
-                        if result_bytes.saturating_add(prospective) > self.limits.max_result_bytes {
-                            truncated = true;
-                            return Ok(false);
-                        }
-                        result_bytes = result_bytes.saturating_add(prospective);
-                        findings.push(GrepMatch {
-                            path: relative.clone(),
-                            line,
-                            text,
-                        });
-                        Ok(true)
-                    }),
-                )
-                .map_err(|error| ToolError::Io {
-                    operation: "search file",
-                    path: relative,
-                    source: std::io::Error::other(error),
-                })?;
             if truncated {
                 break;
             }
@@ -170,35 +177,40 @@ impl Tool for GlobTool {
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: GlobInput = parse_input(input)?;
-        let root = context.resolve_existing(&input.path)?;
+        let roots = context.resolve_search_roots(&input.path)?;
         let matcher = compile_glob(&input.pattern)?;
         let mut paths = Vec::new();
         let mut bytes = 0usize;
         let mut truncated = false;
-        for entry in WalkBuilder::new(&root)
-            .standard_filters(true)
-            .follow_links(false)
-            .sort_by_file_path(std::path::Path::cmp)
-            .build()
-            .filter_map(Result::ok)
-        {
-            context.cancellation.check()?;
-            if entry.path() == root {
-                continue;
-            }
-            let relative = context.relative_display(entry.path());
-            if !matcher.is_match(&relative) {
-                continue;
-            }
-            let length = relative.as_os_str().len().saturating_add(1);
-            if paths.len() >= self.limits.max_search_results
-                || bytes.saturating_add(length) > self.limits.max_result_bytes
+        for root in roots {
+            for entry in WalkBuilder::new(&root)
+                .standard_filters(true)
+                .follow_links(false)
+                .sort_by_file_path(std::path::Path::cmp)
+                .build()
+                .filter_map(Result::ok)
             {
-                truncated = true;
+                context.cancellation.check()?;
+                if entry.path() == root {
+                    continue;
+                }
+                let relative = context.relative_display(entry.path());
+                if !matcher.is_match(&relative) {
+                    continue;
+                }
+                let length = relative.as_os_str().len().saturating_add(1);
+                if paths.len() >= self.limits.max_search_results
+                    || bytes.saturating_add(length) > self.limits.max_result_bytes
+                {
+                    truncated = true;
+                    break;
+                }
+                bytes = bytes.saturating_add(length);
+                paths.push(relative);
+            }
+            if truncated {
                 break;
             }
-            bytes = bytes.saturating_add(length);
-            paths.push(relative);
         }
         paths.sort();
         let model_text = paths
@@ -252,57 +264,62 @@ impl Tool for LsTool {
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: LsInput = parse_input(input)?;
-        let root = context.resolve_existing(&input.path)?;
-        if !root.is_dir() {
-            return Err(ToolError::InvalidInput(format!(
-                "{} is not a directory",
-                input.path.display()
-            )));
-        }
+        let roots = context.resolve_search_roots(&input.path)?;
         let mut entries = Vec::new();
         let mut result_bytes = 0usize;
-        let iterator = WalkBuilder::new(&root)
-            .max_depth(if input.recursive { None } else { Some(1) })
-            .standard_filters(true)
-            .follow_links(false)
-            .sort_by_file_path(std::path::Path::cmp)
-            .build();
         let mut truncated = false;
-        for entry in iterator.filter_map(Result::ok) {
-            context.cancellation.check()?;
-            if entry.path() == root {
-                continue;
+        for root in roots {
+            if !root.is_dir() {
+                return Err(ToolError::InvalidInput(format!(
+                    "{} is not a directory",
+                    input.path.display()
+                )));
             }
-            if entries.len() >= self.limits.max_directory_entries {
-                truncated = true;
-                break;
-            }
-            let metadata = entry.metadata().ok();
-            let kind = metadata.as_ref().map_or("other", |metadata| {
-                if metadata.is_dir() {
-                    "directory"
-                } else if metadata.is_file() {
-                    "file"
-                } else if metadata.file_type().is_symlink() {
-                    "symlink"
-                } else {
-                    "other"
+            let iterator = WalkBuilder::new(&root)
+                .max_depth(if input.recursive { None } else { Some(1) })
+                .standard_filters(true)
+                .follow_links(false)
+                .sort_by_file_path(std::path::Path::cmp)
+                .build();
+            for entry in iterator.filter_map(Result::ok) {
+                context.cancellation.check()?;
+                if entry.path() == root {
+                    continue;
                 }
-            });
-            let path = context.relative_display(entry.path());
-            let prospective = path.as_os_str().len().saturating_add(12);
-            if result_bytes.saturating_add(prospective) > self.limits.max_result_bytes {
-                truncated = true;
+                if entries.len() >= self.limits.max_directory_entries {
+                    truncated = true;
+                    break;
+                }
+                let metadata = entry.metadata().ok();
+                let kind = metadata.as_ref().map_or("other", |metadata| {
+                    if metadata.is_dir() {
+                        "directory"
+                    } else if metadata.is_file() {
+                        "file"
+                    } else if metadata.file_type().is_symlink() {
+                        "symlink"
+                    } else {
+                        "other"
+                    }
+                });
+                let path = context.relative_display(entry.path());
+                let prospective = path.as_os_str().len().saturating_add(12);
+                if result_bytes.saturating_add(prospective) > self.limits.max_result_bytes {
+                    truncated = true;
+                    break;
+                }
+                result_bytes = result_bytes.saturating_add(prospective);
+                entries.push(LsEntry {
+                    path,
+                    kind,
+                    bytes: metadata
+                        .filter(std::fs::Metadata::is_file)
+                        .map(|value| value.len()),
+                });
+            }
+            if truncated {
                 break;
             }
-            result_bytes = result_bytes.saturating_add(prospective);
-            entries.push(LsEntry {
-                path,
-                kind,
-                bytes: metadata
-                    .filter(std::fs::Metadata::is_file)
-                    .map(|value| value.len()),
-            });
         }
         entries.sort_by(|left, right| left.path.cmp(&right.path));
         let model_text = entries
@@ -353,6 +370,27 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn default_search_spans_all_workspace_roots_with_virtual_paths() {
+        let root = tempdir().expect("temp directory");
+        let primary = root.path().join("primary");
+        let added = root.path().join("added");
+        fs::create_dir_all(&primary).expect("primary");
+        fs::create_dir_all(&added).expect("added");
+        fs::write(primary.join("primary.txt"), "needle\n").expect("primary fixture");
+        fs::write(added.join("added.txt"), "needle\n").expect("added fixture");
+        fs::write(root.path().join("outside.txt"), "needle\n").expect("outside fixture");
+        let context = ToolContext::from_workspace_roots([&primary, &added]).expect("context");
+
+        let grep = GrepTool::new(ToolLimits::default())
+            .execute(&context, json!({"pattern": "needle"}))
+            .await
+            .expect("grep");
+        assert!(grep.content.contains("primary.txt"));
+        assert!(grep.content.contains("@root/1/added.txt"));
+        assert!(!grep.content.contains("outside.txt"));
+    }
 
     #[tokio::test]
     async fn grep_glob_and_ls_are_deterministic_and_ignore_gitignored_files() {

@@ -9,6 +9,7 @@ import type {
   Cost,
   CostSnapshot,
   EngineError,
+  PlanArtifact,
   PromptDump,
   Question,
   ToolCapability,
@@ -212,6 +213,8 @@ export interface RottweilerState {
   readonly cost: CostSnapshot | null
   readonly promptDump: PromptDump | null
   readonly mode: string | null
+  readonly pendingPlan: PlanArtifact | null
+  readonly approvedPlan: PlanArtifact | null
   readonly model: string | null
   readonly driverClientId: string | null
   readonly shell: ShellProjection
@@ -247,6 +250,8 @@ export function createInitialState(): RottweilerState {
     cost: null,
     promptDump: null,
     mode: null,
+    pendingPlan: null,
+    approvedPlan: null,
     model: null,
     driverClientId: null,
     shell: { shellId: null, active: false, status: null, capturedOutput: null },

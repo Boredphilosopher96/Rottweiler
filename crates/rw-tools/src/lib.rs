@@ -15,8 +15,8 @@ mod web;
 
 pub use bash::{
     BashInput, BashTool, CommandExecutor, CommandFixtureRedactor, CommandOutcome, CommandRequest,
-    ExecutionLease, IdentityCommandFixtureRedactor, RecordingCommandExecutor,
-    ReplayCommandExecutor, TokioCommandExecutor,
+    CommandSafety, ExecutionLease, IdentityCommandFixtureRedactor, RecordingCommandExecutor,
+    ReplayCommandExecutor, TokioCommandExecutor, classify_safe_command,
 };
 pub use builtins::{BuiltinDependencies, BuiltinHandles, register_builtins};
 pub use files::{
@@ -24,7 +24,8 @@ pub use files::{
     WriteInput, WriteTool,
 };
 pub use interaction::{
-    AskUserInput, AskUserTool, QuestionAsker, TodoAction, TodoInput, TodoItem, TodoStatus, TodoTool,
+    AskUserInput, AskUserTool, QuestionAsker, SubmitPlanTool, TodoAction, TodoInput, TodoItem,
+    TodoStatus, TodoTool,
 };
 pub use registry::{
     ApprovalPreview, CancellationToken, CapabilityManifest, MutationScope, NoopOutputSink, Tool,

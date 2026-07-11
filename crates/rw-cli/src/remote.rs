@@ -39,6 +39,8 @@ pub struct RemoteConfig {
     pub local_socket: PathBuf,
     pub session_id: String,
     pub remote_workspace: PathBuf,
+    pub additional_workspaces: Vec<PathBuf>,
+    pub dangerously_trust: bool,
     pub model: Option<String>,
     pub permission_mode: RemotePermissionMode,
 }
@@ -102,6 +104,13 @@ impl RemoteConfig {
         if !is_safe_absolute_path(&self.remote_workspace) {
             return Err(RemoteError::InvalidWorkspace);
         }
+        if self
+            .additional_workspaces
+            .iter()
+            .any(|path| !is_safe_absolute_path(path))
+        {
+            return Err(RemoteError::InvalidWorkspace);
+        }
         if self.model.as_ref().is_some_and(|model| {
             model.is_empty()
                 || model
@@ -132,6 +141,12 @@ impl RemoteConfig {
         ];
         if let Some(model) = &self.model {
             remote_argv.extend(["--model".to_owned(), model.clone()]);
+        }
+        for root in &self.additional_workspaces {
+            remote_argv.extend(["--add-dir".to_owned(), root.to_string_lossy().into_owned()]);
+        }
+        if self.dangerously_trust {
+            remote_argv.push("--dangerously-trust".to_owned());
         }
         let remote_command = remote_argv
             .iter()
@@ -406,6 +421,8 @@ mod tests {
             local_socket: PathBuf::from("/tmp/rottweiler-forward.sock"),
             session_id: "session-1".to_owned(),
             remote_workspace: PathBuf::from("/work/project"),
+            additional_workspaces: Vec::new(),
+            dangerously_trust: false,
             model: None,
             permission_mode: RemotePermissionMode::Strict,
         }
@@ -445,6 +462,21 @@ mod tests {
             .map(OsString::from)
         );
         assert!(!format!("{start:?}{forward:?}").contains("token"));
+    }
+
+    #[test]
+    fn remote_start_carries_safe_added_roots_and_explicit_trust_only() {
+        let mut candidate = config();
+        candidate.additional_workspaces = vec![PathBuf::from("/work/second repo")];
+        candidate.dangerously_trust = true;
+        let command = candidate.engine_start_command().expect("remote command");
+        let rendered = command.args.last().expect("remote argv").to_string_lossy();
+        assert!(rendered.contains("--add-dir"));
+        assert!(rendered.contains("'/work/second repo'"));
+        assert!(rendered.contains("--dangerously-trust"));
+
+        candidate.additional_workspaces = vec![PathBuf::from("relative")];
+        assert_eq!(candidate.validate(), Err(RemoteError::InvalidWorkspace));
     }
 
     #[test]

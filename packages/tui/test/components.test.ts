@@ -198,6 +198,45 @@ describe("M4 retained components", () => {
     )
   })
 
+  test("renders a completed submitted plan and routes explicit approval", async () => {
+    const setup = await createTestRenderer({ width: 112, height: 30, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        mode: "plan",
+        pendingPlan: {
+          title: "Implement safely",
+          summary_md: "One reviewed change.",
+          steps: [{ description: "Edit", files_touched: ["src/lib.rs"], verification: "cargo test" }],
+          open_questions: [],
+        },
+      },
+      sessionId: "session-plan",
+      clientId: "client-plan",
+      requestId: () => "request-plan",
+      onCommand(command) {
+        commands.push(command)
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    expect(app.interactionPanel.visible).toBe(true)
+    app.interactionPanel.select.selectCurrent()
+    expect(commands).toContainEqual({
+      type: "approve_plan",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client-plan",
+        request_id: "request-plan",
+      },
+      session_id: "session-plan",
+      decision: "approve",
+      revisions: null,
+    })
+  })
+
   test("notifies only while terminal focus is away", async () => {
     const setup = await createTestRenderer({ width: 80, height: 20, useThread: false })
     renderer = setup.renderer

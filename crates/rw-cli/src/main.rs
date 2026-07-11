@@ -61,6 +61,12 @@ struct Cli {
     /// Use the pre-M4 readline client instead of `OpenTUI`.
     #[arg(long, global = true)]
     line: bool,
+    /// Add another canonical workspace root for tools and sandbox writes.
+    #[arg(long = "add-dir", value_name = "PATH", global = true)]
+    add_dirs: Vec<PathBuf>,
+    /// Enable executable project configuration without persisting trust.
+    #[arg(long, global = true)]
+    dangerously_trust: bool,
     /// Resume an exact durable session id.
     #[arg(
         long,
@@ -164,6 +170,21 @@ enum Command {
         #[command(subcommand)]
         command: AuthCommand,
     },
+    /// Inspect or change folder trust for the current workspace.
+    Trust {
+        #[command(subcommand)]
+        command: TrustCommand,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Subcommand)]
+enum TrustCommand {
+    /// Show the exact executable inventory and its trust state.
+    Status,
+    /// Trust the exact currently displayed executable inventory.
+    Grant,
+    /// Revoke the current workspace decision.
+    Revoke,
 }
 
 #[derive(Debug, Subcommand)]
@@ -216,6 +237,11 @@ enum AuthCommand {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
+    if rw_sandbox::maybe_run_helper(std::env::args_os())
+        .map_err(|error| miette!(error.to_string()))?
+    {
+        return Ok(());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
@@ -245,6 +271,8 @@ async fn main() -> Result<()> {
                 cli.max_turns,
                 cli.model,
                 cli.detach,
+                cli.add_dirs,
+                cli.dangerously_trust,
             )
             .await?;
         }
@@ -265,6 +293,8 @@ async fn main() -> Result<()> {
                 perf_markers: false,
                 replay_provider: "prompt-dump-offline".to_owned(),
                 model: cli.model,
+                additional_workspaces: cli.add_dirs,
+                dangerously_trust: cli.dangerously_trust,
                 action: runtime::RunAction::PromptDump { turn },
             })
             .await?;
@@ -272,15 +302,20 @@ async fn main() -> Result<()> {
         Some(Command::Config {
             command: ConfigCommand::Check { overrides },
         }) => {
-            let loaded = rw_store::config::ConfigLoader::from_environment()
-                .into_diagnostic()?
+            let loader = rw_store::config::ConfigLoader::from_environment().into_diagnostic()?;
+            let loader = if cli.dangerously_trust {
+                loader.dangerously_trust_project()
+            } else {
+                loader
+            };
+            let effective = loader
                 .with_cli_overrides(overrides)
                 .load()
                 .into_diagnostic()?;
-            for warning in loaded.warnings() {
+            for warning in effective.warnings() {
                 eprintln!("warning: {}", warning.message());
             }
-            print!("{}", loaded.render_with_provenance());
+            print!("{}", effective.render_with_provenance());
         }
         Some(Command::Models {
             command: ModelsCommand::Refresh { source, output },
@@ -304,6 +339,7 @@ async fn main() -> Result<()> {
         Some(Command::Auth {
             command: AuthCommand::SetKey { provider },
         }) => auth_set_key(&provider)?,
+        Some(Command::Trust { command }) => run_trust_command(command)?,
         None => {
             let headless_or_line = cli.prompt.is_some()
                 || cli.line
@@ -327,6 +363,8 @@ async fn main() -> Result<()> {
                     perf_markers: cli.perf_markers,
                     replay_provider: cli.replay_provider,
                     model: cli.model,
+                    additional_workspaces: cli.add_dirs,
+                    dangerously_trust: cli.dangerously_trust,
                     action: runtime::RunAction::Agent,
                 })
                 .await?;
@@ -343,6 +381,8 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
     let workspace =
         fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
     let storage_root = configuration_root()?;
+    let workspace_roots = canonical_workspace_roots(&workspace, &cli.add_dirs)?;
+    prompt_for_folder_trust(&storage_root, &workspace_roots, cli.dangerously_trust)?;
     let session_id = runtime::select_interactive_session(
         &storage_root,
         &workspace,
@@ -366,6 +406,8 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
             permission_mode: cli.permission_mode,
             max_turns: cli.max_turns,
             model: cli.model.clone(),
+            additional_workspaces: workspace_roots.into_iter().skip(1).collect(),
+            dangerously_trust: cli.dangerously_trust,
             shell_target: Some(shell_broker::ShellTarget::Local),
             detach: cli.detach,
             restart_policy: supervisor::RestartPolicy::default(),
@@ -454,6 +496,8 @@ async fn run_serve(
     max_turns: usize,
     model: Option<String>,
     detach: bool,
+    add_dirs: Vec<PathBuf>,
+    dangerously_trust: bool,
 ) -> Result<()> {
     let storage_root = configuration_root_path()?;
     let paths = resolve_server_paths(socket, token_file, &storage_root)?;
@@ -461,9 +505,10 @@ async fn run_serve(
         .or_else(|| std::env::var("ROTTWEILER_SESSION_ID").ok())
         .map_or_else(runtime::new_session_id, Ok)?;
     let workspace = workspace.unwrap_or(std::env::current_dir().into_diagnostic()?);
+    let workspace_roots = canonical_workspace_roots(&workspace, &add_dirs)?;
 
     if detach {
-        let workspace = fs::canonicalize(workspace).into_diagnostic()?;
+        let workspace = workspace_roots[0].clone();
         return spawn_detached_server(
             &paths,
             &session_id,
@@ -471,6 +516,8 @@ async fn run_serve(
             permission_mode,
             max_turns,
             model.as_deref(),
+            &workspace_roots[1..],
+            dangerously_trust,
         )
         .await;
     }
@@ -482,9 +529,10 @@ async fn run_serve(
     let serve_task = tokio::spawn(server::serve(listener, state, shutdown_rx));
     let preparation: Result<()> = async {
         ensure_configuration_root(&storage_root)?;
-        let workspace = fs::canonicalize(workspace).into_diagnostic()?;
+        let workspace = workspace_roots[0].clone();
         let options = host_runtime::CliHostOptions::from_environment(
-            vec![workspace.clone()],
+            workspace_roots,
+            dangerously_trust,
             permission_mode,
             max_turns,
             runtime::HostedProviderMode::Live,
@@ -541,6 +589,114 @@ fn configuration_root() -> Result<PathBuf> {
     let root = configuration_root_path()?;
     ensure_configuration_root(&root)?;
     Ok(root)
+}
+
+fn canonical_workspace_roots(primary: &Path, added: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut roots = vec![fs::canonicalize(primary).into_diagnostic()?];
+    for supplied in added {
+        let canonical = fs::canonicalize(supplied)
+            .map_err(|error| miette!("--add-dir {} is unavailable: {error}", supplied.display()))?;
+        if !canonical.is_dir() {
+            return Err(miette!(
+                "--add-dir {} is not a directory",
+                supplied.display()
+            ));
+        }
+        if !roots.contains(&canonical) {
+            roots.push(canonical);
+        }
+    }
+    Ok(roots)
+}
+
+fn prompt_for_folder_trust(
+    storage_root: &Path,
+    roots: &[PathBuf],
+    dangerously_trust: bool,
+) -> Result<()> {
+    use std::io::IsTerminal as _;
+
+    if dangerously_trust {
+        eprintln!(
+            "warning: --dangerously-trust enables executable project configuration for this process without persisting a decision"
+        );
+        return Ok(());
+    }
+    let store = rw_store::trust::FolderTrustStore::new(storage_root.join("trust.json"));
+    for root in roots {
+        let assessment = store.assess(root).into_diagnostic()?;
+        if assessment.project_execution_enabled() {
+            continue;
+        }
+        eprintln!("{}", assessment.render_prompt());
+        if std::io::stdin().is_terminal() {
+            eprint!("Trust this exact executable inventory? [y/N] ");
+            std::io::stderr().flush().into_diagnostic()?;
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).into_diagnostic()?;
+            if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                store.grant(&assessment).into_diagnostic()?;
+                eprintln!(
+                    "trusted {}; executable project changes require a session restart",
+                    assessment.workspace().display()
+                );
+            } else {
+                eprintln!(
+                    "project executable configuration remains inert for {}",
+                    assessment.workspace().display()
+                );
+            }
+        } else {
+            eprintln!(
+                "project executable configuration remains inert; use `rw trust grant` interactively or --dangerously-trust in a controlled CI image"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_trust_command(command: TrustCommand) -> Result<()> {
+    use std::io::IsTerminal as _;
+
+    let workspace =
+        fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
+    let loader = rw_store::config::ConfigLoader::from_environment().into_diagnostic()?;
+    let store = rw_store::trust::FolderTrustStore::new(loader.trust_store_path().to_path_buf());
+    match command {
+        TrustCommand::Status => {
+            let assessment = store.assess(&workspace).into_diagnostic()?;
+            print!("{}", assessment.render_prompt());
+        }
+        TrustCommand::Grant => {
+            let assessment = store.assess(&workspace).into_diagnostic()?;
+            eprint!("{}", assessment.render_prompt());
+            if !std::io::stdin().is_terminal() {
+                return Err(miette!(
+                    "refusing to grant folder trust without an interactive terminal; use --dangerously-trust only for controlled CI images"
+                ));
+            }
+            eprint!("Trust this exact executable inventory? [y/N] ");
+            std::io::stderr().flush().into_diagnostic()?;
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).into_diagnostic()?;
+            if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                return Err(miette!("folder trust was not granted"));
+            }
+            store.grant(&assessment).into_diagnostic()?;
+            println!(
+                "trusted {}; restart active sessions to load executable project configuration",
+                assessment.workspace().display()
+            );
+        }
+        TrustCommand::Revoke => {
+            store.revoke(&workspace).into_diagnostic()?;
+            println!(
+                "revoked trust for {}; restart active sessions to unload executable project configuration",
+                workspace.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 fn configuration_root_path() -> Result<PathBuf> {
@@ -662,6 +818,7 @@ fn session_metadata_path(storage_root: &Path, session_id: &str) -> PathBuf {
         .join("metadata.json")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_detached_server(
     paths: &server::ServerRuntimePaths,
     session_id: &str,
@@ -669,6 +826,8 @@ async fn spawn_detached_server(
     permission_mode: Option<PermissionMode>,
     max_turns: usize,
     model: Option<&str>,
+    additional_workspaces: &[PathBuf],
+    dangerously_trust: bool,
 ) -> Result<()> {
     use std::process::Stdio;
 
@@ -707,6 +866,12 @@ async fn spawn_detached_server(
     }
     if let Some(model) = model {
         command.arg("--model").arg(model);
+    }
+    for root in additional_workspaces {
+        command.arg("--add-dir").arg(root);
+    }
+    if dangerously_trust {
+        command.arg("--dangerously-trust");
     }
     #[cfg(unix)]
     {
@@ -813,6 +978,8 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         local_socket: local_paths.socket.clone(),
         session_id: session_id.clone(),
         remote_workspace,
+        additional_workspaces: cli.add_dirs.clone(),
+        dangerously_trust: cli.dangerously_trust,
         model: cli.model.clone(),
         permission_mode: remote::RemotePermissionMode::Strict,
     };
@@ -1267,7 +1434,33 @@ fn write_github_device_prompt(
 
 #[cfg(test)]
 mod tests {
-    use super::{valid_bootstrap_token, write_github_device_prompt, write_private_file_atomic};
+    use clap::Parser as _;
+
+    use super::{
+        Cli, Command, TrustCommand, valid_bootstrap_token, write_github_device_prompt,
+        write_private_file_atomic,
+    };
+
+    #[test]
+    fn trust_and_multi_root_flags_are_global_and_typed() {
+        let cli = Cli::try_parse_from([
+            "rw",
+            "--add-dir",
+            "/work/second",
+            "--dangerously-trust",
+            "trust",
+            "status",
+        ])
+        .unwrap_or_else(|error| panic!("CLI should parse: {error}"));
+        assert_eq!(cli.add_dirs, [std::path::PathBuf::from("/work/second")]);
+        assert!(cli.dangerously_trust);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Trust {
+                command: TrustCommand::Status
+            })
+        ));
+    }
 
     #[test]
     fn copilot_device_prompt_surfaces_only_the_user_facing_values() {

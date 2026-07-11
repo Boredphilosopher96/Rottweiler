@@ -15,6 +15,7 @@ futures-core = "0.3.31"
 futures-util = "0.3.31"
 getrandom.workspace = true
 reqwest = { version = "0.12.28", default-features = false, features = ["http2", "json", "rustls-tls", "stream"] }
+regex.workspace = true
 rw-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true

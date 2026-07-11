@@ -33,17 +33,18 @@ use rw_tools::{
     ApprovalPreview, AskUserInput, CancellationToken, MutationScope, QuestionAsker, ToolContext,
     ToolDescriptor, ToolError, ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult,
 };
-use rw_types::config::{BudgetConfig, CompactionConfig};
+use rw_types::config::{BudgetConfig, CompactionConfig, PermissionDecision, PermissionRule};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
     ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId,
     ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot,
-    EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias,
-    PROTOCOL_VERSION, PromptDump, PromptTool, Question, QuestionId, QuestionOption,
-    QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId, SessionId, ShellId,
-    StoredAttachment, ToolCallId, ToolOutput, ToolOutputPart, ToolOutputStream, Turn,
-    TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
+    EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModeId, ModelAlias,
+    PROTOCOL_VERSION, PlanArtifact, PlanDecision, PromptDump, PromptTool, Question, QuestionId,
+    QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId, SessionId,
+    SessionMode, ShellId, StoredAttachment, ToolCallId, ToolOutput, ToolOutputPart,
+    ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
+    UnrestorablePath, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -115,6 +116,19 @@ impl PreparedUserMessage {
             blocks,
             meta: TurnMeta::default(),
         }
+    }
+
+    fn redact(mut self, redactor: &dyn SecretRedactor) -> Self {
+        self.content = redactor.redact(&self.content);
+        for attachment in &mut self.stored_attachments {
+            attachment.name = redactor.redact(&attachment.name);
+        }
+        for block in &mut self.attachment_blocks {
+            if let Block::Text { text } = block {
+                *text = redactor.redact(text);
+            }
+        }
+        self
     }
 }
 
@@ -532,6 +546,17 @@ enum PendingEvent {
     ModelChanged {
         model: ModelAlias,
     },
+    ModeChanged {
+        mode: SessionMode,
+    },
+    PlanSubmitted {
+        artifact: PlanArtifact,
+    },
+    PlanReviewed {
+        artifact: PlanArtifact,
+        decision: PlanDecision,
+        revisions: Option<String>,
+    },
     UserShellStateChanged {
         shell_id: ShellId,
         command: String,
@@ -553,6 +578,23 @@ enum PendingEvent {
 
 fn wire_turn_id(turn: u64) -> TurnId {
     TurnId(turn.to_string())
+}
+
+fn session_mode_name(mode: SessionMode) -> &'static str {
+    match mode {
+        SessionMode::Discuss => "discuss",
+        SessionMode::Plan => "plan",
+        SessionMode::Execute => "execute",
+    }
+}
+
+fn parse_session_mode(mode: &str) -> Option<SessionMode> {
+    match mode {
+        "discuss" => Some(SessionMode::Discuss),
+        "plan" => Some(SessionMode::Plan),
+        "execute" => Some(SessionMode::Execute),
+        _ => None,
+    }
 }
 
 fn unavailable_cost() -> Cost {
@@ -919,6 +961,21 @@ impl PendingEvent {
                 driver_client_id,
             },
             Self::ModelChanged { model } => EngineEvent::ModelChanged { meta, model },
+            Self::ModeChanged { mode } => EngineEvent::ModeChanged {
+                meta,
+                mode: ModeId(session_mode_name(mode).to_owned()),
+            },
+            Self::PlanSubmitted { artifact } => EngineEvent::PlanSubmitted { meta, artifact },
+            Self::PlanReviewed {
+                artifact,
+                decision,
+                revisions,
+            } => EngineEvent::PlanReviewed {
+                meta,
+                artifact,
+                decision,
+                revisions,
+            },
             Self::UserShellStateChanged {
                 shell_id,
                 command,
@@ -1047,6 +1104,10 @@ pub struct SessionSnapshot {
     pub running: bool,
     pub completed_turns: u64,
     pub model_alias: String,
+    pub mode: SessionMode,
+    pub pending_plan: Option<PlanArtifact>,
+    pub approved_plan: Option<PlanArtifact>,
+    pub plan_gate_active: bool,
     pub active_shell: Option<RecoveredUserShell>,
 }
 
@@ -1070,6 +1131,10 @@ pub struct SessionRecoveredState {
     pub budgeter: Budgeter,
     pub interrupted_compaction: bool,
     pub model_alias: Option<String>,
+    pub mode: SessionMode,
+    pub pending_plan: Option<PlanArtifact>,
+    pub approved_plan: Option<PlanArtifact>,
+    pub plan_gate_active: bool,
     pub active_shell: Option<RecoveredUserShell>,
 }
 
@@ -1122,6 +1187,8 @@ pub enum SessionProjectionError {
     InvalidTurnId(String),
     #[error("invalid durable user-shell transition: {0}")]
     InvalidShellTransition(String),
+    #[error("unknown built-in mode id `{0}` in durable session")]
+    InvalidMode(String),
 }
 
 fn parse_turn_id(turn_id: &TurnId) -> Result<u64, SessionProjectionError> {
@@ -1456,6 +1523,23 @@ fn recovered_pending_event(
         EngineEvent::ModelChanged { model, .. } => PendingEvent::ModelChanged {
             model: model.clone(),
         },
+        EngineEvent::ModeChanged { mode, .. } => PendingEvent::ModeChanged {
+            mode: parse_session_mode(&mode.0)
+                .ok_or_else(|| SessionProjectionError::InvalidMode(mode.0.clone()))?,
+        },
+        EngineEvent::PlanSubmitted { artifact, .. } => PendingEvent::PlanSubmitted {
+            artifact: artifact.clone(),
+        },
+        EngineEvent::PlanReviewed {
+            artifact,
+            decision,
+            revisions,
+            ..
+        } => PendingEvent::PlanReviewed {
+            artifact: artifact.clone(),
+            decision: *decision,
+            revisions: revisions.clone(),
+        },
         EngineEvent::UserShellStateChanged {
             shell_id,
             command,
@@ -1483,9 +1567,9 @@ fn recovered_pending_event(
         EngineEvent::Error { error, .. } => PendingEvent::Error {
             message: error.message.clone(),
         },
-        EngineEvent::SubagentSpawned { .. }
-        | EngineEvent::SubagentFinished { .. }
-        | EngineEvent::ModeChanged { .. } => return Ok(None),
+        EngineEvent::SubagentSpawned { .. } | EngineEvent::SubagentFinished { .. } => {
+            return Ok(None);
+        }
     };
     Ok(Some(pending))
 }
@@ -1522,6 +1606,10 @@ pub fn project_session_events(
     let mut pruned_tool_outputs = BTreeMap::new();
     let mut accounting = Vec::new();
     let mut model_alias = None;
+    let mut mode = SessionMode::Execute;
+    let mut pending_plan = None;
+    let mut approved_plan = None;
+    let mut plan_gate_active = false;
     let mut active_shell = None::<RecoveredUserShell>;
     let mut compacted_conversation = None::<Vec<(u64, Turn)>>;
     let mut compaction_surgery_start = None::<usize>;
@@ -1834,6 +1922,26 @@ pub fn project_session_events(
             PendingEvent::ModelChanged { model } => {
                 model_alias = Some(model.0.clone());
             }
+            PendingEvent::ModeChanged { mode: changed } => {
+                mode = *changed;
+                if *changed == SessionMode::Plan {
+                    pending_plan = None;
+                    approved_plan = None;
+                    plan_gate_active = true;
+                }
+            }
+            PendingEvent::PlanSubmitted { artifact } => {
+                pending_plan = Some(artifact.clone());
+            }
+            PendingEvent::PlanReviewed {
+                artifact, decision, ..
+            } => {
+                pending_plan = None;
+                if *decision == PlanDecision::Approve {
+                    approved_plan = Some(artifact.clone());
+                    plan_gate_active = false;
+                }
+            }
             PendingEvent::UserShellStateChanged {
                 shell_id,
                 command,
@@ -1960,6 +2068,10 @@ pub fn project_session_events(
         budgeter,
         interrupted_compaction,
         model_alias,
+        mode,
+        pending_plan,
+        approved_plan,
+        plan_gate_active,
         active_shell,
     })
 }
@@ -1977,6 +2089,80 @@ fn shell_context_turn(command: &str, status: i32, captured_output: Option<&str>)
         blocks: vec![Block::Text { text }],
         meta: TurnMeta::default(),
     }
+}
+
+fn plan_review_context_turn(
+    artifact: &PlanArtifact,
+    decision: PlanDecision,
+    revisions: Option<&str>,
+) -> Option<Turn> {
+    if decision == PlanDecision::Reject && revisions.is_none_or(|text| text.trim().is_empty()) {
+        return None;
+    }
+    let text = if decision == PlanDecision::Approve {
+        let serialized = serde_json::to_string_pretty(artifact)
+            .unwrap_or_else(|_| "{\"error\":\"plan serialization failed\"}".to_owned());
+        format!(
+            "Approved plan artifact (authoritative for Execute mode; keep through compaction):\n{serialized}"
+        )
+    } else {
+        format!(
+            "Plan rejected. Requested revisions:\n{}",
+            revisions.unwrap_or_default().trim()
+        )
+    };
+    Some(Turn {
+        role: Role::User,
+        blocks: vec![Block::Text { text }],
+        meta: TurnMeta::default(),
+    })
+}
+
+fn approved_plan_context_item(conversation: &[Turn]) -> Option<ContextItemId> {
+    conversation
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, turn)| {
+            turn.blocks.iter().any(|block| {
+                matches!(block, Block::Text { text } if text.starts_with("Approved plan artifact (authoritative"))
+            })
+        })
+        .map(|(index, _)| ContextItemId(format!("conversation:{index}")))
+}
+
+async fn apply_mode_change(
+    state: &mut ActorState,
+    events: &broadcast::Sender<RoutedEvent>,
+    sink: &Arc<dyn SessionEventSink>,
+    mode: SessionMode,
+) -> Result<(), AgentLoopError> {
+    let evicted = (mode == SessionMode::Plan)
+        .then(|| approved_plan_context_item(&state.conversation))
+        .flatten();
+    let mut durable = Vec::with_capacity(usize::from(evicted.is_some()) + 1);
+    if let Some(item_id) = &evicted {
+        durable.push(PendingEvent::ContextItemEvicted {
+            item_id: item_id.clone(),
+            effective_after_agent_turn: state.completed_turns,
+        });
+    }
+    durable.push(PendingEvent::ModeChanged { mode });
+    emit_batch(state, events, sink, durable).await?;
+    if let Some(item_id) = evicted {
+        state.context_surgery.push(ContextSurgeryAction {
+            item_id,
+            pinned: false,
+            effective_after_agent_turn: state.completed_turns,
+        });
+    }
+    state.mode = mode;
+    if mode == SessionMode::Plan {
+        state.pending_plan = None;
+        state.approved_plan = None;
+        state.plan_gate_active = true;
+    }
+    Ok(())
 }
 
 /// Provider/UI-neutral durability boundary for the sequenced session log.
@@ -2242,6 +2428,9 @@ impl MutationCheckpointCoordinator for NoopMutationCheckpointCoordinator {
 pub struct SessionCommandContext {
     running: bool,
     queued_messages: usize,
+    mode: SessionMode,
+    permission_summary: String,
+    plan_summary: String,
 }
 
 impl SessionCommandContext {
@@ -2283,6 +2472,46 @@ pub enum SessionCommandAction {
     Compact {
         instructions: Option<String>,
     },
+    SwitchMode {
+        mode: SessionMode,
+    },
+    AddPermissionRule {
+        rule: PermissionRule,
+    },
+    RemovePermissionRule {
+        pattern: String,
+    },
+    ClearPermissionRules,
+    Trust {
+        operation: FolderTrustOperation,
+    },
+}
+
+/// Explicit folder-trust ledger operation requested by `/trust`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FolderTrustOperation {
+    Status,
+    Grant,
+    Revoke,
+}
+
+/// Host-injected folder-trust boundary. Core never reads a platform ledger directly.
+#[async_trait]
+pub trait FolderTrustController: Send + Sync {
+    async fn execute(&self, operation: FolderTrustOperation) -> Result<String, AgentLoopError>;
+}
+
+/// Folder-trust boundary for embedded/test actors that do not configure persistence.
+#[derive(Debug, Default)]
+pub struct NoopFolderTrustController;
+
+#[async_trait]
+impl FolderTrustController for NoopFolderTrustController {
+    async fn execute(&self, _operation: FolderTrustOperation) -> Result<String, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "folder trust is unavailable for this session host".to_owned(),
+        ))
+    }
 }
 
 struct StatusCommand;
@@ -2330,7 +2559,137 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for HelpCommand
         _invocation: CommandInvocation,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
         Ok(SessionCommandOutput {
-            message: "/help, /status, /interrupt, /rewind <turn>, /context [pin|evict <item-id>], /cost, /compact [instructions]".to_owned(),
+            message: "/help, /status, /mode [discuss|plan|execute], /plan, /permissions [list|add|remove|clear-session], /interrupt, /rewind <turn>, /context [pin|evict <item-id>], /cost, /compact [instructions], /trust, /add-dir <path>".to_owned(),
+            action: SessionCommandAction::None,
+        })
+    }
+}
+
+struct ModeCommand;
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ModeCommand {
+    async fn execute(
+        &self,
+        context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        let value = invocation.arguments().trim();
+        if value.is_empty() {
+            return Ok(SessionCommandOutput {
+                message: format!("active mode: {:?}", context.mode).to_ascii_lowercase(),
+                action: SessionCommandAction::None,
+            });
+        }
+        if context.running() {
+            return Err(CommandExecutionError::new(
+                "turn_running",
+                "mode switching requires an idle session",
+            ));
+        }
+        let mode = match value {
+            "discuss" => SessionMode::Discuss,
+            "plan" => SessionMode::Plan,
+            "execute" => SessionMode::Execute,
+            _ => {
+                return Err(CommandExecutionError::new(
+                    "invalid_mode",
+                    "usage: /mode [discuss|plan|execute]",
+                ));
+            }
+        };
+        Ok(SessionCommandOutput {
+            message: format!("mode changed to {value}"),
+            action: SessionCommandAction::SwitchMode { mode },
+        })
+    }
+}
+
+struct PermissionsCommand;
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for PermissionsCommand {
+    async fn execute(
+        &self,
+        context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        let arguments = invocation.arguments().trim();
+        if arguments.is_empty() || arguments == "list" {
+            return Ok(SessionCommandOutput {
+                message: context.permission_summary.clone(),
+                action: SessionCommandAction::None,
+            });
+        }
+        if arguments == "clear-session" {
+            return Ok(SessionCommandOutput {
+                message: String::new(),
+                action: SessionCommandAction::ClearPermissionRules,
+            });
+        }
+        if let Some(pattern) = arguments.strip_prefix("remove ").map(str::trim) {
+            if pattern.is_empty() {
+                return Err(invalid_permissions_command());
+            }
+            return Ok(SessionCommandOutput {
+                message: String::new(),
+                action: SessionCommandAction::RemovePermissionRule {
+                    pattern: pattern.to_owned(),
+                },
+            });
+        }
+        if let Some(addition) = arguments.strip_prefix("add ") {
+            let Some((decision, pattern)) = addition.trim().split_once(char::is_whitespace) else {
+                return Err(invalid_permissions_command());
+            };
+            let action = match decision {
+                "allow" => PermissionDecision::Allow,
+                "ask" => PermissionDecision::Ask,
+                "deny" => PermissionDecision::Deny,
+                _ => return Err(invalid_permissions_command()),
+            };
+            let pattern = pattern.trim();
+            if pattern.is_empty() {
+                return Err(invalid_permissions_command());
+            }
+            return Ok(SessionCommandOutput {
+                message: String::new(),
+                action: SessionCommandAction::AddPermissionRule {
+                    rule: PermissionRule {
+                        pattern: pattern.to_owned(),
+                        action,
+                    },
+                },
+            });
+        }
+        Err(invalid_permissions_command())
+    }
+}
+
+fn invalid_permissions_command() -> CommandExecutionError {
+    CommandExecutionError::new(
+        "invalid_permissions_command",
+        "usage: /permissions [list | add <allow|ask|deny> <tool(glob)> | remove <tool(glob)> | clear-session]",
+    )
+}
+
+struct PlanCommand;
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for PlanCommand {
+    async fn execute(
+        &self,
+        context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        if !invocation.arguments().trim().is_empty() {
+            return Err(CommandExecutionError::new(
+                "invalid_plan_command",
+                "usage: /plan",
+            ));
+        }
+        Ok(SessionCommandOutput {
+            message: context.plan_summary.clone(),
             action: SessionCommandAction::None,
         })
     }
@@ -2439,6 +2798,58 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CompactComm
 
 struct RewindCommand;
 
+struct TrustCommand;
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for TrustCommand {
+    async fn execute(
+        &self,
+        _context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        let operation = match invocation.arguments().trim() {
+            "" | "status" => FolderTrustOperation::Status,
+            "grant" => FolderTrustOperation::Grant,
+            "revoke" => FolderTrustOperation::Revoke,
+            _ => {
+                return Err(CommandExecutionError::new(
+                    "invalid_trust_command",
+                    "usage: /trust [status|grant|revoke]",
+                ));
+            }
+        };
+        Ok(SessionCommandOutput {
+            message: String::new(),
+            action: SessionCommandAction::Trust { operation },
+        })
+    }
+}
+
+struct AddDirCommand;
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for AddDirCommand {
+    async fn execute(
+        &self,
+        _context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        let path = invocation.arguments().trim();
+        if path.is_empty() {
+            return Err(CommandExecutionError::new(
+                "invalid_add_dir_command",
+                "usage: /add-dir <path>",
+            ));
+        }
+        Ok(SessionCommandOutput {
+            message: format!(
+                "workspace roots are fixed when a session starts; restart with `rw --add-dir {path}` so tools, permissions, and the sandbox share one root set"
+            ),
+            action: SessionCommandAction::None,
+        })
+    }
+}
+
 #[async_trait]
 impl CommandHandler<SessionCommandContext, SessionCommandOutput> for RewindCommand {
     async fn execute(
@@ -2485,6 +2896,31 @@ pub fn builtin_command_registry()
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
     registry
         .register(
+            CommandDescriptor::new("mode", "Show or switch the interaction mode")
+                .with_argument_hint("[discuss|plan|execute]"),
+            ModeCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
+            CommandDescriptor::new(
+                "permissions",
+                "Show or edit session-scoped permission rules",
+            )
+            .with_argument_hint(
+                "[list|add <allow|ask|deny> <tool(glob)>|remove <tool(glob)>|clear-session]",
+            ),
+            PermissionsCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
+            CommandDescriptor::new("plan", "Show the pending or approved plan artifact"),
+            PlanCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
             CommandDescriptor::new("rewind", "Restore a completed turn checkpoint")
                 .with_argument_hint("<turn>"),
             RewindCommand,
@@ -2514,6 +2950,20 @@ pub fn builtin_command_registry()
             CommandDescriptor::new("compact", "Compact conversation context")
                 .with_argument_hint("[instructions]"),
             CompactCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
+            CommandDescriptor::new("trust", "Inspect or change folder trust")
+                .with_argument_hint("[status|grant|revoke]"),
+            TrustCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
+            CommandDescriptor::new("add-dir", "Add a workspace root on session restart")
+                .with_argument_hint("<path>"),
+            AddDirCommand,
         )
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
     Ok(registry)
@@ -2564,6 +3014,7 @@ pub fn builtin_hook_dispatcher() -> Result<HookDispatcher, AgentLoopError> {
 pub struct SessionActorConfig {
     pub session_id: SessionId,
     pub workspace_root: PathBuf,
+    pub additional_workspace_roots: Vec<PathBuf>,
     pub initial_session_context: Vec<Turn>,
     pub model_alias: String,
     pub model: Arc<dyn ModelDriver>,
@@ -2575,6 +3026,7 @@ pub struct SessionActorConfig {
     pub event_clock: Arc<dyn EventClock>,
     pub secret_redactor: Arc<dyn SecretRedactor>,
     pub checkpoints: Arc<dyn MutationCheckpointCoordinator>,
+    pub folder_trust: Arc<dyn FolderTrustController>,
     pub recovered: SessionRecoveredState,
     pub max_turns: usize,
     pub identical_tool_failure_limit: usize,
@@ -2589,6 +3041,10 @@ impl fmt::Debug for SessionActorConfig {
             .debug_struct("SessionActorConfig")
             .field("session_id", &self.session_id)
             .field("workspace_root", &self.workspace_root)
+            .field(
+                "additional_workspace_roots",
+                &self.additional_workspace_roots,
+            )
             .field("initial_session_context", &self.initial_session_context)
             .field("model_alias", &self.model_alias)
             .field("recovered", &self.recovered)
@@ -2609,6 +3065,7 @@ impl SessionActorConfig {
         Self {
             session_id: self.session_id.clone(),
             workspace_root: self.workspace_root.clone(),
+            additional_workspace_roots: self.additional_workspace_roots.clone(),
             initial_session_context: self.initial_session_context.clone(),
             model_alias,
             model: Arc::clone(&self.model),
@@ -2620,12 +3077,44 @@ impl SessionActorConfig {
             event_clock: Arc::clone(&self.event_clock),
             secret_redactor: Arc::clone(&self.secret_redactor),
             checkpoints: Arc::clone(&self.checkpoints),
+            folder_trust: Arc::clone(&self.folder_trust),
             recovered: self.recovered.clone(),
             max_turns: self.max_turns,
             identical_tool_failure_limit: self.identical_tool_failure_limit,
             max_output_tokens: self.max_output_tokens,
             thinking: self.thinking,
             event_capacity: self.event_capacity,
+        }
+    }
+
+    fn with_model_alias_and_mode(&self, model_alias: String, mode: SessionMode) -> Self {
+        let mut configured = self.with_model_alias(model_alias);
+        if mode == SessionMode::Execute {
+            return configured;
+        }
+        if let Some(system) = configured
+            .initial_session_context
+            .iter_mut()
+            .find(|turn| turn.role == Role::System)
+        {
+            system.blocks.push(Block::Text {
+                text: mode_system_text(mode).to_owned(),
+            });
+        }
+        configured
+    }
+}
+
+fn mode_system_text(mode: SessionMode) -> &'static str {
+    match mode {
+        SessionMode::Discuss => {
+            "Active mode: Discuss. Use only read-only tools. Do not request or imply any mutation."
+        }
+        SessionMode::Plan => {
+            "Active mode: Plan. Use only read-only tools. Finish by calling submit_plan with the complete structured plan artifact; do not mutate the workspace."
+        }
+        SessionMode::Execute => {
+            "Active mode: Execute. Follow the approved plan artifact when present. Tool calls remain subject to the permission policy."
         }
     }
 }
@@ -2666,9 +3155,11 @@ impl SessionActor {
                 "turn, doom-loop, output, and event limits must be greater than zero".to_owned(),
             ));
         }
-        let tool_context = ToolContext::new(&config.workspace_root)
-            .map_err(|error| AgentLoopError::ToolContext(error.to_string()))?
-            .with_session_id(config.session_id.clone());
+        let tool_context = ToolContext::from_workspace_roots(
+            std::iter::once(&config.workspace_root).chain(&config.additional_workspace_roots),
+        )
+        .map_err(|error| AgentLoopError::ToolContext(error.to_string()))?
+        .with_session_id(config.session_id.clone());
         let (command_tx, command_rx) = mpsc::channel(64);
         let (event_tx, _) = broadcast::channel(config.event_capacity);
         let active_turn = Arc::new(AtomicU64::new(0));
@@ -3061,6 +3552,30 @@ impl SessionHandle {
         ))
     }
 
+    /// Reviews the pending plan as the active local driver.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actor or protocol error when the session is closed, the
+    /// caller cannot acquire the driver lease, or no plan is pending.
+    pub async fn review_plan(
+        &self,
+        decision: PlanDecision,
+        revisions: Option<String>,
+    ) -> Result<bool, AgentLoopError> {
+        self.ensure_local_driver().await?;
+        Ok(matches!(
+            self.dispatch(ClientCommand::ApprovePlan {
+                meta: self.local_meta(),
+                session_id: self.session_id.clone(),
+                decision,
+                revisions,
+            })
+            .await?,
+            CommandOutcome::Accepted
+        ))
+    }
+
     /// Answers one pending protocol-routed `ask_user` question as the local
     /// driver.
     ///
@@ -3348,6 +3863,10 @@ struct ActorState {
     accounting: Vec<TurnAccounting>,
     budgeter: Budgeter,
     model_alias: String,
+    mode: SessionMode,
+    pending_plan: Option<PlanArtifact>,
+    approved_plan: Option<PlanArtifact>,
+    plan_gate_active: bool,
     active_shell: Option<RecoveredUserShell>,
 }
 
@@ -3399,6 +3918,10 @@ impl ActorState {
                 .model_alias
                 .clone()
                 .unwrap_or_else(|| default_model_alias.to_owned()),
+            mode: recovered.mode,
+            pending_plan: recovered.pending_plan.clone(),
+            approved_plan: recovered.approved_plan.clone(),
+            plan_gate_active: recovered.plan_gate_active,
             active_shell: recovered.active_shell.clone(),
         }
     }
@@ -3437,7 +3960,7 @@ async fn dispatch_lifecycle_hook(
                 event: hook_event_name(event).to_owned(),
                 hook_id: failure.hook_id().to_owned(),
                 fail_closed: failure.policy() == HookFailurePolicy::FailClosed,
-                message: failure.error().to_string(),
+                message: config.secret_redactor.redact(&failure.error().to_string()),
             },
         )
         .await
@@ -3593,6 +4116,7 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::SendMessage { meta, .. }
         | ClientCommand::Interrupt { meta, .. }
         | ClientCommand::ApproveTool { meta, .. }
+        | ClientCommand::ApprovePlan { meta, .. }
         | ClientCommand::AnswerQuestion { meta, .. }
         | ClientCommand::SwitchMode { meta, .. }
         | ClientCommand::SwitchModel { meta, .. }
@@ -3629,6 +4153,7 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::SendMessage { session_id, .. }
         | ClientCommand::Interrupt { session_id, .. }
         | ClientCommand::ApproveTool { session_id, .. }
+        | ClientCommand::ApprovePlan { session_id, .. }
         | ClientCommand::AnswerQuestion { session_id, .. }
         | ClientCommand::SwitchMode { session_id, .. }
         | ClientCommand::SwitchModel { session_id, .. }
@@ -4508,7 +5033,6 @@ fn unsupported_in_m2(command: &ClientCommand) -> bool {
         command,
         ClientCommand::CreateSession { .. }
             | ClientCommand::ResumeSession { .. }
-            | ClientCommand::SwitchMode { .. }
             | ClientCommand::Fork { .. }
             | ClientCommand::ListSessions { .. }
             | ClientCommand::ListCommands { .. }
@@ -4539,7 +5063,7 @@ fn start_manual_compaction(
     let mut conversation = state.conversation.clone();
     let mut context_surgery = state.context_surgery.clone();
     let local_session_accounting = session_accounting_fallback(&state.accounting);
-    let config = Arc::new(config.with_model_alias(state.model_alias.clone()));
+    let config = Arc::new(config.with_model_alias_and_mode(state.model_alias.clone(), state.mode));
     let signals = turn_signals.clone();
     tokio::spawn(async move {
         let result = async {
@@ -4742,6 +5266,8 @@ async fn handle_actor_command(
                     }
                 }
                 ClientCommand::SwitchModel { .. }
+                | ClientCommand::SwitchMode { .. }
+                | ClientCommand::ApprovePlan { .. }
                     if state.running.is_some() || state.active_shell.is_some() =>
                 {
                     let outcome = protocol_rejection(
@@ -4758,6 +5284,35 @@ async fn handle_actor_command(
                     let outcome = protocol_rejection(
                         "unknown_model_alias",
                         format!("model alias {:?} is not configured", model.0),
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::SwitchMode { mode, .. } if parse_session_mode(&mode.0).is_none() => {
+                    let outcome = protocol_rejection(
+                        "unknown_mode",
+                        format!("mode {:?} is not registered", mode.0),
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::SwitchMode { mode, .. }
+                    if mode.0 == "execute" && state.plan_gate_active =>
+                {
+                    let outcome = protocol_rejection(
+                        "plan_approval_required",
+                        "Plan mode can enter Execute only after the submitted plan is approved",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::ApprovePlan { .. } if state.pending_plan.is_none() => {
+                    let outcome = protocol_rejection(
+                        "no_pending_plan",
+                        "there is no submitted plan awaiting review",
                     );
                     send_ack(state, events, &meta, session, outcome.clone());
                     let _ = respond.send(outcome);
@@ -4863,7 +5418,10 @@ async fn handle_actor_command(
                 }
                 ClientCommand::ApproveTool {
                     tool_call_id,
-                    decision: ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession,
+                    decision:
+                        ApprovalDecision::AllowOnce
+                        | ApprovalDecision::AllowSession
+                        | ApprovalDecision::AllowProject,
                     ..
                 } if state
                     .pending_approvals
@@ -4969,7 +5527,10 @@ async fn handle_actor_command(
 
             if let ClientCommand::ApproveTool {
                 tool_call_id,
-                decision: ApprovalDecision::AllowOnce | ApprovalDecision::AllowSession,
+                decision:
+                    ApprovalDecision::AllowOnce
+                    | ApprovalDecision::AllowSession
+                    | ApprovalDecision::AllowProject,
                 ..
             } = &command
             {
@@ -5217,6 +5778,71 @@ async fn handle_actor_command(
                     state
                         .client_roles
                         .insert(meta.client_id.0.clone(), ClientRole::Driver);
+                }
+                ClientCommand::SwitchMode { mode, .. } => {
+                    let Some(mode) = parse_session_mode(&mode.0) else {
+                        return;
+                    };
+                    let result = apply_mode_change(state, events, &config.event_sink, mode).await;
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
+                    }
+                }
+                ClientCommand::ApprovePlan {
+                    decision,
+                    revisions,
+                    ..
+                } => {
+                    let artifact = state.pending_plan.clone().unwrap_or_else(|| PlanArtifact {
+                        title: String::new(),
+                        summary_md: String::new(),
+                        steps: Vec::new(),
+                        open_questions: Vec::new(),
+                    });
+                    let mut durable = vec![PendingEvent::PlanReviewed {
+                        artifact: artifact.clone(),
+                        decision,
+                        revisions: revisions.clone(),
+                    }];
+                    let context_turn =
+                        plan_review_context_turn(&artifact, decision, revisions.as_deref());
+                    let item_id =
+                        ContextItemId(format!("conversation:{}", state.conversation.len()));
+                    if let Some(turn) = context_turn.clone() {
+                        durable.push(PendingEvent::ConversationTurnCommitted {
+                            agent_turn: state.completed_turns,
+                            turn,
+                        });
+                    }
+                    if decision == PlanDecision::Approve {
+                        durable.push(PendingEvent::ContextItemPinned {
+                            item_id: item_id.clone(),
+                            effective_after_agent_turn: state.completed_turns,
+                        });
+                        durable.push(PendingEvent::ModeChanged {
+                            mode: SessionMode::Execute,
+                        });
+                    }
+                    let result = emit_batch(state, events, &config.event_sink, durable).await;
+                    if result.is_ok() {
+                        state.pending_plan = None;
+                        if let Some(turn) = context_turn {
+                            state.conversation.push(turn);
+                        }
+                        if decision == PlanDecision::Approve {
+                            state.approved_plan = Some(artifact);
+                            state.plan_gate_active = false;
+                            state.context_surgery.push(ContextSurgeryAction {
+                                item_id,
+                                pinned: true,
+                                effective_after_agent_turn: state.completed_turns,
+                            });
+                            state.mode = SessionMode::Execute;
+                        }
+                    }
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
+                    }
                 }
                 ClientCommand::SwitchModel { model, .. } => {
                     let result = emit(
@@ -5547,7 +6173,6 @@ async fn handle_actor_command(
                 }
                 ClientCommand::CreateSession { .. }
                 | ClientCommand::ResumeSession { .. }
-                | ClientCommand::SwitchMode { .. }
                 | ClientCommand::Fork { .. }
                 | ClientCommand::ListSessions { .. }
                 | ClientCommand::ListCommands { .. }
@@ -5578,6 +6203,17 @@ async fn handle_actor_command(
                 let mut context = SessionCommandContext {
                     running: state.running.is_some(),
                     queued_messages: state.queued.len(),
+                    mode: state.mode,
+                    permission_summary: serde_json::to_string_pretty(
+                        &config.permissions.snapshot(),
+                    )
+                    .unwrap_or_else(|_| "permission state unavailable".to_owned()),
+                    plan_summary: state
+                        .pending_plan
+                        .as_ref()
+                        .or(state.approved_plan.as_ref())
+                        .and_then(|plan| serde_json::to_string_pretty(plan).ok())
+                        .unwrap_or_else(|| "no plan has been submitted".to_owned()),
                 };
                 let result = config.commands.dispatch_line(&mut context, &content).await;
                 let disposition = match result {
@@ -5689,6 +6325,58 @@ async fn handle_actor_command(
                                     None,
                                 );
                             }
+                            SessionCommandAction::SwitchMode { mode } => {
+                                if mode == SessionMode::Execute && state.plan_gate_active {
+                                    let _ = respond.send(Err(
+                                        AgentLoopError::InvalidConfiguration(
+                                            "plan_approval_required: submit and approve a plan before Execute"
+                                                .to_owned(),
+                                        ),
+                                    ));
+                                    return;
+                                }
+                                if let Err(error) =
+                                    apply_mode_change(state, events, &config.event_sink, mode).await
+                                {
+                                    let _ = respond.send(Err(error));
+                                    return;
+                                }
+                            }
+                            SessionCommandAction::AddPermissionRule { rule } => {
+                                if let Err(message) =
+                                    config.permissions.add_session_rule(rule.clone())
+                                {
+                                    let _ = respond
+                                        .send(Err(AgentLoopError::InvalidConfiguration(message)));
+                                    return;
+                                }
+                                output.message = format!(
+                                    "added session permission rule: {:?} {}",
+                                    rule.action, rule.pattern
+                                );
+                            }
+                            SessionCommandAction::RemovePermissionRule { pattern } => {
+                                output.message = if config.permissions.remove_session_rule(&pattern)
+                                {
+                                    format!("removed session permission rule: {pattern}")
+                                } else {
+                                    format!("no session permission rule matched: {pattern}")
+                                };
+                            }
+                            SessionCommandAction::ClearPermissionRules => {
+                                let removed = config.permissions.clear_session_rules();
+                                output.message =
+                                    format!("cleared {removed} session permission rule(s)");
+                            }
+                            SessionCommandAction::Trust { operation } => {
+                                match config.folder_trust.execute(operation).await {
+                                    Ok(message) => output.message = message,
+                                    Err(error) => {
+                                        let _ = respond.send(Err(error));
+                                        return;
+                                    }
+                                }
+                            }
                             SessionCommandAction::None => {}
                         }
                         let name = content
@@ -5728,6 +6416,7 @@ async fn handle_actor_command(
                 };
                 let _ = respond.send(disposition);
             } else if state.running.is_some() {
+                let content = config.secret_redactor.redact(&content);
                 state.queued.push_back(content.clone());
                 let persisted = emit(
                     state,
@@ -5832,6 +6521,10 @@ async fn handle_actor_command(
                 running: state.running.is_some(),
                 completed_turns: state.completed_turns,
                 model_alias: state.model_alias.clone(),
+                mode: state.mode,
+                pending_plan: state.pending_plan.clone(),
+                approved_plan: state.approved_plan.clone(),
+                plan_gate_active: state.plan_gate_active,
                 active_shell: state.active_shell.clone(),
             });
         }
@@ -5912,6 +6605,10 @@ async fn rewind_state(
         state.context_surgery = historical.context_surgery;
         state.pruned_tool_outputs = historical.pruned_tool_outputs;
         state.budgeter = historical.budgeter;
+        state.mode = historical.mode;
+        state.pending_plan = historical.pending_plan;
+        state.approved_plan = historical.approved_plan;
+        state.plan_gate_active = historical.plan_gate_active;
     } else {
         state.conversation.truncate(conversation_len);
         state
@@ -5942,7 +6639,14 @@ async fn handle_turn_signal(
 ) -> Result<(), AgentLoopError> {
     match signal {
         TurnSignal::Event(event) | TurnSignal::ToolOutput { event, .. } => {
+            let submitted_plan = match &event {
+                PendingEvent::PlanSubmitted { artifact } => Some(artifact.clone()),
+                _ => None,
+            };
             emit(state, events, &config.event_sink, event).await?;
+            if let Some(artifact) = submitted_plan {
+                state.pending_plan = Some(artifact);
+            }
         }
         TurnSignal::DurableEvent { kind, respond } => {
             let compaction_accounting = match &kind {
@@ -6163,6 +6867,7 @@ async fn start_turn(
                 &state.model_alias,
                 config.model.as_ref(),
             )
+            .map(|message| message.redact(config.secret_redactor.as_ref()))
             .map_err(AgentLoopError::InvalidConfiguration)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -6218,7 +6923,7 @@ async fn start_turn(
     } else {
         messages
     };
-    let config = Arc::new(config.with_model_alias(state.model_alias.clone()));
+    let config = Arc::new(config.with_model_alias_and_mode(state.model_alias.clone(), state.mode));
     let protocol_asker: Arc<dyn QuestionAsker> = Arc::new(ActorQuestionAsker {
         signals: signals.clone(),
         cancellation: cancellation.clone(),
@@ -6234,6 +6939,7 @@ async fn start_turn(
     let panic_pruned_tool_outputs = state_pruned_tool_outputs.clone();
     let state_budgeter = state.budgeter;
     let local_session_accounting = session_accounting_fallback(&state.accounting);
+    let state_mode = state.mode;
     tokio::spawn(async move {
         let outcome = AssertUnwindSafe(run_turn(
             turn,
@@ -6247,6 +6953,7 @@ async fn start_turn(
             state_pruned_tool_outputs,
             state_budgeter,
             local_session_accounting,
+            state_mode,
         ))
         .catch_unwind()
         .await
@@ -6368,6 +7075,20 @@ async fn emit_batch(
 struct ChannelApprover {
     signals: mpsc::UnboundedSender<TurnSignal>,
     cancellation: CancellationToken,
+}
+
+struct RedactingApprover<'a> {
+    inner: &'a dyn PermissionApprover,
+    redactor: &'a dyn SecretRedactor,
+}
+
+#[async_trait]
+impl PermissionApprover for RedactingApprover<'_> {
+    async fn decide(&self, request: PermissionRequest) -> ApprovalDecision {
+        self.inner
+            .decide(redacted_permission_request(request, self.redactor))
+            .await
+    }
 }
 
 struct ActorQuestionAsker {
@@ -7068,6 +7789,7 @@ fn report_hook_failures(
     event: HookEvent,
     failures: &[HookFailure],
     signals: &mpsc::UnboundedSender<TurnSignal>,
+    redactor: &dyn SecretRedactor,
 ) {
     for failure in failures {
         send_event(
@@ -7076,7 +7798,7 @@ fn report_hook_failures(
                 event: hook_event_name(event).to_owned(),
                 hook_id: failure.hook_id().to_owned(),
                 fail_closed: failure.policy() == HookFailurePolicy::FailClosed,
-                message: failure.error().to_string(),
+                message: redactor.redact(&failure.error().to_string()),
             },
         );
     }
@@ -7096,12 +7818,12 @@ async fn dispatch_hook(
     }
 }
 
-fn hook_rejection(status: &HookDispatchStatus) -> Option<String> {
+fn hook_rejection(status: &HookDispatchStatus, redactor: &dyn SecretRedactor) -> Option<String> {
     match status {
         HookDispatchStatus::Completed => None,
-        HookDispatchStatus::Blocked { hook_id, message } => {
-            Some(format!("hook `{hook_id}` blocked the operation: {message}"))
-        }
+        HookDispatchStatus::Blocked { hook_id, message } => Some(redactor.redact(&format!(
+            "hook `{hook_id}` blocked the operation: {message}"
+        ))),
         HookDispatchStatus::FailedClosed { hook_id } => {
             Some(format!("hook `{hook_id}` failed closed"))
         }
@@ -7180,6 +7902,7 @@ async fn authorize_tool_call(
     approver: &dyn PermissionApprover,
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
+    mode: SessionMode,
 ) -> Result<Option<ApprovalBinding>, String> {
     let mut request = PermissionRequest {
         id: call.id.clone(),
@@ -7190,14 +7913,15 @@ async fn authorize_tool_call(
     };
     request.approval_diff = current_approval_diff(tool, context, &request).await?;
     let binding = request.approval_diff.as_ref().map(diff_binding);
+    let displayed = redacted_permission_request(request.clone(), config.secret_redactor.as_ref());
     let permission_hook = dispatch_hook(
         &config.hooks,
         HookEvent::PermissionCheck,
         json!({
-            "id": request.id,
-            "name": request.tool_name,
-            "arguments": request.arguments,
-            "capabilities": request.capabilities,
+            "id": displayed.id,
+            "name": displayed.tool_name,
+            "arguments": displayed.arguments,
+            "capabilities": displayed.capabilities,
         }),
         cancellation,
     )
@@ -7207,13 +7931,19 @@ async fn authorize_tool_call(
         HookEvent::PermissionCheck,
         permission_hook.failures(),
         signals,
+        config.secret_redactor.as_ref(),
     );
+    let redacting_approver = RedactingApprover {
+        inner: approver,
+        redactor: config.secret_redactor.as_ref(),
+    };
     let permission = config
         .permissions
-        .authorize_with_override(
+        .authorize_in_mode(
             request,
-            approver,
+            &redacting_approver,
             permission_hook_override(permission_hook.status(), permission_hook.payload()),
+            mode,
         )
         .await;
     if permission == PermissionOutcome::Denied {
@@ -7238,6 +7968,7 @@ async fn current_approval_diff(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn prepare_tool_call(
     turn: u64,
     mut call: PendingToolCall,
@@ -7246,6 +7977,7 @@ async fn prepare_tool_call(
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
     context: &ToolContext,
+    mode: SessionMode,
 ) -> PreparedToolCall {
     let Some(arguments) = call.arguments.clone() else {
         return PreparedToolCall::Complete(failed_execution(
@@ -7253,13 +7985,14 @@ async fn prepare_tool_call(
             "provider did not finish tool-call arguments",
         ));
     };
+    let displayed_arguments = redacted_json(arguments.clone(), config.secret_redactor.as_ref());
     send_event(
         signals,
         PendingEvent::ToolCallStarted {
             turn,
             id: call.id.clone(),
             name: call.name.clone(),
-            arguments: arguments.clone(),
+            arguments: displayed_arguments.clone(),
             index: call.index,
         },
     );
@@ -7280,6 +8013,7 @@ async fn prepare_tool_call(
         approver,
         cancellation,
         signals,
+        mode,
     )
     .await
     {
@@ -7294,7 +8028,7 @@ async fn prepare_tool_call(
         json!({
             "id": call.id,
             "name": call.name,
-            "arguments": arguments,
+            "arguments": displayed_arguments,
         }),
         cancellation,
     )
@@ -7303,8 +8037,13 @@ async fn prepare_tool_call(
         Ok(result) => result,
         Err(error) => return PreparedToolCall::Complete(failed_execution(call, error.to_string())),
     };
-    report_hook_failures(HookEvent::PreTool, pre_tool.failures(), signals);
-    if let Some(message) = hook_rejection(pre_tool.status()) {
+    report_hook_failures(
+        HookEvent::PreTool,
+        pre_tool.failures(),
+        signals,
+        config.secret_redactor.as_ref(),
+    );
+    if let Some(message) = hook_rejection(pre_tool.status(), config.secret_redactor.as_ref()) {
         return PreparedToolCall::Complete(failed_execution(call, message));
     }
     let Some(name) = pre_tool.payload().get("name").and_then(Value::as_str) else {
@@ -7320,11 +8059,23 @@ async fn prepare_tool_call(
         ));
     }
     call.name = name.to_owned();
-    let arguments = pre_tool
+    let hook_arguments = pre_tool
         .payload()
         .get("arguments")
         .cloned()
         .unwrap_or(Value::Null);
+    let arguments = if hook_arguments
+        == redacted_json(original_arguments.clone(), config.secret_redactor.as_ref())
+    {
+        original_arguments.clone()
+    } else if json_contains_redaction(&hook_arguments) {
+        return PreparedToolCall::Complete(failed_execution(
+            call,
+            "pre_tool hook cannot execute a rewritten redacted placeholder",
+        ));
+    } else {
+        hook_arguments
+    };
     call.arguments = Some(arguments.clone());
     let Some(security) = resolve_tool_security(config, &call.name, &arguments) else {
         let name = call.name.clone();
@@ -7344,6 +8095,7 @@ async fn prepare_tool_call(
             approver,
             cancellation,
             signals,
+            mode,
         )
         .await
         {
@@ -7398,12 +8150,73 @@ fn redact_json(value: &mut Value, redactor: &dyn SecretRedactor) {
             }
         }
         Value::Object(values) => {
-            for value in values.values_mut() {
-                redact_json(value, redactor);
+            for (key, value) in values {
+                if sensitive_json_key(key) && !value.is_null() {
+                    *value = Value::String("[REDACTED]".to_owned());
+                } else {
+                    redact_json(value, redactor);
+                }
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
+}
+
+fn sensitive_json_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace('-', "_");
+    matches!(
+        normalized.as_str(),
+        "authorization"
+            | "proxy_authorization"
+            | "cookie"
+            | "set_cookie"
+            | "api_key"
+            | "access_token"
+            | "refresh_token"
+            | "id_token"
+            | "auth_token"
+            | "bearer_token"
+            | "session_token"
+            | "oauth_token"
+            | "password"
+            | "secret"
+            | "client_secret"
+            | "private_key"
+            | "credential"
+            | "credentials"
+    ) || normalized.ends_with("_api_key")
+        || normalized.ends_with("_token")
+        || normalized.ends_with("_password")
+        || normalized.ends_with("_secret")
+        || normalized.ends_with("_private_key")
+        || normalized.ends_with("_credential")
+        || normalized.ends_with("_credentials")
+}
+
+fn redacted_json(mut value: Value, redactor: &dyn SecretRedactor) -> Value {
+    redact_json(&mut value, redactor);
+    value
+}
+
+fn json_contains_redaction(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.contains("[REDACTED]"),
+        Value::Array(values) => values.iter().any(json_contains_redaction),
+        Value::Object(values) => values.values().any(json_contains_redaction),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn redacted_permission_request(
+    mut request: PermissionRequest,
+    redactor: &dyn SecretRedactor,
+) -> PermissionRequest {
+    redact_json(&mut request.arguments, redactor);
+    if let Some(diff) = &mut request.approval_diff {
+        diff.unified_diff = redactor.redact(&diff.unified_diff);
+        diff.path = redactor.redact(&diff.path);
+    }
+    request
 }
 
 fn redact_tool_output(output: &mut ToolOutput, redactor: &dyn SecretRedactor) {
@@ -7602,13 +8415,18 @@ async fn apply_post_tool_hook(
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
 ) -> ToolExecution {
+    redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
+    let displayed_arguments = redacted_json(
+        execution.call.arguments.clone().unwrap_or(Value::Null),
+        config.secret_redactor.as_ref(),
+    );
     let post_tool = match dispatch_hook(
         &config.hooks,
         HookEvent::PostTool,
         json!({
             "id": execution.call.id,
             "name": execution.call.name,
-            "arguments": execution.call.arguments,
+            "arguments": displayed_arguments,
             "output": execution.output,
             "is_error": execution.is_error,
         }),
@@ -7625,8 +8443,13 @@ async fn apply_post_tool_hook(
             return execution;
         }
     };
-    report_hook_failures(HookEvent::PostTool, post_tool.failures(), signals);
-    if let Some(message) = hook_rejection(post_tool.status()) {
+    report_hook_failures(
+        HookEvent::PostTool,
+        post_tool.failures(),
+        signals,
+        config.secret_redactor.as_ref(),
+    );
+    if let Some(message) = hook_rejection(post_tool.status(), config.secret_redactor.as_ref()) {
         execution.output = ToolOutput::Text { text: message };
         execution.is_error = true;
         return execution;
@@ -7648,7 +8471,7 @@ async fn apply_post_tool_hook(
     execution
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn execute_tool_calls(
     turn: u64,
     calls: Vec<PendingToolCall>,
@@ -7657,11 +8480,22 @@ async fn execute_tool_calls(
     cancellation: &CancellationToken,
     approver: &dyn PermissionApprover,
     signals: &mpsc::UnboundedSender<TurnSignal>,
+    mode: SessionMode,
 ) -> Vec<ToolExecution> {
     let mut prepared = Vec::with_capacity(calls.len());
     for call in calls {
         prepared.push(
-            prepare_tool_call(turn, call, config, approver, cancellation, signals, context).await,
+            prepare_tool_call(
+                turn,
+                call,
+                config,
+                approver,
+                cancellation,
+                signals,
+                context,
+                mode,
+            )
+            .await,
         );
     }
     let may_run_in_parallel = prepared.iter().all(|call| match call {
@@ -7700,6 +8534,7 @@ async fn execute_tool_calls(
                 execution = apply_post_tool_hook(execution, config, cancellation, signals).await;
             }
             redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
+            emit_plan_submission(&execution, mode, signals, config.secret_redactor.as_ref());
             send_event(
                 signals,
                 PendingEvent::ToolCallFinished {
@@ -7779,6 +8614,7 @@ async fn execute_tool_calls(
             execution = apply_post_tool_hook(execution, config, cancellation, signals).await;
         }
         redact_tool_output(&mut execution.output, config.secret_redactor.as_ref());
+        emit_plan_submission(&execution, mode, signals, config.secret_redactor.as_ref());
         send_event(
             signals,
             PendingEvent::ToolCallFinished {
@@ -7794,6 +8630,26 @@ async fn execute_tool_calls(
         coordinator.advance(next);
     }
     ordered
+}
+
+fn emit_plan_submission(
+    execution: &ToolExecution,
+    mode: SessionMode,
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    redactor: &dyn SecretRedactor,
+) {
+    if mode != SessionMode::Plan || execution.is_error || execution.call.name != "submit_plan" {
+        return;
+    }
+    if let Some(arguments) = execution
+        .call
+        .arguments
+        .clone()
+        .map(|arguments| redacted_json(arguments, redactor))
+        && let Ok(artifact) = serde_json::from_value::<PlanArtifact>(arguments)
+    {
+        send_event(signals, PendingEvent::PlanSubmitted { artifact });
+    }
 }
 
 async fn prune_before_provider_request(
@@ -7979,7 +8835,12 @@ async fn execute_compaction(
         cancellation,
     )
     .await?;
-    report_hook_failures(HookEvent::PreCompact, hook_result.failures(), signals);
+    report_hook_failures(
+        HookEvent::PreCompact,
+        hook_result.failures(),
+        signals,
+        config.secret_redactor.as_ref(),
+    );
     if !hook_result.completed() {
         return Err(AgentLoopError::Extension(
             "pre_compact hook blocked compaction".to_owned(),
@@ -7994,7 +8855,7 @@ async fn execute_compaction(
                 values
                     .iter()
                     .filter_map(Value::as_str)
-                    .map(str::to_owned)
+                    .map(|value| config.secret_redactor.redact(value))
                     .collect()
             })
             .unwrap_or_default(),
@@ -8002,7 +8863,7 @@ async fn execute_compaction(
             .payload()
             .get("replacement_prompt")
             .and_then(Value::as_str)
-            .map(str::to_owned),
+            .map(|value| config.secret_redactor.redact(value)),
     };
     let automatic_continue = !hook_result
         .payload()
@@ -8389,6 +9250,7 @@ async fn run_turn(
     mut pruned_tool_outputs: BTreeMap<String, u64>,
     mut budgeter: Budgeter,
     local_session_accounting: SessionAccountingFallback,
+    mode: SessionMode,
 ) -> TurnOutcome {
     for message in messages {
         let Ok(hook) = dispatch_hook(
@@ -8412,7 +9274,12 @@ async fn run_turn(
                 budgeter,
             };
         };
-        report_hook_failures(HookEvent::UserPromptSubmit, hook.failures(), &signals);
+        report_hook_failures(
+            HookEvent::UserPromptSubmit,
+            hook.failures(),
+            &signals,
+            config.secret_redactor.as_ref(),
+        );
         if !hook.completed() {
             return TurnOutcome {
                 turn,
@@ -8427,12 +9294,12 @@ async fn run_turn(
                 budgeter,
             };
         }
-        let content = hook
-            .payload()
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let content = config.secret_redactor.redact(
+            hook.payload()
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
         let user_turn = message.turn(content);
         conversation.push(user_turn.clone());
         if persist_event(
@@ -8793,11 +9660,13 @@ async fn run_turn(
                 ProviderEvent::RouteSelected { route } => selected_route = Some(route),
                 ProviderEvent::MessageStart { model } => assistant.meta.model = Some(model),
                 ProviderEvent::TextDelta { text } => {
+                    let text = config.secret_redactor.redact(&text);
                     flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
                     append_text(&mut assistant.blocks, &text);
                     pending_text_delta = Some(text);
                 }
                 ProviderEvent::ThinkingDelta { content, signature } => {
+                    let content = config.secret_redactor.redact(&content);
                     assistant.blocks.push(Block::Thinking {
                         content: content.clone(),
                         signature: signature.clone(),
@@ -8848,7 +9717,7 @@ async fn run_turn(
                         assistant.blocks.push(Block::ToolCall {
                             id: ToolCallId(id),
                             name: call.name.clone(),
-                            args: arguments,
+                            args: redacted_json(arguments, config.secret_redactor.as_ref()),
                         });
                     } else {
                         send_event(
@@ -8863,6 +9732,8 @@ async fn run_turn(
                     }
                 }
                 ProviderEvent::Citation { uri, title, .. } => {
+                    let uri = config.secret_redactor.redact(&uri);
+                    let title = title.map(|title| config.secret_redactor.redact(&title));
                     assistant.blocks.push(Block::Citation {
                         uri: uri.clone(),
                         title: title.clone(),
@@ -9065,6 +9936,7 @@ async fn run_turn(
             &cancellation,
             &approver,
             &signals,
+            mode,
         )
         .await;
         let interrupted = cancellation.is_cancelled();
@@ -9138,7 +10010,12 @@ async fn run_turn(
     .await;
     match hook {
         Ok(hook) => {
-            report_hook_failures(HookEvent::TurnEnd, hook.failures(), &signals);
+            report_hook_failures(
+                HookEvent::TurnEnd,
+                hook.failures(),
+                &signals,
+                config.secret_redactor.as_ref(),
+            );
             if !hook.completed() && status == AgentTurnStatus::Completed {
                 status = AgentTurnStatus::Failed;
             }
@@ -9187,7 +10064,7 @@ mod tests {
         Capabilities, FixtureRedactor, Provider, ProviderError, ProviderErrorKind, ProviderRouter,
         Recorder, ReplayProvider, RetryPolicy,
     };
-    use rw_tools::{AskUserTool, CapabilityManifest, Tool, ToolLimits, WriteTool};
+    use rw_tools::{AskUserTool, CapabilityManifest, SubmitPlanTool, Tool, ToolLimits, WriteTool};
     use rw_types::{ToolCapability, ToolOutputStream, config::PermissionDecision};
     use tempfile::TempDir;
     use tokio::{sync::Notify, time::timeout};
@@ -9668,6 +10545,94 @@ mod tests {
                 StubOutcome::Failure(message) => Err(ToolError::InvalidInput(message.clone())),
             }
         }
+    }
+
+    struct PlanMutationTripwire {
+        descriptor: ToolDescriptor,
+    }
+
+    impl PlanMutationTripwire {
+        fn new(name: &str, capabilities: Vec<ToolCapability>) -> Self {
+            Self {
+                descriptor: ToolDescriptor {
+                    name: name.to_owned(),
+                    description: format!("plan-mode mutation tripwire {name}"),
+                    input_schema: json!({"type": "object"}),
+                    capabilities: CapabilityManifest::new(capabilities),
+                },
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Tool for PlanMutationTripwire {
+        fn descriptor(&self) -> ToolDescriptor {
+            self.descriptor.clone()
+        }
+
+        async fn execute(
+            &self,
+            context: &ToolContext,
+            input: Value,
+        ) -> Result<ToolResult, ToolError> {
+            let marker = format!(
+                "tripwire-{}-{}",
+                self.descriptor.name,
+                blake3::hash(canonical_json_bytes(&input).as_slice()).to_hex()
+            );
+            std::fs::write(context.workspace_root().join(marker), b"MUTATED")
+                .map_err(|error| ToolError::Command(error.to_string()))?;
+            Ok(ToolResult::new("tripwire executed", Value::Null))
+        }
+    }
+
+    fn canonical_json_bytes(value: &Value) -> Vec<u8> {
+        serde_json::to_vec(value).unwrap_or_default()
+    }
+
+    fn workspace_tree_bytes(root: &Path) -> BTreeMap<String, Vec<u8>> {
+        fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<String, Vec<u8>>) {
+            let mut entries = std::fs::read_dir(path)
+                .expect("read workspace tree")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("workspace entries");
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let relative = entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("workspace relative path")
+                    .to_path_buf();
+                if relative
+                    .components()
+                    .next()
+                    .is_some_and(|component| component.as_os_str() == std::ffi::OsStr::new(".git"))
+                {
+                    continue;
+                }
+                let key = relative.to_string_lossy().into_owned();
+                let kind = entry.file_type().expect("workspace entry type");
+                if kind.is_dir() {
+                    snapshot.insert(format!("{key}/"), Vec::new());
+                    visit(root, &entry.path(), snapshot);
+                } else if kind.is_symlink() {
+                    snapshot.insert(
+                        key,
+                        std::fs::read_link(entry.path())
+                            .expect("symlink target")
+                            .as_os_str()
+                            .as_encoded_bytes()
+                            .to_vec(),
+                    );
+                } else {
+                    snapshot.insert(key, std::fs::read(entry.path()).expect("workspace file"));
+                }
+            }
+        }
+
+        let mut snapshot = BTreeMap::new();
+        visit(root, root, &mut snapshot);
+        snapshot
     }
 
     struct ReverseCompletionTool {
@@ -10303,6 +11268,11 @@ mod tests {
         result: Result<HookDirective, HookError>,
     }
 
+    struct PayloadCaptureHook {
+        label: &'static str,
+        payloads: Arc<Mutex<Vec<(&'static str, Value)>>>,
+    }
+
     #[async_trait]
     impl HookHandler for FixedHook {
         async fn invoke(
@@ -10317,11 +11287,33 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl HookHandler for PayloadCaptureHook {
+        async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
+            self.payloads
+                .lock()
+                .expect("captured hook payloads")
+                .push((self.label, invocation.payload().clone()));
+            Ok(HookDirective::Continue)
+        }
+    }
+
     struct RewriteArgumentsHook(Value);
 
     struct RewriteUserPromptHook(&'static str);
 
     struct NeverHook;
+
+    struct PermissionAllowHook;
+
+    #[async_trait]
+    impl HookHandler for PermissionAllowHook {
+        async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
+            let mut payload = invocation.payload().clone();
+            payload["decision"] = Value::String("allow".to_owned());
+            Ok(HookDirective::Replace(payload))
+        }
+    }
 
     #[async_trait]
     impl HookHandler for NeverHook {
@@ -10352,6 +11344,22 @@ mod tests {
     }
 
     struct EchoCommand;
+
+    #[derive(Default)]
+    struct RecordingFolderTrust {
+        operations: Mutex<Vec<FolderTrustOperation>>,
+    }
+
+    #[async_trait]
+    impl FolderTrustController for RecordingFolderTrust {
+        async fn execute(&self, operation: FolderTrustOperation) -> Result<String, AgentLoopError> {
+            self.operations
+                .lock()
+                .expect("trust operations")
+                .push(operation);
+            Ok(format!("trust operation: {operation:?}"))
+        }
+    }
 
     #[async_trait]
     impl CommandHandler<SessionCommandContext, SessionCommandOutput> for EchoCommand {
@@ -10433,6 +11441,7 @@ mod tests {
         SessionActorConfig {
             session_id: SessionId("fixture-session".to_owned()),
             workspace_root: root.to_path_buf(),
+            additional_workspace_roots: Vec::new(),
             initial_session_context: Vec::new(),
             model_alias: "fast".to_owned(),
             model,
@@ -10444,6 +11453,7 @@ mod tests {
             event_clock: Arc::new(FixedClock),
             secret_redactor: Arc::new(NoopSecretRedactor),
             checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
+            folder_trust: Arc::new(NoopFolderTrustController),
             recovered: SessionRecoveredState::default(),
             max_turns: 10,
             identical_tool_failure_limit: 5,
@@ -10471,6 +11481,15 @@ mod tests {
                 return "useful [REDACTED] output".to_owned();
             }
             text.replace("SHELL_SECRET", "[REDACTED]")
+        }
+    }
+
+    #[derive(Debug)]
+    struct CanarySecretRedactor;
+
+    impl SecretRedactor for CanarySecretRedactor {
+        fn redact(&self, text: &str) -> String {
+            text.replace("KNOWN_CANARY", "[REDACTED]")
         }
     }
 
@@ -10509,6 +11528,10 @@ mod tests {
             client_id: ClientId(client.to_owned()),
             request_id: RequestId(request.to_owned()),
         }
+    }
+
+    fn wire_mode(mode: SessionMode) -> ModeId {
+        ModeId(session_mode_name(mode).to_owned())
     }
 
     async fn next_matching(
@@ -10585,6 +11608,114 @@ mod tests {
         assert!(String::from_utf8_lossy(&encoded).contains("\"sequence_id\":\""));
         let decoded: EngineEvent = serde_json::from_slice(&encoded).expect("deserialize event");
         assert_eq!(decoded, event.wire);
+    }
+
+    #[tokio::test]
+    async fn trust_slash_command_dispatches_status_grant_and_revoke_to_host_boundary() {
+        let root = TempDir::new().expect("tempdir");
+        let trust = Arc::new(RecordingFolderTrust::default());
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(ScriptedModel::default()),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.folder_trust = trust.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        for (command, expected) in [
+            ("/trust", FolderTrustOperation::Status),
+            ("/trust grant", FolderTrustOperation::Grant),
+            ("/trust revoke", FolderTrustOperation::Revoke),
+        ] {
+            assert_eq!(
+                handle.send_message(command).await.expect("trust command"),
+                MessageDisposition::Command
+            );
+            let event = next_matching(&mut events, |kind| {
+                matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "trust")
+            })
+            .await;
+            assert!(matches!(
+                event.kind,
+                PendingEvent::CommandFinished { message, .. }
+                    if message == format!("trust operation: {expected:?}")
+            ));
+        }
+        assert_eq!(
+            *trust.operations.lock().expect("trust operations"),
+            vec![
+                FolderTrustOperation::Status,
+                FolderTrustOperation::Grant,
+                FolderTrustOperation::Revoke,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn permissions_slash_command_edits_only_session_rules() {
+        let root = TempDir::new().expect("tempdir");
+        let permissions = Arc::new(PermissionGate::new(PermissionDecision::Ask));
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(ScriptedModel::default()),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.permissions = permissions.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        for command in [
+            "/permissions add allow bash(cargo test*)",
+            "/permissions add deny bash(rm *)",
+        ] {
+            assert_eq!(
+                handle
+                    .send_message(command)
+                    .await
+                    .expect("permission command"),
+                MessageDisposition::Command
+            );
+            next_matching(&mut events, |kind| {
+                matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "permissions")
+            })
+            .await;
+        }
+        assert_eq!(permissions.snapshot().session_rules.len(), 2);
+        handle
+            .send_message("/permissions list")
+            .await
+            .expect("list permissions");
+        let listed = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "permissions")
+        })
+        .await;
+        assert!(matches!(
+            listed.kind,
+            PendingEvent::CommandFinished { message, .. }
+                if message.contains("session_rules") && message.contains("bash(cargo test*)")
+        ));
+        handle
+            .send_message("/permissions remove bash(cargo test*)")
+            .await
+            .expect("remove permission");
+        next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "permissions")
+        })
+        .await;
+        assert_eq!(permissions.snapshot().session_rules.len(), 1);
+        handle
+            .send_message("/permissions clear-session")
+            .await
+            .expect("clear permissions");
+        next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "permissions")
+        })
+        .await;
+        assert!(permissions.snapshot().session_rules.is_empty());
+        assert!(permissions.snapshot().rules.is_empty());
     }
 
     #[test]
@@ -11706,6 +12837,276 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn secrets_never_reach_durable_tool_events_or_hook_payloads() {
+        let root = TempDir::new().expect("tempdir");
+        let raw_arguments = json!({
+            "api_key": "KEY_CANARY",
+            "known_value": "KNOWN_CANARY",
+            "nested": {"password": "PASS_CANARY"},
+            "safe": "visible",
+        });
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(&[("call", "fixture", raw_arguments.clone())], &[]),
+            stop_script("done", &[]),
+        ]));
+        let tool = Arc::new(StubTool::new(
+            "fixture",
+            vec![ToolCapability::WriteFilesystem],
+            StubOutcome::Success(ToolResult::new(
+                "KNOWN_CANARY output",
+                json!({
+                    "authorization": "Bearer OUTPUT_CANARY",
+                    "safe": "visible output",
+                }),
+            )),
+        ));
+        let mut tools = ToolRegistry::new();
+        tools.register(tool.clone()).expect("register tool");
+        let payloads = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = builtin_hook_dispatcher().expect("hooks");
+        for (id, event, label) in [
+            (
+                "fixture.capture-permission",
+                HookEvent::PermissionCheck,
+                "permission_check",
+            ),
+            ("fixture.capture-pre", HookEvent::PreTool, "pre_tool"),
+            ("fixture.capture-post", HookEvent::PostTool, "post_tool"),
+        ] {
+            hooks
+                .register(
+                    HookRegistration::new(id, event),
+                    PayloadCaptureHook {
+                        label,
+                        payloads: payloads.clone(),
+                    },
+                )
+                .expect("capture hook");
+        }
+        let sink = Arc::new(RecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            hooks,
+        );
+        actor_config.event_sink = sink.clone();
+        actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        let event = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        let PendingEvent::PermissionRequested { request, .. } = event.kind else {
+            unreachable!("matching event")
+        };
+        assert_eq!(request.arguments["safe"], "visible");
+        assert_eq!(request.arguments["api_key"], "[REDACTED]");
+        assert_eq!(request.arguments["known_value"], "[REDACTED]");
+        assert_eq!(request.arguments["nested"]["password"], "[REDACTED]");
+        assert!(
+            handle
+                .approve(request.id, ApprovalDecision::AllowOnce)
+                .await
+                .expect("approval")
+        );
+        collect_turn(&mut events).await;
+
+        assert_eq!(
+            tool.inputs.lock().expect("tool inputs").as_slice(),
+            &[raw_arguments],
+            "the tool execution boundary still receives the original arguments"
+        );
+        let captured = payloads.lock().expect("captured hook payloads").clone();
+        assert_eq!(
+            captured.iter().map(|(label, _)| *label).collect::<Vec<_>>(),
+            ["permission_check", "pre_tool", "post_tool"]
+        );
+        let hook_wire = serde_json::to_string(&captured).expect("serialize hook payloads");
+        let durable_wire = serde_json::to_string(
+            &sink
+                .events
+                .lock()
+                .expect("durable events")
+                .iter()
+                .map(|event| &event.wire)
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize durable events");
+        for exposed in ["KEY_CANARY", "KNOWN_CANARY", "PASS_CANARY", "OUTPUT_CANARY"] {
+            assert!(!hook_wire.contains(exposed), "hook exposed {exposed}");
+            assert!(!durable_wire.contains(exposed), "event exposed {exposed}");
+        }
+        assert!(hook_wire.contains("visible"));
+        assert!(hook_wire.contains("visible output"));
+        assert!(hook_wire.contains("[REDACTED]"));
+        assert!(durable_wire.contains("visible"));
+        assert!(durable_wire.contains("visible output"));
+        assert!(durable_wire.contains("[REDACTED]"));
+    }
+
+    #[tokio::test]
+    async fn hook_failure_and_block_messages_are_redacted_before_events() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(&[("call", "fixture", json!({}))], &[]),
+            stop_script("done", &[]),
+        ]));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(StubTool::new(
+                "fixture",
+                vec![ToolCapability::WriteFilesystem],
+                StubOutcome::Success(ToolResult::new("unused", Value::Null)),
+            )))
+            .expect("register tool");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = builtin_hook_dispatcher().expect("hooks");
+        hooks
+            .register(
+                HookRegistration::new("fixture.secret-failure", HookEvent::PermissionCheck)
+                    .with_failure_policy(HookFailurePolicy::FailOpen),
+                FixedHook {
+                    label: "failure",
+                    calls: calls.clone(),
+                    result: Err(HookError::new("fixture", "KNOWN_CANARY failure")),
+                },
+            )
+            .expect("failure hook");
+        hooks
+            .register(
+                HookRegistration::new("fixture.secret-block", HookEvent::PreTool),
+                FixedHook {
+                    label: "block",
+                    calls,
+                    result: Ok(HookDirective::Block {
+                        message: "KNOWN_CANARY blocked".to_owned(),
+                    }),
+                },
+            )
+            .expect("blocking hook");
+        let sink = Arc::new(RecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            hooks,
+        );
+        actor_config.event_sink = sink.clone();
+        actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        let event = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        let PendingEvent::PermissionRequested { request, .. } = event.kind else {
+            unreachable!("matching event")
+        };
+        assert!(
+            handle
+                .approve(request.id, ApprovalDecision::AllowOnce)
+                .await
+                .expect("approval")
+        );
+        collect_turn(&mut events).await;
+        let durable = serde_json::to_string(
+            &sink
+                .events
+                .lock()
+                .expect("durable events")
+                .iter()
+                .map(|event| &event.wire)
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize durable events");
+        assert!(!durable.contains("KNOWN_CANARY"));
+        assert!(durable.contains("[REDACTED]"));
+        assert!(durable.contains("blocked"));
+    }
+
+    #[tokio::test]
+    async fn user_secrets_are_redacted_before_hooks_events_and_provider_context() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(ScriptedModel::new([stop_script("done", &[])]));
+        let payloads = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = builtin_hook_dispatcher().expect("hooks");
+        hooks
+            .register(
+                HookRegistration::new("fixture.capture-user", HookEvent::UserPromptSubmit),
+                PayloadCaptureHook {
+                    label: "user_prompt_submit",
+                    payloads: payloads.clone(),
+                },
+            )
+            .expect("capture hook");
+        let sink = Arc::new(RecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            hooks,
+        );
+        actor_config.event_sink = sink.clone();
+        actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .send_message("safe KNOWN_CANARY tail")
+            .await
+            .expect("message");
+        collect_turn(&mut events).await;
+
+        let hook_wire = serde_json::to_string(&*payloads.lock().expect("hook payloads"))
+            .expect("serialize hook payloads");
+        let durable_wire = serde_json::to_string(
+            &sink
+                .events
+                .lock()
+                .expect("durable events")
+                .iter()
+                .map(|event| &event.wire)
+                .collect::<Vec<_>>(),
+        )
+        .expect("serialize durable events");
+        let provider_wire = serde_json::to_string(&*model.requests.lock().expect("requests"))
+            .expect("serialize provider requests");
+        for wire in [&hook_wire, &durable_wire, &provider_wire] {
+            assert!(!wire.contains("KNOWN_CANARY"));
+            assert!(wire.contains("[REDACTED]"));
+            assert!(wire.contains("safe"));
+        }
+    }
+
+    #[test]
+    fn structured_token_metrics_are_not_mistaken_for_credentials() {
+        let value = redacted_json(
+            json!({
+                "max_tokens": 4096,
+                "input_tokens": 12,
+                "output_tokens": 34,
+                "token_count": 46,
+                "token_type": "cached",
+                "access_token": "credential",
+            }),
+            &NoopSecretRedactor,
+        );
+        assert_eq!(value["max_tokens"], 4096);
+        assert_eq!(value["input_tokens"], 12);
+        assert_eq!(value["output_tokens"], 34);
+        assert_eq!(value["token_count"], 46);
+        assert_eq!(value["token_type"], "cached");
+        assert_eq!(value["access_token"], "[REDACTED]");
+    }
+
+    #[tokio::test]
     async fn diff_approval_rejects_tampered_binding_without_consuming_the_prompt() {
         let root = TempDir::new().expect("tempdir");
         std::fs::write(root.path().join("bound.txt"), "before").expect("fixture");
@@ -11838,16 +13239,18 @@ mod tests {
         let diff = request.approval_diff.as_ref().expect("diff");
         assert!(diff.truncated);
         let binding = diff_binding(diff);
-        assert!(
-            !handle
-                .approve_bound(
-                    request.id.clone(),
-                    ApprovalDecision::AllowOnce,
-                    Some(binding.clone()),
-                )
-                .await
-                .expect("truncated allow rejection")
-        );
+        for decision in [
+            ApprovalDecision::AllowOnce,
+            ApprovalDecision::AllowSession,
+            ApprovalDecision::AllowProject,
+        ] {
+            assert!(
+                !handle
+                    .approve_bound(request.id.clone(), decision, Some(binding.clone()))
+                    .await
+                    .expect("truncated allow rejection")
+            );
+        }
         assert_eq!(std::fs::read_to_string(&path).expect("unchanged"), "before");
         assert!(
             handle
@@ -11907,7 +13310,7 @@ mod tests {
         std::fs::write(&path, "concurrent user edit").expect("race mutation");
         assert!(
             !handle
-                .approve_bound(request.id, ApprovalDecision::AllowOnce, Some(binding))
+                .approve_bound(request.id, ApprovalDecision::AllowProject, Some(binding))
                 .await
                 .expect("stale approval")
         );
@@ -15242,6 +16645,521 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discuss_and_plan_tool_sequences_cannot_mutate_the_workspace() {
+        for mode in [SessionMode::Discuss, SessionMode::Plan] {
+            let root = TempDir::new().expect("workspace");
+            let model = Arc::new(ScriptedModel::new([
+                tool_script(
+                    &[(
+                        "write-1",
+                        "write",
+                        json!({"path": "forbidden.txt", "content": "must not exist"}),
+                    )],
+                    &[],
+                ),
+                stop_script("done", &[]),
+            ]));
+            let mut tools = ToolRegistry::new();
+            tools
+                .register(Arc::new(WriteTool::new(ToolLimits::default())))
+                .expect("write tool");
+            let handle = SessionActor::spawn(config(
+                root.path(),
+                model,
+                Arc::new(tools),
+                PermissionDecision::Allow,
+                HookDispatcher::new(),
+            ))
+            .expect("actor");
+            let mut events = handle.subscribe();
+            handle
+                .dispatch(ClientCommand::AttachSession {
+                    meta: protocol_meta("driver", "attach"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                })
+                .await
+                .expect("attach");
+            assert_eq!(
+                handle
+                    .dispatch(ClientCommand::SwitchMode {
+                        meta: protocol_meta("driver", "mode"),
+                        session_id: SessionId("fixture-session".to_owned()),
+                        mode: wire_mode(mode),
+                    })
+                    .await
+                    .expect("switch mode"),
+                CommandOutcome::Accepted
+            );
+            assert_eq!(
+                handle
+                    .dispatch(ClientCommand::SendMessage {
+                        meta: protocol_meta("driver", "turn"),
+                        session_id: SessionId("fixture-session".to_owned()),
+                        content: "try mutation".to_owned(),
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .expect("turn"),
+                CommandOutcome::Accepted
+            );
+            let turn = collect_turn(&mut events).await;
+            assert!(turn.iter().any(|event| matches!(
+                &event.kind,
+                PendingEvent::ToolCallFinished { is_error: true, output: ToolOutput::Text { text }, .. }
+                    if text.contains("permission denied")
+            )));
+            assert!(!root.path().join("forbidden.txt").exists());
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn seeded_plan_mode_property_keeps_complete_workspace_byte_identical() {
+        for seed in 0_u64..48 {
+            for hook_allow in [false, true] {
+                let root = TempDir::new().expect("workspace");
+                std::fs::create_dir(root.path().join("nested")).expect("nested fixture");
+                std::fs::write(root.path().join("nested/original.bin"), [0, 1, 2, 255])
+                    .expect("baseline fixture");
+                std::fs::create_dir(root.path().join(".git")).expect("git metadata fixture");
+                std::fs::write(root.path().join(".git/index"), seed.to_le_bytes())
+                    .expect("git index fixture");
+                let before = workspace_tree_bytes(root.path());
+
+                let mut value = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+                let count = usize::try_from(value % 12 + 1).expect("bounded count");
+                let mut calls = Vec::with_capacity(count);
+                let names = ["write", "edit", "multi_edit", "bash", "network_tool"];
+                for index in 0..count {
+                    value = value
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let name = names[usize::try_from(value % 5).expect("bounded choice")];
+                    let arguments = match name {
+                        "bash" => json!({
+                            "command": format!("printf mutated > generated-{index}"),
+                            "cwd": if value & 1 == 0 { "." } else { "nested" },
+                            "env": {"PATH": format!("/seed/{value}")},
+                            "network_domains": if value & 2 != 0 {
+                                vec![format!("seed-{value}.invalid")]
+                            } else {
+                                Vec::new()
+                            },
+                        }),
+                        "network_tool" => json!({
+                            "url": format!("https://seed-{value}.invalid"),
+                            "body": format!("write generated-{index}"),
+                        }),
+                        _ => json!({
+                            "path": format!("nested/generated-{index}.txt"),
+                            "content": format!("seed={seed}; value={value}"),
+                            "edits": [{"old": "original", "new": "mutated"}],
+                        }),
+                    };
+                    calls.push((format!("call-{index}"), name.to_owned(), arguments));
+                }
+                let mut script = vec![Ok(ProviderEvent::MessageStart {
+                    model: "fixture-model".to_owned(),
+                })];
+                for (id, name, arguments) in &calls {
+                    script.push(Ok(ProviderEvent::ToolCallStart {
+                        id: id.clone(),
+                        name: name.clone(),
+                    }));
+                    script.push(Ok(ProviderEvent::ToolCallEnd {
+                        id: id.clone(),
+                        arguments: arguments.clone(),
+                    }));
+                }
+                script.push(Ok(ProviderEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                }));
+                let model = Arc::new(ScriptedModel::new([
+                    script,
+                    stop_script("plan sequence denied", &[]),
+                ]));
+                let mut tools = ToolRegistry::new();
+                for (name, capabilities) in [
+                    ("write", vec![ToolCapability::WriteFilesystem]),
+                    ("edit", vec![ToolCapability::WriteFilesystem]),
+                    ("multi_edit", vec![ToolCapability::WriteFilesystem]),
+                    (
+                        "bash",
+                        vec![
+                            ToolCapability::ReadFilesystem,
+                            ToolCapability::WriteFilesystem,
+                            ToolCapability::Execute,
+                            ToolCapability::Network,
+                        ],
+                    ),
+                    (
+                        "network_tool",
+                        vec![ToolCapability::Network, ToolCapability::Execute],
+                    ),
+                ] {
+                    tools
+                        .register(Arc::new(PlanMutationTripwire::new(name, capabilities)))
+                        .expect("tripwire tool");
+                }
+                let mut hooks = builtin_hook_dispatcher().expect("built-in hooks");
+                if hook_allow {
+                    hooks
+                        .register(
+                            HookRegistration::new(
+                                "test.allow-permission",
+                                HookEvent::PermissionCheck,
+                            )
+                            .with_priority(i32::MAX),
+                            PermissionAllowHook,
+                        )
+                        .expect("permission allow hook");
+                }
+                let mut actor_config = config(
+                    root.path(),
+                    model,
+                    Arc::new(tools),
+                    PermissionDecision::Allow,
+                    hooks,
+                );
+                actor_config.permissions = Arc::new(if hook_allow {
+                    PermissionGate::new(PermissionDecision::Ask)
+                } else {
+                    PermissionGate::for_headless_mode(crate::HeadlessPermissionMode::Yolo)
+                });
+                let handle = SessionActor::spawn(actor_config).expect("actor");
+                let mut events = handle.subscribe();
+                handle
+                    .dispatch(ClientCommand::AttachSession {
+                        meta: protocol_meta("property", "attach"),
+                        session_id: SessionId("fixture-session".to_owned()),
+                        last_seen_sequence: None,
+                        role: ClientRole::Driver,
+                    })
+                    .await
+                    .expect("attach");
+                handle
+                    .dispatch(ClientCommand::SwitchMode {
+                        meta: protocol_meta("property", "plan-mode"),
+                        session_id: SessionId("fixture-session".to_owned()),
+                        mode: wire_mode(SessionMode::Plan),
+                    })
+                    .await
+                    .expect("plan mode");
+                handle
+                    .dispatch(ClientCommand::SendMessage {
+                        meta: protocol_meta("property", "turn"),
+                        session_id: SessionId("fixture-session".to_owned()),
+                        content: "exercise arbitrary plan tools".to_owned(),
+                        attachments: Vec::new(),
+                    })
+                    .await
+                    .expect("property turn");
+                let turn = collect_turn(&mut events).await;
+                assert_eq!(
+                    turn.iter()
+                        .filter(|event| matches!(
+                            event.kind,
+                            PendingEvent::ToolCallFinished { is_error: true, .. }
+                        ))
+                        .count(),
+                    calls.len(),
+                    "seed={seed}, hook_allow={hook_allow}"
+                );
+                assert_eq!(
+                    workspace_tree_bytes(root.path()),
+                    before,
+                    "Plan mutated workspace for seed={seed}, hook_allow={hook_allow}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn plan_submission_requires_review_and_pins_approved_artifact() {
+        let root = TempDir::new().expect("workspace");
+        let artifact = PlanArtifact {
+            title: "Safe change".to_owned(),
+            summary_md: "Implement after approval.".to_owned(),
+            steps: vec![rw_types::PlanStep {
+                description: "Change one file".to_owned(),
+                files_touched: vec!["src/lib.rs".to_owned()],
+                verification: "cargo test".to_owned(),
+            }],
+            open_questions: Vec::new(),
+        };
+        let artifact_b = PlanArtifact {
+            title: "Second plan".to_owned(),
+            summary_md: "A new approval cycle.".to_owned(),
+            steps: vec![rw_types::PlanStep {
+                description: "Change another file".to_owned(),
+                files_touched: vec!["src/second.rs".to_owned()],
+                verification: "cargo test".to_owned(),
+            }],
+            open_questions: Vec::new(),
+        };
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "plan-1",
+                    "submit_plan",
+                    serde_json::to_value(&artifact).expect("artifact value"),
+                )],
+                &[],
+            ),
+            stop_script("awaiting approval", &[]),
+            tool_script(
+                &[(
+                    "plan-2",
+                    "submit_plan",
+                    serde_json::to_value(&artifact_b).expect("second artifact value"),
+                )],
+                &[],
+            ),
+            stop_script("awaiting second approval", &[]),
+        ]));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(SubmitPlanTool))
+            .expect("submit plan tool");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            HookDispatcher::new(),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .dispatch(ClientCommand::AttachSession {
+                meta: protocol_meta("driver", "attach"),
+                session_id: SessionId("fixture-session".to_owned()),
+                last_seen_sequence: None,
+                role: ClientRole::Driver,
+            })
+            .await
+            .expect("attach");
+        handle
+            .dispatch(ClientCommand::SwitchMode {
+                meta: protocol_meta("driver", "plan-mode"),
+                session_id: SessionId("fixture-session".to_owned()),
+                mode: wire_mode(SessionMode::Plan),
+            })
+            .await
+            .expect("plan mode");
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SendMessage {
+                    meta: protocol_meta("driver", "turn"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    content: "make a plan".to_owned(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("turn"),
+            CommandOutcome::Accepted
+        );
+        let turn = collect_turn(&mut events).await;
+        assert!(turn.iter().any(|event| matches!(
+            &event.kind,
+            PendingEvent::PlanSubmitted { artifact: submitted } if submitted == &artifact
+        )));
+        assert!(matches!(
+            handle
+                .dispatch(ClientCommand::SwitchMode {
+                    meta: protocol_meta("driver", "execute-too-early"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    mode: wire_mode(SessionMode::Execute),
+                })
+                .await
+                .expect("early execute"),
+            CommandOutcome::Rejected { error } if error.code == "plan_approval_required"
+        ));
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::ApprovePlan {
+                    meta: protocol_meta("driver", "approve-plan"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    decision: PlanDecision::Approve,
+                    revisions: None,
+                })
+                .await
+                .expect("review"),
+            CommandOutcome::Accepted
+        );
+        let snapshot = handle.snapshot().await.expect("snapshot");
+        assert_eq!(snapshot.mode, SessionMode::Execute);
+        assert_eq!(snapshot.approved_plan, Some(artifact.clone()));
+        assert!(snapshot.pending_plan.is_none());
+        assert!(snapshot.conversation.last().is_some_and(|turn| matches!(
+            turn.blocks.as_slice(),
+            [Block::Text { text }] if text.contains("Approved plan artifact")
+        )));
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SwitchMode {
+                    meta: protocol_meta("driver", "second-plan-mode"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    mode: wire_mode(SessionMode::Plan),
+                })
+                .await
+                .expect("second plan mode"),
+            CommandOutcome::Accepted
+        );
+        assert!(
+            handle
+                .snapshot()
+                .await
+                .expect("second cycle")
+                .plan_gate_active
+        );
+        for (request, intermediate) in [
+            ("second-direct-execute", None),
+            ("second-discuss-bypass", Some(SessionMode::Discuss)),
+        ] {
+            if let Some(intermediate) = intermediate {
+                assert_eq!(
+                    handle
+                        .dispatch(ClientCommand::SwitchMode {
+                            meta: protocol_meta("driver", "second-discuss"),
+                            session_id: SessionId("fixture-session".to_owned()),
+                            mode: wire_mode(intermediate),
+                        })
+                        .await
+                        .expect("discuss"),
+                    CommandOutcome::Accepted
+                );
+            }
+            assert!(matches!(
+                handle
+                    .dispatch(ClientCommand::SwitchMode {
+                        meta: protocol_meta("driver", request),
+                        session_id: SessionId("fixture-session".to_owned()),
+                        mode: wire_mode(SessionMode::Execute),
+                    })
+                    .await
+                    .expect("blocked execute"),
+                CommandOutcome::Rejected { error } if error.code == "plan_approval_required"
+            ));
+        }
+        handle
+            .dispatch(ClientCommand::SwitchMode {
+                meta: protocol_meta("driver", "return-to-plan"),
+                session_id: SessionId("fixture-session".to_owned()),
+                mode: wire_mode(SessionMode::Plan),
+            })
+            .await
+            .expect("return plan");
+        handle
+            .dispatch(ClientCommand::SendMessage {
+                meta: protocol_meta("driver", "second-plan-turn"),
+                session_id: SessionId("fixture-session".to_owned()),
+                content: "make another plan".to_owned(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("second plan turn");
+        collect_turn(&mut events).await;
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::ApprovePlan {
+                    meta: protocol_meta("driver", "approve-second-plan"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    decision: PlanDecision::Approve,
+                    revisions: None,
+                })
+                .await
+                .expect("approve second plan"),
+            CommandOutcome::Accepted
+        );
+        let second = handle.snapshot().await.expect("second approved snapshot");
+        assert_eq!(second.mode, SessionMode::Execute);
+        assert!(!second.plan_gate_active);
+        assert_eq!(second.approved_plan, Some(artifact_b));
+    }
+
+    #[test]
+    fn mode_and_approved_plan_project_durably_with_conversation_pin() {
+        let artifact = PlanArtifact {
+            title: "Durable plan".to_owned(),
+            summary_md: "Survives restart and compaction.".to_owned(),
+            steps: vec![rw_types::PlanStep {
+                description: "Implement".to_owned(),
+                files_touched: Vec::new(),
+                verification: "test".to_owned(),
+            }],
+            open_questions: Vec::new(),
+        };
+        let context = plan_review_context_turn(&artifact, PlanDecision::Approve, None)
+            .expect("approved context");
+        let item_id = ContextItemId("conversation:0".to_owned());
+        let kinds = vec![
+            PendingEvent::ModeChanged {
+                mode: SessionMode::Plan,
+            },
+            PendingEvent::PlanSubmitted {
+                artifact: artifact.clone(),
+            },
+            PendingEvent::PlanReviewed {
+                artifact: artifact.clone(),
+                decision: PlanDecision::Approve,
+                revisions: None,
+            },
+            PendingEvent::ConversationTurnCommitted {
+                agent_turn: 0,
+                turn: context.clone(),
+            },
+            PendingEvent::ContextItemPinned {
+                item_id: item_id.clone(),
+                effective_after_agent_turn: 0,
+            },
+            PendingEvent::ModeChanged {
+                mode: SessionMode::Execute,
+            },
+        ];
+        let events = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, kind)| wire_event(u64::try_from(sequence).expect("sequence"), kind))
+            .collect::<Vec<_>>();
+        let recovered = project_session_events(&events).expect("project mode and plan");
+        assert_eq!(recovered.mode, SessionMode::Execute);
+        assert!(!recovered.plan_gate_active);
+        assert_eq!(recovered.pending_plan, None);
+        assert_eq!(recovered.approved_plan, Some(artifact));
+        assert_eq!(recovered.conversation, vec![context]);
+        assert_eq!(
+            recovered.context_surgery,
+            vec![ContextSurgeryAction {
+                item_id,
+                pinned: true,
+                effective_after_agent_turn: 0,
+            }]
+        );
+        let mut next_cycle = events;
+        next_cycle.push(wire_event(
+            6,
+            PendingEvent::ModeChanged {
+                mode: SessionMode::Plan,
+            },
+        ));
+        next_cycle.push(wire_event(
+            7,
+            PendingEvent::ModeChanged {
+                mode: SessionMode::Discuss,
+            },
+        ));
+        let resumed = project_session_events(&next_cycle).expect("resume second plan cycle");
+        assert_eq!(resumed.mode, SessionMode::Discuss);
+        assert!(resumed.plan_gate_active);
+        assert!(resumed.approved_plan.is_none());
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn shell_gate_and_model_alias_are_durable_and_fail_closed() {
         let root = TempDir::new().expect("workspace");
@@ -15403,14 +17321,20 @@ mod tests {
             name: "notes.txt".to_owned(),
             media_type: "text/plain".to_owned(),
             data: AttachmentData::Text {
-                content: "bounded context".to_owned(),
+                content: "bounded KNOWN_CANARY context".to_owned(),
             },
         };
-        let prepared = prepare_user_message("inspect", &[text], "fast", &AliasVisionModel)
-            .expect("text attachment");
+        let prepared =
+            prepare_user_message("inspect KNOWN_CANARY", &[text], "fast", &AliasVisionModel)
+                .expect("text attachment")
+                .redact(&CanarySecretRedactor);
         assert_eq!(prepared.stored_attachments.len(), 1);
         assert_eq!(prepared.stored_attachments[0].content_hash.len(), 64);
-        assert!(matches!(prepared.attachment_blocks[0], Block::Text { .. }));
+        assert!(matches!(
+            &prepared.attachment_blocks[0],
+            Block::Text { text } if text.contains("[REDACTED]") && !text.contains("KNOWN_CANARY")
+        ));
+        assert_eq!(prepared.content, "inspect [REDACTED]");
 
         let image = Attachment {
             name: "screen.png".to_owned(),
@@ -15430,8 +17354,15 @@ mod tests {
             .contains("does not support image")
         );
         let prepared = prepare_user_message("inspect", &[image], "slow", &AliasVisionModel)
-            .expect("vision attachment");
-        assert!(matches!(prepared.attachment_blocks[0], Block::Image { .. }));
+            .expect("vision attachment")
+            .redact(&CanarySecretRedactor);
+        assert!(matches!(
+            &prepared.attachment_blocks[0],
+            Block::Image {
+                data: ImageRef::InlineBase64 { data },
+                ..
+            } if data == "iVBORw0KGgo="
+        ));
 
         let unsafe_name = Attachment {
             name: "../secret.txt".to_owned(),

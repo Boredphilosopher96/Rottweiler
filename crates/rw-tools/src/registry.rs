@@ -151,9 +151,9 @@ impl ToolOutputSink for NoopOutputSink {
 /// Per-invocation context supplied by core after permission approval.
 #[derive(Clone)]
 pub struct ToolContext {
-    workspace_root: Arc<PathBuf>,
+    workspace_roots: Arc<Vec<PathBuf>>,
     #[cfg(unix)]
-    workspace_fd: Arc<OwnedFd>,
+    workspace_fds: Arc<Vec<OwnedFd>>,
     session_id: Option<SessionId>,
     result_limit_bytes: usize,
     pub cancellation: CancellationToken,
@@ -168,30 +168,68 @@ impl ToolContext {
     ///
     /// Returns [`ToolError::Io`] when the workspace root cannot be canonicalized.
     pub fn new(workspace_root: impl AsRef<Path>) -> Result<Self, ToolError> {
-        let supplied = workspace_root.as_ref();
-        let canonical = std::fs::canonicalize(supplied).map_err(|source| ToolError::Io {
-            operation: "canonicalize workspace",
-            path: supplied.to_path_buf(),
-            source,
-        })?;
+        Self::from_workspace_roots([workspace_root.as_ref()])
+    }
+
+    /// Create an invocation context with one primary and zero or more added
+    /// workspace roots. Relative paths resolve against the primary root;
+    /// additional roots use the stable `@root/<index>/...` virtual prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::Io`] when any root cannot be canonicalized and
+    /// pinned as a directory.
+    pub fn from_workspace_roots<Roots, Root>(workspace_roots: Roots) -> Result<Self, ToolError>
+    where
+        Roots: IntoIterator<Item = Root>,
+        Root: AsRef<Path>,
+    {
+        let mut canonical_roots = Vec::new();
+        for root in workspace_roots {
+            let supplied = root.as_ref();
+            let canonical = std::fs::canonicalize(supplied).map_err(|source| ToolError::Io {
+                operation: "canonicalize workspace",
+                path: supplied.to_path_buf(),
+                source,
+            })?;
+            if !canonical.is_dir() {
+                return Err(ToolError::InvalidInput(format!(
+                    "workspace root is not a directory: {}",
+                    supplied.display()
+                )));
+            }
+            if !canonical_roots.contains(&canonical) {
+                canonical_roots.push(canonical);
+            }
+        }
+        if canonical_roots.is_empty() {
+            return Err(ToolError::InvalidInput(
+                "at least one workspace root is required".to_owned(),
+            ));
+        }
         #[cfg(unix)]
-        let workspace_fd = rustix::fs::open(
-            &canonical,
-            rustix::fs::OFlags::RDONLY
-                | rustix::fs::OFlags::DIRECTORY
-                | rustix::fs::OFlags::CLOEXEC
-                | rustix::fs::OFlags::NOFOLLOW,
-            rustix::fs::Mode::empty(),
-        )
-        .map_err(|source| ToolError::Io {
-            operation: "open workspace directory",
-            path: canonical.clone(),
-            source: source.into(),
-        })?;
+        let workspace_fds = canonical_roots
+            .iter()
+            .map(|canonical| {
+                rustix::fs::open(
+                    canonical,
+                    rustix::fs::OFlags::RDONLY
+                        | rustix::fs::OFlags::DIRECTORY
+                        | rustix::fs::OFlags::CLOEXEC
+                        | rustix::fs::OFlags::NOFOLLOW,
+                    rustix::fs::Mode::empty(),
+                )
+                .map_err(|source| ToolError::Io {
+                    operation: "open workspace directory",
+                    path: canonical.clone(),
+                    source: source.into(),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
-            workspace_root: Arc::new(canonical),
+            workspace_roots: Arc::new(canonical_roots),
             #[cfg(unix)]
-            workspace_fd: Arc::new(workspace_fd),
+            workspace_fds: Arc::new(workspace_fds),
             session_id: None,
             result_limit_bytes: ToolLimits::default().max_result_bytes,
             cancellation: CancellationToken::default(),
@@ -202,7 +240,13 @@ impl ToolContext {
 
     #[must_use]
     pub fn workspace_root(&self) -> &Path {
-        &self.workspace_root
+        &self.workspace_roots[0]
+    }
+
+    /// Canonical write/read roots in primary-first order.
+    #[must_use]
+    pub fn workspace_roots(&self) -> &[PathBuf] {
+        &self.workspace_roots
     }
 
     #[must_use]
@@ -252,17 +296,13 @@ impl ToolContext {
     }
 
     pub(crate) fn resolve_existing(&self, path: &Path) -> Result<PathBuf, ToolError> {
-        let candidate = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.workspace_root.join(path)
-        };
+        let candidate = self.candidate_path(path)?;
         let canonical = std::fs::canonicalize(&candidate).map_err(|source| ToolError::Io {
             operation: "resolve path",
             path: path.to_path_buf(),
             source,
         })?;
-        if !canonical.starts_with(self.workspace_root()) {
+        if self.root_index_for(&canonical).is_none() {
             return Err(ToolError::PathEscape(path.to_path_buf()));
         }
         Ok(canonical)
@@ -274,15 +314,11 @@ impl ToolContext {
         }
         if path
             .components()
-            .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+            .any(|component| matches!(component, Component::Prefix(_)))
         {
             return Err(ToolError::PathEscape(path.to_path_buf()));
         }
-        let candidate = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.workspace_root.join(path)
-        };
+        let candidate = self.candidate_path(path)?;
         if candidate.exists() {
             return self.resolve_existing(&candidate);
         }
@@ -294,7 +330,7 @@ impl ToolContext {
             path: parent.to_path_buf(),
             source,
         })?;
-        if !canonical_parent.starts_with(self.workspace_root()) {
+        if self.root_index_for(&canonical_parent).is_none() {
             return Err(ToolError::PathEscape(path.to_path_buf()));
         }
         let file_name = candidate
@@ -304,28 +340,94 @@ impl ToolContext {
     }
 
     pub(crate) fn relative_display(&self, path: &Path) -> PathBuf {
-        path.strip_prefix(self.workspace_root())
-            .unwrap_or(path)
-            .to_path_buf()
+        let Some(index) = self.root_index_for(path) else {
+            return path.to_path_buf();
+        };
+        let relative = path
+            .strip_prefix(&self.workspace_roots[index])
+            .unwrap_or(path);
+        if index == 0 {
+            relative.to_path_buf()
+        } else {
+            PathBuf::from("@root")
+                .join(index.to_string())
+                .join(relative)
+        }
+    }
+
+    pub(crate) fn resolve_search_roots(&self, path: &Path) -> Result<Vec<PathBuf>, ToolError> {
+        if path == Path::new(".") && self.workspace_roots.len() > 1 {
+            Ok(self.workspace_roots.as_ref().clone())
+        } else {
+            self.resolve_existing(path).map(|path| vec![path])
+        }
+    }
+
+    fn candidate_path(&self, path: &Path) -> Result<PathBuf, ToolError> {
+        if path.is_absolute() {
+            return Ok(path.to_path_buf());
+        }
+        let mut components = path.components();
+        if components.next().is_some_and(
+            |component| matches!(component, Component::Normal(name) if name == "@root"),
+        ) {
+            let Some(Component::Normal(index)) = components.next() else {
+                return Err(ToolError::InvalidInput(
+                    "virtual root path must use @root/<index>/...".to_owned(),
+                ));
+            };
+            let index = index
+                .to_str()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|index| *index > 0)
+                .ok_or_else(|| {
+                    ToolError::InvalidInput(
+                        "virtual root index must be a positive integer".to_owned(),
+                    )
+                })?;
+            let root = self
+                .workspace_roots
+                .get(index)
+                .ok_or_else(|| ToolError::PathEscape(path.to_path_buf()))?;
+            return Ok(components.fold(root.clone(), |joined, component| {
+                joined.join(component.as_os_str())
+            }));
+        }
+        Ok(self.workspace_root().join(path))
+    }
+
+    fn root_index_for(&self, path: &Path) -> Option<usize> {
+        self.workspace_roots
+            .iter()
+            .enumerate()
+            .filter(|(_, root)| path.starts_with(root))
+            .max_by_key(|(_, root)| root.components().count())
+            .map(|(index, _)| index)
     }
 
     /// Traverse a canonical workspace-relative parent using pinned, no-follow directory handles.
     /// This closes the symlink-swap window for direct read/write/edit operations on Unix.
     #[cfg(unix)]
     pub(crate) fn secure_parent(&self, path: &Path) -> Result<(OwnedFd, OsString), ToolError> {
+        let root_index = self
+            .root_index_for(path)
+            .ok_or_else(|| ToolError::PathEscape(path.to_path_buf()))?;
+        let root = &self.workspace_roots[root_index];
         let relative = path
-            .strip_prefix(self.workspace_root())
+            .strip_prefix(root)
             .map_err(|_| ToolError::PathEscape(path.to_path_buf()))?;
         let file_name = relative
             .file_name()
             .ok_or_else(|| ToolError::InvalidInput("path must name a file".to_owned()))?
             .to_os_string();
         let mut directory = self
-            .workspace_fd
+            .workspace_fds
+            .get(root_index)
+            .ok_or_else(|| ToolError::PathEscape(path.to_path_buf()))?
             .try_clone()
             .map_err(|source| ToolError::Io {
                 operation: "clone workspace directory handle",
-                path: self.workspace_root().to_path_buf(),
+                path: root.clone(),
                 source,
             })?;
         if let Some(parent) = relative.parent() {

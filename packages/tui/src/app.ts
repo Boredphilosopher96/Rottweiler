@@ -31,6 +31,8 @@ import {
   type ClientCommand,
   type CommandOutcome,
   type EngineEvent,
+  type PlanDecision,
+  type ModeId,
 } from "./protocol"
 import {
   createInitialState,
@@ -153,6 +155,7 @@ export class RottweilerApp extends BoxRenderable {
       {
         onApproval: (tool, decision) => this.#approve(tool, decision),
         onAnswer: (question, values) => this.#answer(question, values),
+        onPlanReview: (decision) => this.#reviewPlan(decision),
       },
       options.treeSitterClient,
     )
@@ -172,6 +175,16 @@ export class RottweilerApp extends BoxRenderable {
       if (key.name === "escape" && this.picker.visible) {
         key.preventDefault()
         this.closePicker()
+      } else if (key.shift && key.name === "tab") {
+        key.preventDefault()
+        const current = this.#state.mode ?? "execute"
+        const mode: ModeId = current === "execute" ? "discuss" : current === "discuss" ? "plan" : "execute"
+        this.#emit({
+          type: "switch_mode",
+          meta: this.#meta(),
+          session_id: this.#sessionId,
+          mode,
+        })
       } else if (key.ctrl && key.name === "p") {
         key.preventDefault()
         this.openCommandPicker()
@@ -392,7 +405,7 @@ export class RottweilerApp extends BoxRenderable {
               type: "switch_mode",
               meta: this.#meta(),
               session_id: this.#sessionId,
-              mode: item.value as string,
+              mode: item.value as ModeId,
             })
             this.closePicker()
           },
@@ -491,6 +504,16 @@ export class RottweilerApp extends BoxRenderable {
       session_id: this.#sessionId,
       question_id: question.questionId,
       answers: [{ question_id: question.questionId, values: [...values] }],
+    })
+  }
+
+  #reviewPlan(decision: PlanDecision): void {
+    this.#emit({
+      type: "approve_plan",
+      meta: this.#meta(),
+      session_id: this.#sessionId,
+      decision,
+      revisions: decision === "reject" ? "Revise the plan using the user's next message as feedback." : null,
     })
   }
 

@@ -75,6 +75,10 @@ string_id!(
     ModelAlias,
     "Provider-blind model alias resolved by the engine router."
 );
+string_id!(
+    ModeId,
+    "Open identifier of a built-in or extension-provided mode."
+);
 
 /// Monotonic per-session sequence encoded as a decimal string on the wire.
 #[derive(
@@ -262,7 +266,47 @@ pub struct UnifiedDiff {
 pub enum ApprovalDecision {
     AllowOnce,
     AllowSession,
+    AllowProject,
     Deny,
+}
+
+/// Built-in interaction policy overlay active for one session.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SessionMode {
+    Discuss,
+    Plan,
+    #[default]
+    Execute,
+}
+
+/// One verifiable step in a model-submitted plan artifact.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct PlanStep {
+    pub description: String,
+    #[serde(default)]
+    pub files_touched: Vec<String>,
+    pub verification: String,
+}
+
+/// Durable plan submitted before entering execute mode.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct PlanArtifact {
+    pub title: String,
+    pub summary_md: String,
+    pub steps: Vec<PlanStep>,
+    #[serde(default)]
+    pub open_questions: Vec<String>,
+}
+
+/// Driver response to a submitted plan.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum PlanDecision {
+    Approve,
+    Reject,
 }
 
 /// Rewind destination selected by a client.
@@ -543,6 +587,12 @@ pub enum ClientCommand {
         /// actor rejects missing or stale bindings without consuming the ask.
         binding: Option<ApprovalBinding>,
     },
+    ApprovePlan {
+        meta: CommandMeta,
+        session_id: SessionId,
+        decision: PlanDecision,
+        revisions: Option<String>,
+    },
     AnswerQuestion {
         meta: CommandMeta,
         session_id: SessionId,
@@ -552,7 +602,7 @@ pub enum ClientCommand {
     SwitchMode {
         meta: CommandMeta,
         session_id: SessionId,
-        mode: String,
+        mode: ModeId,
     },
     SwitchModel {
         meta: CommandMeta,
@@ -656,6 +706,7 @@ impl ClientCommand {
             | Self::SendMessage { meta, .. }
             | Self::Interrupt { meta, .. }
             | Self::ApproveTool { meta, .. }
+            | Self::ApprovePlan { meta, .. }
             | Self::AnswerQuestion { meta, .. }
             | Self::SwitchMode { meta, .. }
             | Self::SwitchModel { meta, .. }
@@ -691,6 +742,7 @@ impl ClientCommand {
             | Self::SendMessage { meta, .. }
             | Self::Interrupt { meta, .. }
             | Self::ApproveTool { meta, .. }
+            | Self::ApprovePlan { meta, .. }
             | Self::AnswerQuestion { meta, .. }
             | Self::SwitchMode { meta, .. }
             | Self::SwitchModel { meta, .. }
@@ -1152,7 +1204,17 @@ pub enum EngineEvent {
     },
     ModeChanged {
         meta: EventMeta,
-        mode: String,
+        mode: ModeId,
+    },
+    PlanSubmitted {
+        meta: EventMeta,
+        artifact: PlanArtifact,
+    },
+    PlanReviewed {
+        meta: EventMeta,
+        artifact: PlanArtifact,
+        decision: PlanDecision,
+        revisions: Option<String>,
     },
     ModelChanged {
         meta: EventMeta,
@@ -1251,6 +1313,8 @@ impl EngineEvent {
             | Self::SubagentFinished { meta, .. }
             | Self::ToolOutputPruned { meta, .. }
             | Self::ModeChanged { meta, .. }
+            | Self::PlanSubmitted { meta, .. }
+            | Self::PlanReviewed { meta, .. }
             | Self::ModelChanged { meta, .. }
             | Self::ContextItemPinned { meta, .. }
             | Self::ContextItemEvicted { meta, .. }
@@ -1305,6 +1369,8 @@ impl EngineEvent {
             | Self::SubagentFinished { meta, .. }
             | Self::ToolOutputPruned { meta, .. }
             | Self::ModeChanged { meta, .. }
+            | Self::PlanSubmitted { meta, .. }
+            | Self::PlanReviewed { meta, .. }
             | Self::ModelChanged { meta, .. }
             | Self::ContextItemPinned { meta, .. }
             | Self::ContextItemEvicted { meta, .. }

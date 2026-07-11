@@ -200,6 +200,36 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "decision": {
+          "$ref": "#/$defs/PlanDecision"
+        },
+        "revisions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "approve_plan"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "decision"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "question_id": {
           "$ref": "#/$defs/QuestionId"
         },
@@ -232,7 +262,7 @@
           "$ref": "#/$defs/SessionId"
         },
         "mode": {
-          "type": "string"
+          "$ref": "#/$defs/ModeId"
         },
         "type": {
           "type": "string",
@@ -811,6 +841,7 @@
       "enum": [
         "allow_once",
         "allow_session",
+        "allow_project",
         "deny"
       ]
     },
@@ -838,6 +869,14 @@
         "diff_hash"
       ]
     },
+    "PlanDecision": {
+      "description": "Driver response to a submitted plan.",
+      "type": "string",
+      "enum": [
+        "approve",
+        "reject"
+      ]
+    },
     "QuestionId": {
       "description": "Stable identifier of an interactive question.",
       "type": "string"
@@ -860,6 +899,10 @@
         "question_id",
         "values"
       ]
+    },
+    "ModeId": {
+      "description": "Open identifier of a built-in or extension-provided mode.",
+      "type": "string"
     },
     "TurnId": {
       "description": "Stable identifier of a conversation turn.",

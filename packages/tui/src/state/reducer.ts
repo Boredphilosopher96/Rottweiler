@@ -48,6 +48,8 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "subagent_finished",
   "tool_output_pruned",
   "mode_changed",
+  "plan_submitted",
+  "plan_reviewed",
   "model_changed",
   "context_item_pinned",
   "context_item_evicted",
@@ -562,7 +564,17 @@ function applyKnownEvent(
         },
       }
     case "mode_changed":
-      return { ...state, mode: event.mode }
+      return event.mode === "plan"
+        ? { ...state, mode: event.mode, pendingPlan: null, approvedPlan: null }
+        : { ...state, mode: event.mode }
+    case "plan_submitted":
+      return { ...state, pendingPlan: event.artifact }
+    case "plan_reviewed":
+      return {
+        ...state,
+        pendingPlan: null,
+        approvedPlan: event.decision === "approve" ? event.artifact : state.approvedPlan,
+      }
     case "model_changed":
       return { ...state, model: event.model }
     case "user_shell_state_changed":

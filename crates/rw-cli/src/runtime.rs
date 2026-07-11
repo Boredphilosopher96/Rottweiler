@@ -29,12 +29,16 @@ use rw_core::runtime_support::{
 };
 use rw_core::{
     AccountingAttribution, AgentLoopError, BudgetLedgerQuery, BudgetLedgerTotals, Config,
-    EngineEvent, EventClock, EventMeta, MessageDisposition, ModelDriver, MutationCheckpoint,
-    MutationCheckpointCoordinator, MutationCheckpointOutcome, PermissionGate, ProviderFactory,
-    QuestionId, RewindCheckpoint, SESSION_EVENT_VERSION, SequenceId, SessionActor,
-    SessionActorConfig, SessionEventSink, SystemEventClock, ToolOutputStream, TurnStatus,
-    UnrestorablePath, Usage, builtin_command_registry, builtin_hook_dispatcher,
-    initial_session_context, project_session_events,
+    EngineEvent, EventClock, EventMeta, FolderTrustController, FolderTrustOperation,
+    MessageDisposition, ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator,
+    MutationCheckpointOutcome, PermissionGate, ProviderFactory, QuestionId, RewindCheckpoint,
+    SESSION_EVENT_VERSION, SequenceId, SessionActor, SessionActorConfig, SessionEventSink,
+    SystemEventClock, ToolOutputStream, TurnStatus, UnrestorablePath, Usage,
+    builtin_command_registry, builtin_hook_dispatcher, initial_session_context,
+    project_session_events,
+};
+use rw_sandbox::{
+    EgressDecision, EgressPolicy, NetworkPolicy as SandboxNetworkPolicy, SandboxPolicy,
 };
 use rw_store::{
     checkpoint::{CheckpointStore, OpaqueMutation, RewindHandle},
@@ -43,6 +47,7 @@ use rw_store::{
         AccountingLedger, SessionEventLog, SessionIndex, SessionProjection, SessionSummary,
         TurnAccountingEntry, UtcTimestamp,
     },
+    trust::FolderTrustStore,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -56,6 +61,14 @@ const DEFAULT_DOOM_LOOP_LIMIT: usize = 5;
 const MAX_REDIRECTS: usize = 5;
 const SESSION_METADATA_VERSION: u16 = 1;
 const PROMPT_SHAPE_VERSION: u16 = 2;
+const CHECKPOINT_ROOTS_VERSION: u16 = 1;
+
+#[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointRootMapping {
+    version: u16,
+    roots: Vec<PathBuf>,
+}
 
 pub(crate) struct RunOptions {
     pub prompt: Option<String>,
@@ -71,6 +84,8 @@ pub(crate) struct RunOptions {
     pub perf_markers: bool,
     pub replay_provider: String,
     pub model: Option<String>,
+    pub additional_workspaces: Vec<PathBuf>,
+    pub dangerously_trust: bool,
     pub action: RunAction,
 }
 
@@ -91,6 +106,7 @@ pub(crate) enum HostedProviderMode {
 
 pub(crate) struct HostedSessionComposition {
     pub workspace: PathBuf,
+    pub additional_workspaces: Vec<PathBuf>,
     pub storage_root: PathBuf,
     pub credentials_path: PathBuf,
     pub config: Config,
@@ -109,6 +125,28 @@ pub(crate) struct HostedActorRuntime {
     pub shell_active: bool,
 }
 
+fn canonical_workspace_roots(primary: &Path, additional: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut roots = vec![std::fs::canonicalize(primary).into_diagnostic()?];
+    for supplied in additional {
+        let canonical = std::fs::canonicalize(supplied).map_err(|error| {
+            miette!(
+                "additional workspace {} is unavailable: {error}",
+                supplied.display()
+            )
+        })?;
+        if !canonical.is_dir() {
+            return Err(miette!(
+                "additional workspace {} is not a directory",
+                supplied.display()
+            ));
+        }
+        if !roots.contains(&canonical) {
+            roots.push(canonical);
+        }
+    }
+    Ok(roots)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn run(options: RunOptions) -> Result<()> {
     if options.max_turns == 0 {
@@ -116,6 +154,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     }
     let workspace =
         std::fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
+    let workspace_roots = canonical_workspace_roots(&workspace, &options.additional_workspaces)?;
     if options.permission_mode == Some(PermissionMode::Yolo)
         && workspace == Path::new("/")
         && rustix::process::geteuid().is_root()
@@ -126,6 +165,11 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     }
 
     let config_loader = ConfigLoader::from_environment().into_diagnostic()?;
+    let config_loader = if options.dangerously_trust {
+        config_loader.dangerously_trust_project()
+    } else {
+        config_loader
+    };
     let storage_root = config_loader
         .credentials_path()
         .parent()
@@ -193,20 +237,22 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     };
 
     let checkpoint_root = checkpoint_root(&storage_root, &workspace, &session_id);
-    let checkpoint_store = Arc::new(
-        CheckpointStore::open(&checkpoint_root, &workspace)
-            .map_err(|error| miette!("checkpoint store could not open: {error}"))?,
-    );
-    let recovery_store = Arc::clone(&checkpoint_store);
-    tokio::task::spawn_blocking(move || recovery_store.recover_opaque_mutations())
-        .await
-        .map_err(|error| miette!("checkpoint recovery worker failed: {error}"))?
-        .map_err(|error| miette!("checkpoint recovery failed: {error}"))?;
+    let checkpoint_stores = open_checkpoint_stores(&checkpoint_root, &workspace_roots)?;
+    let recovery_stores = Arc::clone(&checkpoint_stores);
+    tokio::task::spawn_blocking(move || {
+        for store in recovery_stores.iter() {
+            store.recover_opaque_mutations()?;
+        }
+        Ok::<_, rw_store::checkpoint::CheckpointError>(())
+    })
+    .await
+    .map_err(|error| miette!("checkpoint recovery worker failed: {error}"))?
+    .map_err(|error| miette!("checkpoint recovery failed: {error}"))?;
 
-    let rewind_store = Arc::clone(&checkpoint_store);
+    let rewind_stores = Arc::clone(&checkpoint_stores);
     let log = tokio::task::spawn_blocking(move || {
         let mut log = log;
-        recover_rewind_transactions(&rewind_store, &mut log)?;
+        recover_rewind_transactions(&rewind_stores, &mut log)?;
         Ok::<_, miette::Report>(log)
     })
     .await
@@ -220,7 +266,8 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         session_id.clone(),
     )?);
     durable_sink.reconcile_accounting(&recovered_events)?;
-    let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::new(checkpoint_store));
+    let checkpoint_coordinator =
+        Arc::new(DurableCheckpointCoordinator::from_stores(checkpoint_stores));
 
     let prompt_dump_turn = match options.action {
         RunAction::Agent => None,
@@ -248,6 +295,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     let offline_fixture =
         inspection || options.replay_dir.is_some() || options.in_memory_replay_script.is_some();
     let fixture_redactor = FixtureRedactor::default();
+    register_credential_environment(&fixture_redactor);
     let command_fixture_mode = if options.record_replay_script.is_some() {
         CommandFixtureMode::Record {
             directory: options
@@ -263,7 +311,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     } else {
         CommandFixtureMode::Live
     };
-    let tool_workspace = workspace.clone();
+    let tool_workspace_roots = workspace_roots.clone();
     let tool_execution_lease = Arc::clone(&execution_lease);
     let global_proxy = loaded_config
         .config
@@ -275,10 +323,10 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
     let built_tools = tokio::task::spawn_blocking(move || {
         build_tools(
-            &tool_workspace,
+            &tool_workspace_roots,
             question_asker,
             offline_fixture,
-            global_proxy,
+            global_proxy.as_ref(),
             command_fixture_mode,
             tool_execution_lease,
         )
@@ -452,6 +500,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         let redactor = runtime.fixture_redactor();
         (Arc::new(runtime), redactor)
     };
+    register_credential_environment(&engine_redactor);
     let model: Arc<dyn ModelDriver> = if inspection {
         model
     } else {
@@ -460,15 +509,22 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
             journal: Arc::clone(&durable_sink.prompt_shapes),
         })
     };
+    let project_approvals = project_approval_path(&storage_root, &workspace);
     let permissions = match options.permission_mode {
-        Some(mode) => Arc::new(PermissionGate::for_headless_mode(mode.into())),
-        None => Arc::new(PermissionGate::new(
-            loaded_config.config.permissions.default,
-        )),
-    };
+        Some(mode) => PermissionGate::for_headless_mode(mode.into()),
+        None => PermissionGate::from_config(loaded_config.config.permissions.clone()),
+    }
+    .with_workspace_roots(&workspace_roots)
+    .with_project_approval_file(project_approvals);
+    let permissions = Arc::new(permissions);
+    let folder_trust = Arc::new(RuntimeFolderTrustController::new(
+        storage_root.join("trust.json"),
+        workspace.clone(),
+    ));
     let actor = SessionActor::spawn(SessionActorConfig {
         session_id: SessionId(session_id.clone()),
         workspace_root: workspace,
+        additional_workspace_roots: workspace_roots.into_iter().skip(1).collect(),
         initial_session_context: initial_context,
         model_alias,
         model,
@@ -480,6 +536,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         event_clock: Arc::new(SystemEventClock),
         secret_redactor: Arc::new(SharedEngineSecretRedactor(engine_redactor)),
         checkpoints: checkpoint_coordinator,
+        folder_trust,
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -551,6 +608,7 @@ pub(crate) async fn compose_hosted_actor(
     if workspace != options.workspace {
         return Err(miette!("hosted workspace must already be canonical"));
     }
+    let workspace_roots = canonical_workspace_roots(&workspace, &options.additional_workspaces)?;
     if options.permission_mode == Some(PermissionMode::Yolo)
         && workspace == Path::new("/")
         && rustix::process::geteuid().is_root()
@@ -605,22 +663,24 @@ pub(crate) async fn compose_hosted_actor(
         (context, configured_model_alias)
     };
 
-    let checkpoint_store = Arc::new(
-        CheckpointStore::open(
-            &checkpoint_root(&options.storage_root, &workspace, &session_id),
-            &workspace,
-        )
-        .map_err(|error| miette!("checkpoint store could not open: {error}"))?,
-    );
-    let recovery_store = Arc::clone(&checkpoint_store);
-    tokio::task::spawn_blocking(move || recovery_store.recover_opaque_mutations())
-        .await
-        .map_err(|error| miette!("checkpoint recovery worker failed: {error}"))?
-        .map_err(|error| miette!("checkpoint recovery failed: {error}"))?;
-    let rewind_store = Arc::clone(&checkpoint_store);
+    let checkpoint_stores = open_checkpoint_stores(
+        &checkpoint_root(&options.storage_root, &workspace, &session_id),
+        &workspace_roots,
+    )?;
+    let recovery_stores = Arc::clone(&checkpoint_stores);
+    tokio::task::spawn_blocking(move || {
+        for store in recovery_stores.iter() {
+            store.recover_opaque_mutations()?;
+        }
+        Ok::<_, rw_store::checkpoint::CheckpointError>(())
+    })
+    .await
+    .map_err(|error| miette!("checkpoint recovery worker failed: {error}"))?
+    .map_err(|error| miette!("checkpoint recovery failed: {error}"))?;
+    let rewind_stores = Arc::clone(&checkpoint_stores);
     let log = tokio::task::spawn_blocking(move || {
         let mut log = log;
-        recover_rewind_transactions(&rewind_store, &mut log)?;
+        recover_rewind_transactions(&rewind_stores, &mut log)?;
         Ok::<_, miette::Report>(log)
     })
     .await
@@ -640,13 +700,15 @@ pub(crate) async fn compose_hosted_actor(
         session_id.clone(),
     )?);
     durable_sink.reconcile_accounting(&recovered_events)?;
-    let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::new(checkpoint_store));
+    let checkpoint_coordinator =
+        Arc::new(DurableCheckpointCoordinator::from_stores(checkpoint_stores));
 
     let offline = matches!(
         options.provider_mode,
         HostedProviderMode::DeterministicReplay { .. }
     );
     let fixture_redactor = FixtureRedactor::default();
+    register_credential_environment(&fixture_redactor);
     let command_fixture_mode = if offline {
         CommandFixtureMode::Offline
     } else {
@@ -660,14 +722,14 @@ pub(crate) async fn compose_hosted_actor(
         .map(Url::parse)
         .transpose()
         .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
-    let tool_workspace = workspace.clone();
+    let tool_workspace_roots = workspace_roots.clone();
     let tool_execution_lease = Arc::clone(&execution_lease);
     let built_tools = tokio::task::spawn_blocking(move || {
         build_tools(
-            &tool_workspace,
+            &tool_workspace_roots,
             Arc::new(HeadlessQuestionAsker),
             offline,
-            global_proxy,
+            global_proxy.as_ref(),
             command_fixture_mode,
             tool_execution_lease,
         )
@@ -726,17 +788,27 @@ pub(crate) async fn compose_hosted_actor(
             )
         }
     };
+    register_credential_environment(&engine_redactor);
     let model: Arc<dyn ModelDriver> = Arc::new(PromptRecordingModel {
         inner: model,
         journal: Arc::clone(&durable_sink.prompt_shapes),
     });
+    let project_approvals = project_approval_path(&options.storage_root, &workspace);
     let permissions = match options.permission_mode {
-        Some(mode) => Arc::new(PermissionGate::for_headless_mode(mode.into())),
-        None => Arc::new(PermissionGate::new(options.config.permissions.default)),
-    };
+        Some(mode) => PermissionGate::for_headless_mode(mode.into()),
+        None => PermissionGate::from_config(options.config.permissions.clone()),
+    }
+    .with_workspace_roots(&workspace_roots)
+    .with_project_approval_file(project_approvals);
+    let permissions = Arc::new(permissions);
+    let folder_trust = Arc::new(RuntimeFolderTrustController::new(
+        options.storage_root.join("trust.json"),
+        workspace.clone(),
+    ));
     let handle = SessionActor::spawn(SessionActorConfig {
         session_id: options.session_id,
         workspace_root: workspace,
+        additional_workspace_roots: workspace_roots.into_iter().skip(1).collect(),
         initial_session_context: initial_context,
         model_alias: persisted_model_alias,
         model,
@@ -748,6 +820,7 @@ pub(crate) async fn compose_hosted_actor(
         event_clock: Arc::new(SystemEventClock),
         secret_redactor: Arc::new(SharedEngineSecretRedactor(engine_redactor)),
         checkpoints: checkpoint_coordinator,
+        folder_trust,
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -1224,6 +1297,92 @@ fn checkpoint_root(storage_root: &Path, workspace: &Path, session_id: &str) -> P
         .join(session_id)
 }
 
+fn open_checkpoint_stores(
+    root: &Path,
+    workspace_roots: &[PathBuf],
+) -> Result<Arc<Vec<Arc<CheckpointStore>>>> {
+    if workspace_roots.is_empty() {
+        return Err(miette!("checkpoint root mapping cannot be empty"));
+    }
+    std::fs::create_dir_all(root).into_diagnostic()?;
+    let mapping_path = root.join("workspace-roots.json");
+    let expected = CheckpointRootMapping {
+        version: CHECKPOINT_ROOTS_VERSION,
+        roots: workspace_roots.to_vec(),
+    };
+    match std::fs::read(&mapping_path) {
+        Ok(bytes) => {
+            let existing: CheckpointRootMapping = serde_json::from_slice(&bytes)
+                .map_err(|error| miette!("checkpoint root mapping is corrupt: {error}"))?;
+            if existing != expected {
+                return Err(miette!(
+                    "checkpoint root mapping changed; refusing to resume with reordered or replaced workspace roots"
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            persist_private_json(&mapping_path, &expected)?;
+        }
+        Err(error) => return Err(miette!("checkpoint root mapping could not load: {error}")),
+    }
+    let stores = workspace_roots
+        .iter()
+        .enumerate()
+        .map(|(index, workspace)| {
+            CheckpointStore::open(&root.join(format!("root-{index:04}")), workspace)
+                .map(Arc::new)
+                .map_err(|error| {
+                    miette!("checkpoint store for root {index} could not open: {error}")
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Arc::new(stores))
+}
+
+fn persist_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).into_diagnostic()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| miette!("private JSON path has no parent"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(".roots-{}-{nonce}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&temporary).into_diagnostic()?;
+    let result = (|| -> Result<()> {
+        file.write_all(&bytes).into_diagnostic()?;
+        file.flush().into_diagnostic()?;
+        file.sync_all().into_diagnostic()?;
+        std::fs::rename(&temporary, path).into_diagnostic()?;
+        std::fs::File::open(parent)
+            .into_diagnostic()?
+            .sync_all()
+            .into_diagnostic()
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn project_approval_path(storage_root: &Path, workspace: &Path) -> PathBuf {
+    let digest = blake3::hash(workspace.as_os_str().as_encoded_bytes())
+        .to_hex()
+        .to_string();
+    storage_root
+        .join("workspaces")
+        .join(digest)
+        .join("permission-approvals.json")
+}
+
 fn persist_session_metadata(
     storage_root: &Path,
     session_id: &str,
@@ -1664,21 +1823,211 @@ fn load_session_events(log: &SessionEventLog) -> Result<Vec<EngineEvent>> {
         .collect()
 }
 
+struct RuntimeFolderTrustController {
+    store: FolderTrustStore,
+    workspace: PathBuf,
+}
+
+impl RuntimeFolderTrustController {
+    fn new(store_path: PathBuf, workspace: PathBuf) -> Self {
+        Self {
+            store: FolderTrustStore::new(store_path),
+            workspace,
+        }
+    }
+}
+
+#[async_trait]
+impl FolderTrustController for RuntimeFolderTrustController {
+    async fn execute(
+        &self,
+        operation: FolderTrustOperation,
+    ) -> std::result::Result<String, AgentLoopError> {
+        let store = self.store.clone();
+        let workspace = self.workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            let trust_error = |error: rw_store::trust::FolderTrustError| {
+                AgentLoopError::Persistence(format!("folder trust failed: {error}"))
+            };
+            let assessment = store.assess(&workspace).map_err(&trust_error)?;
+            match operation {
+                FolderTrustOperation::Status => Ok(assessment.render_prompt()),
+                FolderTrustOperation::Grant => {
+                    store.grant(&assessment).map_err(&trust_error)?;
+                    let current = store.assess(&workspace).map_err(&trust_error)?;
+                    Ok(format!(
+                        "{}folder trust granted; executable project configuration activates in the next session\n",
+                        current.render_prompt()
+                    ))
+                }
+                FolderTrustOperation::Revoke => {
+                    store.revoke(&workspace).map_err(&trust_error)?;
+                    let current = store.assess(&workspace).map_err(&trust_error)?;
+                    Ok(format!(
+                        "{}folder trust revoked; executable project configuration unloads in the next session\n",
+                        current.render_prompt()
+                    ))
+                }
+            }
+        })
+        .await
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+    }
+}
+
 enum ActiveCheckpoint {
     Known,
-    Opaque(OpaqueMutation),
+    Opaque(Vec<(usize, OpaqueMutation)>),
+}
+
+fn group_checkpoint_paths(
+    stores: &[Arc<CheckpointStore>],
+    paths: Vec<PathBuf>,
+) -> std::result::Result<BTreeMap<usize, Vec<PathBuf>>, AgentLoopError> {
+    let mut grouped = BTreeMap::<usize, Vec<PathBuf>>::new();
+    for path in paths {
+        let mut components = path.components();
+        let first = components.next();
+        let virtual_target = match first {
+            Some(std::path::Component::Normal(value)) if value == "@root" => {
+                let index = match components.next() {
+                    Some(std::path::Component::Normal(value)) => value
+                        .to_str()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .filter(|index| *index > 0 && *index < stores.len())
+                        .ok_or_else(|| {
+                            AgentLoopError::Persistence(format!(
+                                "checkpoint path has an invalid workspace-root index: {}",
+                                path.display()
+                            ))
+                        })?,
+                    _ => {
+                        return Err(AgentLoopError::Persistence(format!(
+                            "checkpoint path has no workspace-root index: {}",
+                            path.display()
+                        )));
+                    }
+                };
+                let relative = components.collect::<PathBuf>();
+                if relative.as_os_str().is_empty() {
+                    return Err(AgentLoopError::Persistence(format!(
+                        "checkpoint path names a workspace root rather than a file: {}",
+                        path.display()
+                    )));
+                }
+                Some((index, relative))
+            }
+            Some(
+                std::path::Component::Normal(_)
+                | std::path::Component::ParentDir
+                | std::path::Component::CurDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_),
+            ) => None,
+            _ => {
+                return Err(AgentLoopError::Persistence(format!(
+                    "checkpoint path is not a confined workspace-relative path: {}",
+                    path.display()
+                )));
+            }
+        };
+        let (root_index, relative) = if let Some(target) = virtual_target {
+            target
+        } else {
+            resolve_checkpoint_path(stores, &path)?
+        };
+        grouped.entry(root_index).or_default().push(relative);
+    }
+    Ok(grouped)
+}
+
+fn resolve_checkpoint_path(
+    stores: &[Arc<CheckpointStore>],
+    path: &Path,
+) -> std::result::Result<(usize, PathBuf), AgentLoopError> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        stores[0].workspace_root().join(path)
+    };
+    let canonical = match std::fs::canonicalize(&candidate) {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = candidate.parent().ok_or_else(|| {
+                AgentLoopError::Persistence(format!(
+                    "checkpoint path has no parent: {}",
+                    path.display()
+                ))
+            })?;
+            let filename = candidate.file_name().ok_or_else(|| {
+                AgentLoopError::Persistence(format!(
+                    "checkpoint path has no file name: {}",
+                    path.display()
+                ))
+            })?;
+            std::fs::canonicalize(parent)
+                .map(|parent| parent.join(filename))
+                .map_err(|error| {
+                    AgentLoopError::Persistence(format!(
+                        "checkpoint path parent is unavailable for {}: {error}",
+                        path.display()
+                    ))
+                })?
+        }
+        Err(error) => {
+            return Err(AgentLoopError::Persistence(format!(
+                "checkpoint path is unavailable for {}: {error}",
+                path.display()
+            )));
+        }
+    };
+    let (root_index, root) = stores
+        .iter()
+        .enumerate()
+        .filter(|(_, store)| canonical.starts_with(store.workspace_root()))
+        .max_by_key(|(_, store)| store.workspace_root().components().count())
+        .ok_or_else(|| {
+            AgentLoopError::Persistence(format!(
+                "checkpoint path escapes every workspace root: {}",
+                path.display()
+            ))
+        })?;
+    let relative = canonical
+        .strip_prefix(root.workspace_root())
+        .map_err(|_| AgentLoopError::Persistence("checkpoint root mismatch".to_owned()))?
+        .to_path_buf();
+    if relative.as_os_str().is_empty() {
+        return Err(AgentLoopError::Persistence(format!(
+            "checkpoint path names a workspace root rather than a file: {}",
+            path.display()
+        )));
+    }
+    Ok((root_index, relative))
+}
+
+fn checkpoint_display_path(root_index: usize, path: &str) -> String {
+    if root_index == 0 {
+        path.to_owned()
+    } else {
+        format!("@root/{root_index}/{path}")
+    }
 }
 
 struct DurableCheckpointCoordinator {
-    store: Arc<CheckpointStore>,
+    stores: Arc<Vec<Arc<CheckpointStore>>>,
     active: Mutex<HashMap<String, ActiveCheckpoint>>,
-    rewinds: Mutex<HashMap<String, RewindHandle>>,
+    rewinds: Mutex<HashMap<String, Vec<RewindHandle>>>,
 }
 
 impl DurableCheckpointCoordinator {
+    #[cfg(test)]
     fn new(store: Arc<CheckpointStore>) -> Self {
+        Self::from_stores(Arc::new(vec![store]))
+    }
+
+    fn from_stores(stores: Arc<Vec<Arc<CheckpointStore>>>) -> Self {
         Self {
-            store,
+            stores,
             active: Mutex::new(HashMap::new()),
             rewinds: Mutex::new(HashMap::new()),
         }
@@ -1699,21 +2048,31 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         }
         let session_id = session_id.0.clone();
         let scope = scope.clone();
-        let store = Arc::clone(&self.store);
+        let stores = Arc::clone(&self.stores);
         let active = tokio::task::spawn_blocking(move || {
             Ok::<_, AgentLoopError>(match scope {
                 MutationScope::None => unreachable!("none returned before the worker"),
                 MutationScope::Paths(paths) => {
-                    store
-                        .checkpoint_known(&session_id, agent_turn, paths)
-                        .map_err(checkpoint_agent_error)?;
+                    let grouped = group_checkpoint_paths(&stores, paths)?;
+                    for (root_index, paths) in grouped {
+                        stores[root_index]
+                            .checkpoint_known(&session_id, agent_turn, paths)
+                            .map_err(checkpoint_agent_error)?;
+                    }
                     ActiveCheckpoint::Known
                 }
-                MutationScope::OpaqueWorkspace => ActiveCheckpoint::Opaque(
-                    store
-                        .begin_opaque_mutation(&session_id, agent_turn)
-                        .map_err(checkpoint_agent_error)?,
-                ),
+                MutationScope::OpaqueWorkspace => {
+                    let mut mutations = Vec::with_capacity(stores.len());
+                    for (root_index, store) in stores.iter().enumerate() {
+                        mutations.push((
+                            root_index,
+                            store
+                                .begin_opaque_mutation(&session_id, agent_turn)
+                                .map_err(checkpoint_agent_error)?,
+                        ));
+                    }
+                    ActiveCheckpoint::Opaque(mutations)
+                }
             })
         })
         .await
@@ -1741,12 +2100,17 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(id)
             .ok_or_else(|| AgentLoopError::Persistence("unknown mutation checkpoint".to_owned()))?;
-        if let ActiveCheckpoint::Opaque(mutation) = active {
-            let store = Arc::clone(&self.store);
-            tokio::task::spawn_blocking(move || store.finish_opaque_mutation(&mutation))
-                .await
-                .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
-                .map_err(checkpoint_agent_error)?;
+        if let ActiveCheckpoint::Opaque(mutations) = active {
+            let stores = Arc::clone(&self.stores);
+            tokio::task::spawn_blocking(move || {
+                for (root_index, mutation) in mutations {
+                    stores[root_index].finish_opaque_mutation(&mutation)?;
+                }
+                Ok::<_, rw_store::checkpoint::CheckpointError>(())
+            })
+            .await
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+            .map_err(checkpoint_agent_error)?;
         }
         Ok(())
     }
@@ -1757,30 +2121,36 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         to_turn: u64,
         operation_id: &str,
     ) -> std::result::Result<RewindCheckpoint, AgentLoopError> {
-        let store = Arc::clone(&self.store);
+        let stores = Arc::clone(&self.stores);
         let session_id = session_id.0.clone();
         let operation_id_owned = operation_id.to_owned();
-        let (handle, unrestorable_paths) = tokio::task::spawn_blocking(move || {
-            let handle = store
-                .prepare_rewind(&session_id, to_turn, &operation_id_owned)
-                .map_err(checkpoint_agent_error)?;
-            let commit = store
-                .apply_rewind(&handle)
-                .map_err(checkpoint_agent_error)?;
-            let unrestorable_paths = commit
-                .report
-                .unrestorable
-                .into_iter()
-                .map(|(path, reason)| UnrestorablePath { path, reason })
-                .collect();
-            Ok::<_, AgentLoopError>((handle, unrestorable_paths))
+        let (handles, unrestorable_paths) = tokio::task::spawn_blocking(move || {
+            let mut handles = Vec::with_capacity(stores.len());
+            let mut unrestorable_paths = Vec::new();
+            for store in stores.iter() {
+                handles.push(
+                    store
+                        .prepare_rewind(&session_id, to_turn, &operation_id_owned)
+                        .map_err(checkpoint_agent_error)?,
+                );
+            }
+            for (root_index, (store, handle)) in stores.iter().zip(&handles).enumerate() {
+                let commit = store.apply_rewind(handle).map_err(checkpoint_agent_error)?;
+                unrestorable_paths.extend(commit.report.unrestorable.into_iter().map(
+                    |(path, reason)| UnrestorablePath {
+                        path: checkpoint_display_path(root_index, &path),
+                        reason,
+                    },
+                ));
+            }
+            Ok::<_, AgentLoopError>((handles, unrestorable_paths))
         })
         .await
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))??;
         self.rewinds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(operation_id.to_owned(), handle);
+            .insert(operation_id.to_owned(), handles);
         Ok(RewindCheckpoint {
             id: operation_id.to_owned(),
             unrestorable_paths,
@@ -1791,17 +2161,25 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         &self,
         checkpoint: &RewindCheckpoint,
     ) -> std::result::Result<(), AgentLoopError> {
-        let handle = self
+        let handles = self
             .rewinds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&checkpoint.id)
             .ok_or_else(|| AgentLoopError::Persistence("unknown rewind checkpoint".to_owned()))?;
-        let store = Arc::clone(&self.store);
-        tokio::task::spawn_blocking(move || store.acknowledge_rewind(&handle))
-            .await
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
-            .map_err(checkpoint_agent_error)
+        let stores = Arc::clone(&self.stores);
+        tokio::task::spawn_blocking(move || {
+            if handles.len() != stores.len() {
+                return Err(rw_store::checkpoint::CheckpointError::CorruptRewindTransaction);
+            }
+            for (store, handle) in stores.iter().zip(&handles) {
+                store.acknowledge_rewind(handle)?;
+            }
+            Ok::<_, rw_store::checkpoint::CheckpointError>(())
+        })
+        .await
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+        .map_err(checkpoint_agent_error)
     }
 }
 
@@ -1810,7 +2188,7 @@ fn checkpoint_agent_error(error: impl std::fmt::Display) -> AgentLoopError {
 }
 
 fn recover_rewind_transactions(
-    checkpoints: &CheckpointStore,
+    checkpoints: &[Arc<CheckpointStore>],
     log: &mut SessionEventLog,
 ) -> Result<()> {
     let existing = log
@@ -1823,34 +2201,92 @@ fn recover_rewind_transactions(
             _ => None,
         })
         .collect::<std::collections::HashSet<_>>();
-    for commit in checkpoints
-        .recover_rewinds()
-        .map_err(|error| miette!("rewind recovery failed: {error}"))?
+    let mut recovered = BTreeMap::<
+        String,
+        (
+            String,
+            u64,
+            Vec<UnrestorablePath>,
+            Vec<Option<RewindHandle>>,
+        ),
+    >::new();
+    for (root_index, store) in checkpoints.iter().enumerate() {
+        for commit in store
+            .recover_rewinds()
+            .map_err(|error| miette!("rewind recovery failed for root {root_index}: {error}"))?
+        {
+            let operation_id = commit.handle.operation_id.clone();
+            let entry = recovered.entry(operation_id.clone()).or_insert_with(|| {
+                (
+                    commit.handle.session_id.clone(),
+                    commit.target_turn,
+                    Vec::new(),
+                    vec![None; checkpoints.len()],
+                )
+            });
+            if entry.0 != commit.handle.session_id || entry.1 != commit.target_turn {
+                return Err(miette!(
+                    "rewind recovery identity differs between workspace roots"
+                ));
+            }
+            entry.2.extend(
+                commit
+                    .report
+                    .unrestorable
+                    .into_iter()
+                    .map(|(path, reason)| UnrestorablePath {
+                        path: checkpoint_display_path(root_index, &path),
+                        reason,
+                    }),
+            );
+            entry.3[root_index] = Some(commit.handle);
+        }
+    }
+    for (operation_id, (session_id, target_turn, mut unrestorable_paths, mut handles)) in recovered
     {
-        if !operations.contains(&commit.handle.operation_id) {
-            let unrestorable_paths = commit
-                .report
-                .unrestorable
-                .into_iter()
-                .map(|(path, reason)| UnrestorablePath { path, reason })
-                .collect();
+        for (root_index, (store, handle)) in checkpoints.iter().zip(&mut handles).enumerate() {
+            if handle.is_none() {
+                let prepared = store
+                    .prepare_rewind(&session_id, target_turn, &operation_id)
+                    .map_err(|error| {
+                        miette!("rewind recovery could not stage root {root_index}: {error}")
+                    })?;
+                let commit = store.apply_rewind(&prepared).map_err(|error| {
+                    miette!("rewind recovery could not apply root {root_index}: {error}")
+                })?;
+                unrestorable_paths.extend(commit.report.unrestorable.into_iter().map(
+                    |(path, reason)| UnrestorablePath {
+                        path: checkpoint_display_path(root_index, &path),
+                        reason,
+                    },
+                ));
+                *handle = Some(prepared);
+            }
+        }
+        if !operations.contains(&operation_id) {
             log.append(EngineEvent::ConversationRewound {
                 meta: EventMeta {
                     protocol_version: SESSION_EVENT_VERSION,
-                    session_id: SessionId(commit.handle.session_id.clone()),
+                    session_id: SessionId(session_id.clone()),
                     sequence_id: SequenceId(log.next_sequence()),
                     emitted_at: SystemEventClock.emitted_at(),
                     caused_by: None,
                 },
-                to_agent_turn: commit.target_turn,
-                operation_id: commit.handle.operation_id.clone(),
+                to_agent_turn: target_turn,
+                operation_id: operation_id.clone(),
                 unrestorable_paths,
             })
             .map_err(|error| miette!("recovered rewind event could not persist: {error}"))?;
         }
-        checkpoints
-            .acknowledge_rewind(&commit.handle)
-            .map_err(|error| miette!("recovered rewind could not be acknowledged: {error}"))?;
+        for (root_index, (store, handle)) in checkpoints.iter().zip(handles).enumerate() {
+            store
+                .acknowledge_rewind(
+                    &handle.ok_or_else(|| miette!("rewind root {root_index} has no handle"))?,
+                )
+                .map_err(|error| {
+                    miette!("recovered rewind root {root_index} could not acknowledge: {error}")
+                })?;
+        }
     }
     Ok(())
 }
@@ -2153,6 +2589,51 @@ enum CommandFixtureMode {
 
 struct SharedCommandFixtureRedactor(FixtureRedactor);
 
+fn credential_shaped_environment_name(name: &str) -> bool {
+    let normalized = name.to_ascii_uppercase().replace('-', "_");
+    matches!(
+        normalized.as_str(),
+        "API_KEY"
+            | "TOKEN"
+            | "ACCESS_TOKEN"
+            | "REFRESH_TOKEN"
+            | "ID_TOKEN"
+            | "AUTH_TOKEN"
+            | "BEARER_TOKEN"
+            | "SESSION_TOKEN"
+            | "OAUTH_TOKEN"
+            | "PASSWORD"
+            | "SECRET"
+            | "CLIENT_SECRET"
+            | "PRIVATE_KEY"
+            | "CREDENTIAL"
+            | "CREDENTIALS"
+            | "AUTHORIZATION"
+            | "COOKIE"
+    ) || normalized.ends_with("_API_KEY")
+        || normalized.ends_with("_TOKEN")
+        || normalized.ends_with("_PASSWORD")
+        || normalized.ends_with("_SECRET")
+        || normalized.ends_with("_PRIVATE_KEY")
+        || normalized.ends_with("_CREDENTIAL")
+        || normalized.ends_with("_CREDENTIALS")
+}
+
+fn register_credential_environment(redactor: &FixtureRedactor) {
+    for (name, value) in std::env::vars_os() {
+        let (Some(name), Some(value)) = (name.to_str(), value.to_str()) else {
+            continue;
+        };
+        register_credential_environment_value(redactor, name, value);
+    }
+}
+
+fn register_credential_environment_value(redactor: &FixtureRedactor, name: &str, value: &str) {
+    if !value.is_empty() && credential_shaped_environment_name(name) {
+        redactor.register_known_value(value);
+    }
+}
+
 impl CommandFixtureRedactor for SharedCommandFixtureRedactor {
     fn redact(&self, value: &str) -> String {
         self.0.redact_text(value)
@@ -2168,13 +2649,16 @@ impl rw_core::SecretRedactor for SharedEngineSecretRedactor {
 }
 
 fn build_tools(
-    workspace: &Path,
+    workspace_roots: &[PathBuf],
     question_asker: Arc<dyn QuestionAsker>,
     offline: bool,
-    global_proxy: Option<Url>,
+    global_proxy: Option<&Url>,
     command_fixture_mode: CommandFixtureMode,
     execution_lease: Arc<ExecutionLease>,
 ) -> Result<BuiltTools> {
+    let workspace = workspace_roots
+        .first()
+        .ok_or_else(|| miette!("tool composition requires a primary workspace"))?;
     let symbols = Arc::new(
         SymbolIndex::new(workspace)
             .map_err(|error| miette!("symbol index could not start: {error}"))?,
@@ -2184,12 +2668,28 @@ fn build_tools(
     let web_fetcher: Arc<dyn WebFetcher> = if offline {
         Arc::new(OfflineWebFetcher)
     } else {
-        Arc::new(PolicyWebFetcher::new(false, global_proxy))
+        Arc::new(PolicyWebFetcher::new(false, global_proxy.cloned()))
     };
+    let scratch = std::env::temp_dir().join(format!("rottweiler-sandbox-{}", std::process::id()));
+    create_private_sandbox_scratch(&scratch)?;
+    let mut sandbox_roots = workspace_roots.to_vec();
+    sandbox_roots.push(scratch.clone());
+    let sandbox_policy = Arc::new(
+        SandboxPolicy::new(&sandbox_roots, SandboxNetworkPolicy::Deny)
+            .map_err(|error| miette!("OS sandbox policy could not be built: {error}"))?,
+    );
+    // Each approved live command receives its own proxy and exact Seatbelt
+    // endpoint. Replay/offline never bind sockets, Linux remains unavailable
+    // pending a netns bridge, and configured corporate proxies fail closed.
+    let policy_egress_available = command_mode_can_open_proxy(&command_fixture_mode)
+        && global_proxy.is_none()
+        && cfg!(target_os = "macos");
     let command_executor = || {
-        Arc::new(TokioCommandExecutor::with_execution_lease(Arc::clone(
-            &execution_lease,
-        )))
+        Arc::new(
+            TokioCommandExecutor::with_execution_lease(Arc::clone(&execution_lease))
+                .sandboxed(Arc::clone(&sandbox_policy))
+                .with_policy_egress(policy_egress_available),
+        )
     };
     let bash: Arc<dyn Tool> = match command_fixture_mode {
         CommandFixtureMode::Live => Arc::new(BashTool::new(command_executor(), limits)),
@@ -2248,6 +2748,39 @@ fn build_tools(
         todo,
         _execution_lease: execution_lease,
     })
+}
+
+fn command_mode_can_open_proxy(mode: &CommandFixtureMode) -> bool {
+    matches!(
+        mode,
+        CommandFixtureMode::Live | CommandFixtureMode::Record { .. }
+    )
+}
+
+fn create_private_sandbox_scratch(path: &Path) -> Result<()> {
+    std::fs::create_dir_all(path)
+        .map_err(|error| miette!("sandbox scratch directory could not be created: {error}"))?;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| miette!("sandbox scratch directory could not be inspected: {error}"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(miette!(
+            "sandbox scratch path must be a real directory, never a symlink"
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        if metadata.uid() != rustix::process::geteuid().as_raw() {
+            return Err(miette!(
+                "sandbox scratch directory must be owned by the current user"
+            ));
+        }
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| miette!("sandbox scratch permissions could not be secured: {error}"),
+        )?;
+    }
+    Ok(())
 }
 
 struct BuiltTools {
@@ -2392,6 +2925,7 @@ impl PolicyWebFetcher {
     async fn validate_and_pin(
         &self,
         url: &Url,
+        policy: &EgressPolicy,
     ) -> std::result::Result<Option<(String, SocketAddr)>, ToolError> {
         if !matches!(url.scheme(), "http" | "https")
             || url.username() != ""
@@ -2407,10 +2941,20 @@ impl PolicyWebFetcher {
         match url.host() {
             Some(Host::Ipv4(address)) => {
                 self.validate_ip(IpAddr::V4(address))?;
+                validate_egress_decision(
+                    policy,
+                    address.to_string().as_str(),
+                    &[IpAddr::V4(address)],
+                )?;
                 Ok(None)
             }
             Some(Host::Ipv6(address)) => {
                 self.validate_ip(IpAddr::V6(address))?;
+                validate_egress_decision(
+                    policy,
+                    address.to_string().as_str(),
+                    &[IpAddr::V6(address)],
+                )?;
                 Ok(None)
             }
             Some(Host::Domain(host)) => {
@@ -2424,6 +2968,8 @@ impl PolicyWebFetcher {
                 for address in &addresses {
                     self.validate_ip(address.ip())?;
                 }
+                let ips = addresses.iter().map(SocketAddr::ip).collect::<Vec<_>>();
+                validate_egress_decision(policy, host, &ips)?;
                 Ok(Some((host.to_owned(), addresses[0])))
             }
             None => Err(ToolError::Network("URL has no host".to_owned())),
@@ -2453,11 +2999,21 @@ impl WebFetcher for PolicyWebFetcher {
         cancellation: CancellationToken,
     ) -> std::result::Result<FetchResponse, ToolError> {
         let original_origin = origin(&request.url);
+        let mut policy = EgressPolicy::default().with_private_destinations(self.allow_loopback);
+        let original_host = request
+            .url
+            .host_str()
+            .ok_or_else(|| ToolError::Network("URL has no host".to_owned()))?;
+        if !policy.allow_domain(original_host) {
+            return Err(ToolError::Network(
+                "webfetch requested an invalid network domain".to_owned(),
+            ));
+        }
         for redirect in 0..=MAX_REDIRECTS {
             if cancellation.is_cancelled() {
                 return Err(ToolError::Cancelled);
             }
-            let pin = self.validate_and_pin(&request.url).await?;
+            let pin = self.validate_and_pin(&request.url, &policy).await?;
             let mut outgoing = Vec::with_capacity(request.headers.len());
             for (name, value) in &request.headers {
                 let lower = name.to_ascii_lowercase();
@@ -2530,6 +3086,22 @@ impl WebFetcher for PolicyWebFetcher {
             });
         }
         Err(ToolError::Network("webfetch redirect loop".to_owned()))
+    }
+}
+
+fn validate_egress_decision(
+    policy: &EgressPolicy,
+    host: &str,
+    addresses: &[IpAddr],
+) -> std::result::Result<(), ToolError> {
+    match policy.evaluate(host, addresses) {
+        EgressDecision::Allowed => Ok(()),
+        EgressDecision::ApprovalRequired => Err(ToolError::Network(format!(
+            "network domain {host:?} requires a separate approval"
+        ))),
+        EgressDecision::HardDenied => Err(ToolError::Network(
+            "local, private, reserved, and non-routable targets are blocked".to_owned(),
+        )),
     }
 }
 
@@ -2920,6 +3492,19 @@ async fn run_repl(
                     InputLine::Line(line) => {
                         if let Some(interaction) = interactions.pop_front() {
                             match interaction {
+                                PendingInteraction::Plan => {
+                                    let (decision, revisions) = if line.trim().eq_ignore_ascii_case("approve")
+                                        || line.trim().eq_ignore_ascii_case("y")
+                                    {
+                                        (rw_core::PlanDecision::Approve, None)
+                                    } else {
+                                        (rw_core::PlanDecision::Reject, Some(line))
+                                    };
+                                    let _ = actor
+                                        .review_plan(decision, revisions)
+                                        .await
+                                        .map_err(display_agent_error)?;
+                                }
                                 PendingInteraction::Question { id, .. } => {
                                     let _ = actor
                                         .answer_question(id, vec![line])
@@ -3006,9 +3591,13 @@ async fn run_repl(
                         display_next_interaction(interactions.front(), printer.as_mut())?;
                     }
                 }
+                if let EngineEvent::PlanSubmitted { .. } = &event {
+                    interactions.push_back(PendingInteraction::Plan);
+                }
                 if let EngineEvent::TurnFinished { status, .. } = &event {
                     last_status = Some(status.clone());
-                    interactions.clear();
+                    interactions.retain(|interaction| matches!(interaction, PendingInteraction::Plan));
+                    display_next_interaction(interactions.front(), printer.as_mut())?;
                 }
                 if let Some(message) = repl_event_message(&event, format)? {
                     printer.print(message).into_diagnostic()?;
@@ -3020,6 +3609,7 @@ async fn run_repl(
 }
 
 enum PendingInteraction {
+    Plan,
     Question {
         id: QuestionId,
         prompt: String,
@@ -3038,6 +3628,9 @@ fn display_next_interaction(
     printer: &mut dyn rustyline::ExternalPrinter,
 ) -> Result<()> {
     let message = match interaction {
+        Some(PendingInteraction::Plan) => {
+            "plan submitted: type `approve` to enter Execute, or rejection feedback to stay in Plan\n".to_owned()
+        }
         Some(PendingInteraction::Question {
             prompt, options, ..
         }) => {
@@ -3051,7 +3644,7 @@ fn display_next_interaction(
             capabilities,
             rationale,
             ..
-        }) => format!("allow {capabilities:?} ({rationale})? [y] once / [a] session / [n] deny\n"),
+        }) => format!("allow {capabilities:?} ({rationale})? [y] once / [a] session / [p] project / [n] deny\n"),
         None => return Ok(()),
     };
     printer.print(message).into_diagnostic()
@@ -3110,6 +3703,7 @@ fn parse_approval(input: &str) -> ApprovalDecision {
     match input.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" | "once" => ApprovalDecision::AllowOnce,
         "a" | "all" | "session" => ApprovalDecision::AllowSession,
+        "p" | "project" => ApprovalDecision::AllowProject,
         _ => ApprovalDecision::Deny,
     }
 }
@@ -3295,6 +3889,15 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn replay_and_offline_command_modes_never_enable_command_egress() {
+        assert!(!command_mode_can_open_proxy(&CommandFixtureMode::Replay {
+            directory: PathBuf::from("fixtures"),
+        }));
+        assert!(!command_mode_can_open_proxy(&CommandFixtureMode::Offline));
+        assert!(command_mode_can_open_proxy(&CommandFixtureMode::Live));
+    }
+
+    #[test]
     fn rejects_private_and_reserved_network_targets() {
         for address in [
             "127.0.0.1",
@@ -3321,6 +3924,23 @@ mod tests {
         ));
         assert!(is_public_ip(
             "64:ff9b::101:101".parse().expect("public NAT64 address")
+        ));
+    }
+
+    #[test]
+    fn webfetch_egress_requires_new_domain_approval_and_keeps_ssrf_hard_denied() {
+        let public = "1.1.1.1".parse().expect("public address");
+        let private = "169.254.169.254".parse().expect("metadata address");
+        let mut policy = EgressPolicy::default();
+        assert!(policy.allow_domain("example.com"));
+        assert!(validate_egress_decision(&policy, "example.com", &[public]).is_ok());
+        assert!(matches!(
+            validate_egress_decision(&policy, "other.example", &[public]),
+            Err(ToolError::Network(message)) if message.contains("separate approval")
+        ));
+        assert!(matches!(
+            validate_egress_decision(&policy, "example.com", &[private]),
+            Err(ToolError::Network(message)) if message.contains("private")
         ));
     }
 
@@ -3352,6 +3972,7 @@ mod tests {
     fn headless_approval_parser_fails_closed() {
         assert_eq!(parse_approval("yes"), ApprovalDecision::AllowOnce);
         assert_eq!(parse_approval("session"), ApprovalDecision::AllowSession);
+        assert_eq!(parse_approval("project"), ApprovalDecision::AllowProject);
         assert_eq!(parse_approval("anything else"), ApprovalDecision::Deny);
     }
 
@@ -3525,6 +4146,7 @@ mod tests {
         let actor = SessionActor::spawn(SessionActorConfig {
             session_id: SessionId(session_id.to_owned()),
             workspace_root: workspace,
+            additional_workspace_roots: Vec::new(),
             initial_session_context: vec![system],
             model_alias: profile.model_alias.clone(),
             model,
@@ -3536,6 +4158,7 @@ mod tests {
             event_clock: Arc::new(SystemEventClock),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
+            folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             recovered: rw_core::SessionRecoveredState {
                 conversation: vec![user],
                 ..rw_core::SessionRecoveredState::default()
@@ -3920,6 +4543,174 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn multi_root_checkpoints_restore_known_and_opaque_added_root_mutations() {
+        let root = tempdir().expect("root");
+        let primary = root.path().join("primary");
+        let added = root.path().join("added");
+        std::fs::create_dir_all(&primary).expect("primary");
+        std::fs::create_dir_all(&added).expect("added");
+        let primary = std::fs::canonicalize(primary).expect("canonical primary");
+        let added = std::fs::canonicalize(added).expect("canonical added");
+        let parent_sentinel = root.path().join("parent.txt");
+        std::fs::write(&parent_sentinel, b"parent-before").expect("parent sentinel");
+        let target = added.join("state.bin");
+        std::fs::write(&target, b"added-before\0bytes").expect("added target");
+        let session = SessionId("session-multi-root-rewind".to_owned());
+        let checkpoint_root = checkpoint_root(root.path(), &primary, &session.0);
+        let stores = open_checkpoint_stores(&checkpoint_root, &[primary.clone(), added.clone()])
+            .expect("multi-root stores");
+        assert!(
+            open_checkpoint_stores(&checkpoint_root, &[added.clone(), primary.clone()]).is_err(),
+            "persisted root order must reject reorder/replacement"
+        );
+        let coordinator = DurableCheckpointCoordinator::from_stores(stores);
+
+        let known = coordinator
+            .begin(
+                &session,
+                1,
+                "known-added",
+                &MutationScope::Paths(vec![PathBuf::from("@root/1/state.bin")]),
+            )
+            .await
+            .expect("known checkpoint");
+        std::fs::write(&target, b"known-after").expect("known mutation");
+        coordinator
+            .finish(&known, MutationCheckpointOutcome::Completed)
+            .await
+            .expect("finish known");
+        let rewind = coordinator
+            .prepare_apply_rewind(&session, 0, "rewind-known-added")
+            .await
+            .expect("rewind known");
+        assert_eq!(
+            std::fs::read(&target).expect("known restored"),
+            b"added-before\0bytes"
+        );
+        coordinator
+            .acknowledge_rewind(&rewind)
+            .await
+            .expect("ack known rewind");
+
+        let sibling = coordinator
+            .begin(
+                &session,
+                2,
+                "known-added-sibling",
+                &MutationScope::Paths(vec![PathBuf::from("../added/state.bin")]),
+            )
+            .await
+            .expect("sibling checkpoint");
+        std::fs::write(&target, b"sibling-after").expect("sibling mutation");
+        coordinator
+            .finish(&sibling, MutationCheckpointOutcome::Completed)
+            .await
+            .expect("finish sibling");
+        let rewind = coordinator
+            .prepare_apply_rewind(&session, 1, "rewind-known-sibling")
+            .await
+            .expect("rewind sibling");
+        assert_eq!(
+            std::fs::read(&target).expect("sibling restored"),
+            b"added-before\0bytes"
+        );
+        coordinator
+            .acknowledge_rewind(&rewind)
+            .await
+            .expect("ack sibling rewind");
+
+        let escaped = coordinator
+            .begin(
+                &session,
+                3,
+                "parent-escape",
+                &MutationScope::Paths(vec![PathBuf::from("@root/1/../parent.txt")]),
+            )
+            .await;
+        assert!(
+            escaped.is_err(),
+            "checkpoint confinement must block parent escape"
+        );
+        assert_eq!(
+            std::fs::read(&parent_sentinel).expect("parent remains"),
+            b"parent-before"
+        );
+
+        let git = |arguments: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&added)
+                .args(arguments)
+                .status()
+                .expect("git command");
+            assert!(status.success(), "git command failed: {arguments:?}");
+        };
+        git(&["init", "--quiet"]);
+        git(&["add", "state.bin"]);
+        let opaque = coordinator
+            .begin(&session, 4, "opaque-added", &MutationScope::OpaqueWorkspace)
+            .await
+            .expect("opaque checkpoint");
+        std::fs::write(&target, b"opaque-after").expect("opaque mutation");
+        coordinator
+            .finish(&opaque, MutationCheckpointOutcome::Completed)
+            .await
+            .expect("finish opaque");
+        let rewind = coordinator
+            .prepare_apply_rewind(&session, 3, "rewind-opaque-added")
+            .await
+            .expect("rewind opaque");
+        assert_eq!(
+            std::fs::read(&target).expect("opaque restored"),
+            b"added-before\0bytes"
+        );
+        coordinator
+            .acknowledge_rewind(&rewind)
+            .await
+            .expect("ack opaque rewind");
+        assert_eq!(
+            std::fs::read(&parent_sentinel).expect("parent final"),
+            b"parent-before"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_trust_controller_persists_grant_and_revoke_for_slash_commands() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let project_config = workspace.join(".rottweiler/config.toml");
+        std::fs::create_dir_all(project_config.parent().expect("project parent"))
+            .expect("project directory");
+        std::fs::write(&project_config, "[models]\ndefault = \"fast\"\n").expect("project config");
+        let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
+        let ledger = root.path().join("private/trust.json");
+        let controller = RuntimeFolderTrustController::new(ledger.clone(), workspace);
+
+        assert!(
+            controller
+                .execute(FolderTrustOperation::Status)
+                .await
+                .expect("status")
+                .contains("state: Untrusted")
+        );
+        let granted = controller
+            .execute(FolderTrustOperation::Grant)
+            .await
+            .expect("grant");
+        assert!(granted.contains("state: Trusted"));
+        assert!(granted.contains("activates in the next session"));
+        assert!(ledger.is_file(), "grant must persist the trust ledger");
+
+        let revoked = controller
+            .execute(FolderTrustOperation::Revoke)
+            .await
+            .expect("revoke");
+        assert!(revoked.contains("state: Untrusted"));
+        assert!(revoked.contains("unloads in the next session"));
+    }
+
+    #[tokio::test]
     async fn rewind_event_reprojects_ephemeral_todo_state() {
         let root = tempdir().expect("root");
         let workspace = root.path().join("workspace");
@@ -4079,6 +4870,7 @@ mod tests {
         let actor = SessionActor::spawn(SessionActorConfig {
             session_id: session,
             workspace_root: workspace.clone(),
+            additional_workspace_roots: Vec::new(),
             initial_session_context: Vec::new(),
             model_alias: "fast".to_owned(),
             model,
@@ -4090,6 +4882,7 @@ mod tests {
             event_clock: Arc::new(SystemEventClock),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
             checkpoints,
+            folder_trust: Arc::new(rw_core::NoopFolderTrustController),
             recovered: rw_core::SessionRecoveredState::default(),
             max_turns: 4,
             identical_tool_failure_limit: 5,
@@ -4135,5 +4928,36 @@ mod tests {
             std::fs::read(workspace.join("state.txt")).expect("rewound file"),
             b"turn-3\n"
         );
+    }
+
+    #[test]
+    fn credential_shaped_environment_values_join_the_shared_redaction_set() {
+        let redactor = FixtureRedactor::default();
+        for (name, value) in [
+            ("OPENAI_API_KEY", "api-canary"),
+            ("MY_TOKEN", "token-canary"),
+            ("SERVICE_SECRET", "secret-canary"),
+            ("DB_PASSWORD", "password-canary"),
+            ("SIGNING_PRIVATE_KEY", "private-key-canary"),
+            ("NORMAL_SETTING", "visible-canary"),
+            ("EMPTY_TOKEN", ""),
+        ] {
+            register_credential_environment_value(&redactor, name, value);
+        }
+        let redacted = redactor.redact_text(
+            "api-canary token-canary secret-canary password-canary private-key-canary visible-canary",
+        );
+        for secret in [
+            "api-canary",
+            "token-canary",
+            "secret-canary",
+            "password-canary",
+            "private-key-canary",
+        ] {
+            assert!(!redacted.contains(secret));
+        }
+        assert!(redacted.contains("visible-canary"));
+        assert!(!credential_shaped_environment_name("MAX_TOKENS"));
+        assert!(!credential_shaped_environment_name("TOKEN_COUNT"));
     }
 }

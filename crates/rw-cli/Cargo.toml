@@ -25,6 +25,7 @@ nix.workspace = true
 portable-pty.workspace = true
 rpassword.workspace = true
 rw-core.workspace = true
+rw-sandbox.workspace = true
 rw-store.workspace = true
 rustix.workspace = true
 rustyline = "=17.0.2"

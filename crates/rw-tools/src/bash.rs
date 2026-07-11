@@ -1,10 +1,15 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
+use rw_sandbox::{
+    EgressPolicy, NetworkPolicy as SandboxNetworkPolicy, SandboxPolicy, SupervisedEgressProxy,
+    normalize_egress_domain, shell_launch_plan,
+};
 use rw_types::{ToolCapability, ToolOutputStream};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -26,6 +31,10 @@ pub struct BashInput {
     pub cwd: PathBuf,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Public domains requested in addition to the default package registries.
+    /// Permission approvals bind to this exact normalized list.
+    #[serde(default)]
+    pub network_domains: Vec<String>,
 }
 
 fn default_cwd() -> PathBuf {
@@ -37,11 +46,144 @@ pub struct CommandRequest {
     pub command: String,
     pub cwd: PathBuf,
     pub env: BTreeMap<String, String>,
+    pub network_domains: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CommandOutcome {
     pub exit_code: i32,
+}
+
+/// Conservative built-in safe-list result used by the permission chokepoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommandSafety {
+    /// The entire command is a recognized read-only operation and may run
+    /// without a prompt, but still inside the OS sandbox.
+    SafeListed,
+    /// The command is unknown, compound, interpolated, or potentially
+    /// mutating.  Normal permission policy applies.
+    RequiresApproval,
+}
+
+/// Classifies a canonical shell command for the built-in no-prompt safe-list.
+///
+/// This list is intentionally small.  Shell interpolation and control syntax
+/// are rejected before tokenization, and only the real `git status` built-in
+/// (with ordinary option/path arguments) is accepted.  A user may extend the
+/// safe-list through user-scoped permission configuration; project content
+/// never calls this function with additional rules.
+#[must_use]
+pub fn classify_safe_command(command: &str) -> CommandSafety {
+    if has_shell_expansion_or_control(command) {
+        return CommandSafety::RequiresApproval;
+    }
+    let Ok(argv) = shell_words::split(command) else {
+        return CommandSafety::RequiresApproval;
+    };
+    if audited_system_git().is_none() || argv.first().map(String::as_str) != Some("git") {
+        return CommandSafety::RequiresApproval;
+    }
+    if argv.get(1).is_some_and(|argument| argument == "status")
+        && safe_git_status_arguments(&argv[2..])
+    {
+        CommandSafety::SafeListed
+    } else {
+        CommandSafety::RequiresApproval
+    }
+}
+
+fn safe_git_status_arguments(arguments: &[String]) -> bool {
+    let mut pathspecs = false;
+    for argument in arguments {
+        if pathspecs {
+            continue;
+        }
+        if argument == "--" {
+            pathspecs = true;
+            continue;
+        }
+        if !matches!(
+            argument.as_str(),
+            "--short"
+                | "-s"
+                | "--branch"
+                | "-b"
+                | "--show-stash"
+                | "--porcelain"
+                | "--porcelain=v1"
+                | "--porcelain=v2"
+                | "--untracked-files=no"
+                | "--untracked-files=normal"
+                | "--untracked-files=all"
+                | "-uno"
+                | "-unormal"
+                | "-uall"
+                | "--ignored=no"
+                | "--ignored=matching"
+                | "--ignored=traditional"
+                | "--renames"
+                | "--no-renames"
+                | "--ahead-behind"
+                | "--no-ahead-behind"
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+fn audited_system_git() -> Option<&'static PathBuf> {
+    static SYSTEM_GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SYSTEM_GIT.get_or_init(resolve_audited_system_git).as_ref()
+}
+
+fn resolve_audited_system_git() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        for candidate in [Path::new("/usr/bin/git"), Path::new("/bin/git")] {
+            let Ok(canonical) = candidate.canonicalize() else {
+                continue;
+            };
+            if !canonical.starts_with("/usr/bin") && !canonical.starts_with("/bin") {
+                continue;
+            }
+            let Ok(metadata) = canonical.metadata() else {
+                continue;
+            };
+            if metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0 {
+                return Some(canonical);
+            }
+        }
+    }
+    None
+}
+
+fn has_shell_expansion_or_control(command: &str) -> bool {
+    if command.is_empty()
+        || command.contains(['\n', '\r', '`', '$'])
+        || command.as_bytes().contains(&0)
+    {
+        return true;
+    }
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    for character in command.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' if !single => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            ';' | '|' | '&' | '<' | '>' if !single && !double => return true,
+            _ => {}
+        }
+    }
+    escaped || single || double
 }
 
 /// Injected process boundary. Core must approve the bash manifest before this is called.
@@ -232,6 +374,8 @@ struct CanonicalCommandRequest {
     command: String,
     workspace_relative_cwd: String,
     env: BTreeMap<String, String>,
+    #[serde(default)]
+    network_domains: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -481,6 +625,7 @@ fn canonical_command_request(
         command: request.command.clone(),
         workspace_relative_cwd,
         env: request.env.clone(),
+        network_domains: request.network_domains.clone(),
     })
 }
 
@@ -879,6 +1024,8 @@ fn reject_non_regular_portable(path: &Path) -> Result<(), ToolError> {
 #[derive(Clone, Debug, Default)]
 pub struct TokioCommandExecutor {
     execution_lease: Option<Arc<ExecutionLease>>,
+    sandbox: Option<Arc<SandboxPolicy>>,
+    policy_egress_available: bool,
 }
 
 impl TokioCommandExecutor {
@@ -887,7 +1034,24 @@ impl TokioCommandExecutor {
     pub fn with_execution_lease(execution_lease: Arc<ExecutionLease>) -> Self {
         Self {
             execution_lease: Some(execution_lease),
+            sandbox: None,
+            policy_egress_available: false,
         }
+    }
+
+    /// Runs every command inside the supplied native OS sandbox.
+    #[must_use]
+    pub fn sandboxed(mut self, policy: Arc<SandboxPolicy>) -> Self {
+        self.sandbox = Some(policy);
+        self
+    }
+
+    /// Enables per-command supervised policy proxies on a backend that can bind
+    /// the child to their exact endpoint.
+    #[must_use]
+    pub const fn with_policy_egress(mut self, available: bool) -> Self {
+        self.policy_egress_available = available;
+        self
     }
 }
 
@@ -903,20 +1067,10 @@ impl CommandExecutor for TokioCommandExecutor {
         // command and its watchdog are spawned.
         let _execution_lease = self.execution_lease.as_ref();
         cancellation.check()?;
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg("IFS= read -r _ || exit 125; exec /bin/sh -lc \"$1\"")
-            .arg("rottweiler-command-launcher")
-            .arg(&request.command)
-            .current_dir(&request.cwd)
-            .envs(&request.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        command.process_group(0);
+        let safe = classify_safe_command(&request.command) == CommandSafety::SafeListed;
+        let egress_proxy = command_egress_proxy(&request, safe, self.policy_egress_available)?;
+        let mut command =
+            guarded_process(&request, self.sandbox.as_deref(), egress_proxy.as_ref())?;
         let mut child = command
             .spawn()
             .map_err(|error| ToolError::Command(error.to_string()))?;
@@ -995,6 +1149,191 @@ impl CommandExecutor for TokioCommandExecutor {
         Ok(CommandOutcome {
             exit_code: status.code().unwrap_or(-1),
         })
+    }
+}
+
+fn command_egress_proxy(
+    request: &CommandRequest,
+    safe: bool,
+    available: bool,
+) -> Result<Option<SupervisedEgressProxy>, ToolError> {
+    if request.network_domains.is_empty() {
+        return Ok(None);
+    }
+    if safe || !available {
+        return Err(ToolError::Command(
+            "requested command domains cannot be routed safely on this host".to_owned(),
+        ));
+    }
+    let mut policy = EgressPolicy::default();
+    for domain in &request.network_domains {
+        if !policy.allow_domain(domain) {
+            return Err(ToolError::InvalidInput(format!(
+                "invalid requested network domain {domain:?}"
+            )));
+        }
+    }
+    SupervisedEgressProxy::start(policy)
+        .map(Some)
+        .map_err(|error| {
+            ToolError::Command(format!("supervised egress proxy could not start: {error}"))
+        })
+}
+
+fn guarded_process(
+    request: &CommandRequest,
+    sandbox: Option<&SandboxPolicy>,
+    egress_proxy: Option<&SupervisedEgressProxy>,
+) -> Result<Command, ToolError> {
+    let safe_git = safe_git_invocation(&request.command);
+    let network = egress_proxy.is_some() && safe_git.is_none();
+    let shell_args = safe_git.as_ref().map_or_else(
+        || {
+            vec![
+                OsString::from("-c"),
+                OsString::from("IFS= read -r _ || exit 125; exec /bin/sh -lc \"$1\""),
+                OsString::from("rottweiler-command-launcher"),
+                OsString::from(&request.command),
+            ]
+        },
+        |argv| {
+            let mut shell_args = vec![
+                OsString::from("-c"),
+                OsString::from("IFS= read -r _ || exit 125; exec \"$@\""),
+                OsString::from("rottweiler-safe-git-launcher"),
+            ];
+            shell_args.extend(argv.iter().map(OsString::from));
+            shell_args
+        },
+    );
+    let (program, args) = if let Some(base_policy) = sandbox {
+        let policy = if network {
+            let proxy = egress_proxy.ok_or_else(|| {
+                ToolError::Command(
+                    "network was approved but the supervised egress proxy is unavailable"
+                        .to_owned(),
+                )
+            })?;
+            base_policy.with_network(SandboxNetworkPolicy::PolicyProxy {
+                port: proxy.address().port(),
+            })
+        } else {
+            base_policy.with_network(SandboxNetworkPolicy::Deny)
+        };
+        let executable = std::env::current_exe()
+            .map_err(|error| ToolError::Command(format!("sandbox helper unavailable: {error}")))?;
+        let plan = shell_launch_plan(&policy, &executable, Path::new("/bin/sh"), &shell_args)
+            .map_err(|error| ToolError::Command(error.to_string()))?;
+        (plan.program, plan.args)
+    } else {
+        (PathBuf::from("/bin/sh"), shell_args)
+    };
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir(&request.cwd)
+        .envs(&request.env)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    configure_proxy_environment(&mut command, network.then_some(egress_proxy).flatten());
+    if safe_git.is_some() {
+        sanitize_git_environment(&mut command, request);
+    }
+    #[cfg(unix)]
+    command.process_group(0);
+    Ok(command)
+}
+
+fn safe_git_invocation(command: &str) -> Option<Vec<String>> {
+    if classify_safe_command(command) != CommandSafety::SafeListed {
+        return None;
+    }
+    let mut supplied = shell_words::split(command).ok()?;
+    let git = audited_system_git()?;
+    supplied.remove(0);
+    let status_arguments = supplied.split_off(1);
+    let mut argv = vec![
+        git.to_string_lossy().into_owned(),
+        "-c".to_owned(),
+        "core.fsmonitor=false".to_owned(),
+        "-c".to_owned(),
+        "core.untrackedCache=false".to_owned(),
+        "-c".to_owned(),
+        "core.hooksPath=/dev/null".to_owned(),
+        "-c".to_owned(),
+        "pager.status=false".to_owned(),
+        "status".to_owned(),
+    ];
+    argv.extend(status_arguments);
+    Some(argv)
+}
+
+fn sanitize_git_environment(command: &mut Command, request: &CommandRequest) {
+    for key in std::env::vars_os()
+        .map(|(key, _)| key)
+        .chain(request.env.keys().map(OsString::from))
+    {
+        if key
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("GIT_")
+        {
+            command.env_remove(key);
+        }
+    }
+    for key in [
+        "BASH_ENV",
+        "ENV",
+        "SHELLOPTS",
+        "CDPATH",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "XDG_CONFIG_HOME",
+    ] {
+        command.env_remove(key);
+    }
+    command
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", "/dev/null")
+        .env("XDG_CONFIG_HOME", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_PAGER", "cat")
+        .env("PAGER", "cat");
+}
+
+fn configure_proxy_environment(command: &mut Command, proxy: Option<&SupervisedEgressProxy>) {
+    for key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        command.env_remove(key);
+    }
+    if let Some(proxy) = proxy {
+        let url = proxy.url();
+        command
+            .env("HTTP_PROXY", &url)
+            .env("HTTPS_PROXY", &url)
+            .env("http_proxy", &url)
+            .env("https_proxy", &url)
+            .env("NO_PROXY", "")
+            .env("no_proxy", "");
     }
 }
 
@@ -1250,7 +1589,7 @@ impl Tool for BashTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "bash".to_owned(),
-            description: "Run an unsandboxed shell command with live stdout/stderr streaming."
+            description: "Run a sandboxed shell command with live stdout/stderr streaming."
                 .to_owned(),
             input_schema: input_schema::<BashInput>(),
             capabilities: CapabilityManifest::new([
@@ -1281,10 +1620,17 @@ impl Tool for BashTool {
             Arc::clone(&context.output),
             self.limits.max_result_bytes.saturating_sub(framing_reserve),
         ));
+        let network_domains = if classify_safe_command(&input.command) == CommandSafety::SafeListed
+        {
+            Vec::new()
+        } else {
+            normalize_requested_domains(&input.network_domains)?
+        };
         let outcome = self
             .executor
             .run(
                 CommandRequest {
+                    network_domains,
                     command: input.command,
                     cwd,
                     env: input.env,
@@ -1310,6 +1656,20 @@ impl Tool for BashTool {
         result.truncated = captured.stdout_truncated || captured.stderr_truncated;
         Ok(result)
     }
+}
+
+fn normalize_requested_domains(domains: &[String]) -> Result<Vec<String>, ToolError> {
+    let mut normalized = domains
+        .iter()
+        .map(|domain| {
+            normalize_egress_domain(domain).ok_or_else(|| {
+                ToolError::InvalidInput(format!("invalid requested network domain {domain:?}"))
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    normalized.sort();
+    normalized.dedup();
+    Ok(normalized)
 }
 
 struct CapturingSink {
@@ -1475,6 +1835,265 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn built_in_safe_list_accepts_only_plain_git_status() {
+        for command in [
+            "git status",
+            "git status --short",
+            "git status --porcelain=v1 -- .",
+        ] {
+            assert_eq!(
+                classify_safe_command(command),
+                CommandSafety::SafeListed,
+                "expected safe-list classification for {command}"
+            );
+        }
+        for command in [
+            "git clean -fd",
+            "git status && rm -rf /tmp/example",
+            "git status; curl https://example.invalid",
+            "git status $(touch escaped)",
+            "git status `touch escaped`",
+            "git -c alias.status='!touch escaped' status",
+            "/usr/bin/git status",
+            "./git status",
+            "evil/git status",
+            "PATH=. git status",
+            "env PATH=. git status",
+            "git status --help",
+            "sh -c 'git status'",
+            "",
+        ] {
+            assert_eq!(
+                classify_safe_command(command),
+                CommandSafety::RequiresApproval,
+                "expected approval classification for {command}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandboxed_executor_surfaces_eperm_and_preserves_workspace_writes() {
+        let root = tempdir().expect("temporary directory");
+        let workspace = root.path().join("workspace");
+        let scratch = root.path().join("scratch");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(&scratch).expect("scratch");
+        let outside = root.path().join("outside");
+        let policy = Arc::new(
+            SandboxPolicy::new([&workspace, &scratch], rw_sandbox::NetworkPolicy::Deny)
+                .expect("sandbox policy"),
+        );
+        let executor = TokioCommandExecutor::default()
+            .sandboxed(policy)
+            .with_policy_egress(true);
+        let sink = Arc::new(RecordingSink::default());
+        let command = format!(
+            "printf allowed > allowed; printf blocked > '{}'",
+            outside.display()
+        );
+        let outcome = executor
+            .run(
+                CommandRequest {
+                    network_domains: Vec::new(),
+                    command,
+                    cwd: workspace.clone(),
+                    env: BTreeMap::new(),
+                },
+                CancellationToken::default(),
+                sink.clone(),
+            )
+            .await
+            .expect("guarded command outcome");
+        assert_ne!(outcome.exit_code, 0);
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("allowed")).expect("allowed write"),
+            "allowed"
+        );
+        assert!(!outside.exists(), "outside write escaped Seatbelt");
+        let stderr = sink
+            .0
+            .lock()
+            .expect("sink")
+            .iter()
+            .filter(|chunk| chunk.stream == ToolOutputStream::Stderr)
+            .map(|chunk| chunk.content.as_str())
+            .collect::<String>();
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "expected EPERM diagnostic, got {stderr:?}"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn sandboxed_executor_denies_network_even_for_safe_list_eligible_processes() {
+        let root = tempdir().expect("temporary directory");
+        let workspace = root.path().join("workspace");
+        let scratch = root.path().join("scratch");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(&scratch).expect("scratch");
+        let policy = Arc::new(
+            SandboxPolicy::new([&workspace, &scratch], rw_sandbox::NetworkPolicy::Deny)
+                .expect("sandbox policy"),
+        );
+        let executor = TokioCommandExecutor::default()
+            .sandboxed(policy)
+            .with_policy_egress(true);
+        let command = r#"python3 -c 'import errno,os,socket,sys;
+if any(os.environ.get(k) for k in ("HTTP_PROXY","HTTPS_PROXY","http_proxy","https_proxy")): sys.exit(94)
+s=socket.socket();
+try: s.connect(("127.0.0.1",9))
+except OSError as e: sys.exit(0 if e.errno in (errno.EPERM,errno.EACCES) else 93)
+sys.exit(92)'"#;
+        let outcome = executor
+            .run(
+                CommandRequest {
+                    network_domains: Vec::new(),
+                    command: command.to_owned(),
+                    cwd: workspace,
+                    env: BTreeMap::new(),
+                },
+                CancellationToken::default(),
+                Arc::new(RecordingSink::default()),
+            )
+            .await
+            .expect("guarded command outcome");
+        assert_eq!(outcome.exit_code, 0, "network denial probe must see EPERM");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn requested_domains_receive_one_command_scoped_proxy_only() {
+        let root = tempdir().expect("temporary directory");
+        let workspace = root.path().join("workspace");
+        let scratch = root.path().join("scratch");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(&scratch).expect("scratch");
+        let executor = TokioCommandExecutor::default()
+            .sandboxed(Arc::new(
+                SandboxPolicy::new([&workspace, &scratch], rw_sandbox::NetworkPolicy::Deny)
+                    .expect("sandbox policy"),
+            ))
+            .with_policy_egress(true);
+        let sink = Arc::new(RecordingSink::default());
+        let outcome = executor
+            .run(
+                CommandRequest {
+                    network_domains: vec!["example.com".to_owned()],
+                    command: "printf '%s' \"$HTTPS_PROXY\"".to_owned(),
+                    cwd: workspace,
+                    env: BTreeMap::new(),
+                },
+                CancellationToken::default(),
+                sink.clone(),
+            )
+            .await
+            .expect("network-scoped command");
+        assert_eq!(outcome.exit_code, 0);
+        let output = sink
+            .0
+            .lock()
+            .expect("sink")
+            .iter()
+            .filter(|chunk| chunk.stream == ToolOutputStream::Stdout)
+            .map(|chunk| chunk.content.as_str())
+            .collect::<String>();
+        let proxy = url::Url::parse(&output).expect("proxy URL");
+        let address = format!(
+            "{}:{}",
+            proxy.host_str().expect("proxy host"),
+            proxy.port().expect("proxy port")
+        )
+        .parse()
+        .expect("proxy address");
+        assert!(
+            std::net::TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err(),
+            "per-command proxy outlived its command"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn safe_listed_git_status_really_runs_inside_the_sandbox() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempdir().expect("temporary directory");
+        let workspace = root.path().join("workspace");
+        let scratch = root.path().join("scratch");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(&scratch).expect("scratch");
+        let git = audited_system_git().expect("audited system git");
+        assert!(
+            std::process::Command::new(git)
+                .args(["init", "--quiet"])
+                .current_dir(&workspace)
+                .status()
+                .expect("git init")
+                .success()
+        );
+        let malicious_git = workspace.join("git");
+        let executed = workspace.join("malicious-git-executed");
+        std::fs::write(
+            &malicious_git,
+            format!(
+                "#!/bin/sh\nprintf HOST_SECRET_CANARY\ntouch '{}'\n",
+                executed.display()
+            ),
+        )
+        .expect("malicious workspace git");
+        std::fs::set_permissions(&malicious_git, std::fs::Permissions::from_mode(0o755))
+            .expect("malicious git executable mode");
+        assert!(
+            std::process::Command::new(git)
+                .args(["config", "core.fsmonitor", "./git"])
+                .current_dir(&workspace)
+                .status()
+                .expect("malicious local git config")
+                .success()
+        );
+        assert_eq!(
+            classify_safe_command("git status --short"),
+            CommandSafety::SafeListed
+        );
+        let executor = TokioCommandExecutor::default().sandboxed(Arc::new(
+            SandboxPolicy::new([&workspace, &scratch], rw_sandbox::NetworkPolicy::Deny)
+                .expect("sandbox policy"),
+        ));
+        let sink = Arc::new(RecordingSink::default());
+        let outcome = executor
+            .run(
+                CommandRequest {
+                    network_domains: Vec::new(),
+                    command: "git status --short".to_owned(),
+                    cwd: workspace.clone(),
+                    env: BTreeMap::from([
+                        ("PATH".to_owned(), workspace.display().to_string()),
+                        ("GIT_CONFIG_COUNT".to_owned(), "1".to_owned()),
+                        ("GIT_CONFIG_KEY_0".to_owned(), "core.fsmonitor".to_owned()),
+                        ("GIT_CONFIG_VALUE_0".to_owned(), "./git".to_owned()),
+                        ("BASH_ENV".to_owned(), malicious_git.display().to_string()),
+                        ("ENV".to_owned(), malicious_git.display().to_string()),
+                    ]),
+                },
+                CancellationToken::default(),
+                sink.clone(),
+            )
+            .await
+            .expect("sandboxed git status");
+        assert_eq!(outcome.exit_code, 0);
+        assert!(!executed.exists(), "workspace-controlled git was executed");
+        let output = sink
+            .0
+            .lock()
+            .expect("sink")
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<String>();
+        assert!(!output.contains("HOST_SECRET_CANARY"), "{output:?}");
+    }
+
     struct StreamingExecutor;
 
     struct SecretRedactor;
@@ -1563,6 +2182,7 @@ mod tests {
         let expected_outcome = recorder
             .run(
                 CommandRequest {
+                    network_domains: Vec::new(),
                     command: dangerous_command.to_owned(),
                     cwd: record_root.path().to_path_buf(),
                     env: BTreeMap::new(),
@@ -1579,6 +2199,7 @@ mod tests {
         let actual_outcome = offline_executor
             .run(
                 CommandRequest {
+                    network_domains: Vec::new(),
                     command: dangerous_command.to_owned(),
                     cwd: replay_root.path().to_path_buf(),
                     env: BTreeMap::new(),
@@ -1598,6 +2219,7 @@ mod tests {
             offline_executor
                 .run(
                     CommandRequest {
+                    network_domains: Vec::new(),
                         command: dangerous_command.to_owned(),
                         cwd: replay_root.path().to_path_buf(),
                         env: BTreeMap::new(),
@@ -1624,6 +2246,7 @@ mod tests {
         recorder
             .run(
                 CommandRequest {
+                    network_domains: Vec::new(),
                     command: "printf secret-canary".to_owned(),
                     cwd: workspace.path().to_path_buf(),
                     env: BTreeMap::from([("TOKEN".to_owned(), "secret-canary".to_owned())]),
@@ -1665,6 +2288,7 @@ mod tests {
         recorder
             .run(
                 CommandRequest {
+                    network_domains: Vec::new(),
                     command: "printf recovered".to_owned(),
                     cwd: record_workspace.path().to_path_buf(),
                     env: BTreeMap::new(),
@@ -1684,6 +2308,7 @@ mod tests {
         replay
             .run(
                 CommandRequest {
+                    network_domains: Vec::new(),
                     command: "printf recovered".to_owned(),
                     cwd: replay_workspace.path().to_path_buf(),
                     env: BTreeMap::new(),
@@ -1758,6 +2383,7 @@ mod tests {
             executor
                 .run(
                     CommandRequest {
+                        network_domains: Vec::new(),
                         command: "sleep 30 & wait".to_owned(),
                         cwd: root.path().to_path_buf(),
                         env: BTreeMap::new(),
@@ -1784,6 +2410,7 @@ mod tests {
         let outcome = TokioCommandExecutor::default()
             .run(
                 CommandRequest {
+                    network_domains: Vec::new(),
                     command: "printf normal".to_owned(),
                     cwd: root.path().to_path_buf(),
                     env: BTreeMap::new(),
@@ -1811,6 +2438,7 @@ mod tests {
         let outcome = TokioCommandExecutor::default()
             .run(
                 CommandRequest {
+                    network_domains: Vec::new(),
                     command: "sleep 30 & printf '%s\\n' \"$!\" > background.pid".to_owned(),
                     cwd: root.path().to_path_buf(),
                     env: BTreeMap::new(),
@@ -1851,6 +2479,7 @@ mod tests {
         let outcome = TokioCommandExecutor::with_execution_lease(lease)
             .run(
                 CommandRequest {
+                    network_domains: Vec::new(),
                     command: user_probe,
                     cwd: root.path().to_path_buf(),
                     env: BTreeMap::new(),
@@ -1884,6 +2513,7 @@ mod tests {
         runtime
             .block_on(executor.run(
                 CommandRequest {
+                    network_domains: Vec::new(),
                     command: "printf '%s\\n' \"$$\" > \"$ROTTWEILER_WATCHDOG_READY\"; sleep 2; printf survived > \"$ROTTWEILER_WATCHDOG_SENTINEL\"; sleep 30".to_owned(),
                     cwd: std::env::temp_dir(),
                     env: BTreeMap::from([

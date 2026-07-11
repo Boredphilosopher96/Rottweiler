@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rw_types::SessionId;
+use rw_types::{PlanArtifact, SessionId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -25,6 +25,45 @@ pub struct AskUserInput {
 
 const fn default_true() -> bool {
     true
+}
+
+/// Read-only control tool used by Plan mode to hand a structured artifact to
+/// the engine. Core owns approval and durable state; this tool only validates
+/// and returns the provider-neutral payload.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SubmitPlanTool;
+
+#[async_trait]
+impl Tool for SubmitPlanTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "submit_plan".to_owned(),
+            description: "Submit the complete implementation plan for explicit user approval."
+                .to_owned(),
+            input_schema: input_schema::<PlanArtifact>(),
+            capabilities: CapabilityManifest::default(),
+        }
+    }
+
+    async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
+        context.cancellation.check()?;
+        let artifact: PlanArtifact = parse_input(input)?;
+        if artifact.title.trim().is_empty()
+            || artifact.summary_md.trim().is_empty()
+            || artifact.steps.is_empty()
+            || artifact.steps.iter().any(|step| {
+                step.description.trim().is_empty() || step.verification.trim().is_empty()
+            })
+        {
+            return Err(ToolError::InvalidInput(
+                "plan requires a title, summary, and at least one described/verifiable step"
+                    .to_owned(),
+            ));
+        }
+        let data = serde_json::to_value(&artifact)
+            .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
+        Ok(ToolResult::new("plan submitted for approval", data))
+    }
 }
 
 /// Injected UI boundary. Headless callers can supply their own transport.

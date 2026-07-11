@@ -4,7 +4,7 @@ use rw_intel::SymbolIndex;
 
 use crate::bash::{BashTool, CommandExecutor};
 use crate::files::{EditTool, MultiEditTool, ReadTool, WriteTool};
-use crate::interaction::{AskUserTool, QuestionAsker, TodoTool};
+use crate::interaction::{AskUserTool, QuestionAsker, SubmitPlanTool, TodoTool};
 use crate::registry::{Tool, ToolError, ToolLimits, ToolRegistry};
 use crate::search::{GlobTool, GrepTool, LsTool};
 use crate::symbols::SymbolsTool;
@@ -51,6 +51,7 @@ pub fn register_builtins(
         Arc::new(WebFetchTool::new(dependencies.web_fetcher, limits)),
         todo_tool,
         Arc::new(AskUserTool::new(dependencies.question_asker, limits)),
+        Arc::new(SubmitPlanTool),
         Arc::new(SymbolsTool::new(Arc::clone(&symbol_index), limits)),
     ];
     for tool in &tools {
@@ -138,7 +139,7 @@ mod tests {
         };
         let mut registry = ToolRegistry::new();
         register_builtins(&mut registry, dependencies()).expect("builtins");
-        assert_eq!(registry.len(), 12);
+        assert_eq!(registry.len(), 13);
         assert!(
             index
                 .symbols_for_file("startup.rs")
@@ -158,6 +159,7 @@ mod tests {
             "webfetch",
             "todo",
             "ask_user",
+            "submit_plan",
             "symbols",
         ] {
             assert!(registry.resolve(name).is_some(), "missing {name}");

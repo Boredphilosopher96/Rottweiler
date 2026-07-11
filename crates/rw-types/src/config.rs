@@ -251,14 +251,29 @@ pub enum PermissionDecision {
 pub struct PermissionConfig {
     /// Decision used when no more-specific policy applies.
     pub default: PermissionDecision,
+    /// Tool/argument patterns evaluated before the default.
+    #[serde(default)]
+    pub rules: Vec<PermissionRule>,
 }
 
 impl Default for PermissionConfig {
     fn default() -> Self {
         Self {
             default: PermissionDecision::Ask,
+            rules: Vec::new(),
         }
     }
+}
+
+/// One permission rule using `tool(glob-over-canonical-arguments)` syntax.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionRule {
+    /// Matcher such as `bash(git status*)` or `write(/etc/**)`.
+    #[serde(rename = "match")]
+    pub pattern: String,
+    /// Decision applied when the matcher covers the complete invocation.
+    pub action: PermissionDecision,
 }
 
 /// Sandbox settings that may only be changed by user-level configuration.
@@ -391,6 +406,8 @@ pub struct NetworkConfigFile {
 pub struct PermissionConfigFile {
     /// Optional default-decision override.
     pub default: Option<PermissionDecision>,
+    /// Optional replacement rule set.
+    pub rules: Option<Vec<PermissionRule>>,
 }
 
 /// Partial sandbox configuration.

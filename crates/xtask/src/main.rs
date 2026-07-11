@@ -7,13 +7,13 @@ use rw_types::{
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
     ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CompactionReason,
     ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost,
-    CostSnapshot, EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModelAlias,
-    ModelCacheBehavior, ModelCapabilities, ModelDescriptor, PromptDump, PromptTool, Question,
-    QuestionId, QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId,
-    SessionDescriptor, SessionId, ShellId, StoredAttachment, SubagentId, ToolCallId,
-    ToolCapability, ToolOutput, ToolOutputPart, ToolOutputStream, Turn, TurnAccounting, TurnId,
-    TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceStatus,
+    CostSnapshot, EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModeId,
+    ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor, PlanArtifact, PlanDecision,
+    PlanStep, PromptDump, PromptTool, Question, QuestionId, QuestionOption, QuestionResponseKind,
+    RequestId, RewindTarget, Role, SequenceId, SessionDescriptor, SessionId, ShellId,
+    StoredAttachment, SubagentId, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
+    ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
+    UnrestorablePath, Usage, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -174,6 +174,10 @@ fn generate_typescript() -> String {
     declaration!(UnifiedDiff);
     declaration!(ApprovalBinding);
     declaration!(ApprovalDecision);
+    declaration!(ModeId);
+    declaration!(PlanStep);
+    declaration!(PlanArtifact);
+    declaration!(PlanDecision);
     declaration!(RewindTarget);
     declaration!(QuestionResponseKind);
     declaration!(QuestionOption);
@@ -311,6 +315,16 @@ fn contract_fixture() -> ContractFixture {
             summary: false,
         },
     };
+    let plan_artifact = PlanArtifact {
+        title: "Protocol plan".to_owned(),
+        summary_md: "Exercise the durable plan contract.".to_owned(),
+        steps: vec![PlanStep {
+            description: "Verify generated clients".to_owned(),
+            files_touched: vec!["protocol/types.ts".to_owned()],
+            verification: "cargo xtask codegen --check".to_owned(),
+        }],
+        open_questions: Vec::new(),
+    };
 
     ContractFixture {
         turns: vec![turn],
@@ -366,6 +380,12 @@ fn contract_fixture() -> ContractFixture {
                 decision: ApprovalDecision::AllowOnce,
                 binding: None,
             },
+            ClientCommand::ApprovePlan {
+                meta: command_meta.clone(),
+                session_id: SessionId("session-fixture".to_owned()),
+                decision: PlanDecision::Approve,
+                revisions: None,
+            },
             ClientCommand::AnswerQuestion {
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
@@ -382,7 +402,7 @@ fn contract_fixture() -> ContractFixture {
             ClientCommand::SwitchMode {
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
-                mode: "plan".to_owned(),
+                mode: ModeId("plan".to_owned()),
             },
             ClientCommand::SwitchModel {
                 meta: command_meta.clone(),
@@ -617,7 +637,7 @@ fn contract_fixture() -> ContractFixture {
             },
             EngineEvent::ModeChanged {
                 meta: event_meta(18),
-                mode: "plan".to_owned(),
+                mode: ModeId("plan".to_owned()),
             },
             EngineEvent::ModelChanged {
                 meta: event_meta(19),
@@ -650,6 +670,16 @@ fn contract_fixture() -> ContractFixture {
                     retryable: false,
                     details: Some(json!({"field": "type"})),
                 },
+            },
+            EngineEvent::PlanSubmitted {
+                meta: event_meta(24),
+                artifact: plan_artifact.clone(),
+            },
+            EngineEvent::PlanReviewed {
+                meta: event_meta(25),
+                artifact: plan_artifact,
+                decision: PlanDecision::Approve,
+                revisions: None,
             },
         ],
     }

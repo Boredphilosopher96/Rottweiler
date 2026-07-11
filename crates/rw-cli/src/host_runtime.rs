@@ -53,6 +53,7 @@ pub(crate) struct CliHostOptions {
 impl CliHostOptions {
     pub(crate) fn from_environment(
         allowed_workspaces: Vec<PathBuf>,
+        dangerously_trust: bool,
         permission_mode: Option<PermissionMode>,
         max_turns: usize,
         provider_mode: HostedProviderMode,
@@ -64,6 +65,11 @@ impl CliHostOptions {
             .parent()
             .ok_or_else(|| HostError::Persistence("configuration root is unavailable".to_owned()))?
             .to_path_buf();
+        let loader = if dangerously_trust {
+            loader.dangerously_trust_project()
+        } else {
+            loader
+        };
         let config = loader
             .load()
             .map_err(|error| HostError::Persistence(error.to_string()))?
@@ -148,6 +154,21 @@ impl CliSessionFactory {
         Ok(workspace)
     }
 
+    fn workspace_roots_for_session(
+        &self,
+        descriptor: &SessionDescriptor,
+    ) -> Result<Vec<PathBuf>, HostError> {
+        let primary = self.workspace_for_session(descriptor)?;
+        let mut roots = vec![primary.clone()];
+        roots.extend(
+            self.allowed_workspaces
+                .iter()
+                .filter(|root| **root != primary)
+                .cloned(),
+        );
+        Ok(roots)
+    }
+
     fn authorize_workspace_path(&self, workspace: &Path) -> Result<PathBuf, HostError> {
         let canonical = fs::canonicalize(workspace)
             .map_err(|_| HostError::Query("session workspace is unavailable".to_owned()))?;
@@ -173,6 +194,12 @@ impl CliSessionFactory {
     ) -> Result<HostedSession, HostError> {
         let runtime = compose_hosted_actor(HostedSessionComposition {
             workspace: workspace.clone(),
+            additional_workspaces: self
+                .allowed_workspaces
+                .iter()
+                .filter(|root| **root != workspace)
+                .cloned()
+                .collect(),
             storage_root: self.options.storage_root.clone(),
             credentials_path: self.options.credentials_path.clone(),
             config: self.options.config.clone(),
@@ -320,14 +347,14 @@ impl HostQueryService for CliSessionFactory {
         query: &str,
         limit: u32,
     ) -> Result<(Vec<WorkspaceFileMatch>, bool), HostError> {
-        let workspace = self.workspace_for_session(session)?;
+        let workspaces = self.workspace_roots_for_session(session)?;
         let query = query.to_owned();
         let limit = usize::try_from(limit)
             .unwrap_or(usize::MAX)
             .clamp(1, MAX_SEARCH_RESULTS);
         tokio::time::timeout(
             QUERY_DEADLINE,
-            tokio::task::spawn_blocking(move || search_workspace(&workspace, &query, limit)),
+            tokio::task::spawn_blocking(move || search_workspaces(&workspaces, &query, limit)),
         )
         .await
         .map_err(|_| HostError::Query("workspace search deadline exceeded".to_owned()))?
@@ -340,8 +367,13 @@ impl HostQueryService for CliSessionFactory {
         path: &str,
         max_bytes: u32,
     ) -> Result<WorkspaceFilePreview, HostError> {
-        let workspace = self.workspace_for_session(session)?;
-        let relative = safe_relative_path(path)?;
+        let workspaces = self.workspace_roots_for_session(session)?;
+        let (root_index, relative) = split_virtual_path(path)?;
+        let workspace = workspaces
+            .get(root_index)
+            .cloned()
+            .ok_or_else(|| HostError::Query("workspace root index is not authorized".to_owned()))?;
+        let rendered_path = path.to_owned();
         let maximum = usize::try_from(max_bytes)
             .unwrap_or(usize::MAX)
             .min(MAX_PREVIEW_BYTES);
@@ -352,7 +384,11 @@ impl HostQueryService for CliSessionFactory {
         }
         tokio::time::timeout(
             QUERY_DEADLINE,
-            tokio::task::spawn_blocking(move || preview_file(&workspace, &relative, maximum)),
+            tokio::task::spawn_blocking(move || {
+                let mut preview = preview_file(&workspace, &relative, maximum)?;
+                preview.path = rendered_path;
+                Ok(preview)
+            }),
         )
         .await
         .map_err(|_| HostError::Query("workspace preview deadline exceeded".to_owned()))?
@@ -474,6 +510,77 @@ fn safe_relative_path(value: &str) -> Result<PathBuf, HostError> {
         ));
     }
     Ok(normalized)
+}
+
+fn split_virtual_path(value: &str) -> Result<(usize, PathBuf), HostError> {
+    let normalized = safe_relative_path(value)?;
+    let mut components = normalized.components();
+    let Some(Component::Normal(first)) = components.next() else {
+        return Err(HostError::Query("workspace path is invalid".to_owned()));
+    };
+    if first != "@root" {
+        return Ok((0, normalized));
+    }
+    let Some(Component::Normal(index)) = components.next() else {
+        return Err(HostError::Query(
+            "virtual workspace path must use @root/<index>/...".to_owned(),
+        ));
+    };
+    let index = index
+        .to_str()
+        .and_then(|index| index.parse::<usize>().ok())
+        .filter(|index| *index > 0)
+        .ok_or_else(|| HostError::Query("workspace root index must be positive".to_owned()))?;
+    let relative = components.fold(PathBuf::new(), |path, component| {
+        path.join(component.as_os_str())
+    });
+    if relative.as_os_str().is_empty() {
+        return Err(HostError::Query(
+            "virtual workspace path must name a file".to_owned(),
+        ));
+    }
+    Ok((index, relative))
+}
+
+#[cfg(unix)]
+fn search_workspaces(
+    workspaces: &[PathBuf],
+    query: &str,
+    limit: usize,
+) -> Result<(Vec<WorkspaceFileMatch>, bool), HostError> {
+    let mut combined = Vec::new();
+    let mut truncated = false;
+    for (index, workspace) in workspaces.iter().enumerate() {
+        let remaining = limit.saturating_sub(combined.len());
+        if remaining == 0 {
+            truncated = true;
+            break;
+        }
+        let (mut matches, root_truncated) = search_workspace(workspace, query, remaining)?;
+        if index > 0 {
+            for item in &mut matches {
+                item.path = format!("@root/{index}/{}", item.path);
+            }
+        }
+        combined.extend(matches);
+        truncated |= root_truncated;
+        if truncated || combined.len() >= limit {
+            break;
+        }
+    }
+    combined.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok((combined, truncated))
+}
+
+#[cfg(not(unix))]
+fn search_workspaces(
+    _workspaces: &[PathBuf],
+    _query: &str,
+    _limit: usize,
+) -> Result<(Vec<WorkspaceFileMatch>, bool), HostError> {
+    Err(HostError::Query(
+        "safe workspace search is unavailable on this platform".to_owned(),
+    ))
 }
 
 #[cfg(unix)]
@@ -794,6 +901,13 @@ mod tests {
             safe_relative_path("nested//safe.txt").expect("normalized path"),
             Path::new("nested/safe.txt")
         );
+        assert_eq!(
+            split_virtual_path("@root/2/nested/safe.txt").expect("virtual path"),
+            (2, PathBuf::from("nested/safe.txt"))
+        );
+        for path in ["@root/0/file", "@root/1", "@root/1/../escape"] {
+            assert!(split_virtual_path(path).is_err(), "{path}");
+        }
         for path in ["binary.bin", "link.txt"] {
             let relative = safe_relative_path(path).expect("normalized path");
             let error = preview_file(&workspace, &relative, 1024).expect_err("unsafe preview");

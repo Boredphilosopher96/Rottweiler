@@ -1084,7 +1084,7 @@
           "$ref": "#/$defs/EventMeta"
         },
         "mode": {
-          "type": "string"
+          "$ref": "#/$defs/ModeId"
         },
         "type": {
           "type": "string",
@@ -1095,6 +1095,56 @@
         "type",
         "meta",
         "mode"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "artifact": {
+          "$ref": "#/$defs/PlanArtifact"
+        },
+        "type": {
+          "type": "string",
+          "const": "plan_submitted"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "artifact"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "artifact": {
+          "$ref": "#/$defs/PlanArtifact"
+        },
+        "decision": {
+          "$ref": "#/$defs/PlanDecision"
+        },
+        "revisions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "plan_reviewed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "artifact",
+        "decision"
       ]
     },
     {
@@ -2765,6 +2815,71 @@
     "SubagentId": {
       "description": "Stable identifier of a child agent session.",
       "type": "string"
+    },
+    "ModeId": {
+      "description": "Open identifier of a built-in or extension-provided mode.",
+      "type": "string"
+    },
+    "PlanArtifact": {
+      "description": "Durable plan submitted before entering execute mode.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string"
+        },
+        "summary_md": {
+          "type": "string"
+        },
+        "steps": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PlanStep"
+          }
+        },
+        "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "title",
+        "summary_md",
+        "steps"
+      ]
+    },
+    "PlanStep": {
+      "description": "One verifiable step in a model-submitted plan artifact.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "files_touched": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "verification": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "verification"
+      ]
+    },
+    "PlanDecision": {
+      "description": "Driver response to a submitted plan.",
+      "type": "string",
+      "enum": [
+        "approve",
+        "reject"
+      ]
     },
     "ShellId": {
       "description": "Engine-generated identifier of one foreground user shell.",

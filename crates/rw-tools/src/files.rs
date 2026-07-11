@@ -823,6 +823,71 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn added_root_is_writable_while_its_parent_remains_blocked() {
+        let root = tempfile::tempdir().expect("root");
+        let primary = root.path().join("primary");
+        let added = root.path().join("added");
+        std::fs::create_dir_all(&primary).expect("primary");
+        std::fs::create_dir_all(&added).expect("added");
+        std::fs::write(root.path().join("parent.txt"), "blocked").expect("parent fixture");
+        let context = ToolContext::from_workspace_roots([&primary, &added]).expect("context");
+        let write = WriteTool::new(ToolLimits::default());
+
+        write
+            .execute(
+                &context,
+                json!({"path": "@root/1/created.txt", "content": "from added root"}),
+            )
+            .await
+            .expect("write added root");
+        assert_eq!(
+            std::fs::read_to_string(added.join("created.txt")).expect("created"),
+            "from added root"
+        );
+        write
+            .execute(
+                &context,
+                json!({"path": "../added/relative.txt", "content": "relative sibling"}),
+            )
+            .await
+            .expect("relative added root");
+        assert!(matches!(
+            write
+                .execute(
+                    &context,
+                    json!({"path": "../parent.txt", "content": "escape"}),
+                )
+                .await,
+            Err(ToolError::PathEscape(_))
+        ));
+        assert!(matches!(
+            write
+                .execute(
+                    &context,
+                    json!({"path": "@root/1/../parent.txt", "content": "escape"}),
+                )
+                .await,
+            Err(ToolError::PathEscape(_))
+        ));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("parent.txt")).expect("parent preserved"),
+            "blocked"
+        );
+
+        let nested = primary.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested");
+        std::fs::write(nested.join("owned.txt"), "nested").expect("nested fixture");
+        let nested_context =
+            ToolContext::from_workspace_roots([&primary, &nested]).expect("nested context");
+        let nested_file =
+            std::fs::canonicalize(nested.join("owned.txt")).expect("canonical nested");
+        assert_eq!(
+            nested_context.relative_display(&nested_file),
+            PathBuf::from("@root/1/owned.txt")
+        );
+    }
+
     #[test]
     fn edit_is_exact_first_then_normalized_and_never_guesses() {
         let (exact, mode) = apply_edit("a  b\na b", "a  b", "x").expect("exact");

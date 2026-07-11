@@ -180,6 +180,13 @@ impl FixtureRedactor {
         self.register_value(secret.expose_secret().to_owned());
     }
 
+    /// Registers a value already classified as sensitive by a trusted
+    /// composition boundary, such as an environment variable whose name ends
+    /// in `_API_KEY`. The value is never exposed by this type.
+    pub fn register_known_value(&self, value: &str) {
+        self.register_value(value.to_owned());
+    }
+
     /// Number of non-empty known secrets registered for fixture sanitization.
     /// This exposes no credential material and supports acceptance assertions
     /// that every preflighted credential reached the recording boundary.
@@ -215,9 +222,10 @@ impl FixtureRedactor {
 
     fn redact(&self, value: &str) -> String {
         let redact_with = |secrets: &[String]| {
-            secrets.iter().fold(value.to_owned(), |rendered, secret| {
+            let rendered = secrets.iter().fold(value.to_owned(), |rendered, secret| {
                 rendered.replace(secret, "[REDACTED]")
-            })
+            });
+            redact_strict_key_formats(&rendered)
         };
         match self.secrets.read() {
             Ok(secrets) => redact_with(&secrets),
@@ -237,6 +245,39 @@ impl FixtureRedactor {
             secrets.push(secret);
         }
     }
+}
+
+/// Redacts credential formats with stable vendor-defined markers. Entropy
+/// heuristics are deliberately excluded so ordinary hashes, base64 payloads,
+/// and minified source remain intact at the model-context boundary.
+fn redact_strict_key_formats(value: &str) -> String {
+    use std::sync::OnceLock;
+
+    use regex::Regex;
+
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            // PEM private keys, including PKCS#1, PKCS#8, EC, and OpenSSH.
+            r"(?s)-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
+            // OpenAI/Anthropic-style secret keys.
+            r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}\b",
+            // GitHub personal, OAuth, user, server, and refresh tokens.
+            r"\bgh[pousr]_[A-Za-z0-9]{20,}\b",
+            // AWS access-key identifiers.
+            r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
+            // Google API keys, Slack tokens, and npm granular tokens.
+            r"\bAIza[0-9A-Za-z_-]{35}\b",
+            r"\bxox[baprs]-[0-9A-Za-z-]{20,}\b",
+            r"\bnpm_[A-Za-z0-9]{36}\b",
+        ]
+        .into_iter()
+        .map(|pattern| Regex::new(pattern).unwrap_or_else(|_| unreachable!("static regex")))
+        .collect()
+    });
+    patterns.iter().fold(value.to_owned(), |redacted, pattern| {
+        pattern.replace_all(&redacted, "[REDACTED]").into_owned()
+    })
 }
 
 impl crate::KnownSecretRegistrar for FixtureRedactor {
@@ -1482,6 +1523,30 @@ mod tests {
         assert!(!debug.contains(FIRST));
         assert!(!debug.contains(SECOND));
         assert_eq!(redactor.registered_secret_count(), 2);
+    }
+
+    #[test]
+    fn strict_key_formats_are_redacted_without_corrupting_normal_code_data() {
+        let redactor = FixtureRedactor::default();
+        let private_key = "-----BEGIN OPENSSH PRIVATE KEY-----\ncanary-private-material\n-----END OPENSSH PRIVATE KEY-----";
+        let values = [
+            "sk-proj-abcdefghijklmnopqrstuvwxyz012345",
+            "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "AKIAABCDEFGHIJKLMNOP",
+            "AIzaabcdefghijklmnopqrstuvwxyz123456789",
+            concat!("xoxb-", "1234567890-abcdefghijklmnopqrstuvwxyz"),
+            "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+            private_key,
+        ];
+        let input = values.join("\n");
+        let redacted = redactor.redact_text(&input);
+        for value in values {
+            assert!(!redacted.contains(value));
+        }
+        assert_eq!(redacted.matches("[REDACTED]").count(), 7);
+
+        let ordinary = "sha256:0123456789abcdef0123456789abcdef and eyJub3QtYS10b2tlbiI6dHJ1ZX0";
+        assert_eq!(redactor.redact_text(ordinary), ordinary);
     }
 
     #[async_trait]

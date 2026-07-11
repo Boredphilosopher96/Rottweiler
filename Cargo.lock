@@ -1494,6 +1494,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "landlock"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "635839550ae8b90d9fd2571460a6645dc0aec070225956ca7a2831ed31d2795d"
+dependencies = [
+ "enumflags2",
+ "libc",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2459,6 +2470,7 @@ dependencies = [
  "rustix",
  "rustyline",
  "rw-core",
+ "rw-sandbox",
  "rw-store",
  "serde",
  "serde_json",
@@ -2493,6 +2505,7 @@ dependencies = [
  "blake3",
  "futures-util",
  "getrandom 0.4.3",
+ "globset",
  "rustix",
  "rw-context",
  "rw-ext",
@@ -2503,6 +2516,7 @@ dependencies = [
  "rw-types",
  "serde",
  "serde_json",
+ "shell-words",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2558,6 +2572,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "getrandom 0.4.3",
+ "regex",
  "reqwest",
  "rw-types",
  "serde",
@@ -2574,7 +2589,15 @@ dependencies = [
 name = "rw-sandbox"
 version = "0.1.0"
 dependencies = [
+ "landlock",
+ "libc",
  "rw-types",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -2582,6 +2605,7 @@ name = "rw-store"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "globset",
  "keyring",
  "rusqlite",
  "rustix",
@@ -2613,6 +2637,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "shell-words",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -2689,6 +2714,15 @@ dependencies = [
  "precomputed-hash",
  "selectors",
  "tendril",
+]
+
+[[package]]
+name = "seccompiler"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae55de56877481d112a559bbc12667635fdaf5e005712fd4e2b2fa50ffc884"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

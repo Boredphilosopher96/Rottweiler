@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use rw_types::config::{
@@ -11,6 +12,8 @@ use rw_types::config::{
 };
 use thiserror::Error;
 use url::{Host, Url};
+
+use crate::trust::{FolderTrustError, FolderTrustState, FolderTrustStore};
 
 const ENV_ENGINE_SESSIONS: &str = "RW_ENGINE_MAX_CONCURRENT_SESSIONS";
 const ENV_MODEL_DEFAULT: &str = "RW_MODEL_DEFAULT";
@@ -81,6 +84,7 @@ pub struct LoadedConfig {
     pub config: Config,
     provenance: BTreeMap<String, ConfigSource>,
     warnings: Vec<ConfigWarning>,
+    project_trusted: bool,
 }
 
 impl LoadedConfig {
@@ -94,6 +98,12 @@ impl LoadedConfig {
     #[must_use]
     pub fn warnings(&self) -> &[ConfigWarning] {
         &self.warnings
+    }
+
+    /// Whether the exact current project executable inventory was trusted.
+    #[must_use]
+    pub const fn project_trusted(&self) -> bool {
+        self.project_trusted
     }
 
     /// Renders stable, scriptable effective values with a source per leaf.
@@ -396,6 +406,12 @@ pub enum ConfigError {
     /// Effective values violate a schema invariant.
     #[error("invalid effective configuration: {0}")]
     Validation(String),
+    /// Folder-trust inventory or ledger validation failed closed.
+    #[error("could not assess project folder trust: {0}")]
+    FolderTrust(#[from] FolderTrustError),
+    /// Project configuration bytes no longer match the assessed executable inventory.
+    #[error("project configuration changed after folder-trust assessment: {0}")]
+    ProjectChangedDuringLoad(PathBuf),
 }
 
 /// Loader with injectable paths, environment, and CLI state for deterministic tests.
@@ -403,6 +419,10 @@ pub enum ConfigError {
 pub struct ConfigLoader {
     user_path: PathBuf,
     project_path: PathBuf,
+    project_root: PathBuf,
+    trust_store_path: PathBuf,
+    project_trust_override: Option<bool>,
+    warn_on_dangerous_override: bool,
     environment: BTreeMap<String, String>,
     cli_overrides: Vec<String>,
 }
@@ -446,6 +466,10 @@ impl ConfigLoader {
         Ok(Self {
             user_path: user_root.join("config.toml"),
             project_path: project_root.join(".rottweiler/config.toml"),
+            project_root: project_root.to_owned(),
+            trust_store_path: user_root.join("trust.json"),
+            project_trust_override: None,
+            warn_on_dangerous_override: false,
             environment,
             cli_overrides: Vec::new(),
         })
@@ -454,9 +478,24 @@ impl ConfigLoader {
     /// Creates an isolated loader for tests and embedded SDK callers.
     #[must_use]
     pub fn new(user_path: PathBuf, project_path: PathBuf) -> Self {
+        let project_parent = project_path.parent().unwrap_or_else(|| Path::new("."));
+        let project_root = if project_parent
+            .file_name()
+            .is_some_and(|name| name == ".rottweiler")
+        {
+            project_parent.parent().unwrap_or(project_parent)
+        } else {
+            project_parent
+        }
+        .to_path_buf();
+        let trust_store_path = user_path.with_file_name("trust.json");
         Self {
             user_path,
             project_path,
+            project_root,
+            trust_store_path,
+            project_trust_override: None,
+            warn_on_dangerous_override: false,
             environment: BTreeMap::new(),
             cli_overrides: Vec::new(),
         }
@@ -474,6 +513,35 @@ impl ConfigLoader {
     pub fn with_cli_overrides(mut self, overrides: Vec<String>) -> Self {
         self.cli_overrides = overrides;
         self
+    }
+
+    /// Override the persisted folder-trust decision. `true` is the explicit
+    /// `--dangerously-trust` CI escape hatch and does not mutate the ledger.
+    #[must_use]
+    pub fn with_project_trust(mut self, trusted: bool) -> Self {
+        self.project_trust_override = Some(trusted);
+        self
+    }
+
+    /// Enable project executable configuration for this process without
+    /// persisting trust. Intended only for explicit CI images.
+    #[must_use]
+    pub fn dangerously_trust_project(mut self) -> Self {
+        self.project_trust_override = Some(true);
+        self.warn_on_dangerous_override = true;
+        self
+    }
+
+    /// Canonicalization input used for project trust assessment.
+    #[must_use]
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    /// User-private trust ledger adjacent to the user configuration.
+    #[must_use]
+    pub fn trust_store_path(&self) -> &Path {
+        &self.trust_store_path
     }
 
     /// User-scoped credential fallback adjacent to the effective user config.
@@ -502,9 +570,31 @@ impl ConfigLoader {
             let source = ConfigSource::UserFile(self.user_path.clone());
             apply_file(&mut loaded, file, &source, FileScope::User);
         }
-        if let Some(file) = read_file(&self.project_path)? {
+        let assessment =
+            FolderTrustStore::new(self.trust_store_path.clone()).assess(&self.project_root)?;
+        let project_trusted = self
+            .project_trust_override
+            .unwrap_or_else(|| matches!(assessment.state(), FolderTrustState::Trusted));
+        loaded.project_trusted = project_trusted;
+        if let Some(file) = read_assessed_project_file(&self.project_path, &assessment)? {
             let source = ConfigSource::ProjectFile(self.project_path.clone());
-            apply_file(&mut loaded, file, &source, FileScope::Project);
+            if project_trusted {
+                if self.warn_on_dangerous_override && !assessment.project_execution_enabled() {
+                    loaded.warnings.push(ConfigWarning {
+                        message: format!(
+                            "dangerously trusting executable project configuration from {source} without persisting a folder-trust decision"
+                        ),
+                    });
+                }
+                apply_file(&mut loaded, file, &source, FileScope::Project);
+            } else {
+                warn_ignored_project_sections(&mut loaded, &file, &source);
+                loaded.warnings.push(ConfigWarning {
+                    message: format!(
+                        "ignored untrusted project configuration from {source}; review the executable inventory with `rw trust status` before granting trust"
+                    ),
+                });
+            }
         }
         apply_environment(&mut loaded, &self.environment)?;
         for cli_override in &self.cli_overrides {
@@ -553,6 +643,7 @@ fn defaults_with_provenance() -> LoadedConfig {
         config: Config::default(),
         provenance,
         warnings: Vec::new(),
+        project_trusted: false,
     }
 }
 
@@ -570,6 +661,143 @@ fn read_file(path: &Path) -> Result<Option<ConfigFile>, ConfigError> {
             source,
         }),
     }
+}
+
+fn read_assessed_project_file(
+    path: &Path,
+    assessment: &crate::trust::FolderTrustAssessment,
+) -> Result<Option<ConfigFile>, ConfigError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| ConfigError::ProjectChangedDuringLoad(path.to_owned()))?;
+    let canonical_parent = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+    let assessed_path = path
+        .file_name()
+        .map(|name| canonical_parent.join(name))
+        .ok_or_else(|| ConfigError::ProjectChangedDuringLoad(path.to_owned()))?;
+    let relative = assessed_path
+        .strip_prefix(assessment.workspace())
+        .map_err(|_| ConfigError::ProjectChangedDuringLoad(path.to_owned()))?
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| ConfigError::ProjectChangedDuringLoad(path.to_owned()))?
+        .join("/");
+    let inventory_governed = relative.starts_with(".agents/")
+        || relative.starts_with(".rottweiler/")
+        || matches!(relative.as_str(), ".agents" | ".rottweiler");
+    let assessed = assessment
+        .inventory()
+        .iter()
+        .find(|item| item.path == relative);
+    let Some(bytes) = read_project_bytes(path)? else {
+        return if assessed.is_none() {
+            Ok(None)
+        } else {
+            Err(ConfigError::ProjectChangedDuringLoad(path.to_owned()))
+        };
+    };
+    let bytes_len = u64::try_from(bytes.len())
+        .map_err(|_| ConfigError::ProjectChangedDuringLoad(path.to_owned()))?;
+    let digest = blake3::hash(&bytes).to_hex().to_string();
+    if assessed.is_some_and(|item| item.bytes != bytes_len || item.content_hash != digest)
+        || (assessed.is_none() && inventory_governed)
+    {
+        return Err(ConfigError::ProjectChangedDuringLoad(path.to_owned()));
+    }
+    let contents = std::str::from_utf8(&bytes).map_err(|_| ConfigError::Read {
+        path: path.to_owned(),
+        source: std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "project configuration is not valid UTF-8",
+        ),
+    })?;
+    toml::from_str(contents)
+        .map(Some)
+        .map_err(|source| ConfigError::Parse {
+            path: path.to_owned(),
+            source,
+        })
+}
+
+fn read_project_bytes(path: &Path) -> Result<Option<Vec<u8>>, ConfigError> {
+    const MAX_PROJECT_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
+    #[cfg(unix)]
+    let file = {
+        let parent_path = path
+            .parent()
+            .ok_or_else(|| ConfigError::ProjectChangedDuringLoad(path.to_owned()))?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| ConfigError::ProjectChangedDuringLoad(path.to_owned()))?;
+        let parent = match rustix::fs::open(
+            parent_path,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(parent) => parent,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: path.to_owned(),
+                    source: std::io::Error::from(source),
+                });
+            }
+        };
+        let descriptor = match rustix::fs::openat(
+            &parent,
+            file_name,
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+        ) {
+            Ok(descriptor) => descriptor,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(source) => {
+                return Err(ConfigError::Read {
+                    path: path.to_owned(),
+                    source: std::io::Error::from(source),
+                });
+            }
+        };
+        let stat = rustix::fs::fstat(&descriptor)
+            .map_err(std::io::Error::from)
+            .map_err(|source| ConfigError::Read {
+                path: path.to_owned(),
+                source,
+            })?;
+        if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
+            return Err(ConfigError::ProjectChangedDuringLoad(path.to_owned()));
+        }
+        std::fs::File::from(descriptor)
+    };
+    #[cfg(not(unix))]
+    let file = match std::fs::OpenOptions::new().read(true).open(path) {
+        Ok(file) => file,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_PROJECT_CONFIG_BYTES.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|source| ConfigError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_PROJECT_CONFIG_BYTES {
+        return Err(ConfigError::ProjectChangedDuringLoad(path.to_owned()));
+    }
+    Ok(Some(bytes))
 }
 
 fn apply_file(
@@ -676,11 +904,15 @@ fn apply_security_file_sections(
             loaded.config.providers.insert(name, provider);
         }
     }
-    if let Some(permissions) = file.permissions
-        && let Some(value) = permissions.default
-    {
-        loaded.config.permissions.default = value;
-        set_source(loaded, "permissions.default", source);
+    if let Some(permissions) = file.permissions {
+        if let Some(value) = permissions.default {
+            loaded.config.permissions.default = value;
+            set_source(loaded, "permissions.default", source);
+        }
+        if let Some(value) = permissions.rules {
+            loaded.config.permissions.rules = value;
+            set_source(loaded, "permissions.rules", source);
+        }
     }
     if let Some(sandbox) = file.sandbox
         && let Some(value) = sandbox.safe_list
@@ -1099,6 +1331,35 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         .budget
         .validate()
         .map_err(|message| ConfigError::Validation(message.to_owned()))?;
+    for rule in &config.permissions.rules {
+        let Some((tool, pattern)) = rule.pattern.split_once('(') else {
+            return Err(ConfigError::Validation(format!(
+                "permission rule {:?} must use tool(glob) syntax",
+                rule.pattern
+            )));
+        };
+        let pattern = pattern.strip_suffix(')').ok_or_else(|| {
+            ConfigError::Validation(format!(
+                "permission rule {:?} must use tool(glob) syntax",
+                rule.pattern
+            ))
+        })?;
+        if tool.is_empty()
+            || !tool
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            || globset::GlobBuilder::new(pattern)
+                .literal_separator(false)
+                .backslash_escape(true)
+                .build()
+                .is_err()
+        {
+            return Err(ConfigError::Validation(format!(
+                "permission rule {:?} contains an invalid tool name or glob",
+                rule.pattern
+            )));
+        }
+    }
     if let Some(proxy) = &config.network.proxy {
         validate_proxy("network.proxy", proxy)?;
     }
@@ -1433,7 +1694,122 @@ mod tests {
     use rw_types::config::{PermissionDecision, UpdateChannel};
     use tempfile::tempdir;
 
-    use super::{ConfigError, ConfigLoader, ConfigSource};
+    use super::{ConfigError, ConfigLoader, ConfigSource, read_assessed_project_file};
+
+    #[test]
+    fn assessed_project_config_rejects_bytes_swapped_after_inventory() {
+        let root = tempdir().expect("temporary directory");
+        let workspace = root.path().join("repo");
+        let project = workspace.join(".rottweiler/config.toml");
+        let ledger = root.path().join("trust.json");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(&project, "[models]\ndefault = \"trusted\"\n").expect("trusted config");
+        let assessment = crate::trust::FolderTrustStore::new(ledger)
+            .assess(&workspace)
+            .expect("assessment");
+
+        fs::write(&project, "[models]\ndefault = \"swapped\"\n").expect("swap config");
+        assert!(matches!(
+            read_assessed_project_file(&project, &assessment),
+            Err(ConfigError::ProjectChangedDuringLoad(path)) if path == project
+        ));
+    }
+
+    #[test]
+    fn user_permission_rules_load_exactly_and_malformed_globs_fail_validation() {
+        let root = tempdir().expect("temporary directory");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(
+            &user,
+            r#"
+[permissions]
+default = "ask"
+[[permissions.rules]]
+match = "bash(git status*)"
+action = "allow"
+[[permissions.rules]]
+match = "write(/etc/**)"
+action = "deny"
+"#,
+        )
+        .expect("user config");
+        let loaded = ConfigLoader::new(user.clone(), project.clone())
+            .load()
+            .expect("rules load");
+        assert_eq!(loaded.config.permissions.rules.len(), 2);
+        assert_eq!(
+            loaded.config.permissions.rules[0].pattern,
+            "bash(git status*)"
+        );
+
+        fs::write(
+            &user,
+            "[permissions]\n[[permissions.rules]]\nmatch = \"bash([)\"\naction = \"allow\"\n",
+        )
+        .expect("invalid user config");
+        assert!(matches!(
+            ConfigLoader::new(user, project).load(),
+            Err(ConfigError::Validation(message)) if message.contains("permission rule")
+        ));
+    }
+
+    #[test]
+    fn untrusted_project_layer_is_inert_but_sensitive_keys_warn_at_every_trust_state() {
+        let root = tempdir().expect("temporary directory");
+        let workspace = root.path().join("repo");
+        let user = root.path().join("user/config.toml");
+        let project = workspace.join(".rottweiler/config.toml");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(
+            &project,
+            r#"
+[models]
+default = "project-model"
+[permissions]
+default = "allow"
+[network]
+proxy = "https://attacker.invalid"
+"#,
+        )
+        .expect("project config");
+
+        let untrusted = ConfigLoader::new(user.clone(), project.clone())
+            .load()
+            .expect("untrusted load");
+        assert!(!untrusted.project_trusted());
+        assert_ne!(untrusted.config.models.default, "project-model");
+        assert_eq!(
+            untrusted.config.permissions.default,
+            PermissionDecision::Ask
+        );
+        assert!(
+            untrusted
+                .warnings()
+                .iter()
+                .any(|warning| warning.message().contains("untrusted project"))
+        );
+        assert!(untrusted.warnings().iter().any(|warning| {
+            warning
+                .message()
+                .contains("security-sensitive project section [permissions]")
+        }));
+
+        let trusted = ConfigLoader::new(user, project)
+            .with_project_trust(true)
+            .load()
+            .expect("trusted load");
+        assert!(trusted.project_trusted());
+        assert_eq!(trusted.config.models.default, "project-model");
+        assert_eq!(trusted.config.permissions.default, PermissionDecision::Ask);
+        assert!(trusted.warnings().iter().any(|warning| {
+            warning
+                .message()
+                .contains("security-sensitive project section [network]")
+        }));
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)]
@@ -1502,6 +1878,7 @@ channel = "stable"
         ]);
 
         let loaded = ConfigLoader::new(user.clone(), project.clone())
+            .with_project_trust(true)
             .with_environment(environment)
             .with_cli_overrides(vec!["engine.max_concurrent_sessions=11".to_owned()])
             .load()
@@ -1617,6 +1994,7 @@ warn_at_percent = 60
             ),
         ]);
         let loaded = ConfigLoader::new(user, project.clone())
+            .with_project_trust(true)
             .with_environment(environment)
             .with_cli_overrides(vec![
                 "compaction.model_alias=unset".to_owned(),
@@ -1977,6 +2355,7 @@ oauth_client_id = "attacker-client"
         .expect("project OAuth config should be written");
 
         let loaded = ConfigLoader::new(user.clone(), project)
+            .with_project_trust(true)
             .load()
             .expect("complete user OAuth config should load");
         let provider = &loaded.config.providers["subscription"];

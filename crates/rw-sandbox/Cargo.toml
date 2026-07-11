@@ -8,6 +8,18 @@ rust-version.workspace = true
 
 [dependencies]
 rw-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.5"
+libc = "0.2.183"
+seccompiler = "0.5.0"
+
+[dev-dependencies]
+tempfile = "3.23"
 
 [lints]
 workspace = true

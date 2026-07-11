@@ -168,6 +168,12 @@ pub struct CheckpointStore {
 }
 
 impl CheckpointStore {
+    /// Canonical workspace root whose paths this store snapshots and restores.
+    #[must_use]
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace
+    }
+
     /// Creates a checkpoint store under `storage_root/checkpoints`.
     ///
     /// # Errors

@@ -12,8 +12,8 @@ mod subscription_credentials;
 pub use rw_types::config::{BudgetConfig, CompactionConfig, Config};
 pub use rw_types::{
     AccountingAttribution, AttachmentData, CommandDescriptor, ContextItemId, ContextSnapshot,
-    CostSnapshot, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor, PromptDump,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    CostSnapshot, ModeId, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor,
+    PlanDecision, PromptDump, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
 };
 
 pub use admin::{
@@ -25,8 +25,9 @@ pub use admin::{
 };
 pub use engine::{
     AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals, ContextSurgeryAction,
-    EventClock, InterruptedToolRepair, MessageDisposition, ModelContextMetadata, ModelDriver,
-    MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
+    EventClock, FolderTrustController, FolderTrustOperation, InterruptedToolRepair,
+    MessageDisposition, ModelContextMetadata, ModelDriver, MutationCheckpoint,
+    MutationCheckpointCoordinator, MutationCheckpointOutcome, NoopFolderTrustController,
     NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink, RecoveredQuestion,
     RewindCheckpoint, SESSION_EVENT_VERSION, SecretRedactor, SessionActor, SessionActorConfig,
     SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,

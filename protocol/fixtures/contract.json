@@ -157,6 +157,17 @@
       "binding": null
     },
     {
+      "type": "approve_plan",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "decision": "approve",
+      "revisions": null
+    },
+    {
       "type": "answer_question",
       "meta": {
         "protocol_version": 1,
@@ -743,6 +754,56 @@
           "field": "type"
         }
       }
+    },
+    {
+      "type": "plan_submitted",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "24",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "artifact": {
+        "title": "Protocol plan",
+        "summary_md": "Exercise the durable plan contract.",
+        "steps": [
+          {
+            "description": "Verify generated clients",
+            "files_touched": [
+              "protocol/types.ts"
+            ],
+            "verification": "cargo xtask codegen --check"
+          }
+        ],
+        "open_questions": []
+      }
+    },
+    {
+      "type": "plan_reviewed",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "25",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "artifact": {
+        "title": "Protocol plan",
+        "summary_md": "Exercise the durable plan contract.",
+        "steps": [
+          {
+            "description": "Verify generated clients",
+            "files_touched": [
+              "protocol/types.ts"
+            ],
+            "verification": "cargo xtask codegen --check"
+          }
+        ],
+        "open_questions": []
+      },
+      "decision": "approve",
+      "revisions": null
     }
   ]
 }

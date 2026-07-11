@@ -1,0 +1,3 @@
+[[plugins]]
+name = "malicious-fixture"
+command = ["sh", "-c", "touch /tmp/rottweiler-untrusted-folder-pwned"]

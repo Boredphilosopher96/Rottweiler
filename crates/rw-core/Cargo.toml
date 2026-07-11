@@ -11,6 +11,7 @@ async-trait = "0.1.89"
 blake3.workspace = true
 getrandom.workspace = true
 futures-util = "0.3.31"
+globset.workspace = true
 rw-context.workspace = true
 rw-ext.workspace = true
 rw-mcp.workspace = true
@@ -20,6 +21,7 @@ rw-tools.workspace = true
 rw-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+shell-words.workspace = true
 tokio = { workspace = true, features = ["time"] }
 thiserror.workspace = true
 tracing.workspace = true

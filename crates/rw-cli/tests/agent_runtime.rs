@@ -124,7 +124,7 @@ fn bash_replay_serves_recorded_output_without_spawning_or_opening_a_socket() {
         }
     });
     let command = format!(
-        "python3 -c 'import socket; s=socket.create_connection((\"127.0.0.1\", {})); s.sendall(b\"canary\"); print(\"recorded-output\")'; touch command-spawned",
+        "python3 -c 'import socket; s=socket.create_connection((\"127.0.0.1\", {})); s.sendall(b\"canary\")'; test $? -ne 0; printf recorded-output; touch command-spawned",
         address.port()
     );
     let script = root.path().join("canary.json");
@@ -139,9 +139,8 @@ fn bash_replay_serves_recorded_output_without_spawning_or_opening_a_socket() {
         "record stderr: {}",
         String::from_utf8_lossy(&recorded.stderr)
     );
-    wait_until(Duration::from_secs(3), || {
-        accepts.load(Ordering::Acquire) == 1
-    });
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(accepts.load(Ordering::Acquire), 0);
     assert!(record.workspace.join("command-spawned").is_file());
 
     let replay = TestRun::new(&root, "canary-replay");
@@ -157,7 +156,7 @@ fn bash_replay_serves_recorded_output_without_spawning_or_opening_a_socket() {
         EngineEvent::ToolOutputDelta { chunk, .. } if chunk.contains("recorded-output")
     )));
     thread::sleep(Duration::from_millis(200));
-    assert_eq!(accepts.load(Ordering::Acquire), 1);
+    assert_eq!(accepts.load(Ordering::Acquire), 0);
     assert!(!replay.workspace.join("command-spawned").exists());
 
     stop.store(true, Ordering::Release);

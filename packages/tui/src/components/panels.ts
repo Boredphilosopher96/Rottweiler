@@ -13,6 +13,8 @@ import { formatPercent, formatSessionCost } from "../render"
 import type {
   ApprovalDecision,
   ContextSnapshot,
+  PlanArtifact,
+  PlanDecision,
   Question,
 } from "../protocol"
 import type { QuestionProjection, RottweilerState, ToolProjection } from "../state"
@@ -21,6 +23,7 @@ import type { RottweilerTheme } from "../theme"
 export interface InteractionCallbacks {
   readonly onApproval: (tool: ToolProjection, decision: ApprovalDecision) => void
   readonly onAnswer: (question: QuestionProjection, values: readonly string[]) => void
+  readonly onPlanReview: (decision: PlanDecision) => void
 }
 
 export class InteractionPanelRenderable extends BoxRenderable {
@@ -29,6 +32,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
   #diff: DiffRenderable | null = null
   #activeTool: ToolProjection | null = null
   #activeQuestion: QuestionProjection | null = null
+  #activePlan: PlanArtifact | null = null
   #callbacks: InteractionCallbacks
   #syntaxStyle: SyntaxStyle
   #theme: RottweilerTheme
@@ -85,6 +89,11 @@ export class InteractionPanelRenderable extends BoxRenderable {
   update(state: RottweilerState): void {
     const tool = Object.values(state.tools).find((candidate) => candidate.status === "awaiting_approval")
     const question = Object.values(state.questions).find((candidate) => !candidate.answered)
+    const turnRunning = Object.values(state.turns).some((turn) => turn.status === "running")
+    if (state.pendingPlan !== null && !turnRunning) {
+      this.#showPlan(state.pendingPlan)
+      return
+    }
     if (tool !== undefined) {
       this.#showTool(tool)
       return
@@ -95,6 +104,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     }
     this.#activeTool = null
     this.#activeQuestion = null
+    this.#activePlan = null
     this.#removeDiff()
     this.visible = false
   }
@@ -102,6 +112,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
   #showTool(tool: ToolProjection): void {
     this.#activeTool = tool
     this.#activeQuestion = null
+    this.#activePlan = null
     this.visible = true
     this.title = " Permission required "
     const diff = readUnifiedDiff(tool.diff)
@@ -116,6 +127,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
       : [
           { name: "Allow once", description: "Run only this invocation", value: "allow_once" },
           { name: "Allow session", description: "Remember for this session", value: "allow_session" },
+          { name: "Allow project", description: "Remember this exact invocation in this project", value: "allow_project" },
           { name: "Deny", description: "Do not run the tool", value: "deny" },
         ]
     this.select.setSelectedIndex(0)
@@ -153,6 +165,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
   #showQuestion(question: QuestionProjection): void {
     this.#activeTool = null
     this.#activeQuestion = question
+    this.#activePlan = null
     this.#removeDiff()
     this.visible = true
     this.title = " Rottweiler asks "
@@ -163,11 +176,32 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.select.focus()
   }
 
+  #showPlan(plan: PlanArtifact): void {
+    this.#activeTool = null
+    this.#activeQuestion = null
+    this.#activePlan = plan
+    this.#removeDiff()
+    this.visible = true
+    this.title = " Plan approval required "
+    this.prompt.content = `${plan.title}\n${plan.summary_md}\n${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`
+    this.select.options = [
+      { name: "Approve plan", description: "Pin this artifact and enter Execute", value: "approve" },
+      { name: "Reject plan", description: "Stay in Plan mode", value: "reject" },
+    ]
+    this.select.setSelectedIndex(0)
+    this.select.focus()
+  }
+
   #selected(index: number): void {
+    if (this.#activePlan !== null) {
+      const decision: PlanDecision = this.select.options[index]?.value === "approve" ? "approve" : "reject"
+      this.#callbacks.onPlanReview(decision)
+      return
+    }
     if (this.#activeTool !== null) {
       const selected = this.select.options[index]?.value
       const requested: ApprovalDecision =
-        selected === "allow_once" || selected === "allow_session" ? selected : "deny"
+        selected === "allow_once" || selected === "allow_session" || selected === "allow_project" ? selected : "deny"
       const decision: ApprovalDecision =
         this.#activeTool.diff?.truncated === true ? "deny" : requested
       this.#callbacks.onApproval(this.#activeTool, decision)

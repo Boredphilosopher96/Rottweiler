@@ -47,6 +47,8 @@ pub struct SupervisorConfig {
     pub permission_mode: Option<crate::PermissionMode>,
     pub max_turns: usize,
     pub model: Option<String>,
+    pub additional_workspaces: Vec<PathBuf>,
+    pub dangerously_trust: bool,
     pub shell_target: Option<crate::shell_broker::ShellTarget>,
     pub detach: bool,
     pub restart_policy: RestartPolicy,
@@ -491,6 +493,12 @@ fn engine_spec(config: &SupervisorConfig) -> ChildSpec {
     if let Some(model) = &config.model {
         args.extend([OsString::from("--model"), OsString::from(model)]);
     }
+    for root in &config.additional_workspaces {
+        args.extend([OsString::from("--add-dir"), root.as_os_str().to_owned()]);
+    }
+    if config.dangerously_trust {
+        args.push(OsString::from("--dangerously-trust"));
+    }
     ChildSpec {
         program: config.rw_executable.clone(),
         args,
@@ -598,6 +606,8 @@ mod tests {
             permission_mode: Some(crate::PermissionMode::Strict),
             max_turns: 32,
             model: None,
+            additional_workspaces: Vec::new(),
+            dangerously_trust: false,
             shell_target: None,
             detach: false,
             restart_policy: RestartPolicy::default(),
@@ -631,6 +641,24 @@ mod tests {
         assert_eq!(
             engine_spec(&config).args,
             ["serve", "--max-turns", "32", "--permission-mode", "strict",].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn engine_restart_preserves_added_roots_and_explicit_trust_override() {
+        let mut config = fixture_config();
+        config.additional_workspaces = vec![PathBuf::from("/work/second")];
+        config.dangerously_trust = true;
+        let spec = engine_spec(&config);
+        assert!(
+            spec.args.windows(2).any(|pair| {
+                pair == [OsString::from("--add-dir"), OsString::from("/work/second")]
+            })
+        );
+        assert!(
+            spec.args
+                .iter()
+                .any(|argument| argument == "--dangerously-trust")
         );
     }
 
