@@ -148,6 +148,7 @@ Property tests worth calling out:
 - **Plan mode cannot mutate**: fuzz arbitrary tool-call sequences in plan mode → assert zero filesystem diff **outside `.git/` metadata** (read-only-blessed commands like `git status` legitimately refresh the index; workspace content must be untouched).
 - **Crash safety**: kill the process at random points during a replayed session → `--resume` always loads a consistent state.
 - **Event schema evolution**: old fixture logs (N-1 version) always load.
+- **Doctor diagnostics**: injected fixtures independently seed a provider 401/403, a bounded connection failure, unavailable sandbox support, and `TERM=dumb`; each must produce its distinct stable code and a non-zero result. Loopback HTTP fixtures cover rejected API credentials and authenticated explicit-proxy routing. Credential-inventory tests assert two logical references cause exactly one shared vault read and that canary values never occur in text or JSON.
 
 ## 3. Performance budgets (CI-enforced, p99 unless noted)
 
@@ -201,6 +202,15 @@ A corpus of structured payloads (search results, dir listings, MCP responses, di
 - **terminal-bench subset** (20 tasks) run nightly against a pinned model: track solve rate, tokens, wall time, cost. The harness's job is to not be the bottleneck — compare against a baseline harness (pi or Claude Code) on the same model monthly; regressions in solve-rate-per-dollar are investigated as bugs.
 - **Self-hosting**: from M2 onward, Rottweiler development uses Rottweiler. v1.0 gate: two consecutive weeks of dogfooding with zero P0s (data loss, hang, corruption).
 - **Compatibility matrix**: ported artifacts (a Claude Code command set, a pi extension rewritten on the plugin SDK, an AGENTS.md-standard repo) exercised in CI as conformance fixtures.
+
+The executable capability lane lives in `evals/`: Harbor 0.18.0 runs the
+checked-in 20-task list against `terminal-bench/terminal-bench-2-1@6` through
+the normal headless `rw` binary from the exact Linux release archive. The
+adapter retains Harbor rewards, stream JSON, and `rw stats --json`; provider
+credentials never enter argv. `scripts/check-dogfood-gate.py` independently
+requires 14 unique consecutive UTC records ending on the release day, with
+session evidence and zero P0s. The temporal gate is not satisfiable by a
+one-time fixture or a single development run.
 
 ## 6. CI pipeline summary
 

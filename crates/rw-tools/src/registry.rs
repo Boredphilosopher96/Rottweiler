@@ -891,6 +891,23 @@ pub trait Tool: Send + Sync {
         Ok(None)
     }
 
+    /// Releases resources owned by an ending actor session. Implementations
+    /// must be idempotent because a host may retry cleanup after an error.
+    async fn end_session(&self, _session_id: &SessionId) -> Result<(), ToolError> {
+        Ok(())
+    }
+
+    /// Human-readable active resource which makes idle-sensitive engine
+    /// operations fail closed.
+    fn session_activity(&self, _session_id: &SessionId) -> Option<String> {
+        None
+    }
+
+    /// Marks a tool whose lifecycle observer must survive filtered registries.
+    fn observes_session_resources(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError>;
 }
 
@@ -959,6 +976,18 @@ impl Tool for GuardedTool {
         self.inner.approval_preview(context, input).await
     }
 
+    async fn end_session(&self, session_id: &SessionId) -> Result<(), ToolError> {
+        self.inner.end_session(session_id).await
+    }
+
+    fn session_activity(&self, session_id: &SessionId) -> Option<String> {
+        self.inner.session_activity(session_id)
+    }
+
+    fn observes_session_resources(&self) -> bool {
+        self.inner.observes_session_resources()
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         self.inner
             .execute(context, input)
@@ -972,6 +1001,7 @@ impl Tool for GuardedTool {
 pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
     mcp_tool_policy: McpToolPolicy,
+    session_observers: Vec<Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -1006,6 +1036,9 @@ impl ToolRegistry {
             descriptor: descriptor.clone(),
             subagent_lifecycle_mode,
         });
+        if guarded.observes_session_resources() {
+            self.session_observers.push(Arc::clone(&guarded));
+        }
         self.tools.insert(
             name,
             RegisteredTool {
@@ -1064,6 +1097,40 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Runs the idempotent session cleanup hook for every registered tool.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first cleanup error after still attempting every tool.
+    pub async fn end_session(&self, session_id: &SessionId) -> Result<(), ToolError> {
+        let mut first_error = None;
+        for registered in self.tools.values() {
+            if registered.tool.observes_session_resources() {
+                continue;
+            }
+            if let Err(error) = registered.tool.end_session(session_id).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        for observer in &self.session_observers {
+            if let Err(error) = observer.end_session(session_id).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
+    #[must_use]
+    pub fn session_activity(&self, session_id: &SessionId) -> Option<String> {
+        self.session_observers
+            .iter()
+            .find_map(|observer| observer.session_activity(session_id))
+    }
+
     /// Builds a registry containing only the exact requested tool names.
     /// Existing guarded registrations are shared; no implementation is
     /// reconstructed and capability snapshots remain unchanged.
@@ -1084,6 +1151,7 @@ impl ToolRegistry {
         Ok(Self {
             tools,
             mcp_tool_policy: self.mcp_tool_policy.clone(),
+            session_observers: self.session_observers.clone(),
         })
     }
 

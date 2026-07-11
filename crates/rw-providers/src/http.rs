@@ -118,6 +118,114 @@ pub struct GuardedHttpFetchResponse {
     pub location: Option<String>,
 }
 
+/// Minimal no-body provider endpoint probe used by `rw doctor`.
+#[derive(Clone)]
+pub struct ProviderReachabilityRequest {
+    pub url: Url,
+    pub headers: Vec<(String, String)>,
+    pub proxy: Option<Url>,
+    pub proxy_authentication: Option<ProxyAuthentication>,
+    pub timeout: Duration,
+}
+
+impl std::fmt::Debug for ProviderReachabilityRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderReachabilityRequest")
+            .field("url", &redacted_url(&self.url))
+            .field(
+                "header_names",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("proxy", &self.proxy.as_ref().map(redacted_url))
+            .field("proxy_authentication", &self.proxy_authentication)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+/// Sends one timeout-bounded, redirect-free HEAD request through the shared
+/// provider proxy/authentication boundary and returns only its status code.
+///
+/// # Errors
+///
+/// Returns a sanitized invalid-request, network-disabled, timeout, or transport error.
+pub async fn provider_reachability_probe(
+    request: ProviderReachabilityRequest,
+) -> Result<u16, ProviderError> {
+    require_process_network()?;
+    if request.timeout.is_zero()
+        || !matches!(request.url.scheme(), "http" | "https")
+        || request.url.host().is_none()
+        || !request.url.username().is_empty()
+        || request.url.password().is_some()
+        || request.url.query().is_some()
+        || request.url.fragment().is_some()
+        || request.headers.len() > MAX_GUARDED_HEADERS
+        || request
+            .headers
+            .iter()
+            .any(|(_, value)| value.len() > MAX_GUARDED_HEADER_VALUE_BYTES)
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "provider reachability probe is invalid",
+        ));
+    }
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(request.timeout)
+        .timeout(request.timeout);
+    if request.proxy.is_none() && request.proxy_authentication.is_some() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "proxy authentication requires a configured proxy URL",
+        ));
+    }
+    if let Some(proxy) = request.proxy.as_ref() {
+        let mut configured = reqwest::Proxy::all(proxy.as_str()).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "configured provider proxy URL is invalid",
+            )
+        })?;
+        if let Some(authentication) = request.proxy_authentication.as_ref() {
+            configured =
+                configured.basic_auth(authentication.username(), authentication.password());
+        }
+        builder = builder.proxy(configured);
+    }
+    let client = builder.build().map_err(transport_error)?;
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in request.headers {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "provider reachability header name is invalid",
+            )
+        })?;
+        let value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "provider reachability header value is invalid",
+            )
+        })?;
+        headers.append(name, value);
+    }
+    client
+        .head(request.url)
+        .headers(headers)
+        .send()
+        .await
+        .map(|response| response.status().as_u16())
+        .map_err(transport_error)
+}
+
 /// Guarded HTTP fetch failure without exposing transport implementation types.
 #[derive(Debug, Error)]
 pub enum GuardedHttpFetchError {

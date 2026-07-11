@@ -4,6 +4,7 @@
 //! tool's [`CapabilityManifest`], pass the invocation through its permission chokepoint, and only
 //! then call [`Tool::execute`].
 
+mod background;
 mod bash;
 mod builtins;
 mod files;
@@ -16,6 +17,11 @@ mod symbols;
 mod web;
 mod worktree;
 
+pub use background::{
+    BackgroundKillInput, BackgroundKillTool, BackgroundOutputInput, BackgroundOutputTool,
+    BackgroundProcessLimits, BackgroundProcessManager, BackgroundProcessSnapshot,
+    BackgroundProcessStatus, BackgroundStatusInput, BackgroundStatusTool,
+};
 pub use bash::{
     BashInput, BashSandboxMode, BashTool, CommandExecutor, CommandFixtureRedactor, CommandOutcome,
     CommandRequest, CommandSafety, CommandSafetyClassifier, ExecutionLease,

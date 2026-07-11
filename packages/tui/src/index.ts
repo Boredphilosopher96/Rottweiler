@@ -76,6 +76,9 @@ async function main(): Promise<void> {
   const configuredSession = process.env.ROTTWEILER_SESSION_ID
   const replaySession =
     process.env.ROTTWEILER_REPLAY_MODE === "1" ? configuredSession : undefined
+  const keybindings = await parseKeybindingsFromEnvironment(
+    process.env.ROTTWEILER_TUI_KEYBINDINGS,
+  )
   const terminalHandover = {
     suspend: () => renderer.suspend(),
     resume: () => renderer.resume(),
@@ -87,6 +90,7 @@ async function main(): Promise<void> {
     ...(replaySession === undefined || replaySession.length === 0
       ? {}
       : { replaySessionId: replaySession }),
+    ...(keybindings === undefined ? {} : { keybindings }),
     onCommand: async (command) => {
       const bootstrap = await runtimeBootstrap
       return (await bootstrap.runtime?.sendCommand(command)) ?? null
@@ -125,6 +129,14 @@ async function main(): Promise<void> {
       })
     }
   })
+}
+
+async function parseKeybindingsFromEnvironment(source: string | undefined) {
+  if (source === undefined || source.length === 0) return undefined
+  // The Rust launcher may forward the TUI-only keybindings.toml section here;
+  // keeping parsing local means extensions never leak into the engine protocol.
+  const { parseKeybindingToml } = await import("./keybindings")
+  return parseKeybindingToml(source)
 }
 
 writeStartupSplash(process.stdout)

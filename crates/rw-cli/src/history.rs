@@ -22,10 +22,18 @@ pub(crate) fn load_events(
     storage_root: &Path,
     session: &str,
 ) -> Result<Vec<EventEnvelope<EngineEvent>>> {
-    let events = SessionEventLog::load_existing_bounded::<EngineEvent>(
+    load_events_with_size(storage_root, session, MAX_HISTORY_BYTES).map(|(events, _)| events)
+}
+
+pub(crate) fn load_events_with_size(
+    storage_root: &Path,
+    session: &str,
+    max_bytes: u64,
+) -> Result<(Vec<EventEnvelope<EngineEvent>>, u64)> {
+    let (events, bytes) = SessionEventLog::load_existing_bounded_with_size::<EngineEvent>(
         storage_root,
         session,
-        MAX_HISTORY_BYTES,
+        max_bytes.min(MAX_HISTORY_BYTES),
         MAX_HISTORY_EVENTS,
     )
     .map_err(|error| miette!("session history could not be read: {error}"))?;
@@ -40,7 +48,7 @@ pub(crate) fn load_events(
             ));
         }
     }
-    Ok(events)
+    Ok((events, bytes))
 }
 
 /// Emits exactly the persisted provider-neutral event payloads consumed by clients.

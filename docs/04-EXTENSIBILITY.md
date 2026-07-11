@@ -119,6 +119,12 @@ allowed_domains = []
 
 Protocol 1 is frozen by the M8 conformance suite: the Rust host runs the canonical generated scaffold plus independent tool/hook, event/push, and provider fixtures, and kills an undeclared-capability fixture. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Wire details and limits live in `packages/plugin-sdk/PROTOCOL.md` and its checked-in JSON schema.
 
+The protocol documentation site is generated deterministically by
+`packages/plugin-docs` from that frozen Markdown, schema, and canonical wire
+fixture. It adds searchable navigation and direct schema/fixture downloads
+without introducing a second protocol source; CI rebuilds and tests the static
+site alongside the TypeScript SDK.
+
 ## Tier 3 — WASM (post-v1)
 
 wasmtime component-model host for latency-critical in-process hooks. Same capability manifest, same hook names. Not in v1 (ADR-003).

@@ -14,6 +14,7 @@ members = [
     "crates/xtask",
 ]
 resolver = "3"
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -34,9 +35,13 @@ unwrap_used = "warn"
 # Keep actionable file/line backtraces without duplicating full debug data
 # across every feature-specific dependency and test artifact.
 debug = "line-tables-only"
+# Long multi-feature agent runs otherwise leave several GiB of incremental
+# state with no Cargo GC. Compiled dependencies remain cached in `deps/`.
+incremental = false
 
 [profile.test]
 debug = "line-tables-only"
+incremental = false
 
 [profile.release]
 strip = true

@@ -18,6 +18,15 @@ import {
   type PickerItem,
 } from "./components"
 import {
+  compileKeybindings,
+  type CompiledKeybindings,
+  type InputMode,
+  type KeybindingAction,
+  type KeybindingConfiguration,
+  type KeybindingContext,
+  type VimFocus,
+} from "./keybindings"
+import {
   noExternalEditor,
   noImagePaste,
   noNotifications,
@@ -66,6 +75,8 @@ export interface RottweilerAppOptions {
   readonly onSessionSelect?: (sessionId: string) => void | Promise<void>
   /** Historical presentation is observer-only; the composer and mutating interactions are hidden. */
   readonly replaySessionId?: string
+  /** TUI-local bindings. Standard is backward-compatible; Vim enables modal editing/navigation. */
+  readonly keybindings?: KeybindingConfiguration
 }
 
 export interface TerminalHandoverAdapter {
@@ -102,6 +113,10 @@ export class RottweilerApp extends BoxRenderable {
   #sessionSearchTimer: ReturnType<typeof setTimeout> | null = null
   #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
+  #keybindings: CompiledKeybindings
+  #inputMode: InputMode
+  #vimFocus: VimFocus = "composer"
+  #vimFocusBeforePicker: Exclude<VimFocus, "picker"> = "composer"
   #onTerminalFocus = () => {
     this.#terminalFocused = true
   }
@@ -109,13 +124,30 @@ export class RottweilerApp extends BoxRenderable {
     this.#terminalFocused = false
   }
   #onGlobalKey = (key: KeyEvent) => {
-    if (
-      (key.name === "escape" || key.name === "esc") &&
-      this.#state.review !== null &&
-      !this.picker.visible
-    ) {
+    const focusOwner = this.#visibleFocusOwner()
+    const safetyPanelFocused = focusOwner === "interaction" || focusOwner === "review"
+    const action =
+      focusOwner === "review"
+        ? this.#keybindings.resolve("review", key)
+        : focusOwner === "interaction"
+          ? null
+          : this.#keybindings.resolve("global", key) ??
+            this.#keybindings.resolve(this.#keybindingContext(), key)
+    if (action !== null && this.#handleKeybindingAction(action)) {
       key.preventDefault()
-      this.#closeReview()
+      key.stopPropagation()
+    } else if (
+      this.#keybindings.preset === "vim" &&
+      this.#inputMode === "normal" &&
+      !safetyPanelFocused &&
+      !key.ctrl &&
+      !key.meta &&
+      !key.option
+    ) {
+      // A focused OpenTUI editor still owns the terminal cursor in normal mode.
+      // Never let an unmapped printable/navigation key leak through as text.
+      key.preventDefault()
+      key.stopPropagation()
     }
   }
 
@@ -137,6 +169,8 @@ export class RottweilerApp extends BoxRenderable {
       editor: options.editor ?? noExternalEditor,
       imagePaste: options.imagePaste ?? noImagePaste,
     }
+    this.#keybindings = compileKeybindings(options.keybindings)
+    this.#inputMode = this.#keybindings.preset === "vim" ? "normal" : "standard"
     this.#syntaxStyle = createSyntaxStyle(theme)
     this.#sessionId = this.#options.sessionId
     const initialState = options.initialState ?? createInitialState()
@@ -144,6 +178,10 @@ export class RottweilerApp extends BoxRenderable {
       options.replaySessionId === undefined
         ? initialState
         : enterReplayMode(initialState, options.replaySessionId)
+    if (this.#state.replay.active && this.#keybindings.preset === "vim") {
+      this.#vimFocus = "transcript"
+      this.#vimFocusBeforePicker = "transcript"
+    }
     if (options.initialEvent !== undefined) {
       this.#state = reduceRottweilerState(this.#state, engineEvent(options.initialEvent))
     }
@@ -210,51 +248,6 @@ export class RottweilerApp extends BoxRenderable {
       onFileMention: (query) => this.openFilePicker(query),
     })
     this.statusLine = new StatusLineRenderable(ctx, theme)
-    this.onKeyDown = (key) => {
-      if ((key.name === "escape" || key.name === "esc") && this.picker.visible) {
-        key.preventDefault()
-        this.closePicker()
-      } else if (
-        (key.name === "escape" || key.name === "esc") &&
-        this.#state.review !== null
-      ) {
-        key.preventDefault()
-        this.#closeReview()
-      } else if (this.#state.replay.active && key.ctrl && key.name === "s") {
-        key.preventDefault()
-        this.openSessionPicker()
-      } else if (this.#state.replay.active) {
-        return
-      } else if (key.ctrl && key.name === "r") {
-        key.preventDefault()
-        this.openReview()
-      } else if (key.shift && key.name === "tab") {
-        key.preventDefault()
-        const current = this.#state.mode ?? "execute"
-        const mode: ModeId = current === "execute" ? "discuss" : current === "discuss" ? "plan" : "execute"
-        this.#emit({
-          type: "switch_mode",
-          meta: this.#meta(),
-          session_id: this.#sessionId,
-          mode,
-        })
-      } else if (key.ctrl && key.name === "p") {
-        key.preventDefault()
-        this.openCommandPicker()
-      } else if (key.ctrl && key.name === "m") {
-        key.preventDefault()
-        this.openModelPicker()
-      } else if (key.ctrl && key.name === "o") {
-        key.preventDefault()
-        this.openModePicker()
-      } else if (key.ctrl && key.name === "s") {
-        key.preventDefault()
-        this.openSessionPicker()
-      } else if (key.ctrl && key.name === "i") {
-        key.preventDefault()
-        void this.composer.pasteImage()
-      }
-    }
 
     this.add(this.banner)
     this.add(this.main)
@@ -270,7 +263,7 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#state.review !== null) {
       this.reviewPanel.files.focus()
     } else if (!this.#state.replay.active) {
-      this.composer.focus()
+      this.#focusForInputMode()
     }
   }
 
@@ -337,6 +330,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   setState(state: RottweilerState): void {
+    const previousFocusOwner = this.#visibleFocusOwner()
     this.#state = state
     this.transcript.update(state)
     this.contextPanel.update(state)
@@ -346,7 +340,19 @@ export class RottweilerApp extends BoxRenderable {
     this.reviewPanel.update(state)
     this.composer.setQueuedMessages(state.queuedMessages)
     this.composer.visible = !state.replay.active && state.review === null
+    const focusOwner = this.#visibleFocusOwner()
+    if (
+      (previousFocusOwner === "interaction" || previousFocusOwner === "review") &&
+      focusOwner !== "interaction" &&
+      focusOwner !== "review"
+    ) {
+      this.#focusForInputMode()
+    }
     this.statusLine.setBranch(state.workspaceStatus?.branch ?? null)
+    this.statusLine.setKeybindingMode(
+      this.#inputMode === "standard" ? null : this.#inputMode,
+      this.#inputMode === "standard" ? null : focusOwner,
+    )
     this.statusLine.update(state)
     this.banner.update(state)
     if (this.#pickerKind !== null) {
@@ -403,8 +409,14 @@ export class RottweilerApp extends BoxRenderable {
   closePicker(): void {
     this.#pickerKind = null
     this.picker.close()
-    if (!this.#state.replay.active) {
-      this.composer.focus()
+    if (this.#keybindings.preset === "vim") this.#vimFocus = this.#vimFocusBeforePicker
+    if (!this.#state.replay.active) this.#focusForInputMode()
+    if (this.#keybindings.preset === "vim") {
+      this.statusLine.setKeybindingMode(
+        this.#inputMode === "normal" ? "normal" : "insert",
+        this.#visibleFocusOwner(),
+      )
+      this.statusLine.update(this.#state)
     }
   }
 
@@ -421,6 +433,244 @@ export class RottweilerApp extends BoxRenderable {
     this.ctx.keyInput.off("keypress", this.#onGlobalKey)
     this.#syntaxStyle.destroy()
     super.destroy()
+  }
+
+  #keybindingContext(): KeybindingContext {
+    if (this.#keybindings.preset === "standard") {
+      return this.#state.review === null ? "standard" : "review"
+    }
+    if (this.picker.visible) {
+      return this.#inputMode === "insert" ? "picker_insert" : "picker_normal"
+    }
+    if (this.#state.review !== null) return "review"
+    return this.#inputMode === "insert" ? "vim_insert" : "vim_normal"
+  }
+
+  #handleKeybindingAction(action: KeybindingAction): boolean {
+    if (action === "close_overlay") {
+      if (this.picker.visible) {
+        this.closePicker()
+        return true
+      }
+      if (this.#state.review !== null) {
+        this.#closeReview()
+        return true
+      }
+      return false
+    }
+    if (action === "open_session_picker") {
+      this.openSessionPicker()
+      return true
+    }
+    if (this.#state.replay.active) {
+      return this.#handleReplayNavigation(action)
+    }
+    switch (action) {
+      case "cycle_agent_mode": {
+        const current = this.#state.mode ?? "execute"
+        const mode: ModeId =
+          current === "execute" ? "discuss" : current === "discuss" ? "plan" : "execute"
+        this.#emit({
+          type: "switch_mode",
+          meta: this.#meta(),
+          session_id: this.#sessionId,
+          mode,
+        })
+        return true
+      }
+      case "open_review":
+        this.openReview()
+        return true
+      case "open_command_picker":
+        this.openCommandPicker()
+        return true
+      case "open_model_picker":
+        this.openModelPicker()
+        return true
+      case "open_mode_picker":
+        this.openModePicker()
+        return true
+      case "paste_image":
+        void this.composer.pasteImage()
+        return true
+      case "open_external_editor":
+        if (this.picker.visible || this.#state.review !== null) return false
+        void this.composer.openExternalEditor()
+        return true
+      case "enter_normal":
+        this.#setInputMode("normal")
+        return true
+      case "enter_insert":
+        this.#vimFocus = this.picker.visible ? "picker" : "composer"
+        this.#setInputMode("insert")
+        return true
+      case "append_insert":
+        if (!this.picker.visible && this.#vimFocus === "composer") {
+          this.composer.editor.moveCursorRight()
+        }
+        this.#vimFocus = this.picker.visible ? "picker" : "composer"
+        this.#setInputMode("insert")
+        return true
+      case "focus_next":
+        this.#cycleVimFocus(1)
+        return true
+      case "focus_previous":
+        this.#cycleVimFocus(-1)
+        return true
+      case "move_left":
+        if (this.#vimFocus === "composer") this.composer.editor.moveCursorLeft()
+        return true
+      case "move_right":
+        if (this.#vimFocus === "composer") this.composer.editor.moveCursorRight()
+        return true
+      case "move_up":
+        this.#moveVertical(-1)
+        return true
+      case "move_down":
+        this.#moveVertical(1)
+        return true
+      case "word_backward":
+        if (this.#vimFocus === "composer") this.composer.editor.moveWordBackward()
+        return true
+      case "word_forward":
+        if (this.#vimFocus === "composer") this.composer.editor.moveWordForward()
+        return true
+      case "line_start":
+        if (this.#vimFocus === "composer") this.composer.editor.gotoLineStart()
+        return true
+      case "line_end":
+        if (this.#vimFocus === "composer") this.composer.editor.gotoLineTextEnd()
+        return true
+      case "delete_character":
+        if (this.#vimFocus === "composer") this.composer.editor.deleteChar()
+        return true
+      case "page_up":
+        this.#scrollTranscript(-1, "viewport")
+        return true
+      case "page_down":
+        this.#scrollTranscript(1, "viewport")
+        return true
+      case "view_top":
+        this.#moveToBoundary(false)
+        return true
+      case "view_bottom":
+        this.#moveToBoundary(true)
+        return true
+      case "select_current":
+        if (!this.picker.visible) return false
+        this.picker.select.selectCurrent()
+        return true
+    }
+  }
+
+  #handleReplayNavigation(action: KeybindingAction): boolean {
+    if (this.#keybindings.preset !== "vim") return false
+    switch (action) {
+      case "move_up":
+        this.#scrollTranscript(-1, "step")
+        return true
+      case "move_down":
+        this.#scrollTranscript(1, "step")
+        return true
+      case "page_up":
+        this.#scrollTranscript(-1, "viewport")
+        return true
+      case "page_down":
+        this.#scrollTranscript(1, "viewport")
+        return true
+      case "view_top":
+        this.transcript.scroller.scrollTo(0)
+        return true
+      case "view_bottom":
+        this.transcript.scroller.scrollTo(this.transcript.scroller.scrollHeight)
+        return true
+      default:
+        return false
+    }
+  }
+
+  #setInputMode(mode: Exclude<InputMode, "standard">): void {
+    if (this.#keybindings.preset !== "vim") return
+    this.#inputMode = mode
+    this.#focusForInputMode()
+    this.statusLine.setKeybindingMode(mode, this.#visibleFocusOwner())
+    this.statusLine.update(this.#state)
+  }
+
+  #focusForInputMode(): void {
+    if (this.reviewPanel.visible) {
+      this.reviewPanel.files.focus()
+      return
+    }
+    if (this.interactionPanel.visible) {
+      this.interactionPanel.select.focus()
+      return
+    }
+    if (this.#inputMode === "standard") {
+      this.composer.editor.showCursor = true
+      this.composer.focus()
+      return
+    }
+    if (this.picker.visible) {
+      if (this.#inputMode === "insert") {
+        this.picker.input.focus()
+      } else {
+        this.picker.select.focus()
+      }
+      return
+    }
+    this.composer.editor.showCursor = this.#inputMode === "insert"
+    if (this.#vimFocus === "transcript" || this.#state.replay.active) {
+      this.transcript.scroller.focus()
+    } else {
+      this.composer.focus()
+    }
+  }
+
+  #cycleVimFocus(direction: 1 | -1): void {
+    if (this.#keybindings.preset !== "vim" || this.picker.visible) return
+    const targets: readonly Exclude<VimFocus, "picker">[] = ["composer", "transcript"]
+    const current = Math.max(0, targets.indexOf(this.#vimFocus as Exclude<VimFocus, "picker">))
+    this.#vimFocus = targets[(current + direction + targets.length) % targets.length] ?? "composer"
+    this.#focusForInputMode()
+    this.statusLine.setKeybindingMode("normal", this.#vimFocus)
+    this.statusLine.update(this.#state)
+  }
+
+  #moveVertical(direction: 1 | -1): void {
+    if (this.picker.visible) {
+      if (direction < 0) this.picker.select.moveUp()
+      else this.picker.select.moveDown()
+    } else if (this.#vimFocus === "composer") {
+      if (direction < 0) this.composer.editor.moveCursorUp()
+      else this.composer.editor.moveCursorDown()
+    } else {
+      this.#scrollTranscript(direction, "step")
+    }
+  }
+
+  #scrollTranscript(direction: 1 | -1, unit: "step" | "viewport"): void {
+    this.transcript.scroller.scrollBy(direction, unit)
+  }
+
+  #moveToBoundary(end: boolean): void {
+    if (this.picker.visible) {
+      const index = end ? this.picker.select.options.length - 1 : 0
+      if (index >= 0) this.picker.select.setSelectedIndex(index)
+    } else if (this.#vimFocus === "composer") {
+      if (end) this.composer.editor.gotoBufferEnd()
+      else this.composer.editor.gotoBufferHome()
+    } else {
+      this.transcript.scroller.scrollTo(end ? this.transcript.scroller.scrollHeight : 0)
+    }
+  }
+
+  #visibleFocusOwner(): VimFocus | "interaction" | "review" {
+    if (this.picker.visible) return "picker"
+    if (this.reviewPanel.visible) return "review"
+    if (this.interactionPanel.visible) return "interaction"
+    if (this.#state.replay.active) return "transcript"
+    return this.#vimFocus
   }
 
   #refreshPicker(): void {
@@ -554,6 +804,11 @@ export class RottweilerApp extends BoxRenderable {
     this.picker.refresh(title, items as readonly PickerItem<unknown>[], (item) =>
       onSelect(item as PickerItem<T>),
     )
+    if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
+      this.#vimFocusBeforePicker = this.#vimFocus
+      this.#vimFocus = "picker"
+      this.#setInputMode("insert")
+    }
   }
 
   #scheduleSessionSearch(query: string): void {
@@ -743,7 +998,7 @@ export class RottweilerApp extends BoxRenderable {
   #closeReview(): void {
     if (this.#state.review === null) return
     this.setState({ ...this.#state, review: null })
-    this.composer.focus()
+    this.#focusForInputMode()
   }
 
   #command(

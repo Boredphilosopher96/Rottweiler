@@ -19,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufRead
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::time::{Duration, sleep};
 
+use crate::BackgroundProcessManager;
 use crate::registry::{
     CancellationToken, CapabilityManifest, Tool, ToolContext, ToolDescriptor, ToolError,
     ToolLimits, ToolOutputChunk, ToolOutputSink, ToolResult, input_schema, parse_input,
@@ -40,6 +41,10 @@ pub struct BashInput {
     /// explicit escape hatch and is always permission-gated by the engine.
     #[serde(default)]
     pub sandbox: BashSandboxMode,
+    /// Return immediately while the session process manager supervises the
+    /// command. Output is retrieved with `background_output`.
+    #[serde(default)]
+    pub run_in_background: bool,
 }
 
 fn default_cwd() -> PathBuf {
@@ -61,6 +66,9 @@ pub enum BashSandboxMode {
     #[default]
     Sandboxed,
     Unsandboxed,
+    /// Internal write-denied sandbox used only after `run_in_background` has
+    /// passed validation.
+    ReadOnly,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -289,6 +297,12 @@ fn resolve_audited_system_git() -> Option<PathBuf> {
 /// Injected process boundary. Core must approve the bash manifest before this is called.
 #[async_trait]
 pub trait CommandExecutor: Send + Sync {
+    /// Whether this executor can safely supervise a command after the
+    /// initiating tool call returns.
+    fn supports_background(&self) -> bool {
+        false
+    }
+
     async fn run(
         &self,
         request: CommandRequest,
@@ -454,6 +468,11 @@ fn acquire_execution_lease(path: &Path) -> Result<ExecutionLease, ToolError> {
 pub trait CommandFixtureRedactor: Send + Sync {
     /// Returns a disk-safe replacement for one fixture string.
     fn redact(&self, value: &str) -> String;
+
+    /// Longest registered byte pattern which may span stream chunks.
+    fn max_secret_bytes(&self) -> usize {
+        0
+    }
 }
 
 /// Identity command-fixture redactor for secret-free unit fixtures.
@@ -583,6 +602,10 @@ impl RecordingCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for RecordingCommandExecutor {
+    fn supports_background(&self) -> bool {
+        false
+    }
+
     async fn run(
         &self,
         request: CommandRequest,
@@ -677,6 +700,10 @@ impl ReplayCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for ReplayCommandExecutor {
+    fn supports_background(&self) -> bool {
+        false
+    }
+
     async fn run(
         &self,
         request: CommandRequest,
@@ -1208,6 +1235,10 @@ impl TokioCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for TokioCommandExecutor {
+    fn supports_background(&self) -> bool {
+        self.sandbox.is_some()
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn run(
         &self,
@@ -1219,7 +1250,7 @@ impl CommandExecutor for TokioCommandExecutor {
         // command and its watchdog are spawned.
         let _execution_lease = self.execution_lease.as_ref();
         cancellation.check()?;
-        let safe = request.sandbox == BashSandboxMode::Sandboxed
+        let safe = request.sandbox != BashSandboxMode::Unsandboxed
             && request.network_domains.is_empty()
             && self.safety.classify(&request.command) == CommandSafety::SafeListed;
         let egress_proxy = command_egress_proxy(
@@ -1237,9 +1268,16 @@ impl CommandExecutor for TokioCommandExecutor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(proxy.lifecycle());
         }
-        let sandbox = (request.sandbox == BashSandboxMode::Sandboxed)
-            .then_some(self.sandbox.as_deref())
+        let read_only_policy = (request.sandbox == BashSandboxMode::ReadOnly)
+            .then(|| self.sandbox.as_deref().map(SandboxPolicy::read_only))
             .flatten();
+        let sandbox = if request.sandbox == BashSandboxMode::ReadOnly {
+            read_only_policy.as_ref()
+        } else if request.sandbox == BashSandboxMode::Sandboxed {
+            self.sandbox.as_deref()
+        } else {
+            None
+        };
         let mut guarded = guarded_process(&request, sandbox, egress_proxy.as_ref())?;
         let mut child = guarded
             .command
@@ -1833,6 +1871,7 @@ pub struct BashTool {
     executor: Arc<dyn CommandExecutor>,
     limits: ToolLimits,
     safety: Arc<CommandSafetyClassifier>,
+    background: Option<Arc<BackgroundProcessManager>>,
 }
 
 impl BashTool {
@@ -1842,7 +1881,14 @@ impl BashTool {
             executor,
             limits,
             safety: Arc::new(CommandSafetyClassifier::default()),
+            background: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_background_manager(mut self, background: Arc<BackgroundProcessManager>) -> Self {
+        self.background = Some(background);
+        self
     }
 
     #[must_use]
@@ -1857,21 +1903,74 @@ impl Tool for BashTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "bash".to_owned(),
-            description: "Run a sandboxed shell command with live stdout/stderr streaming."
+            description: "Run a sandboxed shell command with live stdout/stderr streaming, or supervise it in the background."
                 .to_owned(),
             input_schema: input_schema::<BashInput>(),
             capabilities: CapabilityManifest::new([
                 ToolCapability::ReadFilesystem,
-                ToolCapability::WriteFilesystem,
                 ToolCapability::Network,
                 ToolCapability::Execute,
             ]),
         }
     }
 
+    fn invocation_capabilities(&self, input: &Value) -> Result<CapabilityManifest, ToolError> {
+        let input: BashInput = parse_input(input.clone())?;
+        Ok(if input.run_in_background {
+            CapabilityManifest::new([
+                ToolCapability::ReadFilesystem,
+                ToolCapability::Network,
+                ToolCapability::Execute,
+            ])
+        } else {
+            CapabilityManifest::new([
+                ToolCapability::ReadFilesystem,
+                ToolCapability::WriteFilesystem,
+                ToolCapability::Network,
+                ToolCapability::Execute,
+            ])
+        })
+    }
+
+    fn mutation_scope(&self, input: &Value) -> crate::MutationScope {
+        serde_json::from_value::<BashInput>(input.clone()).map_or(
+            crate::MutationScope::OpaqueWorkspace,
+            |input| {
+                if input.run_in_background {
+                    crate::MutationScope::None
+                } else {
+                    crate::MutationScope::OpaqueWorkspace
+                }
+            },
+        )
+    }
+
+    async fn end_session(&self, session_id: &rw_types::SessionId) -> Result<(), ToolError> {
+        if let Some(background) = &self.background {
+            background.shutdown_session(session_id).await?;
+        }
+        Ok(())
+    }
+
+    fn session_activity(&self, session_id: &rw_types::SessionId) -> Option<String> {
+        self.background
+            .as_ref()
+            .is_some_and(|background| background.has_running(session_id))
+            .then(|| "background shell process is still running".to_owned())
+    }
+
+    fn observes_session_resources(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError> {
         context.cancellation.check()?;
         let input: BashInput = parse_input(input)?;
+        if !input.run_in_background && input.sandbox == BashSandboxMode::ReadOnly {
+            return Err(ToolError::InvalidInput(
+                "read_only sandbox mode is reserved for supervised background commands".to_owned(),
+            ));
+        }
         if input.command.trim().is_empty() {
             return Err(ToolError::InvalidInput(
                 "command must not be empty".to_owned(),
@@ -1889,19 +1988,40 @@ impl Tool for BashTool {
             self.limits.max_result_bytes.saturating_sub(framing_reserve),
         ));
         let network_domains = normalize_requested_domains(&input.network_domains)?;
+        let request = CommandRequest {
+            network_domains,
+            command: input.command,
+            cwd,
+            env: input.env,
+            sandbox: input.sandbox,
+        };
+        if input.run_in_background {
+            if input.sandbox != BashSandboxMode::Sandboxed {
+                return Err(ToolError::InvalidInput(
+                    "background commands must use the write-denied sandbox".to_owned(),
+                ));
+            }
+            let mut request = request;
+            request.sandbox = BashSandboxMode::ReadOnly;
+            let manager = self.background.as_ref().ok_or_else(|| {
+                ToolError::Command("background process manager is unavailable".to_owned())
+            })?;
+            let session_id = context.session_id().ok_or_else(|| {
+                ToolError::Command("background commands require an actor-owned session".to_owned())
+            })?;
+            let process = manager.start(Arc::clone(&self.executor), session_id, request)?;
+            if context.cancellation.is_cancelled() {
+                let _ = manager.kill(session_id, &process.process_id).await;
+                return Err(ToolError::Cancelled);
+            }
+            return Ok(ToolResult::new(
+                format!("background process started: {}", process.process_id),
+                json!({ "background_process": process }),
+            ));
+        }
         let outcome = self
             .executor
-            .run(
-                CommandRequest {
-                    network_domains,
-                    command: input.command,
-                    cwd,
-                    env: input.env,
-                    sandbox: input.sandbox,
-                },
-                context.cancellation.clone(),
-                capture.clone(),
-            )
+            .run(request, context.cancellation.clone(), capture.clone())
             .await?;
         context.cancellation.check()?;
         let captured = capture.finish()?;
@@ -3144,16 +3264,31 @@ sys.exit(92)
     }
 
     #[test]
-    fn bash_declares_all_ambient_capabilities() {
-        let descriptor =
-            BashTool::new(Arc::new(StreamingExecutor), ToolLimits::default()).descriptor();
+    fn bash_declares_shared_capabilities_and_adds_write_only_for_foreground_calls() {
+        let tool = BashTool::new(Arc::new(StreamingExecutor), ToolLimits::default());
+        let descriptor = tool.descriptor();
         for capability in [
             ToolCapability::ReadFilesystem,
-            ToolCapability::WriteFilesystem,
             ToolCapability::Network,
             ToolCapability::Execute,
         ] {
             assert!(descriptor.capabilities.contains(&capability));
         }
+        assert!(
+            !descriptor
+                .capabilities
+                .contains(&ToolCapability::WriteFilesystem)
+        );
+        assert!(
+            tool.invocation_capabilities(&json!({ "command": "true" }))
+                .expect("foreground capabilities")
+                .contains(&ToolCapability::WriteFilesystem)
+        );
+        assert!(
+            !tool
+                .invocation_capabilities(&json!({ "command": "true", "run_in_background": true }))
+                .expect("background capabilities")
+                .contains(&ToolCapability::WriteFilesystem)
+        );
     }
 }

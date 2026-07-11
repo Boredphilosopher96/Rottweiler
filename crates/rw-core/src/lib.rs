@@ -12,7 +12,9 @@ mod permission;
 mod provider_factory;
 mod subscription_credentials;
 
-pub use rw_types::config::{BudgetConfig, CompactionConfig, Config, PermissionConfig};
+pub use rw_types::config::{
+    BudgetConfig, CompactionConfig, Config, PermissionConfig, ProviderConfig,
+};
 pub use rw_types::{
     AccountingAttribution, AttachmentData, CommandDescriptor, ContextItemId, ContextSnapshot,
     CostSnapshot, ModeId, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor,
@@ -26,7 +28,7 @@ pub use admin::{
     ModelCatalogRefresh, OAuthLogin, OAuthLoginResult, ProviderApiKey, ProviderLogin,
     ProviderLoginCancellation, ResolvedProviderApiKey, begin_oauth_login, begin_provider_login,
     default_provider_api_key_credential_id, refresh_model_catalog, resolve_provider_api_key,
-    store_provider_api_key,
+    store_provider_api_key, validate_stored_provider_credential,
 };
 pub use engine::{
     AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals, CommandToolCall,
@@ -147,22 +149,25 @@ pub mod runtime_support {
         FixtureRedactor, GuardedHttpFetchError, GuardedHttpFetchRequest, GuardedHttpFetchResponse,
         GuardedHttpMethod, GuardedHttpRequest, GuardedHttpStreamResponse,
         NativeWebSearchCapability, NativeWebSearchRequest, PricingTable, Provider, ProviderError,
-        ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyAuthentication, ProxyEnvironment,
-        ProxySettings, Recorder, ReplayProvider, Secret as ProviderSecret, ThinkingLevel,
-        ToolChoice, ToolDefinition, WireMode, deny_outbound_network_for_process,
-        guarded_http_fetch, guarded_http_request,
+        ProviderErrorKind, ProviderEvent, ProviderReachabilityRequest, ProviderRequest,
+        ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource, Recorder,
+        ReplayProvider, Secret as ProviderSecret, ThinkingLevel, ToolChoice, ToolDefinition,
+        WireMode, deny_outbound_network_for_process, guarded_http_fetch, guarded_http_request,
+        provider_reachability_probe,
     };
     pub use rw_tools::{
-        ApplyWorktreeDiffTool, AskUserInput, AskUserTool, BashSandboxMode, BashTool,
-        CancellationToken, CapabilityManifest, CodeIntelligence, CodeIntelligenceProvider,
-        CommandExecutor, CommandFixtureRedactor, CommandOutcome as ToolCommandOutcome,
-        CommandRequest, CommandSafetyClassifier, ConfiguredSearchApi, DefinitionTool, Diagnostic,
-        DiagnosticSeverity, DiagnosticsTool, EditTool, EgressDecision, EgressPin, EgressPolicy,
-        ExecutionLease, FetchRequest, FetchResponse, GlobTool, GrepTool, IntelligenceBackend,
-        IntelligenceResult, Language, Location, LsTool, LspConfig, LspServerConfig, MultiEditTool,
-        MutationScope, NetworkPolicy as SandboxNetworkPolicy, NoopOutputSink, Position,
-        QuestionAsker, Range, ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult,
-        RenameTool, ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
+        ApplyWorktreeDiffTool, AskUserInput, AskUserTool, BackgroundKillTool, BackgroundOutputTool,
+        BackgroundProcessLimits, BackgroundProcessManager, BackgroundStatusTool, BashSandboxMode,
+        BashTool, CancellationToken, CapabilityManifest, CodeIntelligence,
+        CodeIntelligenceProvider, CommandExecutor, CommandFixtureRedactor,
+        CommandOutcome as ToolCommandOutcome, CommandRequest, CommandSafetyClassifier,
+        ConfiguredSearchApi, DefinitionTool, Diagnostic, DiagnosticSeverity, DiagnosticsTool,
+        EditTool, EgressDecision, EgressPin, EgressPolicy, ExecutionLease, FetchRequest,
+        FetchResponse, GlobTool, GrepTool, IntelligenceBackend, IntelligenceResult, Language,
+        Location, LsTool, LspConfig, LspServerConfig, MultiEditTool, MutationScope,
+        NetworkPolicy as SandboxNetworkPolicy, NoopOutputSink, Position, QuestionAsker, Range,
+        ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult, RenameTool,
+        ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
         SandboxedProtocolLauncher, SubagentEventSink, SubagentLifecycleEvent,
         SubagentLifecycleMode, SubagentProgressEvent, SupervisedEgressProxy, SymbolIndex,
         SymbolsTool, TodoTool, TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError,

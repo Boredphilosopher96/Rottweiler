@@ -153,6 +153,54 @@ pub struct ResolvedCredential {
     warnings: Vec<CredentialWarning>,
 }
 
+/// One secret-safe result from a non-mutating batch credential inventory.
+#[derive(Debug)]
+pub enum CredentialInventoryItem {
+    /// A value exists; callers may use it only at an authenticated boundary.
+    Present(ResolvedCredential),
+    /// No configured source contains the reference.
+    Missing,
+    /// The keychain was unavailable and no fallback value exists.
+    StoreUnavailable,
+}
+
+enum EnvironmentInventoryValue {
+    NotConfigured,
+    Missing,
+    Present(String),
+}
+
+fn environment_only_inventory(
+    references: &[CredentialReference],
+    environment_values: &[EnvironmentInventoryValue],
+) -> Option<Vec<CredentialInventoryItem>> {
+    let values = environment_values
+        .iter()
+        .map(|environment| match environment {
+            EnvironmentInventoryValue::Present(value) => Some(value),
+            EnvironmentInventoryValue::NotConfigured | EnvironmentInventoryValue::Missing => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(
+        references
+            .iter()
+            .zip(values)
+            .map(|(reference, value)| {
+                CredentialInventoryItem::Present(ResolvedCredential {
+                    secret: Secret::new(value.clone()),
+                    source: CredentialSource::Environment(
+                        reference
+                            .environment_variable()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    ),
+                    warnings: Vec::new(),
+                })
+            })
+            .collect(),
+    )
+}
+
 impl ResolvedCredential {
     /// Sensitive value, exposed only through an explicit method call.
     #[must_use]
@@ -562,6 +610,116 @@ where
     E: CredentialEnvironment,
     K: CredentialKeychain,
 {
+    /// Inventories many references with one vault read and at most one fallback
+    /// document read. This path never performs legacy migration or any write.
+    ///
+    /// Returned entries align exactly with `references`; secret values remain
+    /// inside [`ResolvedCredential`] and its redacted debug boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized error for an invalid reference/environment value,
+    /// malformed vault/fallback document, or unsafe fallback file.
+    pub fn resolve_inventory(
+        &self,
+        references: &[CredentialReference],
+    ) -> Result<Vec<CredentialInventoryItem>, CredentialError> {
+        for reference in references {
+            reference.validate()?;
+        }
+        let environment_values = references
+            .iter()
+            .map(|reference| {
+                let Some(variable) = reference.environment_variable() else {
+                    return Ok(EnvironmentInventoryValue::NotConfigured);
+                };
+                Ok(self
+                    .environment
+                    .get(variable)?
+                    .filter(|value| !value.is_empty())
+                    .map_or(
+                        EnvironmentInventoryValue::Missing,
+                        EnvironmentInventoryValue::Present,
+                    ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(inventory) = environment_only_inventory(references, &environment_values) {
+            return Ok(inventory);
+        }
+        let (vault, keychain_unavailable) = {
+            let mut cache =
+                self.vault_cache
+                    .lock()
+                    .map_err(|_| CredentialError::KeychainUnavailable {
+                        identifier: "credential-vault".to_owned(),
+                    })?;
+            let unavailable = match self.load_vault(&mut cache) {
+                Ok(()) => false,
+                Err(VaultAccessError::Unavailable) => true,
+                Err(VaultAccessError::Malformed) => {
+                    return Err(CredentialError::MalformedKeychainVault);
+                }
+                Err(VaultAccessError::Encode) => {
+                    return Err(CredentialError::EncodeKeychainVault);
+                }
+            };
+            let values = match &cache.vault {
+                CachedVault::Loaded(vault) => vault.credentials.clone(),
+                CachedVault::Unavailable | CachedVault::Unloaded => BTreeMap::new(),
+                CachedVault::Malformed => return Err(CredentialError::MalformedKeychainVault),
+            };
+            (values, unavailable)
+        };
+        let fallback = if fallback_metadata(&self.fallback_path)?.is_some() {
+            Some(read_document(&self.fallback_path)?)
+        } else {
+            None
+        };
+        Ok(references
+            .iter()
+            .zip(environment_values)
+            .map(|(reference, environment)| {
+                if let EnvironmentInventoryValue::Present(value) = environment {
+                    return CredentialInventoryItem::Present(ResolvedCredential {
+                        secret: Secret::new(value),
+                        source: CredentialSource::Environment(
+                            reference
+                                .environment_variable()
+                                .unwrap_or_default()
+                                .to_owned(),
+                        ),
+                        warnings: Vec::new(),
+                    });
+                }
+                if let Some(value) = vault.get(reference.identifier()) {
+                    return CredentialInventoryItem::Present(ResolvedCredential {
+                        secret: Secret::new(value.clone()),
+                        source: CredentialSource::OsKeychain,
+                        warnings: Vec::new(),
+                    });
+                }
+                if let Some(value) = fallback
+                    .as_ref()
+                    .and_then(|document| document.credentials.get(reference.identifier()))
+                {
+                    return CredentialInventoryItem::Present(ResolvedCredential {
+                        secret: Secret::new(value.clone()),
+                        source: CredentialSource::FallbackFile(self.fallback_path.clone()),
+                        warnings: vec![fallback_warning(
+                            &self.fallback_path,
+                            reference.identifier(),
+                        )],
+                    });
+                }
+                if keychain_unavailable {
+                    CredentialInventoryItem::StoreUnavailable
+                } else {
+                    CredentialInventoryItem::Missing
+                }
+            })
+            .collect())
+    }
+
     /// Creates a manager with deterministic/injectable external boundaries.
     #[must_use]
     pub fn with_backends(environment: E, keychain: K, fallback_path: impl Into<PathBuf>) -> Self {
@@ -1159,9 +1317,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
-        CredentialReference, CredentialSource, CredentialVault, KEYCHAIN_VAULT_ID,
-        KeychainUnavailable, Secret, decode_vault, encode_vault, keychain_backend_is_file,
+        CredentialEnvironment, CredentialError, CredentialInventoryItem, CredentialKeychain,
+        CredentialManager, CredentialReference, CredentialSource, CredentialVault,
+        KEYCHAIN_VAULT_ID, KeychainUnavailable, Secret, decode_vault, encode_vault,
+        keychain_backend_is_file,
     };
 
     #[derive(Debug, Default, Clone)]
@@ -1313,6 +1472,76 @@ mod tests {
             }
             Ok(state.legacy.get(identifier).cloned().map(Secret::new))
         }
+    }
+
+    #[test]
+    fn empty_inventory_skips_keychain_legacy_and_fallback_access() {
+        let root = tempdir().expect("temporary root should be created");
+        let keychain = RecordingKeychain::default();
+        let manager = CredentialManager::with_backends(
+            TestEnvironment::default(),
+            keychain.clone(),
+            // A directory is intentionally unsafe as a fallback file. Success
+            // therefore proves the fallback metadata/document path was skipped.
+            root.path(),
+        );
+        let inventory = manager
+            .resolve_inventory(&[])
+            .expect("empty inventory should be side-effect free");
+        assert!(inventory.is_empty());
+        assert!(keychain.calls().is_empty());
+    }
+
+    #[test]
+    fn environment_satisfied_inventory_skips_keychain_legacy_and_fallback_access() {
+        let root = tempdir().expect("temporary root should be created");
+        let keychain = RecordingKeychain::default();
+        let manager = CredentialManager::with_backends(
+            TestEnvironment(BTreeMap::from([(
+                "RW_INVENTORY_TOKEN".to_owned(),
+                "environment-token".to_owned(),
+            )])),
+            keychain.clone(),
+            // As above, touching this directory as a fallback file would fail.
+            root.path(),
+        );
+        let references = [
+            CredentialReference::new("first").with_environment("RW_INVENTORY_TOKEN"),
+            CredentialReference::new("second").with_environment("RW_INVENTORY_TOKEN"),
+        ];
+        let inventory = manager
+            .resolve_inventory(&references)
+            .expect("environment-only inventory should avoid durable stores");
+        assert_eq!(inventory.len(), 2);
+        assert!(inventory.iter().all(|item| matches!(
+            item,
+            CredentialInventoryItem::Present(resolved)
+                if matches!(resolved.source(), CredentialSource::Environment(_))
+        )));
+        assert!(keychain.calls().is_empty());
+    }
+
+    #[test]
+    fn missing_inventory_reads_one_vault_without_writes_or_legacy_migration() {
+        let root = tempdir().expect("temporary root should be created");
+        let keychain = RecordingKeychain::default();
+        let manager = CredentialManager::with_backends(
+            TestEnvironment::default(),
+            keychain.clone(),
+            root.path().join("missing-credentials.toml"),
+        );
+        let inventory = manager
+            .resolve_inventory(&[
+                CredentialReference::new("first"),
+                CredentialReference::new("second"),
+            ])
+            .expect("missing inventory should remain non-destructive");
+        assert!(
+            inventory
+                .iter()
+                .all(|item| matches!(item, CredentialInventoryItem::Missing))
+        );
+        assert_eq!(keychain.calls(), vec![format!("get:{KEYCHAIN_VAULT_ID}")]);
     }
 
     #[test]

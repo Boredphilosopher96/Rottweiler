@@ -1,0 +1,46 @@
+[package]
+name = "rottweiler-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rw-context = { path = "../crates/rw-context" }
+rw-ext = { path = "../crates/rw-ext" }
+rw-store = { path = "../crates/rw-store" }
+rw-types = { path = "../crates/rw-types" }
+serde_json = "1.0"
+tempfile = "3.27"
+toml = "0.9"
+
+[[bin]]
+name = "config_parser"
+path = "fuzz_targets/config_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "toon_decoder"
+path = "fuzz_targets/toon_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plugin_rpc"
+path = "fuzz_targets/plugin_rpc.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "event_log"
+path = "fuzz_targets/event_log.rs"
+test = false
+doc = false
+bench = false

@@ -1,4 +1,6 @@
 /target/
+/fuzz/target/
+/fuzz/artifacts/
 /dist/
 *.profraw
 .DS_Store
@@ -10,6 +12,9 @@ packages/tui/*.bun-build
 packages/plugin-sdk/node_modules/
 packages/plugin-sdk/dist/
 packages/plugin-sdk/*.bun-build
+packages/plugin-docs/node_modules/
+packages/plugin-docs/dist/
+packages/plugin-docs/*.bun-build
 .rottweiler/sessions/
 .rottweiler/checkpoints/
 .rottweiler/runtime/

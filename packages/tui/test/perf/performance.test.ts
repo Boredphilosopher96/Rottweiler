@@ -131,6 +131,42 @@ describe("M4 executable TUI performance budgets", () => {
     expect(app.composer.value).toBe(input)
     expect(percentile(samples.slice(5), 0.99)).toBeLessThan(16)
   })
+
+  test("Vim mode dispatch and insert echo stay below 16ms p99", async () => {
+    Bun.gc(true)
+    const setup = await createTestRenderer({
+      width: 80,
+      height: 20,
+      useThread: false,
+      gatherStats: true,
+    })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { keybindings: { preset: "vim" } })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    setup.mockInput.pressKey("i")
+
+    for (const key of "modalwarmup") {
+      setup.mockInput.pressKey(key)
+      await setup.renderOnce()
+    }
+    app.composer.value = ""
+    await setup.renderOnce()
+    Bun.gc(true)
+
+    const samples: number[] = []
+    const input = "vimmodestaysresponsiveundertyping"
+    for (const key of input) {
+      const started = Bun.nanoseconds()
+      setup.mockInput.pressKey(key)
+      await setup.renderOnce()
+      setup.captureCharFrame()
+      samples.push((Bun.nanoseconds() - started) / 1_000_000)
+    }
+
+    expect(app.composer.value).toBe(input)
+    expect(percentile(samples.slice(5), 0.99)).toBeLessThan(16)
+  })
 })
 
 function percentile(values: readonly number[], quantile: number): number {

@@ -123,6 +123,26 @@ hooks/extensions. One schema, three consumers: UI, storage, extensions.
 Versioning uses serde-compatible evolution rules; 64-bit counters and sequence
 ids cross JSON as decimal strings so JavaScript clients never lose precision.
 
+Historical `rw stats` is deliberately outside the live engine/provider path. It
+copies the reconciled accounting database plus committed WAL through the same
+descriptor-stable, size-capped read-only snapshot boundary as session search,
+then scans authoritative event logs under aggregate session/byte/event limits
+for tool-use counts and durable parent→child relationships. A session-scoped
+query includes that session's descendants; descendant accounting is relabeled
+as `subagent` instead of duplicating the aggregate `SubagentFinished` result.
+USD API subtotal completeness and typed subscription/credit/unavailable counts
+remain explicit in both deterministic text and JSON output.
+
+`rw doctor` is an administrative, non-mutating composition root rather than an
+engine session. Local config/path, OS/WSL, terminal, and sandbox probes always
+run; outbound provider probes require `--network` and enforce a 250–10,000 ms
+timeout with redirects disabled. Provider and proxy URLs retain the same
+user-scoped precedence as runtime calls. All configured credential references
+are inventoried through one process-cached vault manager, after which only
+presence/source categories enter the report; versioned ChatGPT/Copilot bundles
+are shape-validated behind the core secret boundary. The stable JSON schema
+contains no secret-bearing type, and failed checks set a non-zero CLI status.
+
 ### Session loop (`rw-core`)
 
 Single-writer actor per session (tokio task owning session state; commands in via mpsc, events out via broadcast). Turn execution:
@@ -133,6 +153,22 @@ Single-writer actor per session (tokio task owning session state; commands in vi
 4. Loop until no tool calls; fire `turn_end` hooks; reconcile usage/cost; check compaction threshold.
 
 Interrupt = cooperative cancellation token checked at every await point; partial output committed to the log with an `interrupted` marker.
+
+Background shell execution is an owned session resource, not a detached task.
+`bash.run_in_background` passes the already-approved request to the same command
+executor used in the foreground under a write-denied sandbox, while a bounded process manager retains
+redacted output and owns both the cancellation token and join handle.
+`background_status`, `background_output`, and `background_kill` are ordinary
+registered tools and can see only their authenticated `ToolContext` session.
+Every registered tool receives an idempotent session-end cleanup hook; the
+background manager cancels and awaits all children there. The executor's
+process-group barrier, parent-death watchdog, and execution lease cover normal
+shutdown, engine crashes, and recovery respectively. Active-resource observers
+survive tool-registry filtering and block foreground shells, initialization,
+fork/review/rewind, and execution-time workspace mutation until the background
+job ends. Record/replay command-fixture modes reject background launch before
+scheduling because their occurrence recorder is intentionally foreground-only;
+historical event replay never invokes a tool at all.
 
 ### Mode state machine (`rw-core`)
 

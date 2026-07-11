@@ -16,8 +16,9 @@ use miette::{IntoDiagnostic, Result, miette};
 use rustyline::{DefaultEditor, error::ReadlineError};
 use rw_core::runtime_support::{
     ApplyWorktreeDiffTool, ApprovalBinding, ApprovalDecision, AskUserInput, AskUserTool,
-    BashSandboxMode, BashTool, Block, BoxEventStream, CacheBreakpointSupport, CacheHint,
-    CancellationToken, Capabilities, CapabilityManifest, CodeIntelligence,
+    BackgroundKillTool, BackgroundOutputTool, BackgroundProcessLimits, BackgroundProcessManager,
+    BackgroundStatusTool, BashSandboxMode, BashTool, Block, BoxEventStream, CacheBreakpointSupport,
+    CacheHint, CancellationToken, Capabilities, CapabilityManifest, CodeIntelligence,
     CodeIntelligenceProvider, CommandDescriptor, CommandExecutionError, CommandExecutor,
     CommandFixtureRedactor, CommandHandler, CommandInvocation, CommandRegistry, CommandRequest,
     CommandSafetyClassifier, ConfiguredSearchApi, DefinitionTool, Diagnostic, DiagnosticsTool,
@@ -76,6 +77,7 @@ const DEFAULT_EVENT_CAPACITY: usize = 1_024;
 const DEFAULT_DOOM_LOOP_LIMIT: usize = 5;
 const MAX_REDIRECTS: usize = 5;
 const SESSION_METADATA_VERSION: u16 = 1;
+const MAX_SESSION_METADATA_BYTES: u64 = 8 * 1024 * 1024;
 const PROMPT_SHAPE_VERSION: u16 = 2;
 const CHECKPOINT_ROOTS_VERSION: u16 = 1;
 const MAX_GLOBAL_REVIEW_FILES: usize = 1_024;
@@ -1102,6 +1104,9 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     let root_execution_lease = Arc::clone(&execution_lease);
     let root_websearch_config = websearch_config.clone();
     let root_websearch_headers = websearch_headers.clone();
+    let background_redactor: Arc<dyn CommandFixtureRedactor> =
+        Arc::new(SharedCommandFixtureRedactor(fixture_redactor.clone()));
+    let root_background_redactor = Arc::clone(&background_redactor);
     let native_websearch_possible = if inspection
         || options.in_memory_replay_script.is_some()
         || options.record_replay_script.is_some()
@@ -1134,6 +1139,8 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
             websearch_config: &websearch_config,
             websearch_headers: &websearch_headers,
             native_websearch_possible,
+            background_redactor,
+            background_manager: None,
         })
     })
     .await
@@ -1498,6 +1505,8 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         command_safety: root_command_safety,
         websearch_config: root_websearch_config,
         websearch_headers: root_websearch_headers,
+        background_redactor: root_background_redactor,
+        background_manager: Arc::clone(&built_tools.background),
         native_websearch_possible,
         native_websearch_resolver: built_tools
             .websearch
@@ -1978,6 +1987,9 @@ pub(crate) async fn compose_hosted_actor(
     let root_execution_lease = Arc::clone(&execution_lease);
     let root_websearch_config = websearch_config.clone();
     let root_websearch_headers = websearch_headers.clone();
+    let background_redactor: Arc<dyn CommandFixtureRedactor> =
+        Arc::new(SharedCommandFixtureRedactor(fixture_redactor.clone()));
+    let root_background_redactor = Arc::clone(&background_redactor);
     let native_websearch_possible = !offline && provider_native_search_available(&options.config);
     let trusted_lsp_roots = trusted_lsp_roots(
         &tool_workspace_roots,
@@ -1998,6 +2010,8 @@ pub(crate) async fn compose_hosted_actor(
             websearch_config: &websearch_config,
             websearch_headers: &websearch_headers,
             native_websearch_possible,
+            background_redactor,
+            background_manager: None,
         })
     })
     .await
@@ -2235,6 +2249,8 @@ pub(crate) async fn compose_hosted_actor(
         command_safety: root_command_safety,
         websearch_config: root_websearch_config,
         websearch_headers: root_websearch_headers,
+        background_redactor: root_background_redactor,
+        background_manager: Arc::clone(&built_tools.background),
         native_websearch_possible,
         native_websearch_resolver: built_tools
             .websearch
@@ -3596,6 +3612,16 @@ pub(crate) fn load_session_metadata_any(
     storage_root: &Path,
     session_id: &str,
 ) -> Result<SessionMetadata> {
+    load_session_metadata_any_bounded(storage_root, session_id, MAX_SESSION_METADATA_BYTES)
+        .map(|(metadata, _)| metadata)
+}
+
+pub(crate) fn load_session_metadata_any_bounded(
+    storage_root: &Path,
+    session_id: &str,
+    max_bytes: u64,
+) -> Result<(SessionMetadata, u64)> {
+    let max_bytes = max_bytes.min(MAX_SESSION_METADATA_BYTES);
     validate_session_id(session_id)?;
     let sessions = storage_root.join("sessions");
     ensure_real_directory(&sessions, false)?;
@@ -3603,15 +3629,9 @@ pub(crate) fn load_session_metadata_any(
     ensure_real_directory(&directory, false)?;
     let path = directory.join("metadata.json");
     #[cfg(unix)]
-    let bytes = load_session_metadata_unix(&directory, &path)?;
+    let (bytes, byte_count) = load_session_metadata_unix(&directory, &path, max_bytes)?;
     #[cfg(not(unix))]
-    let bytes = {
-        let metadata_on_disk = std::fs::symlink_metadata(&path).into_diagnostic()?;
-        if metadata_on_disk.file_type().is_symlink() || !metadata_on_disk.is_file() {
-            return Err(miette!("session metadata is not a regular file"));
-        }
-        std::fs::read(&path).into_diagnostic()?
-    };
+    let (bytes, byte_count) = load_session_metadata_portable(&path, max_bytes)?;
     let metadata: SessionMetadata = serde_json::from_slice(&bytes).into_diagnostic()?;
     if metadata.version != SESSION_METADATA_VERSION || metadata.session_id != session_id {
         return Err(miette!(
@@ -3627,7 +3647,7 @@ pub(crate) fn load_session_metadata_any(
             "session metadata exceeds the supported workspace root maximum"
         ));
     }
-    Ok(metadata)
+    Ok((metadata, byte_count))
 }
 
 #[cfg(unix)]
@@ -3692,7 +3712,11 @@ fn persist_session_metadata_unix(directory: &Path, path: &Path, bytes: &[u8]) ->
 }
 
 #[cfg(unix)]
-fn load_session_metadata_unix(directory: &Path, path: &Path) -> Result<Vec<u8>> {
+fn load_session_metadata_unix(
+    directory: &Path,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(Vec<u8>, u64)> {
     let parent = open_session_metadata_directory(directory)?;
     let stat = rustix::fs::statat(
         &parent,
@@ -3701,12 +3725,19 @@ fn load_session_metadata_unix(directory: &Path, path: &Path) -> Result<Vec<u8>> 
     )
     .map_err(std::io::Error::from)
     .into_diagnostic()?;
-    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() || stat.st_nlink != 1 {
         return Err(miette!("session metadata is not a regular file"));
     }
     if stat.st_mode & 0o077 != 0 {
         return Err(miette!(
             "session metadata permissions grant group or other access"
+        ));
+    }
+    let byte_count =
+        u64::try_from(stat.st_size).map_err(|_| miette!("session metadata size is invalid"))?;
+    if byte_count > max_bytes {
+        return Err(miette!(
+            "session metadata exceeds the {max_bytes}-byte read limit"
         ));
     }
     let descriptor = rustix::fs::openat(
@@ -3717,12 +3748,95 @@ fn load_session_metadata_unix(directory: &Path, path: &Path) -> Result<Vec<u8>> 
     )
     .map_err(std::io::Error::from)
     .into_diagnostic()?;
-    let mut file = std::fs::File::from(descriptor);
+    let file = std::fs::File::from(descriptor);
+    let opened = rustix::fs::fstat(&file)
+        .map_err(std::io::Error::from)
+        .into_diagnostic()?;
+    if opened.st_dev != stat.st_dev
+        || opened.st_ino != stat.st_ino
+        || opened.st_size != stat.st_size
+        || opened.st_nlink != 1
+    {
+        return Err(miette!("session metadata changed while it was opened"));
+    }
+    let length = usize::try_from(byte_count)
+        .map_err(|_| miette!("session metadata size cannot be represented"))?;
+    let mut bytes = vec![0_u8; length];
+    let mut offset = 0_usize;
+    while offset < bytes.len() {
+        use std::os::unix::fs::FileExt as _;
+        let position = u64::try_from(offset)
+            .map_err(|_| miette!("session metadata offset cannot be represented"))?;
+        let read = file
+            .read_at(&mut bytes[offset..], position)
+            .into_diagnostic()
+            .map_err(|error| miette!("could not read {}: {error}", path.display()))?;
+        if read == 0 {
+            return Err(miette!("session metadata changed while it was read"));
+        }
+        offset = offset
+            .checked_add(read)
+            .ok_or_else(|| miette!("session metadata offset overflow"))?;
+    }
+    let after = rustix::fs::fstat(&file)
+        .map_err(std::io::Error::from)
+        .into_diagnostic()?;
+    let named_after = rustix::fs::statat(
+        &parent,
+        "metadata.json",
+        rustix::fs::AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(std::io::Error::from)
+    .into_diagnostic()?;
+    for current in [&after, &named_after] {
+        if !rustix::fs::FileType::from_raw_mode(current.st_mode).is_file()
+            || current.st_nlink != 1
+            || current.st_dev != stat.st_dev
+            || current.st_ino != stat.st_ino
+            || current.st_size != stat.st_size
+            || current.st_mtime != stat.st_mtime
+            || current.st_mtime_nsec != stat.st_mtime_nsec
+            || current.st_ctime != stat.st_ctime
+            || current.st_ctime_nsec != stat.st_ctime_nsec
+        {
+            return Err(miette!("session metadata changed while it was read"));
+        }
+    }
+    Ok((bytes, byte_count))
+}
+
+#[cfg(not(unix))]
+fn load_session_metadata_portable(path: &Path, max_bytes: u64) -> Result<(Vec<u8>, u64)> {
+    let before = std::fs::symlink_metadata(path).into_diagnostic()?;
+    if before.file_type().is_symlink() || !before.is_file() {
+        return Err(miette!("session metadata is not a regular file"));
+    }
+    if before.len() > max_bytes {
+        return Err(miette!(
+            "session metadata exceeds the {max_bytes}-byte read limit"
+        ));
+    }
+    let file = std::fs::File::open(path).into_diagnostic()?;
+    let opened = file.metadata().into_diagnostic()?;
+    if opened.len() != before.len() || opened.modified().ok() != before.modified().ok() {
+        return Err(miette!("session metadata changed while it was opened"));
+    }
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .into_diagnostic()
-        .map_err(|error| miette!("could not read {}: {error}", path.display()))?;
-    Ok(bytes)
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .into_diagnostic()?;
+    let byte_count =
+        u64::try_from(bytes.len()).map_err(|_| miette!("session metadata size overflow"))?;
+    let after = std::fs::symlink_metadata(path).into_diagnostic()?;
+    if byte_count > max_bytes
+        || after.file_type().is_symlink()
+        || !after.is_file()
+        || after.len() != before.len()
+        || after.modified().ok() != before.modified().ok()
+    {
+        return Err(miette!("session metadata changed while it was read"));
+    }
+    Ok((bytes, byte_count))
 }
 
 fn ensure_real_directory(path: &Path, create: bool) -> Result<()> {
@@ -4291,6 +4405,8 @@ struct RuntimeWorkspaceRootController {
     command_safety: Arc<CommandSafetyClassifier>,
     websearch_config: WebSearchConfig,
     websearch_headers: BTreeMap<String, String>,
+    background_redactor: Arc<dyn CommandFixtureRedactor>,
+    background_manager: Arc<BackgroundProcessManager>,
     native_websearch_possible: bool,
     native_websearch_resolver: Option<Arc<NativeWebSearchResolver>>,
     trust_store_path: PathBuf,
@@ -4362,6 +4478,8 @@ impl RuntimeWorkspaceRootController {
             websearch_config: &self.websearch_config,
             websearch_headers: &self.websearch_headers,
             native_websearch_possible: self.native_websearch_possible,
+            background_redactor: Arc::clone(&self.background_redactor),
+            background_manager: Some(Arc::clone(&self.background_manager)),
         })
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         if let Some(searcher) = &built.websearch {
@@ -4431,6 +4549,8 @@ impl RuntimeWorkspaceRootController {
             command_safety: Arc::clone(&self.command_safety),
             websearch_config: self.websearch_config.clone(),
             websearch_headers: self.websearch_headers.clone(),
+            background_redactor: Arc::clone(&self.background_redactor),
+            background_manager: Arc::clone(&self.background_manager),
             native_websearch_possible: self.native_websearch_possible,
             native_websearch_resolver: self.native_websearch_resolver.clone(),
             trust_store_path: self.trust_store_path.clone(),
@@ -4499,6 +4619,8 @@ impl RuntimeWorkspaceRootController {
             websearch_config: &self.websearch_config,
             websearch_headers: &self.websearch_headers,
             native_websearch_possible: self.native_websearch_possible,
+            background_redactor: Arc::clone(&self.background_redactor),
+            background_manager: Some(Arc::clone(&self.background_manager)),
         })
         .map_err(|_error| {
             AgentLoopError::InvalidConfiguration(
@@ -6239,6 +6361,10 @@ impl CommandFixtureRedactor for SharedCommandFixtureRedactor {
     fn redact(&self, value: &str) -> String {
         self.0.redact_text(value)
     }
+
+    fn max_secret_bytes(&self) -> usize {
+        self.0.maximum_registered_secret_bytes()
+    }
 }
 
 struct SharedEngineSecretRedactor(FixtureRedactor);
@@ -7534,6 +7660,8 @@ struct BuildToolsInput<'a> {
     websearch_config: &'a WebSearchConfig,
     websearch_headers: &'a BTreeMap<String, String>,
     native_websearch_possible: bool,
+    background_redactor: Arc<dyn CommandFixtureRedactor>,
+    background_manager: Option<Arc<BackgroundProcessManager>>,
 }
 
 fn trusted_lsp_roots(
@@ -7659,6 +7787,10 @@ struct ScratchGuardedCommandExecutor {
 
 #[async_trait]
 impl CommandExecutor for ScratchGuardedCommandExecutor {
+    fn supports_background(&self) -> bool {
+        self.inner.supports_background()
+    }
+
     async fn run(
         &self,
         request: CommandRequest,
@@ -8167,6 +8299,7 @@ impl WebSearcher for ReplayingConfiguredWebSearcher {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
     let BuildToolsInput {
         workspace_roots,
@@ -8180,6 +8313,8 @@ fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
         websearch_config,
         websearch_headers,
         native_websearch_possible,
+        background_redactor,
+        background_manager,
     } = input;
     let workspace = workspace_roots
         .first()
@@ -8205,11 +8340,18 @@ fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
         command_safety,
         global_proxy,
     )?;
+    let background = background_manager.unwrap_or_else(|| {
+        Arc::new(BackgroundProcessManager::new(
+            background_redactor,
+            BackgroundProcessLimits::default(),
+        ))
+    });
     let (read_only_hook_executor, read_only_hook_scratch) =
         build_read_only_hook_executor(hook_fixture_mode, &execution_lease, command_safety)?;
     let bash: Arc<dyn Tool> = Arc::new(
         BashTool::new(Arc::clone(&command_executor), limits)
-            .with_command_safety(Arc::clone(command_safety)),
+            .with_command_safety(Arc::clone(command_safety))
+            .with_background_manager(Arc::clone(&background)),
     );
     let code_intelligence: Arc<dyn CodeIntelligenceProvider> =
         Arc::new(MultiRootCodeIntelligence::new(
@@ -8227,6 +8369,9 @@ fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
         Arc::new(GlobTool::new(limits)),
         Arc::new(LsTool::new(limits)),
         bash,
+        Arc::new(BackgroundStatusTool::new(Arc::clone(&background))),
+        Arc::new(BackgroundOutputTool::new(Arc::clone(&background))),
+        Arc::new(BackgroundKillTool::new(Arc::clone(&background))),
         Arc::new(WebFetchTool::new(Arc::clone(&web_fetcher), limits)),
         todo.clone(),
         Arc::new(AskUserTool::new(question_asker, limits)),
@@ -8263,6 +8408,7 @@ fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
         read_only_hook_scratch,
         code_intelligence,
         websearch,
+        background,
         _execution_lease: execution_lease,
     })
 }
@@ -8308,6 +8454,7 @@ struct BuiltTools {
     read_only_hook_scratch: PathBuf,
     code_intelligence: Arc<dyn CodeIntelligenceProvider>,
     websearch: Option<Arc<RuntimeWebSearcher>>,
+    background: Arc<BackgroundProcessManager>,
     _execution_lease: Arc<ExecutionLease>,
 }
 
@@ -9845,6 +9992,60 @@ mod tests {
     }
 
     struct RecoveryProbeObserver;
+
+    #[cfg(unix)]
+    #[test]
+    fn session_metadata_reads_are_bounded_descriptor_stable_and_single_link() {
+        let root = tempdir().expect("metadata root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::create_dir_all(root.path().join("sessions/metadata-bounds"))
+            .expect("session directory");
+        persist_session_metadata(
+            root.path(),
+            "metadata-bounds",
+            &workspace,
+            "default",
+            &[],
+            std::slice::from_ref(&workspace),
+        )
+        .expect("metadata fixture");
+        let path = root.path().join("sessions/metadata-bounds/metadata.json");
+        let expected_bytes = std::fs::metadata(&path).expect("metadata size").len();
+        let (metadata, descriptor_bytes) = load_session_metadata_any_bounded(
+            root.path(),
+            "metadata-bounds",
+            MAX_SESSION_METADATA_BYTES,
+        )
+        .expect("bounded metadata read");
+        assert_eq!(metadata.session_id, "metadata-bounds");
+        assert_eq!(descriptor_bytes, expected_bytes);
+
+        let alias = root.path().join("metadata-hardlink.json");
+        std::fs::hard_link(&path, &alias).expect("hard link fixture");
+        assert!(
+            load_session_metadata_any_bounded(
+                root.path(),
+                "metadata-bounds",
+                MAX_SESSION_METADATA_BYTES,
+            )
+            .is_err()
+        );
+        std::fs::remove_file(alias).expect("remove hard link");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .and_then(|file| file.set_len(MAX_SESSION_METADATA_BYTES + 1))
+            .expect("oversized sparse metadata");
+        assert!(
+            load_session_metadata_any_bounded(
+                root.path(),
+                "metadata-bounds",
+                MAX_SESSION_METADATA_BYTES,
+            )
+            .is_err()
+        );
+    }
 
     #[async_trait]
     impl rw_core::SubagentSessionFactory for RecoveryProbeFactory {
@@ -12784,9 +12985,14 @@ mod tests {
             websearch_config: &configured,
             websearch_headers: &BTreeMap::new(),
             native_websearch_possible: false,
+            background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
+            background_manager: None,
         })
         .expect("tool composition");
         for name in [
+            "background_status",
+            "background_output",
+            "background_kill",
             "diagnostics",
             "definition",
             "references",
@@ -12795,6 +13001,16 @@ mod tests {
         ] {
             assert!(built.registry.resolve(name).is_some(), "missing {name}");
         }
+        assert!(
+            built
+                .registry
+                .descriptor("bash")
+                .and_then(|descriptor| descriptor
+                    .input_schema
+                    .pointer("/properties/run_in_background"))
+                .is_some(),
+            "bash schema must expose typed background execution"
+        );
 
         let offline_lease = Arc::new(
             ExecutionLease::acquire(private.path().join("offline-execution.lock"))
@@ -12812,6 +13028,8 @@ mod tests {
             websearch_config: &configured,
             websearch_headers: &BTreeMap::new(),
             native_websearch_possible: false,
+            background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
+            background_manager: None,
         })
         .expect("offline tool composition");
         assert!(offline.registry.resolve("websearch").is_none());
@@ -12833,6 +13051,8 @@ mod tests {
             websearch_config: &configured,
             websearch_headers: &BTreeMap::new(),
             native_websearch_possible: true,
+            background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
+            background_manager: None,
         })
         .expect("native replay tool composition");
         assert!(replay_native.registry.resolve("websearch").is_some());
@@ -14170,6 +14390,11 @@ mod tests {
             command_safety: Arc::new(CommandSafetyClassifier::default()),
             websearch_config: WebSearchConfig::default(),
             websearch_headers: BTreeMap::new(),
+            background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
+            background_manager: Arc::new(BackgroundProcessManager::new(
+                Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
+                BackgroundProcessLimits::default(),
+            )),
             native_websearch_possible: false,
             native_websearch_resolver: None,
             trust_store_path: private.join("trust.json"),
@@ -14367,6 +14592,11 @@ mod tests {
             command_safety: Arc::new(CommandSafetyClassifier::default()),
             websearch_config: WebSearchConfig::default(),
             websearch_headers: BTreeMap::new(),
+            background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
+            background_manager: Arc::new(BackgroundProcessManager::new(
+                Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
+                BackgroundProcessLimits::default(),
+            )),
             native_websearch_possible: false,
             native_websearch_resolver: None,
             trust_store_path: private.join("trust.json"),

@@ -21,6 +21,7 @@ const SESSION_ENV: &str = "ROTTWEILER_SESSION_ID";
 const LAST_SEEN_ENV: &str = "ROTTWEILER_LAST_SEEN_SEQUENCE";
 const LAST_SEEN_FILE_ENV: &str = "ROTTWEILER_LAST_SEEN_FILE";
 const FORK_OPERATION_DIRECTORY_ENV: &str = "ROTTWEILER_FORK_OPERATION_DIRECTORY";
+const TUI_KEYBINDINGS_ENV: &str = "ROTTWEILER_TUI_KEYBINDINGS";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StdioMode {
@@ -46,6 +47,7 @@ pub struct SupervisorConfig {
     pub last_seen_file: PathBuf,
     pub fork_operation_directory: PathBuf,
     pub session_id: String,
+    pub tui_keybindings: Option<String>,
     pub permission_mode: Option<crate::PermissionMode>,
     pub max_turns: usize,
     pub model: Option<String>,
@@ -200,8 +202,7 @@ impl ProcessBackend for TokioProcessBackend {
     type Child = TokioManagedChild;
 
     async fn spawn(&self, spec: ChildSpec) -> io::Result<Self::Child> {
-        let mut command = Command::new(&spec.program);
-        command.args(&spec.args).envs(&spec.env);
+        let mut command = command_from_spec(&spec);
         match spec.stdio {
             StdioMode::Inherit => {
                 command
@@ -254,6 +255,15 @@ impl ProcessBackend for TokioProcessBackend {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     }
+}
+
+fn command_from_spec(spec: &ChildSpec) -> Command {
+    let mut command = Command::new(&spec.program);
+    command
+        .args(&spec.args)
+        .env_remove(TUI_KEYBINDINGS_ENV)
+        .envs(&spec.env);
+    command
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -511,10 +521,17 @@ fn engine_spec(config: &SupervisorConfig) -> ChildSpec {
 }
 
 fn tui_spec(config: &SupervisorConfig, last_seen: Option<SequenceId>) -> ChildSpec {
+    let mut env = connection_env(config, last_seen);
+    if let Some(keybindings) = &config.tui_keybindings {
+        env.insert(
+            OsString::from(TUI_KEYBINDINGS_ENV),
+            OsString::from(keybindings),
+        );
+    }
     ChildSpec {
         program: config.tui_executable.clone(),
         args: Vec::new(),
-        env: connection_env(config, last_seen),
+        env,
         stdio: StdioMode::Inherit,
         // The TUI must remain in `rw`'s foreground process group so it can
         // actually own the controlling terminal. Foreground shell handover
@@ -610,6 +627,7 @@ mod tests {
             last_seen_file: PathBuf::from("/private/run/last-seen"),
             fork_operation_directory: PathBuf::from("/private/control/pending-forks"),
             session_id: "session-1".to_owned(),
+            tui_keybindings: None,
             permission_mode: Some(crate::PermissionMode::Strict),
             max_turns: 32,
             model: None,
@@ -652,6 +670,37 @@ mod tests {
         assert_eq!(
             engine_spec(&config).args,
             ["serve", "--max-turns", "32", "--permission-mode", "strict",].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn keybindings_are_forwarded_only_to_the_tui() {
+        let mut config = fixture_config();
+        config.tui_keybindings = Some("preset = 'vim'".to_owned());
+
+        let key = OsString::from(TUI_KEYBINDINGS_ENV);
+        assert_eq!(
+            tui_spec(&config, None).env.get(&key),
+            Some(&OsString::from("preset = 'vim'"))
+        );
+        assert!(!engine_spec(&config).env.contains_key(&key));
+
+        let engine = command_from_spec(&engine_spec(&config));
+        let engine_value = engine
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == key.as_os_str())
+            .map(|(_, value)| value);
+        assert_eq!(engine_value, Some(None));
+        let tui = command_from_spec(&tui_spec(&config, None));
+        let tui_value = tui
+            .as_std()
+            .get_envs()
+            .find(|(name, _)| *name == key.as_os_str())
+            .map(|(_, value)| value);
+        assert_eq!(
+            tui_value,
+            Some(Some(std::ffi::OsStr::new("preset = 'vim'")))
         );
     }
 

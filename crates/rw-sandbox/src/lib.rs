@@ -141,6 +141,17 @@ impl SandboxPolicy {
             network,
         }
     }
+
+    /// Removes every filesystem write grant while preserving read and network
+    /// policy for supervised background commands.
+    #[must_use]
+    pub fn read_only(&self) -> Self {
+        Self {
+            write_roots: Vec::new(),
+            read_roots: self.read_roots.clone(),
+            network: self.network.clone(),
+        }
+    }
 }
 
 /// One executable and argument vector.  No shell interpolation is involved.
@@ -761,9 +772,6 @@ mod linux {
             return Err(SandboxError::MalformedHelper);
         }
         let policy: SandboxPolicy = serde_json::from_os_str(&args[2])?;
-        if policy.write_roots.is_empty() {
-            return Err(SandboxError::MalformedHelper);
-        }
         let helper_pin = inherited_helper_pin(args)?;
         if let NetworkPolicy::PolicyProxy {
             port,

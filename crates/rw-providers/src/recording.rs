@@ -205,6 +205,21 @@ impl FixtureRedactor {
         }
     }
 
+    /// Longest registered secret, used by bounded streaming redactors to keep
+    /// exactly enough overlap between arbitrary transport chunks.
+    #[must_use]
+    pub fn maximum_registered_secret_bytes(&self) -> usize {
+        match self.secrets.read() {
+            Ok(secrets) => secrets.iter().map(String::len).max().unwrap_or(0),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .iter()
+                .map(String::len)
+                .max()
+                .unwrap_or(0),
+        }
+    }
+
     /// Whether already-rendered content still contains a registered secret.
     /// The result exposes no secret value.
     #[must_use]

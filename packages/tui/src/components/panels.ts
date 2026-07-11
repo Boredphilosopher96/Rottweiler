@@ -108,11 +108,6 @@ export class ReviewPanelRenderable extends BoxRenderable {
     })
     this.files.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.#showSelected())
     this.files.onKeyDown = (key) => {
-      if (key.name === "escape" || key.name === "esc") {
-        key.preventDefault()
-        this.#callbacks.onClose()
-        return
-      }
       if (key.name !== "a" && key.name !== "r") return
       key.preventDefault()
       const file = this.#review?.files[this.files.getSelectedIndex()]
@@ -512,6 +507,8 @@ export class ContextPanelRenderable extends BoxRenderable {
 
 export class StatusLineRenderable extends TextRenderable {
   #branch: string | null = null
+  #inputMode: "normal" | "insert" | null = null
+  #inputTarget: "composer" | "transcript" | "picker" | "interaction" | "review" | null = null
 
   constructor(ctx: RenderContext, theme: RottweilerTheme) {
     super(ctx, {
@@ -529,6 +526,14 @@ export class StatusLineRenderable extends TextRenderable {
     this.#branch = branch
   }
 
+  setKeybindingMode(
+    mode: "normal" | "insert" | null,
+    target: "composer" | "transcript" | "picker" | "interaction" | "review" | null,
+  ): void {
+    this.#inputMode = mode
+    this.#inputTarget = target
+  }
+
   update(state: RottweilerState): void {
     const context =
       state.context === null
@@ -538,6 +543,13 @@ export class StatusLineRenderable extends TextRenderable {
       state.cost === null ? "cache —" : `cache ${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
     const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
     this.content = [
+      ...(this.#inputMode === null
+        ? []
+        : [
+            `${this.#inputMode === "normal" ? "NORMAL" : "INSERT"}${
+              this.#inputTarget === null ? "" : ` · ${this.#inputTarget}`
+            }`,
+          ]),
       ...(state.replay.active ? ["◉ replay"] : []),
       ...(state.replay.active ? [] : [`◉ ${state.mode ?? "execute"}`]),
       `model ${state.model ?? "fast"}`,

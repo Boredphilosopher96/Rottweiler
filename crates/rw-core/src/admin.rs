@@ -51,6 +51,22 @@ impl AdminError {
 /// never exposes the wrapped value.
 pub struct ProviderApiKey(StoredSecret<String>);
 
+/// Validates the versioned shape of a stored built-in subscription credential
+/// without returning or logging any credential material.
+///
+/// # Errors
+///
+/// Returns a sanitized error when the selected built-in bundle is malformed.
+pub fn validate_stored_provider_credential(kind: &str, value: &str) -> Result<(), AdminError> {
+    match kind {
+        "openai_codex" | "openai_subscription" => {
+            OpenAiSubscriptionCredentialBundle::parse(value).map(|_| ())
+        }
+        "github_copilot" => GitHubCopilotCredential::parse(value).map(|_| ()),
+        _ => Ok(()),
+    }
+}
+
 impl ProviderApiKey {
     /// Builds an API key from hidden terminal input, removing only trailing CR
     /// and LF line terminators. Spaces and every other byte remain unchanged.

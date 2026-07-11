@@ -21,6 +21,7 @@ use rw_core::{
 };
 use tracing_subscriber::EnvFilter;
 
+mod doctor;
 mod history;
 #[allow(dead_code)]
 mod host_runtime;
@@ -42,11 +43,13 @@ mod runtime;
 mod server;
 #[allow(dead_code)]
 mod shell_broker;
+mod stats;
 mod subagent_metadata;
 #[allow(dead_code)]
 mod supervisor;
 #[allow(dead_code)]
 mod tty;
+mod tui_config;
 mod workflow_runtime;
 
 #[derive(Debug, Parser)]
@@ -230,6 +233,33 @@ enum Command {
     Sessions {
         #[command(subcommand)]
         command: SessionsCommand,
+    },
+    /// Report bounded historical tokens, costs, cache savings, and tool use.
+    Stats {
+        /// Limit the report to this session and its durable subagent descendants.
+        #[arg(long, value_name = "SESSION")]
+        session: Option<String>,
+        /// Inclusive UTC start day (`YYYY-MM-DD`).
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        from: Option<String>,
+        /// Inclusive UTC end day (`YYYY-MM-DD`).
+        #[arg(long = "to", value_name = "YYYY-MM-DD")]
+        through: Option<String>,
+        /// Emit the stable JSON report (equivalent to `--output-format json`).
+        #[arg(long)]
+        json: bool,
+    },
+    /// Diagnose configuration, credentials, sandbox, terminal, and providers.
+    Doctor {
+        /// Opt in to bounded provider reachability and credential-validation probes.
+        #[arg(long)]
+        network: bool,
+        /// Per-provider connect and request timeout in milliseconds.
+        #[arg(long, default_value_t = 3_000, value_name = "MILLISECONDS")]
+        timeout_ms: u64,
+        /// Emit the stable machine-readable diagnostic report.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -582,6 +612,55 @@ async fn main() -> Result<()> {
             let sessions = history::search_sessions(&configuration_root_path()?, &query, limit)?;
             render_session_search(&sessions, cli.output_format)?;
         }
+        Some(Command::Stats {
+            session,
+            from,
+            through,
+            json,
+        }) => {
+            let report = stats::collect(
+                &configuration_root_path()?,
+                &stats::StatsQuery {
+                    session,
+                    from_day: from,
+                    through_day: through,
+                },
+            )?;
+            if json
+                || matches!(
+                    cli.output_format,
+                    OutputFormat::Json | OutputFormat::StreamJson
+                )
+            {
+                println!("{}", serde_json::to_string(&report).into_diagnostic()?);
+            } else {
+                print!("{}", stats::render_text(&report));
+            }
+        }
+        Some(Command::Doctor {
+            network,
+            timeout_ms,
+            json,
+        }) => {
+            let report = doctor::collect(doctor::DoctorOptions {
+                network,
+                timeout_ms,
+            })
+            .await;
+            if json
+                || matches!(
+                    cli.output_format,
+                    OutputFormat::Json | OutputFormat::StreamJson
+                )
+            {
+                println!("{}", serde_json::to_string(&report).into_diagnostic()?);
+            } else {
+                print!("{}", doctor::render_text(&report));
+            }
+            if report.has_failures() {
+                return Err(miette!("doctor found one or more blocking issues"));
+            }
+        }
         None => {
             let headless_or_line = cli.prompt.is_some()
                 || cli.line
@@ -828,6 +907,22 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
     let storage_root = configuration_root()?;
     let workspace_roots = canonical_workspace_roots(&workspace, &cli.add_dirs)?;
     prompt_for_folder_trust(&storage_root, &workspace_roots, cli.dangerously_trust)?;
+    let project_assessment =
+        rw_store::trust::FolderTrustStore::new(storage_root.join("trust.json"))
+            .assess(&workspace)
+            .into_diagnostic()?;
+    let project_inventory = (cli.dangerously_trust
+        || project_assessment.project_execution_enabled())
+    .then(|| project_assessment.inventory());
+    let (user_home, user_rottweiler) =
+        runtime::extension_user_roots(&storage_root.join("credentials.toml"));
+    let tui_keybindings = tui_config::load_keybindings(
+        Some(&workspace),
+        project_inventory,
+        &user_home,
+        &user_rottweiler,
+    )
+    .map_err(|error| miette!(error.to_string()))?;
     let session_id = runtime::select_interactive_session(
         &storage_root,
         &workspace,
@@ -849,6 +944,7 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
             last_seen_file: paths.directory.join("last-seen"),
             fork_operation_directory: storage_root.join("control/pending-forks"),
             session_id,
+            tui_keybindings,
             permission_mode: cli.permission_mode,
             max_turns: cli.max_turns,
             model: cli.model.clone(),
@@ -1035,6 +1131,10 @@ async fn run_history_replay_with_tui(
     events: Vec<rw_store::session::EventEnvelope<EngineEvent>>,
     tui: &Path,
 ) -> Result<()> {
+    let (user_home, user_rottweiler) =
+        runtime::extension_user_roots(&storage_root.join("credentials.toml"));
+    let keybindings = tui_config::load_keybindings(None, None, &user_home, &user_rottweiler)
+        .map_err(|error| miette!(error.to_string()))?;
     let through_sequence = events.last().map(|envelope| envelope.sequence);
     let events = historical_replay_items(storage_root, session, events)?;
     let paths = allocate_runtime_paths(&storage_root.join("run"))?;
@@ -1050,16 +1150,20 @@ async fn run_history_replay_with_tui(
     );
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
     let server_task = tokio::spawn(server::serve(listener, state, shutdown_rx));
-    let status = tokio::process::Command::new(tui)
+    let mut command = tokio::process::Command::new(tui);
+    command
+        .env_remove("ROTTWEILER_TUI_KEYBINDINGS")
         .env("ROTTWEILER_ENGINE_SOCKET", &runtime.paths.socket)
         .env("ROTTWEILER_ENGINE_TOKEN_FILE", &runtime.paths.token)
         .env("ROTTWEILER_SESSION_ID", session)
         .env("ROTTWEILER_REPLAY_MODE", "1")
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .status()
-        .await;
+        .stderr(std::process::Stdio::inherit());
+    if let Some(keybindings) = keybindings {
+        command.env("ROTTWEILER_TUI_KEYBINDINGS", keybindings);
+    }
+    let status = command.status().await;
     let _ = shutdown.send(true);
     server_task.await.into_diagnostic()??;
     drop(runtime);
@@ -1445,13 +1549,16 @@ mod historical_replay_tests {
 
         let storage = tempfile::tempdir().expect("storage");
         let fixture = storage.path().join("fixture-tui");
+        fs::write(storage.path().join("keybindings.toml"), "preset = 'vim'")
+            .expect("user keybindings");
         fs::write(
             &fixture,
             b"#!/bin/sh\n\
               test \"$ROTTWEILER_REPLAY_MODE\" = \"1\" || exit 11\n\
               test \"$ROTTWEILER_SESSION_ID\" = \"history\" || exit 12\n\
               test -S \"$ROTTWEILER_ENGINE_SOCKET\" || exit 13\n\
-              test -f \"$ROTTWEILER_ENGINE_TOKEN_FILE\" || exit 14\n",
+              test -f \"$ROTTWEILER_ENGINE_TOKEN_FILE\" || exit 14\n\
+              test \"$ROTTWEILER_TUI_KEYBINDINGS\" = \"preset = 'vim'\" || exit 15\n",
         )
         .expect("fixture script");
         fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700))
@@ -2256,11 +2363,16 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         return Err(error);
     }
     let fork_operation_directory = storage_root.join("control/pending-forks");
+    let (user_home, user_rottweiler) =
+        runtime::extension_user_roots(&storage_root.join("credentials.toml"));
+    let tui_keybindings = tui_config::load_keybindings(None, None, &user_home, &user_rottweiler)
+        .map_err(|error| miette!(error.to_string()))?;
     let tui = run_remote_tui_process(
         tui_executable,
         &local_paths,
         &fork_operation_directory,
         &session_id,
+        tui_keybindings.as_deref(),
         cli.detach,
     );
     tokio::pin!(tui);
@@ -2551,13 +2663,16 @@ async fn run_remote_tui_process(
     paths: &server::ServerRuntimePaths,
     fork_operation_directory: &Path,
     session_id: &str,
+    keybindings: Option<&str>,
     _detach: bool,
 ) -> Result<()> {
     use std::process::Stdio;
 
     let cursor = paths.directory.join("last-seen");
     for attempt in 0..=5_u8 {
-        let status = tokio::process::Command::new(&tui)
+        let mut command = tokio::process::Command::new(&tui);
+        command
+            .env_remove("ROTTWEILER_TUI_KEYBINDINGS")
             .env("ROTTWEILER_ENGINE_SOCKET", &paths.socket)
             .env("ROTTWEILER_ENGINE_TOKEN_FILE", &paths.token)
             .env("ROTTWEILER_SESSION_ID", session_id)
@@ -2568,10 +2683,11 @@ async fn run_remote_tui_process(
             )
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .await
-            .into_diagnostic()?;
+            .stderr(Stdio::inherit());
+        if let Some(keybindings) = keybindings {
+            command.env("ROTTWEILER_TUI_KEYBINDINGS", keybindings);
+        }
+        let status = command.status().await.into_diagnostic()?;
         if status.success() {
             return Ok(());
         }
@@ -2697,6 +2813,46 @@ mod tests {
             cli.command,
             Some(Command::Trust {
                 command: TrustCommand::Status
+            })
+        ));
+    }
+
+    #[test]
+    fn stats_accepts_session_utc_range_and_json_output() {
+        let cli = Cli::try_parse_from([
+            "rw",
+            "stats",
+            "--session",
+            "session-1",
+            "--from",
+            "2026-07-01",
+            "--to",
+            "2026-07-31",
+            "--json",
+        ])
+        .unwrap_or_else(|error| panic!("stats CLI should parse: {error}"));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Stats {
+                session: Some(ref session),
+                from: Some(ref from),
+                through: Some(ref through),
+                json: true,
+            }) if session == "session-1" && from == "2026-07-01" && through == "2026-07-31"
+        ));
+    }
+
+    #[test]
+    fn doctor_network_probe_is_explicit_and_bounded() {
+        let cli =
+            Cli::try_parse_from(["rw", "doctor", "--network", "--timeout-ms", "750", "--json"])
+                .unwrap_or_else(|error| panic!("doctor CLI should parse: {error}"));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Doctor {
+                network: true,
+                timeout_ms: 750,
+                json: true,
             })
         ));
     }

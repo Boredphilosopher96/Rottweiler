@@ -39,6 +39,12 @@ jobs:
       - run: cargo run --locked --quiet -p xtask -- codegen --check
       - run: python3 scripts/check-dependency-direction.py
       - run: python3 scripts/check-network-boundaries.py
+      - name: Capability-eval adapter contract
+        run: |
+          python3 -m py_compile evals/harbor/rottweiler_agent.py
+          python3 -m unittest scripts/tests/test_dogfood_gate.py
+          bash -n scripts/run-terminal-bench.sh
+          test "$(grep -c '^terminal-bench/[a-z0-9-][a-z0-9-]*$' evals/terminal-bench-20.txt)" -eq 20
       - run: cargo doc --locked --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
@@ -50,6 +56,10 @@ jobs:
         working-directory: packages/plugin-sdk
       - run: bun run build
         working-directory: packages/plugin-sdk
+      - run: bun test
+        working-directory: packages/plugin-docs
+      - run: bun run build
+        working-directory: packages/plugin-docs
       - name: Generated TypeScript plugin scaffold conformance
         shell: bash
         run: |

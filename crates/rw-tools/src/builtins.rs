@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
-use crate::bash::{BashTool, CommandExecutor};
+use crate::background::{
+    BackgroundKillTool, BackgroundOutputTool, BackgroundProcessLimits, BackgroundProcessManager,
+    BackgroundStatusTool,
+};
+use crate::bash::{BashTool, CommandExecutor, CommandFixtureRedactor};
 use crate::files::{EditTool, MultiEditTool, ReadTool, WriteTool};
 use crate::interaction::{AskUserTool, QuestionAsker, SubmitPlanTool, TodoTool};
 use crate::registry::{Tool, ToolError, ToolLimits, ToolRegistry};
@@ -12,6 +16,9 @@ use crate::worktree::{ApplyWorktreeDiffTool, DiffArtifactAuthority};
 /// Host-provided boundaries required by the complete first-party tool set.
 pub struct BuiltinDependencies {
     pub command_executor: Arc<dyn CommandExecutor>,
+    /// Shared known-secret redactor applied before background output is kept
+    /// in memory.
+    pub command_output_redactor: Arc<dyn CommandFixtureRedactor>,
     pub web_fetcher: Arc<dyn WebFetcher>,
     pub question_asker: Arc<dyn QuestionAsker>,
     pub symbol_index: Arc<WorkspaceSymbolIndex>,
@@ -23,6 +30,7 @@ pub struct BuiltinDependencies {
 pub struct BuiltinHandles {
     pub todo: Arc<TodoTool>,
     pub symbol_index: Arc<WorkspaceSymbolIndex>,
+    pub background: Arc<BackgroundProcessManager>,
 }
 
 /// Register the first-party tool set through the same public API used by extensions.
@@ -38,6 +46,10 @@ pub fn register_builtins(
     let limits = dependencies.limits;
     let symbol_index = dependencies.symbol_index;
     let todo = Arc::new(TodoTool::new(limits));
+    let background = Arc::new(BackgroundProcessManager::new(
+        dependencies.command_output_redactor,
+        BackgroundProcessLimits::default(),
+    ));
     let todo_tool: Arc<dyn Tool> = todo.clone();
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadTool::new(limits)),
@@ -47,7 +59,13 @@ pub fn register_builtins(
         Arc::new(GrepTool::new(limits)),
         Arc::new(GlobTool::new(limits)),
         Arc::new(LsTool::new(limits)),
-        Arc::new(BashTool::new(dependencies.command_executor, limits)),
+        Arc::new(
+            BashTool::new(dependencies.command_executor, limits)
+                .with_background_manager(Arc::clone(&background)),
+        ),
+        Arc::new(BackgroundStatusTool::new(Arc::clone(&background))),
+        Arc::new(BackgroundOutputTool::new(Arc::clone(&background))),
+        Arc::new(BackgroundKillTool::new(Arc::clone(&background))),
         Arc::new(WebFetchTool::new(dependencies.web_fetcher, limits)),
         todo_tool,
         Arc::new(AskUserTool::new(dependencies.question_asker, limits)),
@@ -69,7 +87,11 @@ pub fn register_builtins(
     for tool in tools {
         registry.register(tool)?;
     }
-    Ok(BuiltinHandles { todo, symbol_index })
+    Ok(BuiltinHandles {
+        todo,
+        symbol_index,
+        background,
+    })
 }
 
 #[cfg(test)]
@@ -136,6 +158,7 @@ mod tests {
         let index = Arc::new(WorkspaceSymbolIndex::new([root.path()]).expect("index"));
         let dependencies = || BuiltinDependencies {
             command_executor: Arc::new(NoCommand),
+            command_output_redactor: Arc::new(crate::IdentityCommandFixtureRedactor),
             web_fetcher: Arc::new(NoFetch),
             question_asker: Arc::new(NoQuestion),
             symbol_index: Arc::clone(&index),
@@ -144,7 +167,7 @@ mod tests {
         };
         let mut registry = ToolRegistry::new();
         register_builtins(&mut registry, dependencies()).expect("builtins");
-        assert_eq!(registry.len(), 14);
+        assert_eq!(registry.len(), 17);
         assert!(
             index
                 .query(&SymbolQuery {
@@ -166,6 +189,9 @@ mod tests {
             "glob",
             "ls",
             "bash",
+            "background_status",
+            "background_output",
+            "background_kill",
             "webfetch",
             "todo",
             "ask_user",

@@ -232,13 +232,29 @@ impl SessionEventLog {
         max_bytes: u64,
         max_events: usize,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+        Self::load_existing_bounded_with_size(root, session_id, max_bytes, max_events)
+            .map(|(events, _)| events)
+    }
+
+    /// Loads a bounded read-only log and returns the byte length observed from
+    /// the same stable file descriptor used for parsing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::load_existing_bounded`].
+    pub fn load_existing_bounded_with_size<T: DeserializeOwned>(
+        root: &Path,
+        session_id: &str,
+        max_bytes: u64,
+        max_events: usize,
+    ) -> Result<(Vec<EventEnvelope<T>>, u64), SessionStoreError> {
         validate_session_id(session_id)?;
         #[cfg(unix)]
         let file = open_existing_session_file(root, session_id)?;
         #[cfg(not(unix))]
         let file = open_existing_session_file_portable(root, session_id)?;
         ensure_regular_file(&file)?;
-        load_events_bounded(&file, max_bytes, max_events)
+        load_events_bounded_with_size(&file, max_bytes, max_events)
     }
 
     /// Creates or idempotently completes a child log from an exact parent
@@ -721,6 +737,73 @@ impl AccountingLedger {
         let rows = statement.query_map([], accounting_entry_from_row)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(SessionStoreError::from)
+    }
+
+    /// Reads a bounded UTC range from an existing accounting projection
+    /// without opening the live database for writes or creating its schema.
+    ///
+    /// The database and any committed WAL are first copied through the same
+    /// descriptor-stable snapshot boundary used by historical session search.
+    /// Event logs remain authoritative; this surface is intended for
+    /// read-only historical reporting over the continuously reconciled index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid or reversed UTC bounds, an unsafe or
+    /// oversized index, a corrupt row, or a result larger than `max_entries`.
+    pub fn entries_read_only_bounded(
+        root: &Path,
+        start_utc: &UtcTimestamp,
+        end_utc: &UtcTimestamp,
+        max_entries: usize,
+    ) -> Result<Vec<TurnAccountingEntry>, SessionStoreError> {
+        if start_utc > end_utc {
+            return Err(SessionStoreError::InvalidAccountingTimestamp);
+        }
+        if max_entries > 1_000_000 {
+            return Err(SessionStoreError::AccountingQueryLimitTooLarge);
+        }
+        let sql_limit = max_entries
+            .checked_add(1)
+            .ok_or(SessionStoreError::LimitOverflow)?;
+        let sql_limit = i64::try_from(sql_limit).map_err(|_| SessionStoreError::LimitOverflow)?;
+        let path = root.join("index.sqlite");
+        let before = validate_read_only_index(&path)?;
+        let canonical_root = fs::canonicalize(root)?;
+        let canonical_path = fs::canonicalize(&path)?;
+        if canonical_path.parent() != Some(canonical_root.as_path()) {
+            return Err(SessionStoreError::UnsafeSessionIndex);
+        }
+        let snapshot = read_only_index_snapshot(&canonical_root, &before)?;
+        let snapshot_path = fs::canonicalize(snapshot.path().join("index.sqlite"))?;
+        let connection = Connection::open_with_flags(
+            snapshot_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        let after = validate_read_only_index(&path)?;
+        if !same_file_identity(&before, &after) {
+            return Err(SessionStoreError::UnsafeSessionIndex);
+        }
+        let mut statement = connection.prepare(
+            "SELECT session_id,turn_id,sequence_id,emitted_at_utc,utc_day,\
+                    attribution_json,usage_json,cost_json \
+             FROM turn_accounting \
+             WHERE emitted_at_utc>=?1 AND emitted_at_utc<=?2 \
+             ORDER BY emitted_at_utc,session_id,length(sequence_id),sequence_id \
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![start_utc.as_str(), end_utc.as_str(), sql_limit],
+            accounting_entry_from_row,
+        )?;
+        let mut entries = rows.collect::<Result<Vec<_>, _>>()?;
+        if entries.len() > max_entries {
+            return Err(SessionStoreError::AccountingResultTooLarge { max_entries });
+        }
+        entries.shrink_to_fit();
+        Ok(entries)
     }
 
     /// Computes session, UTC-day, and trailing-window totals as of the injected
@@ -1859,13 +1942,14 @@ fn load_events<T: DeserializeOwned>(
     parse_events_bounded(&bytes, usize::MAX)
 }
 
-fn load_events_bounded<T: DeserializeOwned>(
+fn load_events_bounded_with_size<T: DeserializeOwned>(
     file: &File,
     max_bytes: u64,
     max_events: usize,
-) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+) -> Result<(Vec<EventEnvelope<T>>, u64), SessionStoreError> {
     let bytes = read_opened_file_bounded(file, max_bytes)?;
-    parse_events_bounded(&bytes, max_events)
+    let byte_count = u64::try_from(bytes.len()).map_err(|_| SessionStoreError::LimitOverflow)?;
+    parse_events_bounded(&bytes, max_events).map(|events| (events, byte_count))
 }
 
 fn parse_events<T: DeserializeOwned>(
@@ -1913,7 +1997,7 @@ fn read_opened_file(file: &File) -> Result<Vec<u8>, SessionStoreError> {
 #[cfg(unix)]
 fn read_opened_file_bounded(file: &File, max_bytes: u64) -> Result<Vec<u8>, SessionStoreError> {
     let stat = rustix::fs::fstat(file).map_err(std::io::Error::from)?;
-    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() || stat.st_nlink != 1 {
         return Err(SessionStoreError::UnsafeEventFileType);
     }
     let file_bytes = u64::try_from(stat.st_size).map_err(|_| SessionStoreError::LimitOverflow)?;
@@ -1935,7 +2019,16 @@ fn read_opened_file_bounded(file: &File, max_bytes: u64) -> Result<Vec<u8>, Sess
             .ok_or(SessionStoreError::LimitOverflow)?;
     }
     let after = rustix::fs::fstat(file).map_err(std::io::Error::from)?;
-    if after.st_dev != stat.st_dev || after.st_ino != stat.st_ino || after.st_size != stat.st_size {
+    if !rustix::fs::FileType::from_raw_mode(after.st_mode).is_file()
+        || after.st_nlink != 1
+        || after.st_dev != stat.st_dev
+        || after.st_ino != stat.st_ino
+        || after.st_size != stat.st_size
+        || after.st_mtime != stat.st_mtime
+        || after.st_mtime_nsec != stat.st_mtime_nsec
+        || after.st_ctime != stat.st_ctime
+        || after.st_ctime_nsec != stat.st_ctime_nsec
+    {
         return Err(SessionStoreError::EventFileChangedDuringRead);
     }
     Ok(bytes)
@@ -2217,6 +2310,10 @@ pub enum SessionStoreError {
     SearchQueryTooLarge,
     #[error("session search internal limit exceeds 1001")]
     SearchLimitTooLarge,
+    #[error("accounting query limit exceeds 1000000 entries")]
+    AccountingQueryLimitTooLarge,
+    #[error("accounting query exceeds the {max_entries}-entry read limit")]
+    AccountingResultTooLarge { max_entries: usize },
     #[error("session search index is missing or has an unsafe file identity")]
     UnsafeSessionIndex,
     #[error("session search {component} exceeds the {max_bytes}-byte snapshot limit")]
@@ -2760,6 +2857,103 @@ mod tests {
             })
             .unwrap_or_else(|error| panic!("legacy marker must remain: {error}"));
         assert_eq!(marker, "preserved");
+    }
+
+    #[test]
+    fn bounded_read_only_accounting_filters_utc_and_never_mutates_live_index() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let ledger = AccountingLedger::open(root.path())
+            .unwrap_or_else(|error| panic!("ledger must open: {error}"));
+        ledger
+            .reconcile(&[
+                accounting_entry(
+                    "first",
+                    1,
+                    0,
+                    "2026-07-09T23:59:59.999Z",
+                    Cost::Monetary {
+                        amount_micros: 1,
+                        currency: "USD".to_owned(),
+                    },
+                ),
+                accounting_entry(
+                    "second",
+                    1,
+                    0,
+                    "2026-07-10T00:00:00.000Z",
+                    Cost::SubscriptionQuota {
+                        used: Some("1".to_owned()),
+                        unit: Some("request".to_owned()),
+                    },
+                ),
+            ])
+            .unwrap_or_else(|error| panic!("fixtures must reconcile: {error}"));
+        drop(ledger);
+        let paths = [
+            root.path().join("index.sqlite"),
+            root.path().join("index.sqlite-wal"),
+            root.path().join("index.sqlite-shm"),
+        ];
+        let before = paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        let entries = AccountingLedger::entries_read_only_bounded(
+            root.path(),
+            &utc_timestamp("2026-07-10T00:00:00.000Z"),
+            &utc_timestamp("2026-07-10T23:59:59.999Z"),
+            10,
+        )
+        .unwrap_or_else(|error| panic!("read-only entries must load: {error}"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].session_id, "second");
+        let after = paths
+            .iter()
+            .map(|path| std::fs::read(path).ok())
+            .collect::<Vec<_>>();
+        assert_eq!(after, before);
+
+        assert!(matches!(
+            AccountingLedger::entries_read_only_bounded(
+                root.path(),
+                &utc_timestamp("2026-07-09T00:00:00.000Z"),
+                &utc_timestamp("2026-07-10T23:59:59.999Z"),
+                1,
+            ),
+            Err(SessionStoreError::AccountingResultTooLarge { max_entries: 1 })
+        ));
+    }
+
+    #[test]
+    fn read_only_accounting_rejects_corrupt_typed_rows() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        AccountingLedger::open(root.path())
+            .and_then(|ledger| {
+                ledger.record(&accounting_entry(
+                    "corrupt",
+                    1,
+                    0,
+                    "2026-07-10T12:00:00.000Z",
+                    Cost::Unavailable {
+                        reason: "fixture".to_owned(),
+                    },
+                ))
+            })
+            .unwrap_or_else(|error| panic!("fixture must record: {error}"));
+        rusqlite::Connection::open(root.path().join("index.sqlite"))
+            .and_then(|connection| {
+                connection.execute("UPDATE turn_accounting SET usage_json='not-json'", [])
+            })
+            .unwrap_or_else(|error| panic!("fixture must corrupt row: {error}"));
+        assert!(
+            AccountingLedger::entries_read_only_bounded(
+                root.path(),
+                &utc_timestamp("2026-07-10T00:00:00.000Z"),
+                &utc_timestamp("2026-07-10T23:59:59.999Z"),
+                10,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -3486,6 +3680,36 @@ mod tests {
                 0,
             ),
             Err(SessionStoreError::EventCountTooLarge { max_events: 0 })
+        ));
+        let expected_bytes = std::fs::metadata(root.path().join("sessions/bounded/events.jsonl"))
+            .unwrap_or_else(|error| panic!("event metadata: {error}"))
+            .len();
+        let (events, descriptor_bytes) = SessionEventLog::load_existing_bounded_with_size::<
+            FixtureEvent,
+        >(root.path(), "bounded", 1024 * 1024, 10)
+        .unwrap_or_else(|error| panic!("bounded descriptor read: {error}"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(descriptor_bytes, expected_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_history_read_rejects_multi_link_event_files() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let log = SessionEventLog::open(root.path(), "linked")
+            .unwrap_or_else(|error| panic!("open log: {error}"));
+        let link = root.path().join("linked-copy.jsonl");
+        std::fs::hard_link(log.path(), &link)
+            .unwrap_or_else(|error| panic!("hard link fixture: {error}"));
+        drop(log);
+        assert!(matches!(
+            SessionEventLog::load_existing_bounded_with_size::<FixtureEvent>(
+                root.path(),
+                "linked",
+                1024,
+                10,
+            ),
+            Err(SessionStoreError::UnsafeEventFileType)
         ));
     }
 

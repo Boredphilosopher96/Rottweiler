@@ -750,7 +750,10 @@ impl EngineHost {
                             "only the current driver may fork a session".to_owned(),
                         ));
                     }
-                    if snapshot.running || snapshot.active_shell.is_some() {
+                    if snapshot.running
+                        || snapshot.active_shell.is_some()
+                        || snapshot.active_background
+                    {
                         return Err(HostError::Protocol(
                             "forking requires an idle session".to_owned(),
                         ));
@@ -777,6 +780,7 @@ impl EngineHost {
                         let verified_tail = parent.handle().last_sequence().await?;
                         if verified.running
                             || verified.active_shell.is_some()
+                            || verified.active_background
                             || verified.completed_turns != snapshot.completed_turns
                             || verified.driver_client_id != snapshot.driver_client_id
                             || verified_tail != tail

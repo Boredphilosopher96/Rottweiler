@@ -1207,6 +1207,7 @@ pub struct SessionSnapshot {
     pub approved_plan: Option<PlanArtifact>,
     pub plan_gate_active: bool,
     pub active_shell: Option<RecoveredUserShell>,
+    pub active_background: bool,
     pub workspace_generation: u64,
     pub workspace_roots: Vec<rw_types::WorkspaceRootDescriptor>,
     pub driver_client_id: Option<ClientId>,
@@ -4637,6 +4638,27 @@ async fn dispatch_lifecycle_hook(
     result.completed()
 }
 
+async fn end_actor_session(
+    state: &mut ActorState,
+    config: &SessionActorConfig,
+    events: &broadcast::Sender<RoutedEvent>,
+) {
+    let _ = dispatch_lifecycle_hook(HookEvent::SessionEnd, state, config, events).await;
+    if let Err(error) = config.tools.end_session(&config.session_id).await {
+        let _ = emit(
+            state,
+            events,
+            &config.event_sink,
+            PendingEvent::Error {
+                message: config
+                    .secret_redactor
+                    .redact(&format!("session resource cleanup failed: {error}")),
+            },
+        )
+        .await;
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn run_actor(
     config: SessionActorConfig,
@@ -4655,7 +4677,7 @@ async fn run_actor(
     let mut config = Arc::new(config);
     let (turn_signals, mut signals) = mpsc::unbounded_channel();
     if !dispatch_lifecycle_hook(HookEvent::SessionStart, &mut state, &config, &events).await {
-        let _ = dispatch_lifecycle_hook(HookEvent::SessionEnd, &mut state, &config, &events).await;
+        end_actor_session(&mut state, &config, &events).await;
         return;
     }
     if config.recovered.interrupted_compaction
@@ -4670,7 +4692,7 @@ async fn run_actor(
         .await
         .is_err()
     {
-        let _ = dispatch_lifecycle_hook(HookEvent::SessionEnd, &mut state, &config, &events).await;
+        end_actor_session(&mut state, &config, &events).await;
         return;
     }
     if let Some(turn) = interrupted_turn {
@@ -4702,8 +4724,7 @@ async fn run_actor(
             .await
             .is_err()
         {
-            let _ =
-                dispatch_lifecycle_hook(HookEvent::SessionEnd, &mut state, &config, &events).await;
+            end_actor_session(&mut state, &config, &events).await;
             return;
         }
         state.completed_turns = state.completed_turns.saturating_add(1);
@@ -4727,8 +4748,7 @@ async fn run_actor(
         .await
         .is_err()
         {
-            let _ =
-                dispatch_lifecycle_hook(HookEvent::SessionEnd, &mut state, &config, &events).await;
+            end_actor_session(&mut state, &config, &events).await;
             return;
         }
     }
@@ -4770,7 +4790,7 @@ async fn run_actor(
             }
         }
     }
-    let _ = dispatch_lifecycle_hook(HookEvent::SessionEnd, &mut state, &config, &events).await;
+    end_actor_session(&mut state, &config, &events).await;
 }
 
 fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
@@ -6129,7 +6149,8 @@ async fn handle_actor_command(
                 ClientCommand::UserShellStarted { command, .. }
                     if command.trim().is_empty()
                         || state.running.is_some()
-                        || state.active_shell.is_some() =>
+                        || state.active_shell.is_some()
+                        || config.tools.session_activity(&state.session_id).is_some() =>
                 {
                     let outcome = protocol_rejection(
                         "shell_start_rejected",
@@ -6184,6 +6205,7 @@ async fn handle_actor_command(
                     target: RewindTarget::Turn { turn_id },
                     ..
                 } if state.running.is_some()
+                    || config.tools.session_activity(&state.session_id).is_some()
                     || parse_turn_id(turn_id).is_ok_and(|to_turn| {
                         !state.turn_ends.contains_key(&to_turn)
                             && state.pending_rewind.as_ref().map(|pending| pending.0)
@@ -6199,7 +6221,9 @@ async fn handle_actor_command(
                     return;
                 }
                 ClientCommand::GetSessionReview { .. }
-                    if state.running.is_some() || state.active_shell.is_some() =>
+                    if state.running.is_some()
+                        || state.active_shell.is_some()
+                        || config.tools.session_activity(&state.session_id).is_some() =>
                 {
                     let outcome = protocol_rejection(
                         "session_not_idle",
@@ -6213,6 +6237,7 @@ async fn handle_actor_command(
                     path, current_hash, ..
                 } if state.running.is_some()
                     || state.active_shell.is_some()
+                    || config.tools.session_activity(&state.session_id).is_some()
                     || !review_path_is_valid(path)
                     || !review_hash_is_valid(current_hash) =>
                 {
@@ -7567,7 +7592,10 @@ async fn handle_actor_command(
                                 }
                             }
                             SessionCommandAction::InitializeWorkspace { depth } => {
-                                if state.running.is_some() || state.initialization_running {
+                                if state.running.is_some()
+                                    || state.initialization_running
+                                    || config.tools.session_activity(&state.session_id).is_some()
+                                {
                                     let _ =
                                         respond.send(Err(AgentLoopError::InvalidConfiguration(
                                             "workspace initialization requires an idle session"
@@ -7792,6 +7820,7 @@ async fn handle_actor_command(
                 approved_plan: state.approved_plan.clone(),
                 plan_gate_active: state.plan_gate_active,
                 active_shell: state.active_shell.clone(),
+                active_background: config.tools.session_activity(&state.session_id).is_some(),
                 workspace_generation: config.workspace_generation,
                 workspace_roots: std::iter::once(&config.workspace_root)
                     .chain(&config.additional_workspace_roots)
@@ -9563,6 +9592,14 @@ fn widen_security_for_hooks(
     (security, deferred_mutating_pre_hook)
 }
 
+fn background_control_call(name: &str, arguments: &Value) -> bool {
+    matches!(
+        name,
+        "background_status" | "background_output" | "background_kill"
+    ) || (name == "bash"
+        && arguments.get("run_in_background").and_then(Value::as_bool) == Some(true))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn authorize_tool_call(
     call: &PendingToolCall,
@@ -9684,6 +9721,22 @@ async fn prepare_tool_call(
     };
     let (initial_security, _) =
         widen_security_for_hooks(initial_security, &config.hooks, &call.name);
+    let background_control = background_control_call(&call.name, &arguments);
+    if background_control && !matches!(initial_security.mutation_scope, MutationScope::None) {
+        return PreparedToolCall::Complete(failed_execution(
+            call,
+            "background commands cannot run with workspace-mutating hooks",
+        ));
+    }
+    if config.tools.session_activity(&config.session_id).is_some()
+        && !matches!(initial_security.mutation_scope, MutationScope::None)
+        && !background_control
+    {
+        return PreparedToolCall::Complete(failed_execution(
+            call,
+            "workspace mutation is blocked while a background shell process is running",
+        ));
+    }
     let mut authorization = match authorize_tool_call(
         &call,
         &arguments,
@@ -9769,6 +9822,22 @@ async fn prepare_tool_call(
     };
     let (security, deferred_mutating_pre_hook) =
         widen_security_for_hooks(security, &config.hooks, &call.name);
+    let background_control = background_control_call(&call.name, &arguments);
+    if background_control && !matches!(security.mutation_scope, MutationScope::None) {
+        return PreparedToolCall::Complete(failed_execution(
+            call,
+            "background commands cannot run with workspace-mutating hooks",
+        ));
+    }
+    if config.tools.session_activity(&config.session_id).is_some()
+        && !matches!(security.mutation_scope, MutationScope::None)
+        && !background_control
+    {
+        return PreparedToolCall::Complete(failed_execution(
+            call,
+            "workspace mutation is blocked while a background shell process is running",
+        ));
+    }
     if call.name != original_name || arguments != original_arguments {
         authorization = match authorize_tool_call(
             &call,
@@ -9957,6 +10026,8 @@ struct ToolExecutionRuntime {
     signals: mpsc::UnboundedSender<TurnSignal>,
     turn: u64,
     subagents: Arc<OrderedSubagentCoordinator>,
+    tools: Arc<ToolRegistry>,
+    session_id: SessionId,
 }
 
 async fn run_deferred_mutating_pre_hook(
@@ -10027,6 +10098,21 @@ async fn execute_prepared_tool(
             ),
             PreparedToolCall::Complete(execution) => return (execution, false),
         };
+    if !matches!(mutation_scope, MutationScope::None)
+        && runtime
+            .tools
+            .session_activity(&runtime.session_id)
+            .is_some()
+        && !background_control_call(&call.name, &arguments)
+    {
+        return (
+            failed_execution(
+                call,
+                "workspace mutation is blocked while a background shell process is running",
+            ),
+            false,
+        );
+    }
     let checkpoint = if matches!(mutation_scope, MutationScope::None) {
         None
     } else {
@@ -10312,6 +10398,8 @@ async fn execute_tool_calls(
         signals: signals.clone(),
         turn,
         subagents: Arc::clone(&subagents),
+        tools: Arc::clone(&config.tools),
+        session_id: config.session_id.clone(),
     };
     let total = prepared.len();
     let mut ordered = Vec::with_capacity(total);
@@ -16961,6 +17049,92 @@ mod tests {
         })
         .await
         .expect("session end hook");
+    }
+
+    struct SessionResourceFixture {
+        ended: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for SessionResourceFixture {
+        fn descriptor(&self) -> ToolDescriptor {
+            descriptor("session_resource_fixture")
+        }
+
+        async fn end_session(&self, session_id: &SessionId) -> Result<(), ToolError> {
+            assert_eq!(session_id.0, "fixture-session");
+            self.ended.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn session_activity(&self, _session_id: &SessionId) -> Option<String> {
+            Some("fixture background resource".to_owned())
+        }
+
+        fn observes_session_resources(&self) -> bool {
+            true
+        }
+
+        async fn execute(
+            &self,
+            _context: &ToolContext,
+            _input: Value,
+        ) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::new("unused", Value::Null))
+        }
+    }
+
+    #[tokio::test]
+    async fn actor_shutdown_runs_registered_tool_session_cleanup() {
+        let root = TempDir::new().expect("tempdir");
+        let ended = Arc::new(AtomicUsize::new(0));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(SessionResourceFixture {
+                ended: Arc::clone(&ended),
+            }))
+            .expect("resource tool");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            Arc::new(ScriptedModel::default()),
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AttachSession {
+                    meta: protocol_meta("driver", "attach-resource"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                })
+                .await
+                .expect("attach"),
+            CommandOutcome::Accepted
+        );
+        assert!(handle.snapshot().await.expect("snapshot").active_background);
+        assert!(matches!(
+            handle
+                .dispatch(ClientCommand::UserShellStarted {
+                    meta: protocol_meta("driver", "blocked-shell"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    command: "echo blocked".to_owned(),
+                })
+                .await
+                .expect("shell outcome"),
+            CommandOutcome::Rejected { .. }
+        ));
+        drop(handle);
+        timeout(Duration::from_secs(3), async {
+            while ended.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("tool session cleanup");
+        assert_eq!(ended.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -61,8 +61,8 @@ Every feature Rottweiler ships, grouped by area. Features marked **[gap]** were 
   - **Tree-sitter symbol index** **[gap]**: always-on, zero-config index (definitions, references, symbols) built at session start and updated incrementally on edits; exposed as a `symbols` tool. The 80/20 of code intelligence with no per-language server management.
   - **LSP integration**: auto-start language servers found on PATH; diagnostics injected after edits (compile errors surface without a build); go-to-def/references/rename exposed as tools. Full v1 feature, not flagged; degrades gracefully to the tree-sitter tier when no server is available.
 - **Formatters & linters via hooks**: a declarative `[toolchain]` config tier — `formatter = "cargo fmt"`, `linters = ["cargo clippy"]` per language/glob — that registers built-in `post_tool` hooks: after every edit/write, the formatter runs on the touched file and linter diagnostics are appended to the tool result. Zero plugin code required; implemented on the same hook API plugins use (dogfooding rule). Details in 04-EXTENSIBILITY.
-- **Streaming tool output** **[gap]**: long-running `bash` calls stream stdout/stderr live into the TUI while executing (a 5-minute build must never look dead); the model receives the (size-capped, tail-biased) final output.
-- **Background processes** **[gap]**: `bash` supports `run_in_background`; a process manager tracks them, streams output on request, kills on session end.
+- **Streaming tool output**: long-running `bash` calls stream stdout/stderr live into the TUI while executing (a 5-minute build must never look dead); the model receives the (size-capped, tail-biased) final output.
+- **Background processes**: typed `bash.run_in_background` returns a session-owned process id; `background_status`, `background_output`, and `background_kill` use the same public tool registry. Background commands always run in a write-denied sandbox, so delayed work cannot escape checkpoint/review accounting. Retained output is stream-redacted and tail-capped, lookup is session-isolated, and actor shutdown cancels, kills, and reaps the complete process group. Record/replay command-fixture modes reject new background launches before scheduling; historical event replay remains fully available.
 
 ## 6. Subagents & orchestration
 
@@ -128,7 +128,7 @@ See 05-SECURITY.md. Headlines: **folder trust gate** (untrusted repos load no pr
 - Structured tracing (`tracing` crate) with `--debug` spool to file.
 - **Prompt transparency**: `rw prompt dump [--turn N]` prints the exact assembled request (system prompt, tools, context order, cache breakpoints) that was/would be sent — the debugging tool for token economy and plugin authors.
 - Optional OpenTelemetry export (opt-in) for teams.
-- `/cost` and `rw stats`: per-session and historical spend, tokens, cache savings, tool-use counts, cost attribution (main turns vs compaction vs subagents).
+- `/cost` and `rw stats`: per-session and historical spend, tokens, cache savings, tool-use counts, cost attribution (main turns vs compaction vs subagents). `rw stats [--session ID] [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--json]` is an offline, read-only report over inclusive UTC days. It keeps known USD API cost, AI credits, subscription quota, unavailable pricing, and non-USD entries distinct—subscription access is never presented as a `$0` API call. Historical child-session rows are counted once and attributed to subagents through durable spawn relationships.
 
 ## 14. Guardrails **[gap]**
 
@@ -139,7 +139,7 @@ See 05-SECURITY.md. Headlines: **folder trust gate** (untrusted repos load no pr
 ## 15. Adoption & lifecycle **[gap]**
 
 - **`rw import`**: migrate from Claude Code / opencode / pi — custom commands, MCP server configs, CLAUDE.md→AGENTS.md, memory files, and **shell-command hooks** (Claude Code settings-style hooks map onto `hooks.toml`, see 04). Mostly file transforms; the difference between "tried it" and "switched."
-- **`rw doctor`**: first-run and troubleshooting diagnostics — auth status, provider reachability, sandbox capability probe, terminal feature detection.
+- **`rw doctor`**: bounded, non-destructive first-run and troubleshooting diagnostics for config/runtime paths, OS/WSL, auth presence, sandbox + policy-egress support, and terminal capabilities. Provider reachability and credential-validation requests are network-free by default and run only with `--network`, using explicit connect/request timeouts and the configured provider/global/environment proxy path. One process-cached vault inventory pass covers every configured credential reference, and neither text nor stable `--json` output can contain credential values. Any failed check produces a non-zero exit status.
 - **Self-update**: `rw upgrade` with stable/beta channels; release notes shown on first run after update.
 
 ## Explicitly out of scope for v1

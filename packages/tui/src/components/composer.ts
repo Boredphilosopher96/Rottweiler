@@ -76,12 +76,6 @@ export class ComposerRenderable extends BoxRenderable {
       height: 1,
       visible: false,
     })
-    this.editor.onKeyDown = (key) => {
-      if (key.ctrl && key.name === "e") {
-        key.preventDefault()
-        void this.openExternalEditor()
-      }
-    }
     this.add(this.attachmentsText)
     this.add(this.editor)
     this.add(this.queueText)
