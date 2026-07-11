@@ -233,7 +233,7 @@ fn pinned_directory_identity(
     use rustix::fs::{FileType, Mode};
     let stat = rustix::fs::fstat(descriptor)
         .map_err(|error| io_error("inspect pinned metadata directory", error.into()))?;
-    let mode = u32::from(Mode::from_raw_mode(stat.st_mode).as_raw_mode()) & 0o777;
+    let mode = crate::rustix_mode_bits(Mode::from_raw_mode(stat.st_mode).as_raw_mode()) & 0o777;
     if !FileType::from_raw_mode(stat.st_mode).is_dir()
         || stat.st_uid != rustix::process::geteuid().as_raw()
         || mode != 0o700
@@ -243,8 +243,8 @@ fn pinned_directory_identity(
         )));
     }
     Ok(PinnedDirectoryIdentity {
-        device: u64::try_from(stat.st_dev)
-            .map_err(|_| session_error("metadata directory device identity overflow"))?,
+        device: crate::rustix_device_id(stat.st_dev)
+            .ok_or_else(|| session_error("metadata directory device identity overflow"))?,
         inode: stat.st_ino,
         uid: stat.st_uid,
         mode,

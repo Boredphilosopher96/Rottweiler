@@ -159,7 +159,7 @@ fn secure_created_storage_root(path: &Path) -> io::Result<()> {
     .map_err(std::io::Error::from)?;
     rustix::fs::fchmod(&descriptor, Mode::from_raw_mode(0o700)).map_err(std::io::Error::from)?;
     let stat = rustix::fs::fstat(&descriptor).map_err(std::io::Error::from)?;
-    let mode = u32::from(Mode::from_raw_mode(stat.st_mode).as_raw_mode()) & 0o777;
+    let mode = crate::rustix_mode_bits(Mode::from_raw_mode(stat.st_mode).as_raw_mode()) & 0o777;
     if !FileType::from_raw_mode(stat.st_mode).is_dir()
         || stat.st_uid != rustix::process::geteuid().as_raw()
         || mode != 0o700
@@ -7993,7 +7993,7 @@ impl WebSearchFixtureDirectory {
                     miette!("web-search fixture directory could not validate: {error}")
                 })?;
             if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_dir()
-                || u64::try_from(stat.st_dev).ok() != Some(supplied.dev())
+                || crate::rustix_device_id(stat.st_dev) != Some(supplied.dev())
                 || stat.st_ino != supplied.ino()
                 || stat.st_uid != rustix::process::geteuid().as_raw()
                 || stat.st_mode & 0o022 != 0

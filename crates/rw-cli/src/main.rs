@@ -54,6 +54,19 @@ mod tui_config;
 mod upgrade;
 mod workflow_runtime;
 
+/// Normalizes rustix's platform-native device identifier without assuming the
+/// signed/unsigned width selected by a particular Unix libc ABI.
+#[cfg(unix)]
+pub(crate) fn rustix_device_id<T: TryInto<u64>>(device: T) -> Option<u64> {
+    device.try_into().ok()
+}
+
+/// Widens rustix's platform-native mode representation for stable bit tests.
+#[cfg(unix)]
+pub(crate) fn rustix_mode_bits<T: Into<u32>>(mode: T) -> u32 {
+    mode.into()
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "rw", version, about = "Rottweiler coding-agent harness")]
 #[allow(clippy::struct_excessive_bools)]
@@ -850,7 +863,7 @@ fn write_history_export_unix(
         .into_diagnostic()?;
     {
         use std::os::unix::fs::MetadataExt as _;
-        if expected.dev() != u64::try_from(opened.st_dev).unwrap_or(u64::MAX)
+        if Some(expected.dev()) != rustix_device_id(opened.st_dev)
             || expected.ino() != opened.st_ino
         {
             return Err(miette!(
@@ -2935,6 +2948,18 @@ mod tests {
         Cli, Command, TrustCommand, UpgradeChannel, sync_install_paths, valid_bootstrap_token,
         write_github_device_prompt, write_private_file_atomic,
     };
+    #[cfg(unix)]
+    use super::{rustix_device_id, rustix_mode_bits};
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_identity_helpers_preserve_signed_failure_and_lossless_mode_widening() {
+        assert_eq!(rustix_device_id(-1_i32), None);
+        assert_eq!(rustix_device_id(41_i32), Some(41));
+        assert_eq!(rustix_device_id(42_u64), Some(42));
+        assert_eq!(rustix_mode_bits(0o755_u16), 0o755);
+        assert_eq!(rustix_mode_bits(0o700_u32), 0o700);
+    }
 
     #[test]
     fn trust_and_multi_root_flags_are_global_and_typed() {

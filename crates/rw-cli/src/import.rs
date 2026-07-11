@@ -166,7 +166,7 @@ fn rollback_created_targets(created: &[CreatedTarget]) {
         ) else {
             continue;
         };
-        if u64::try_from(stat.st_dev).ok() == Some(target.device)
+        if crate::rustix_device_id(stat.st_dev) == Some(target.device)
             && stat.st_ino == target.inode
             && stat.st_nlink == 1
             && rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file()
@@ -1120,7 +1120,7 @@ fn prepare_target_root(root: &Path, _dry_run: bool) -> Result<TargetRoot> {
         let opened = rustix::fs::fstat(&descriptor)
             .map_err(std::io::Error::from)
             .into_diagnostic()?;
-        if metadata.dev() != u64::try_from(opened.st_dev).unwrap_or(u64::MAX)
+        if Some(metadata.dev()) != crate::rustix_device_id(opened.st_dev)
             || metadata.ino() != opened.st_ino
         {
             return Err(miette!("import target root changed during inspection"));
@@ -1186,7 +1186,7 @@ fn create_target(root: &TargetRoot, relative: &Path, bytes: &[u8]) -> Result<Cre
     let created = CreatedTarget {
         parent: directory,
         name: name.to_os_string(),
-        device: u64::try_from(stat.st_dev).unwrap_or(u64::MAX),
+        device: crate::rustix_device_id(stat.st_dev).unwrap_or(u64::MAX),
         inode: stat.st_ino,
     };
     let mut file = std::fs::File::from(descriptor);

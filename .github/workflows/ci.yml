@@ -30,6 +30,9 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Install plugin SDK test dependencies
+        run: bun install --frozen-lockfile
+        working-directory: packages/plugin-sdk
       - run: cargo test --locked --workspace --all-features
       - name: M8 production-composition functional acceptance (Linux)
         if: runner.os == 'Linux'
@@ -48,8 +51,6 @@ jobs:
       - run: cargo doc --locked --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
-      - run: bun install --frozen-lockfile
-        working-directory: packages/plugin-sdk
       - run: bun run typecheck
         working-directory: packages/plugin-sdk
       - run: bun test
