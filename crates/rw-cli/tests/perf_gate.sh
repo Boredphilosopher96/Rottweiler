@@ -5,12 +5,13 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 cd "$repo"
 
 export ROTTWEILER_CREDENTIAL_BACKEND=file
-cargo build --locked --release -p rw-cli
+scripts/cargo-release.sh build --locked --release -p rw-cli
+release_dir=$(scripts/cargo-release.sh artifact-dir)
 
 root=$(mktemp -d "${TMPDIR:-/tmp}/rottweiler-perf.XXXXXX")
 trap 'rm -rf "$root"' EXIT HUP INT TERM
 
-python3 - "$repo" "$root" "${ROTTWEILER_PERF_OUTPUT:-}" <<'PY'
+python3 - "$repo" "$root" "${ROTTWEILER_PERF_OUTPUT:-}" "$release_dir/rw" <<'PY'
 import json
 import math
 import os
@@ -24,7 +25,7 @@ import time
 repo = pathlib.Path(sys.argv[1])
 root = pathlib.Path(sys.argv[2])
 output = pathlib.Path(sys.argv[3]) if sys.argv[3] else None
-built_binary = repo / "target/release/rw"
+built_binary = pathlib.Path(sys.argv[4])
 binary = root / "rw"
 shutil.copyfile(built_binary, binary)
 binary.chmod(0o700)

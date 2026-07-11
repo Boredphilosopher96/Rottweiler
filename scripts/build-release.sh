@@ -9,10 +9,11 @@ if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
   SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD 2>/dev/null || printf '%s' 1700000000)
   export SOURCE_DATE_EPOCH
 fi
-cargo build --locked --release -p rw-cli
+scripts/cargo-release.sh build --locked --release -p rw-cli
 (cd packages/tui && bun run build)
 
-engine="$repo/target/release/rw"
+release_dir=$(scripts/cargo-release.sh artifact-dir)
+engine="$release_dir/rw"
 tui="$repo/packages/tui/dist/rottweiler-tui"
 case "$(uname -s)" in
   Darwin) opentui_native_name=libopentui.dylib ;;

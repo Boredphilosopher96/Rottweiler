@@ -7,12 +7,13 @@ cd "$repo"
 export ROTTWEILER_CREDENTIAL_BACKEND=file
 export CARGO_PROFILE_RELEASE_DEBUG=0
 
-cargo build --locked --release -p rw-cli
+scripts/cargo-release.sh build --locked --release -p rw-cli
+release_dir=$(scripts/cargo-release.sh artifact-dir)
 (cd packages/tui && bun run build)
 
 set -- \
   --repo "$repo" \
-  --rw "$repo/target/release/rw" \
+  --rw "$release_dir/rw" \
   --tui "$repo/packages/tui/dist/rottweiler-tui" \
   --samples "${ROTTWEILER_M4_PERF_SAMPLES:-100}"
 

@@ -12,12 +12,13 @@ export CARGO_TARGET_DIR="$target"
 export CARGO_PROFILE_RELEASE_DEBUG=0
 export ROTTWEILER_CREDENTIAL_BACKEND=file
 
-cargo build --locked --release \
+scripts/cargo-release.sh build --locked --release \
   -p rw-cli --bin rw \
   -p rw-mcp --features rw-mcp/test-support --bin rw-mcp-fixture
+release_dir=$(scripts/cargo-release.sh artifact-dir)
 
-cp "$target/release/rw" "$artifacts/rw"
-cp "$target/release/rw-mcp-fixture" "$artifacts/rw-mcp-fixture"
+cp "$release_dir/rw" "$artifacts/rw"
+cp "$release_dir/rw-mcp-fixture" "$artifacts/rw-mcp-fixture"
 rm -rf "$target"
 
 set -- \

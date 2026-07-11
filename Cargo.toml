@@ -45,10 +45,10 @@ incremental = false
 
 [profile.release]
 strip = true
-# Size optimization keeps the single provider/tool/UI-bridge binary below the
-# distribution budget while retaining loop vectorization; platform p99 gates
-# protect startup and turn latency on every release build.
-opt-level = "s"
+# macOS is the latency-leading target. Official release builds route through
+# scripts/cargo-release.sh, which keeps this macOS profile and selects `s` for
+# Linux where the same binary needs more loop optimization.
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 panic = "abort"

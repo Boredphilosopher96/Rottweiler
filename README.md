@@ -57,23 +57,24 @@ Requirements are Rust 1.94.1 and Bun 1.3.14. On macOS or Linux:
 git clone https://github.com/Boredphilosopher96/Rottweiler.git
 cd Rottweiler
 
-cargo build --locked --release -p rw-cli
+scripts/cargo-release.sh build --locked --release -p rw-cli
+release_dir=$(scripts/cargo-release.sh artifact-dir)
 bun install --cwd packages/tui --frozen-lockfile
 bun run --cwd packages/tui build
 
 ROTTWEILER_TUI_BIN="$PWD/packages/tui/dist/rottweiler-tui" \
-  target/release/rw
+  "$release_dir/rw"
 ```
 
 Useful first commands:
 
 ```sh
-target/release/rw --help
-target/release/rw config check
-target/release/rw doctor
-target/release/rw models refresh
-target/release/rw auth set-key <provider>
-target/release/rw auth login <subscription-provider>
+"$release_dir/rw" --help
+"$release_dir/rw" config check
+"$release_dir/rw" doctor
+"$release_dir/rw" models refresh
+"$release_dir/rw" auth set-key <provider>
+"$release_dir/rw" auth login <subscription-provider>
 ```
 
 ChatGPT and GitHub Copilot subscription credentials are separate from ordinary

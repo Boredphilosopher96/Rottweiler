@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
-import { createConnection, createServer, type Server, type Socket } from "node:net"
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse,
+} from "node:http"
+import { createConnection, createServer, type Server as NetServer, type Socket } from "node:net"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import { join } from "node:path"
@@ -103,24 +109,56 @@ describe("M4 transport and process acceptance gates", () => {
     })
     const controller = new AbortController()
     const samples: number[] = []
+    const streamIds = new Set<string>()
+    let notifySample: (() => void) | null = null
 
-    await client.subscribe({
+    const subscription = client.subscribe({
       attach,
       signal: controller.signal,
       onEvent(event) {
         const sentAt = Reflect.get(event, "_sent_at_ns")
+        const streamId = Reflect.get(event, "_event_stream_id")
         if (typeof sentAt !== "string") {
           throw new Error("timed event omitted its monotonic send marker")
         }
-        samples.push(Number(BigInt(Bun.nanoseconds()) - BigInt(sentAt)) / 1_000_000)
-        if (samples.length === engine.eventCount) {
-          controller.abort()
+        if (typeof streamId !== "string") {
+          throw new Error("timed event omitted its persistent-stream marker")
         }
+        streamIds.add(streamId)
+        samples.push(Number(process.hrtime.bigint() - BigInt(sentAt)) / 1_000_000)
+        notifySample?.()
+        notifySample = null
       },
     })
 
+    await waitFor(async () => engine.eventStreamRequests === 1)
+    for (let index = 0; index < engine.eventCount; index += 1) {
+      await client.postCommand({
+        type: "list_models",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          client_id: "m4-perf-client",
+          request_id: `m4-perf-probe-${index}`,
+        },
+      })
+      if (samples.length <= index) {
+        await new Promise<void>((resolve) => {
+          notifySample = resolve
+          if (samples.length > index) {
+            notifySample = null
+            resolve()
+          }
+        })
+      }
+    }
+    controller.abort()
+    await subscription
+
     expect(samples).toHaveLength(engine.eventCount)
-    expect(percentile(samples.slice(20), 0.99)).toBeLessThan(2)
+    expect([...streamIds]).toEqual(["1"])
+    const p99 = percentile(samples.slice(20), 0.99)
+    console.info(`M4 persistent-SSE transport latency: p99=${p99.toFixed(3)}ms`)
+    expect(p99).toBeLessThan(2)
   }, 10_000)
 
   test("SIGKILLed TUI runtime rebuilds the complete durable transcript with no lost sequence", async () => {
@@ -309,10 +347,10 @@ async function collectTranscript(
 class UnixSocketForwarder {
   readonly socketPath: string
   readonly #directory: string
-  readonly #server: Server
+  readonly #server: NetServer
   readonly #sockets = new Set<Socket>()
 
-  private constructor(socketPath: string, directory: string, server: Server) {
+  private constructor(socketPath: string, directory: string, server: NetServer) {
     this.socketPath = socketPath
     this.#directory = directory
     this.#server = server
@@ -365,8 +403,10 @@ class TimedEventEngine {
   readonly eventCount: number
   socketPath = ""
   #directory = ""
-  #server: Bun.Server<undefined> | null = null
+  #server: HttpServer | null = null
   #sequence = 0
+  #eventStreamRequests = 0
+  #eventResponse: ServerResponse | null = null
 
   constructor(eventCount: number) {
     this.eventCount = eventCount
@@ -375,53 +415,86 @@ class TimedEventEngine {
   async start(): Promise<void> {
     this.#directory = await mkdtemp(join(tmpdir(), "rw-m4-latency-"))
     this.socketPath = join(this.#directory, "engine.sock")
-    this.#server = Bun.serve({
-      unix: this.socketPath,
-      fetch: (request, server) => this.#handle(request, server),
+    this.#server = createHttpServer((request, response) => {
+      this.#handle(request, response)
+    })
+    await new Promise<void>((resolve, reject) => {
+      this.#server?.once("error", reject)
+      this.#server?.listen(this.socketPath, resolve)
     })
   }
 
   async stop(): Promise<void> {
-    await this.#server?.stop(true)
+    this.#server?.closeAllConnections()
+    await new Promise<void>((resolve) => this.#server?.close(() => resolve()))
     await rm(this.#directory, { recursive: true, force: true })
   }
 
-  async #handle(request: Request, server: Bun.Server<undefined>): Promise<Response> {
-    const url = new URL(request.url)
+  get eventStreamRequests(): number {
+    return this.#eventStreamRequests
+  }
+
+  #handle(request: IncomingMessage, response: ServerResponse): void {
+    request.resume()
+    const url = new URL(request.url ?? "/", "http://rottweiler.local")
     if (url.pathname === "/v1/connect") {
-      if (request.headers.get("Authorization") !== `Bearer ${this.bootstrapToken}`) {
-        return new Response("unauthorized", { status: 401 })
+      if (request.headers.authorization !== `Bearer ${this.bootstrapToken}`) {
+        response.writeHead(401).end("unauthorized")
+        return
       }
-      return Response.json({ client_id: "m4-latency-client", token: "m4-latency-token" })
+      writeJson(response, 200, {
+        client_id: "m4-latency-client",
+        token: "m4-latency-token",
+      })
+      return
     }
     if (
-      request.headers.get("Authorization") !== "Bearer m4-latency-token" ||
-      request.headers.get("x-rottweiler-client") !== "m4-latency-client"
+      request.headers.authorization !== "Bearer m4-latency-token" ||
+      request.headers["x-rottweiler-client"] !== "m4-latency-client"
     ) {
-      return new Response("unauthorized", { status: 401 })
+      response.writeHead(401).end("unauthorized")
+      return
     }
     if (url.pathname === "/v1/command") {
-      return Response.json({ type: "accepted" }, { status: 202 })
+      if (this.#eventResponse !== null && this.#sequence < this.eventCount) {
+        const sequence = ++this.#sequence
+        this.#eventResponse.write(
+          encodeSseJson({
+            ...modeEvent(sequence),
+            _sent_at_ns: process.hrtime.bigint().toString(),
+            _event_stream_id: String(this.#eventStreamRequests),
+          }),
+        )
+      }
+      writeJson(response, 202, { type: "accepted" })
+      return
     }
     if (url.pathname !== "/v1/events") {
-      return new Response("not found", { status: 404 })
+      response.writeHead(404).end("not found")
+      return
     }
 
-    server.timeout(request, 0)
-    this.#sequence += 1
-    const sequence = this.#sequence
-    const event = {
-      ...modeEvent(sequence),
-      _sent_at_ns: Bun.nanoseconds().toString(),
-    }
-    return new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(encodeSseJson(event))
-          controller.close()
-        },
-      }),
-      { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } },
-    )
+    this.#eventStreamRequests += 1
+    this.#eventResponse = response
+    response.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    })
+    response.flushHeaders()
+    response.once("close", () => {
+      if (this.#eventResponse === response) {
+        this.#eventResponse = null
+      }
+    })
   }
+}
+
+function writeJson(response: ServerResponse, status: number, value: unknown): void {
+  const body = JSON.stringify(value)
+  response.writeHead(status, {
+    "Content-Type": "application/json",
+    "Content-Length": Buffer.byteLength(body),
+  })
+  response.end(body)
 }

@@ -108,13 +108,13 @@ jobs:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
-      - run: cargo build --locked --release -p rw-cli
+      - run: scripts/cargo-release.sh build --locked --release -p rw-cli
       - run: bun run build
         working-directory: packages/tui
       - name: Run the real supervisor, engine, and OpenTUI for eight hours
         run: >-
           python3 scripts/run-soak.py
-          --rw target/release/rw
+          --rw "$(scripts/cargo-release.sh artifact-dir)/rw"
           --tui packages/tui/dist/rottweiler-tui
           --duration-seconds 28800
           --output soak-result.json

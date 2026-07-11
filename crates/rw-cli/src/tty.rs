@@ -55,6 +55,13 @@ pub enum TerminalSignal {
 
 pub trait SignalTarget: Clone + Send + Sync + 'static {
     fn forward(&self, signal: TerminalSignal) -> io::Result<()>;
+
+    /// Returns the active interrupt control byte when the child PTY line
+    /// discipline would convert it into `SIGINT`. Raw-mode applications return
+    /// `None` so the byte remains ordinary input.
+    fn interrupt_input_byte(&self) -> io::Result<Option<u8>> {
+        Ok(Some(0x03))
+    }
 }
 
 #[async_trait]
@@ -308,12 +315,25 @@ fn bounded_redacted_tail(redactor: &(impl OutputRedactor + ?Sized), value: &str)
 #[derive(Debug)]
 pub struct TokioTerminalSpawner {
     pump_terminal_input: bool,
+    intercept_interrupt_input: bool,
 }
 
 impl Default for TokioTerminalSpawner {
     fn default() -> Self {
         Self {
             pump_terminal_input: true,
+            intercept_interrupt_input: true,
+        }
+    }
+}
+
+impl TokioTerminalSpawner {
+    /// Keeps raw control bytes on the PTY stream so SSH can deliver them to
+    /// the remote terminal's foreground process group.
+    pub(crate) fn for_remote_tty() -> Self {
+        Self {
+            pump_terminal_input: true,
+            intercept_interrupt_input: false,
         }
     }
 }
@@ -323,6 +343,7 @@ impl TokioTerminalSpawner {
     fn without_terminal_input() -> Self {
         Self {
             pump_terminal_input: false,
+            intercept_interrupt_input: true,
         }
     }
 }
@@ -360,10 +381,16 @@ pub struct PtySignalTarget {
 impl SignalTarget for PtySignalTarget {
     fn forward(&self, signal: TerminalSignal) -> io::Result<()> {
         match signal {
-            TerminalSignal::Interrupt => Ok(rustix::process::kill_process_group(
-                self.process_group,
-                rustix::process::Signal::INT,
-            )?),
+            TerminalSignal::Interrupt => {
+                let foreground_group = self
+                    .master
+                    .lock()
+                    .map_err(|_| io::Error::other("PTY master lock was poisoned"))?
+                    .process_group_leader()
+                    .and_then(rustix::process::Pid::from_raw)
+                    .unwrap_or(self.process_group);
+                forward_interrupt(self.process_group, foreground_group)
+            }
             TerminalSignal::WindowChanged => {
                 let size = real_terminal_size();
                 self.master
@@ -374,6 +401,126 @@ impl SignalTarget for PtySignalTarget {
             }
         }
     }
+
+    fn interrupt_input_byte(&self) -> io::Result<Option<u8>> {
+        let termios = self
+            .master
+            .lock()
+            .map_err(|_| io::Error::other("PTY master lock was poisoned"))?
+            .get_termios()
+            .ok_or_else(|| io::Error::other("PTY termios is unavailable"))?;
+        if !termios
+            .local_flags
+            .contains(nix::sys::termios::LocalFlags::ISIG)
+        {
+            return Ok(None);
+        }
+        let interrupt =
+            termios.control_chars[nix::sys::termios::SpecialCharacterIndices::VINTR as usize];
+        Ok((interrupt != nix::libc::_POSIX_VDISABLE).then_some(interrupt))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn forward_interrupt(
+    _launcher_group: rustix::process::Pid,
+    foreground_group: rustix::process::Pid,
+) -> io::Result<()> {
+    Ok(rustix::process::kill_process_group(
+        foreground_group,
+        rustix::process::Signal::INT,
+    )?)
+}
+
+#[cfg(target_os = "linux")]
+fn forward_interrupt(
+    launcher_group: rustix::process::Pid,
+    foreground_group: rustix::process::Pid,
+) -> io::Result<()> {
+    if foreground_group != launcher_group {
+        return Ok(rustix::process::kill_process_group(
+            foreground_group,
+            rustix::process::Signal::INT,
+        )?);
+    }
+    // `portable_pty` makes the configured user shell the PTY session leader.
+    // Non-interactive `dash` keeps its foreground children in that same
+    // process group and does not ignore SIGINT while waiting for them. A
+    // group-wide signal therefore kills the shell before it can report a
+    // child's handled exit status. Keep the shell alive as a job-control
+    // monitor and signal every other member, matching an interactive shell's
+    // relationship to its foreground job. Open each candidate as a pidfd
+    // before rechecking its group and signal only through that stable handle;
+    // a concurrent PID exit/reuse can therefore never target another process.
+    // Shell builtins have no descendant, so retain the group-wide fallback.
+    let mut found_job_member = false;
+    for entry in std::fs::read_dir("/proc")? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Some(member) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+            .and_then(rustix::process::Pid::from_raw)
+        else {
+            continue;
+        };
+        if member == launcher_group {
+            continue;
+        }
+        let stat_path = entry.path().join("stat");
+        let Ok(stat) = std::fs::read_to_string(&stat_path) else {
+            continue;
+        };
+        if linux_stat_process_group(&stat) != Some(foreground_group.as_raw_pid()) {
+            continue;
+        }
+        let pidfd = match rustix::process::pidfd_open(member, rustix::process::PidfdFlags::empty())
+        {
+            Ok(pidfd) => pidfd,
+            Err(rustix::io::Errno::SRCH) => continue,
+            Err(rustix::io::Errno::NOSYS) => {
+                return Ok(rustix::process::kill_process_group(
+                    foreground_group,
+                    rustix::process::Signal::INT,
+                )?);
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let Ok(stat) = std::fs::read_to_string(stat_path) else {
+            continue;
+        };
+        if linux_stat_process_group(&stat) != Some(foreground_group.as_raw_pid()) {
+            continue;
+        }
+        found_job_member = true;
+        match rustix::process::pidfd_send_signal(&pidfd, rustix::process::Signal::INT) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if found_job_member {
+        Ok(())
+    } else {
+        Ok(rustix::process::kill_process_group(
+            foreground_group,
+            rustix::process::Signal::INT,
+        )?)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_stat_process_group(stat: &str) -> Option<i32> {
+    // `comm` is parenthesized and may itself contain spaces or `)`, so locate
+    // its final delimiter before indexing the state, parent, and group fields.
+    stat.rfind(") ")?
+        .checked_add(2)
+        .and_then(|start| stat.get(start..))?
+        .split_whitespace()
+        .nth(2)?
+        .parse()
+        .ok()
 }
 
 #[async_trait]
@@ -447,7 +594,7 @@ impl TerminalSpawner for TokioTerminalSpawner {
                 .and_then(rustix::process::Pid::from_raw)
                 .ok_or_else(|| io::Error::other("PTY child has no process group"))?;
             let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
-            let mut writer = pair.master.take_writer().map_err(io::Error::other)?;
+            let writer = pair.master.take_writer().map_err(io::Error::other)?;
             let master = Arc::new(Mutex::new(pair.master));
             let captured_tail = Arc::new(Mutex::new(CapturedTail::default()));
             let cancelled = Arc::new(AtomicBool::new(false));
@@ -455,9 +602,17 @@ impl TerminalSpawner for TokioTerminalSpawner {
 
             let (input_thread, idle_writer) = if self.pump_terminal_input {
                 let input_cancelled = Arc::clone(&cancelled);
-                let input_thread = thread::Builder::new()
-                    .name("rw-pty-input".to_owned())
-                    .spawn(move || pump_terminal_input(&mut writer, &input_cancelled))?;
+                let intercept_interrupt_input = self.intercept_interrupt_input;
+                let input_target = PtySignalTarget {
+                    process_group,
+                    master: Arc::clone(&master),
+                };
+                let input_thread = spawn_terminal_input_thread(
+                    writer,
+                    input_cancelled,
+                    input_target,
+                    intercept_interrupt_input,
+                )?;
                 (Some(input_thread), None)
             } else {
                 (None, Some(writer))
@@ -605,6 +760,8 @@ fn real_terminal_size() -> PtySize {
 fn pump_terminal_input(
     writer: &mut (impl io::Write + ?Sized),
     cancelled: &AtomicBool,
+    signal_target: &impl SignalTarget,
+    intercept_interrupt: bool,
 ) -> io::Result<()> {
     let mut stdin = io::stdin();
     let mut buffer = [0_u8; 16 * 1024];
@@ -621,7 +778,9 @@ fn pump_terminal_input(
         if count == 0 {
             break;
         }
-        if let Err(error) = writer.write_all(&buffer[..count]) {
+        if let Err(error) =
+            forward_terminal_input(writer, signal_target, &buffer[..count], intercept_interrupt)
+        {
             if matches!(
                 error.kind(),
                 io::ErrorKind::BrokenPipe | io::ErrorKind::NotConnected
@@ -633,6 +792,47 @@ fn pump_terminal_input(
         writer.flush()?;
     }
     Ok(())
+}
+
+fn spawn_terminal_input_thread(
+    mut writer: Box<dyn io::Write + Send>,
+    cancelled: Arc<AtomicBool>,
+    signal_target: PtySignalTarget,
+    intercept_interrupt: bool,
+) -> io::Result<thread::JoinHandle<io::Result<()>>> {
+    thread::Builder::new()
+        .name("rw-pty-input".to_owned())
+        .spawn(move || {
+            pump_terminal_input(&mut writer, &cancelled, &signal_target, intercept_interrupt)
+        })
+}
+
+fn forward_terminal_input(
+    writer: &mut (impl io::Write + ?Sized),
+    signal_target: &impl SignalTarget,
+    bytes: &[u8],
+    intercept_interrupt: bool,
+) -> io::Result<()> {
+    if !intercept_interrupt {
+        writer.write_all(bytes)?;
+        return writer.flush();
+    }
+    let Some(interrupt_byte) = signal_target.interrupt_input_byte()? else {
+        writer.write_all(bytes)?;
+        return writer.flush();
+    };
+    let mut pending_start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != interrupt_byte {
+            continue;
+        }
+        writer.write_all(&bytes[pending_start..index])?;
+        writer.flush()?;
+        signal_target.forward(TerminalSignal::Interrupt)?;
+        pending_start = index + 1;
+    }
+    writer.write_all(&bytes[pending_start..])?;
+    writer.flush()
 }
 
 fn pump_terminal_output(
@@ -784,6 +984,23 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct ConfiguredInterruptTarget {
+        signals: Arc<Mutex<Vec<TerminalSignal>>>,
+        interrupt: Option<u8>,
+    }
+
+    impl SignalTarget for ConfiguredInterruptTarget {
+        fn forward(&self, signal: TerminalSignal) -> io::Result<()> {
+            self.signals.lock().expect("signals").push(signal);
+            Ok(())
+        }
+
+        fn interrupt_input_byte(&self) -> io::Result<Option<u8>> {
+            Ok(self.interrupt)
+        }
+    }
+
     struct FixtureChild {
         events: Arc<Mutex<Vec<String>>>,
         target: RecordingTarget,
@@ -892,6 +1109,60 @@ mod tests {
             forwarded.lock().expect("signals").as_slice(),
             [TerminalSignal::Interrupt, TerminalSignal::WindowChanged]
         );
+    }
+
+    #[test]
+    fn raw_terminal_etx_signals_the_job_without_reaching_the_child_line_discipline() {
+        let signals = Arc::new(Mutex::new(Vec::new()));
+        let target = RecordingTarget(Arc::clone(&signals));
+        let mut child_input = Vec::new();
+        forward_terminal_input(&mut child_input, &target, b"before\x03after", true)
+            .expect("route terminal input");
+        assert_eq!(child_input, b"beforeafter");
+        assert_eq!(
+            signals.lock().expect("signals").as_slice(),
+            [TerminalSignal::Interrupt]
+        );
+    }
+
+    #[test]
+    fn remote_terminal_input_preserves_etx_for_the_ssh_pty() {
+        let signals = Arc::new(Mutex::new(Vec::new()));
+        let target = RecordingTarget(Arc::clone(&signals));
+        let mut ssh_input = Vec::new();
+        forward_terminal_input(&mut ssh_input, &target, b"before\x03after", false)
+            .expect("route remote terminal input");
+        assert_eq!(ssh_input, b"before\x03after");
+        assert!(signals.lock().expect("signals").is_empty());
+    }
+
+    #[test]
+    fn child_termios_controls_whether_and_which_input_byte_becomes_sigint() {
+        for (interrupt, input, expected_input, expected_signals) in [
+            (
+                None,
+                b"raw\x03input".as_slice(),
+                b"raw\x03input".as_slice(),
+                0,
+            ),
+            (
+                Some(0x1d),
+                b"ctrl-c\x03ctrl-close\x1d".as_slice(),
+                b"ctrl-c\x03ctrl-close".as_slice(),
+                1,
+            ),
+        ] {
+            let signals = Arc::new(Mutex::new(Vec::new()));
+            let target = ConfiguredInterruptTarget {
+                signals: Arc::clone(&signals),
+                interrupt,
+            };
+            let mut child_input = Vec::new();
+            forward_terminal_input(&mut child_input, &target, input, true)
+                .expect("route configured terminal input");
+            assert_eq!(child_input, expected_input);
+            assert_eq!(signals.lock().expect("signals").len(), expected_signals);
+        }
     }
 
     #[test]
@@ -1017,6 +1288,79 @@ mod tests {
                 .as_deref()
                 .is_some_and(|tail| tail.contains("PTY_INTERRUPT_OK"))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn production_spawner_preserves_a_dash_childs_handled_interrupt_status() {
+        let temporary = tempfile::tempdir().expect("temporary shell workspace");
+        let script = temporary.path().join("handled-interrupt.py");
+        std::fs::write(
+            &script,
+            concat!(
+                "#!/usr/bin/env python3\n",
+                "import signal,time\n",
+                "def stop(*_):\n",
+                "    print('DASH_CHILD_INTERRUPT_OK', flush=True)\n",
+                "    raise SystemExit(23)\n",
+                "signal.signal(signal.SIGINT, stop)\n",
+                "print('DASH_CHILD_READY', flush=True)\n",
+                "while True: time.sleep(1)\n",
+            ),
+        )
+        .expect("write child script");
+        let mut permissions = std::fs::metadata(&script)
+            .expect("child script metadata")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o700);
+        std::fs::set_permissions(&script, permissions).expect("make child executable");
+        let argv = [
+            OsString::from("/bin/sh"),
+            OsString::from("-lc"),
+            script.as_os_str().to_owned(),
+        ];
+        let spawner = TokioTerminalSpawner::without_terminal_input();
+        let mut child = spawner.spawn_tty(&argv).await.expect("spawn dash child");
+        let target = child.signal_target();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if child
+                    .captured_tail
+                    .lock()
+                    .expect("captured output")
+                    .as_string()
+                    .contains("DASH_CHILD_READY")
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dash child readiness timeout");
+        target
+            .forward(TerminalSignal::Interrupt)
+            .expect("forward interrupt");
+        let exit = tokio::time::timeout(Duration::from_secs(3), child.wait())
+            .await
+            .expect("interrupted dash child timeout")
+            .expect("interrupted dash child wait");
+        assert_eq!(exit.status, 23, "PTY exit was {exit:?}");
+        assert!(
+            exit.captured_tail
+                .as_deref()
+                .is_some_and(|tail| tail.contains("DASH_CHILD_INTERRUPT_OK"))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_proc_stat_parser_handles_spaces_and_closing_parentheses_in_comm() {
+        assert_eq!(
+            linux_stat_process_group("123 (worker ) name) S 12 345 345 0 -1"),
+            Some(345)
+        );
+        assert_eq!(linux_stat_process_group("malformed"), None);
     }
 
     #[test]

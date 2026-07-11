@@ -180,10 +180,10 @@ async fn run_launch(
     launch: ShellLaunch,
 ) -> Result<(), ShellBrokerError> {
     let mut signals = UnixTerminalSignals::new()?;
-    let spawner = TokioTerminalSpawner::default();
     let redactor = BrokerOutputRedactor;
     let result = match &config.target {
         ShellTarget::Local => {
+            let spawner = TokioTerminalSpawner::default();
             run_after_durable_shell_start(
                 &launch.command,
                 launch.shell_id,
@@ -195,6 +195,7 @@ async fn run_launch(
             .await
         }
         ShellTarget::Remote { host } => {
+            let spawner = TokioTerminalSpawner::for_remote_tty();
             let argv = remote_tty_argv(host, &launch.command).map_err(|message| {
                 ShellBrokerError::Protocol(format!("invalid remote foreground command: {message}"))
             })?;
