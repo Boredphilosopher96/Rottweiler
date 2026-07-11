@@ -85,6 +85,13 @@ Sandbox implementation (`rw-sandbox`):
 - MCP servers: same first-use approval flow; per-server tool allowlists; remote servers require explicit `trust` in config.
 - Our own deps: `cargo deny` (licenses, advisories) and `cargo audit` in CI; lockfile committed; release binaries built on CI with provenance attestation.
 - **Self-update is a signed channel**: `rw upgrade` verifies a detached signature against a root public key embedded in the binary (minisign/TUF-style, with key-rotation support) *before* installing; downgrades below the running version require an explicit flag; the update check travels over the configured proxy but an attacker-controlled proxy gains nothing — unsigned or wrongly-signed artifacts are rejected. CI carries a seeded bad-signature fixture that must fail.
+- **Updates switch complete generations**: the release installer creates immutable
+  `versions/<version>` directories and atomically advances one `current`
+  selector. `rw upgrade` operates only from that managed layout; direct copies
+  and package-manager layouts are refused instead of partially replacing the
+  engine, TUI, and native OpenTUI library. Initial installation rejects extra
+  archive entries, links, special files, conflicting generations, and WSL
+  DrvFS destinations.
 
 ## Security acceptance tests (enforced in 07-VERIFICATION)
 

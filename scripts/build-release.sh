@@ -48,6 +48,11 @@ cp "$engine" "$stage/bin/rw"
 cp "$tui" "$stage/bin/rottweiler-tui"
 cp "$opentui_native" "$stage/bin/$opentui_native_name"
 chmod 755 "$stage/bin/rw" "$stage/bin/rottweiler-tui"
+sed \
+  -e "s/@ROTTWEILER_VERSION@/$version/g" \
+  -e "s/@ROTTWEILER_PLATFORM@/$platform/g" \
+  scripts/install-release.sh >"$stage/install.sh"
+chmod 755 "$stage/install.sh"
 python3 scripts/package-release.py "$stage" "$archive"
 
 verify=$(mktemp -d "${TMPDIR:-/tmp}/rottweiler-release.XXXXXX")
