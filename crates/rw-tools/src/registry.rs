@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
-use rw_types::{SessionId, ToolCapability, ToolOutputStream};
+use rw_types::{SessionId, SubagentId, SubagentResult, ToolCapability, ToolOutputStream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -138,6 +138,41 @@ pub trait ToolOutputSink: Send + Sync {
     async fn emit(&self, chunk: ToolOutputChunk) -> Result<(), ToolError>;
 }
 
+/// Lifecycle records emitted by tools that create full child agent sessions.
+///
+/// Core supplies this sink after the ordinary capability/permission gate. The
+/// sink is deliberately unavailable to tools executed outside a session actor,
+/// preventing extensions from forging durable parent-session records.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SubagentLifecycleEvent {
+    Spawned {
+        subagent_id: SubagentId,
+        child_session_id: SessionId,
+        task: String,
+    },
+    Finished {
+        subagent_id: SubagentId,
+        result: Box<SubagentResult>,
+    },
+}
+
+/// One child event forwarded only to the active parent client for display.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubagentProgressEvent {
+    pub subagent_id: SubagentId,
+    pub child_session_id: SessionId,
+    pub child_sequence: Option<u64>,
+    pub event: Value,
+}
+
+/// Engine-owned bridge for durable lifecycle and display-only child progress.
+#[async_trait]
+pub trait SubagentEventSink: Send + Sync {
+    async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError>;
+
+    async fn progress(&self, event: SubagentProgressEvent) -> Result<(), ToolError>;
+}
+
 #[derive(Debug, Default)]
 pub struct NoopOutputSink;
 
@@ -160,6 +195,7 @@ pub struct ToolContext {
     pub cancellation: CancellationToken,
     pub output: Arc<dyn ToolOutputSink>,
     question_asker: Option<Arc<dyn QuestionAsker>>,
+    subagent_events: Option<Arc<dyn SubagentEventSink>>,
 }
 
 impl ToolContext {
@@ -237,6 +273,7 @@ impl ToolContext {
             cancellation: CancellationToken::default(),
             output: Arc::new(NoopOutputSink),
             question_asker: None,
+            subagent_events: None,
         })
     }
 
@@ -305,6 +342,20 @@ impl ToolContext {
     pub fn with_question_asker(mut self, asker: Arc<dyn QuestionAsker>) -> Self {
         self.question_asker = Some(asker);
         self
+    }
+
+    /// Installs the engine-owned child-session event bridge for this exact
+    /// invocation. This is used by the public `spawn_agent` tool API.
+    #[must_use]
+    pub fn with_subagent_event_sink(mut self, sink: Arc<dyn SubagentEventSink>) -> Self {
+        self.subagent_events = Some(sink);
+        self
+    }
+
+    /// Returns the child-session event bridge when execution is actor-owned.
+    #[must_use]
+    pub fn subagent_event_sink(&self) -> Option<&Arc<dyn SubagentEventSink>> {
+        self.subagent_events.as_ref()
     }
 
     pub(crate) fn question_asker(&self) -> Option<&Arc<dyn QuestionAsker>> {
@@ -642,6 +693,22 @@ pub enum MutationScope {
     OpaqueWorkspace,
 }
 
+/// Whether a tool implementation captures workspace-root-specific state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceBinding {
+    RootBound,
+    RootIndependent,
+}
+
+/// Durable child-lifecycle production declared by any public tool extension.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SubagentLifecycleMode {
+    #[default]
+    None,
+    Single,
+    MultipleOrdered,
+}
+
 /// Exact filesystem mutation preview used to bind a visual approval.
 ///
 /// Tools opt in only when they can derive the bytes they will write from the
@@ -658,6 +725,41 @@ pub struct ApprovalPreview {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
+
+    /// Root-bound is the fail-closed default. Only pure orchestration controls
+    /// that never resolve workspace paths may opt into root independence.
+    fn workspace_binding(&self) -> WorkspaceBinding {
+        WorkspaceBinding::RootBound
+    }
+
+    /// Declares whether this tool emits durable child lifecycle events.
+    fn subagent_lifecycle_mode(&self) -> SubagentLifecycleMode {
+        SubagentLifecycleMode::None
+    }
+
+    /// Input-dependent capabilities inspected by core before approval.
+    /// The guarded registry always unions these with the descriptor snapshot,
+    /// so an implementation cannot hide a statically declared capability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the invocation input cannot be safely classified.
+    fn invocation_capabilities(&self, _input: &Value) -> Result<CapabilityManifest, ToolError> {
+        Ok(self.descriptor().capabilities)
+    }
+
+    /// Whether this exact invocation may overlap another parallel-safe call.
+    /// Core still performs capability approval independently.
+    fn parallel_safe(&self, input: &Value) -> bool {
+        let descriptor = self.descriptor();
+        matches!(self.mutation_scope(input), MutationScope::None)
+            && !descriptor.capabilities.capabilities().is_empty()
+            && descriptor
+                .capabilities
+                .capabilities()
+                .iter()
+                .all(|capability| matches!(capability, ToolCapability::ReadFilesystem))
+    }
 
     /// Describe possible workspace mutation for this input before execution.
     ///
@@ -693,17 +795,27 @@ pub trait Tool: Send + Sync {
 struct RegisteredTool {
     tool: Arc<dyn Tool>,
     descriptor: ToolDescriptor,
+    subagent_lifecycle_mode: SubagentLifecycleMode,
 }
 
 struct GuardedTool {
     inner: Arc<dyn Tool>,
     descriptor: ToolDescriptor,
+    subagent_lifecycle_mode: SubagentLifecycleMode,
 }
 
 #[async_trait]
 impl Tool for GuardedTool {
     fn descriptor(&self) -> ToolDescriptor {
         self.descriptor.clone()
+    }
+
+    fn workspace_binding(&self) -> WorkspaceBinding {
+        self.inner.workspace_binding()
+    }
+
+    fn subagent_lifecycle_mode(&self) -> SubagentLifecycleMode {
+        self.subagent_lifecycle_mode
     }
 
     fn mutation_scope(&self, input: &Value) -> MutationScope {
@@ -718,6 +830,22 @@ impl Tool for GuardedTool {
         } else {
             scope
         }
+    }
+
+    fn invocation_capabilities(&self, input: &Value) -> Result<CapabilityManifest, ToolError> {
+        let dynamic = self.inner.invocation_capabilities(input)?;
+        Ok(CapabilityManifest::new(
+            self.descriptor
+                .capabilities
+                .capabilities()
+                .iter()
+                .cloned()
+                .chain(dynamic.capabilities().iter().cloned()),
+        ))
+    }
+
+    fn parallel_safe(&self, input: &Value) -> bool {
+        self.inner.parallel_safe(input) && matches!(self.mutation_scope(input), MutationScope::None)
     }
 
     async fn approval_preview(
@@ -755,6 +883,7 @@ impl ToolRegistry {
     /// Returns [`ToolError::DuplicateTool`] when the name is already registered.
     pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolError> {
         let descriptor = tool.descriptor();
+        let subagent_lifecycle_mode = tool.subagent_lifecycle_mode();
         let name = descriptor.name.clone();
         if name.is_empty()
             || !name
@@ -771,12 +900,14 @@ impl ToolRegistry {
         let guarded: Arc<dyn Tool> = Arc::new(GuardedTool {
             inner: tool,
             descriptor: descriptor.clone(),
+            subagent_lifecycle_mode,
         });
         self.tools.insert(
             name,
             RegisteredTool {
                 tool: guarded,
                 descriptor,
+                subagent_lifecycle_mode,
             },
         );
         Ok(())
@@ -794,6 +925,13 @@ impl ToolRegistry {
         self.tools
             .get(name)
             .map(|registered| &registered.descriptor)
+    }
+
+    #[must_use]
+    pub fn subagent_lifecycle_mode(&self, name: &str) -> Option<SubagentLifecycleMode> {
+        self.tools
+            .get(name)
+            .map(|registered| registered.subagent_lifecycle_mode)
     }
 
     /// Resolve a mutation hint while enforcing the registered capability snapshot.
@@ -914,6 +1052,65 @@ mod tests {
             registry.subset(["missing"]),
             Err(ToolError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn lifecycle_mode_is_immutable_after_registration() {
+        struct FlippingLifecycleTool(Arc<std::sync::atomic::AtomicBool>);
+
+        #[async_trait]
+        impl Tool for FlippingLifecycleTool {
+            fn descriptor(&self) -> ToolDescriptor {
+                ToolDescriptor {
+                    name: "flipping_lifecycle".to_owned(),
+                    description: String::new(),
+                    input_schema: Value::Null,
+                    capabilities: CapabilityManifest::default(),
+                }
+            }
+
+            fn subagent_lifecycle_mode(&self) -> SubagentLifecycleMode {
+                if self.0.load(std::sync::atomic::Ordering::Acquire) {
+                    SubagentLifecycleMode::MultipleOrdered
+                } else {
+                    SubagentLifecycleMode::Single
+                }
+            }
+
+            async fn execute(
+                &self,
+                _context: &ToolContext,
+                _input: Value,
+            ) -> Result<ToolResult, ToolError> {
+                Ok(ToolResult::new("", Value::Null))
+            }
+        }
+
+        let flipped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(FlippingLifecycleTool(Arc::clone(&flipped))))
+            .expect("register");
+        flipped.store(true, std::sync::atomic::Ordering::Release);
+
+        assert_eq!(
+            registry.subagent_lifecycle_mode("flipping_lifecycle"),
+            Some(SubagentLifecycleMode::Single)
+        );
+        assert_eq!(
+            registry
+                .resolve("flipping_lifecycle")
+                .expect("guarded tool")
+                .subagent_lifecycle_mode(),
+            SubagentLifecycleMode::Single
+        );
+        assert_eq!(
+            registry
+                .subset(["flipping_lifecycle"])
+                .expect("subset")
+                .subagent_lifecycle_mode("flipping_lifecycle"),
+            Some(SubagentLifecycleMode::Single)
+        );
     }
 
     #[test]

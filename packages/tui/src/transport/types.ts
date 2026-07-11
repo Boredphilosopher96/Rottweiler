@@ -28,7 +28,7 @@ export function isWireEngineEvent(value: unknown): value is WireEngineEvent {
 }
 
 export function durableSequenceId(event: WireEngineEvent): string | null {
-  if (!isRecord(event.meta)) {
+  if (!("meta" in event) || !isRecord(event.meta)) {
     return null
   }
   return typeof event.meta.sequence_id === "string" ? event.meta.sequence_id : null

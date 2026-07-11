@@ -9,7 +9,12 @@ import {
 } from "@opentui/core"
 
 import { estimateEntryHeight, entryKey, formatCost, toolOutputText, TranscriptVirtualizer, turnMarkdown } from "../render"
-import type { RottweilerState, ToolProjection, TranscriptEntry } from "../state"
+import type {
+  RottweilerState,
+  SubagentProjection,
+  ToolProjection,
+  TranscriptEntry,
+} from "../state"
 import type { RottweilerTheme } from "../theme"
 
 export interface TranscriptRenderableOptions {
@@ -17,6 +22,8 @@ export interface TranscriptRenderableOptions {
   readonly treeSitterClient?: TreeSitterClient
   readonly overscan?: number
 }
+
+const MAX_VISIBLE_SUBAGENTS = 8
 
 export class ToolBlockRenderable extends BoxRenderable {
   readonly header: TextRenderable
@@ -75,6 +82,12 @@ export class ToolBlockRenderable extends BoxRenderable {
           : tool.status === "finished"
             ? this.#theme.success
             : this.#theme.info
+    if (this.#collapsed) {
+      this.body.content = ""
+      this.body.height = 0
+      this.height = 2
+      return
+    }
     const live = tool.chunks.map((chunk) => chunk.chunk).join("")
     const final = toolOutputText(tool.output)
     this.body.content = [tool.rationale, live, final].filter(Boolean).join("\n") || "Working…"
@@ -90,6 +103,124 @@ export class ToolBlockRenderable extends BoxRenderable {
   }
 }
 
+export class SubagentPanelRenderable extends BoxRenderable {
+  readonly header: TextRenderable
+  readonly rows = new Map<string, TextRenderable>()
+  readonly #theme: RottweilerTheme
+  #rowOrder: readonly string[] = []
+
+  constructor(ctx: RenderContext, theme: RottweilerTheme) {
+    super(ctx, {
+      id: "subagent-progress",
+      width: "100%",
+      height: 0,
+      flexDirection: "column",
+      flexShrink: 0,
+      border: true,
+      borderStyle: "single",
+      borderColor: theme.border,
+      backgroundColor: theme.panel,
+      paddingX: 1,
+      marginTop: 1,
+      visible: false,
+    })
+    this.#theme = theme
+    this.header = new TextRenderable(ctx, {
+      content: "",
+      fg: theme.accentStrong,
+      height: 1,
+      flexShrink: 0,
+    })
+    this.add(this.header)
+  }
+
+  update(subagents: readonly SubagentProjection[], total = subagents.length): void {
+    const nextOrder = subagents.map((subagent) => subagent.projectionId)
+    if (
+      nextOrder.length !== this.#rowOrder.length ||
+      nextOrder.some((subagentId, index) => subagentId !== this.#rowOrder[index])
+    ) {
+      for (const row of this.rows.values()) {
+        this.remove(row)
+        row.destroyRecursively()
+      }
+      this.rows.clear()
+      this.#rowOrder = nextOrder
+    }
+    const currentIds = new Set(subagents.map((subagent) => subagent.projectionId))
+    for (const [subagentId, row] of this.rows) {
+      if (!currentIds.has(subagentId)) {
+        this.remove(row)
+        row.destroyRecursively()
+        this.rows.delete(subagentId)
+      }
+    }
+
+    const running = subagents.filter((subagent) => subagent.status === "running").length
+    this.header.content = `Subagents · ${running} running · ${total} total`
+    for (const [index, subagent] of subagents.entries()) {
+      let row = this.rows.get(subagent.projectionId)
+      if (row === undefined) {
+        row = new TextRenderable(this.ctx, {
+          content: "",
+          fg: this.#theme.muted,
+          height: 1,
+          flexShrink: 0,
+        })
+        this.rows.set(subagent.projectionId, row)
+        this.add(row)
+      }
+      const glyph = subagentGlyph(subagent.status)
+      const branch = index === subagents.length - 1 ? "└─" : "├─"
+      const detail = subagentDetail(subagent)
+      row.content = `${branch} ${glyph} ${singleLine(subagent.task, 72)}${detail === "" ? "" : ` · ${detail}`}`
+      row.fg =
+        subagent.status === "failed"
+          ? this.#theme.danger
+          : subagent.status === "completed"
+            ? this.#theme.success
+            : subagent.status === "cancelled" ||
+                subagent.status === "timed_out" ||
+                subagent.status === "max_turns"
+              ? this.#theme.warning
+            : this.#theme.info
+    }
+    this.visible = subagents.length > 0
+    this.height = subagents.length === 0 ? 0 : subagents.length + 3
+  }
+}
+
+function subagentDetail(subagent: SubagentProjection): string {
+  if (subagent.status === "running") {
+    return subagent.activity ?? "starting"
+  }
+  const files = subagent.touchedFileCount === 0 ? "" : ` · ${subagent.touchedFileCount} files`
+  const diff = subagent.diffArtifactId === null ? "" : " · diff ready"
+  return `${subagent.summary === null ? subagent.status.replaceAll("_", " ") : singleLine(subagent.summary, 72)}${files}${diff}`
+}
+
+function subagentGlyph(status: SubagentProjection["status"]): string {
+  switch (status) {
+    case "running":
+      return "◌"
+    case "completed":
+      return "✓"
+    case "failed":
+      return "✕"
+    case "cancelled":
+      return "■"
+    case "timed_out":
+      return "◷"
+    case "max_turns":
+      return "◇"
+  }
+}
+
+function singleLine(value: string, limit: number): string {
+  const compact = value.replace(/\s+/g, " ").trim()
+  return compact.length <= limit ? compact : `${compact.slice(0, Math.max(1, limit - 1))}…`
+}
+
 class TurnCardRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly markdown: MarkdownRenderable
@@ -102,6 +233,8 @@ class TurnCardRenderable extends BoxRenderable {
     width: number,
     cost: string,
     tools: readonly ToolProjection[],
+    subagents: readonly SubagentProjection[],
+    subagentTotal: number,
     treeSitterClient?: TreeSitterClient,
   ) {
     const role = entry.turn.role === "assistant" ? "Rottweiler" : entry.turn.role
@@ -110,7 +243,8 @@ class TurnCardRenderable extends BoxRenderable {
       width: "100%",
       height:
         estimateEntryHeight(entry, width) + 1 +
-        tools.reduce((rows, tool) => rows + (tool.status === "finished" ? 2 : 4), 0),
+        tools.reduce((rows, tool) => rows + (tool.status === "finished" ? 2 : 4), 0) +
+        (subagents.length === 0 ? 0 : subagents.length + 3),
       flexDirection: "column",
       flexShrink: 0,
       border: false,
@@ -143,6 +277,11 @@ class TurnCardRenderable extends BoxRenderable {
     for (const tool of tools) {
       this.add(new ToolBlockRenderable(ctx, theme, tool))
     }
+    if (subagents.length > 0) {
+      const panel = new SubagentPanelRenderable(ctx, theme)
+      panel.update(subagents, subagentTotal)
+      this.add(panel)
+    }
   }
 }
 
@@ -150,6 +289,7 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly scroller: ScrollBoxRenderable
   readonly streamingCard: BoxRenderable
   readonly streamingMarkdown: MarkdownRenderable
+  readonly subagentPanel: SubagentPanelRenderable
   readonly mountedCards = new Map<string, TurnCardRenderable>()
   readonly #topSpacer: BoxRenderable
   readonly #bottomSpacer: BoxRenderable
@@ -163,7 +303,11 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #treeSitterClient: TreeSitterClient | undefined
   #state: RottweilerState | null = null
   #transcript: readonly TranscriptEntry[] | null = null
+  #tools: RottweilerState["tools"] | null = null
+  #subagents: RottweilerState["subagents"] | null = null
   #virtualizedTranscript: readonly TranscriptEntry[] | null = null
+  #virtualizedTools: RottweilerState["tools"] | null = null
+  #virtualizedSubagents: RottweilerState["subagents"] | null = null
   #virtualizedWidth = 0
   #lastWindow = ""
 
@@ -243,10 +387,12 @@ export class TranscriptRenderable extends BoxRenderable {
       width: "100%",
       flexDirection: "column",
     })
+    this.subagentPanel = new SubagentPanelRenderable(ctx, theme)
     this.streamingCard.add(this.#tailHeader)
     this.streamingCard.add(this.#tailThinking)
     this.streamingCard.add(this.streamingMarkdown)
     this.streamingCard.add(this.#tailCitations)
+    this.streamingCard.add(this.subagentPanel)
     this.streamingCard.add(this.#tailTools)
     this.scroller.add(this.#topSpacer)
     this.scroller.add(this.#bottomSpacer)
@@ -265,9 +411,12 @@ export class TranscriptRenderable extends BoxRenderable {
   update(state: RottweilerState): void {
     this.#state = state
     const transcriptChanged = this.#transcript !== state.transcript
+    const cardProjectionChanged = this.#tools !== state.tools || this.#subagents !== state.subagents
     this.#transcript = state.transcript
+    this.#tools = state.tools
+    this.#subagents = state.subagents
     this.#updateTail(state)
-    this.#reconcile(transcriptChanged)
+    this.#reconcile(transcriptChanged || (state.streamingTail === null && cardProjectionChanged))
   }
 
   setScrollOffset(scrollTop: number): void {
@@ -286,9 +435,42 @@ export class TranscriptRenderable extends BoxRenderable {
     }
     const width = Math.max(20, this.width || this.ctx.width)
     const height = Math.max(4, this.height || this.ctx.height - 8)
-    if (this.#virtualizedTranscript !== state.transcript || this.#virtualizedWidth !== width) {
-      this.#virtualizer.update(state.transcript, width)
+    if (
+      this.#virtualizedTranscript !== state.transcript ||
+      this.#virtualizedTools !== state.tools ||
+      this.#virtualizedSubagents !== state.subagents ||
+      this.#virtualizedWidth !== width
+    ) {
+      const extraRowsByTurn = new Map<string, number>()
+      for (const tool of Object.values(state.tools)) {
+        extraRowsByTurn.set(
+          tool.turnId,
+          (extraRowsByTurn.get(tool.turnId) ?? 0) + (tool.status === "finished" ? 2 : 4),
+        )
+      }
+      const subagentsByTurn = new Map<string, SubagentProjection[]>()
+      for (const subagent of Object.values(state.subagents)) {
+        const group = subagentsByTurn.get(subagent.parentTurnId) ?? []
+        group.push(subagent)
+        subagentsByTurn.set(subagent.parentTurnId, group)
+      }
+      for (const [turnId, subagents] of subagentsByTurn) {
+        const visible = boundedSubagents(subagents)
+        if (visible.length > 0) {
+          extraRowsByTurn.set(
+            turnId,
+            (extraRowsByTurn.get(turnId) ?? 0) + visible.length + 3,
+          )
+        }
+      }
+      this.#virtualizer.update(
+        state.transcript,
+        width,
+        (entry) => extraRowsByTurn.get(entry.agentTurn) ?? 0,
+      )
       this.#virtualizedTranscript = state.transcript
+      this.#virtualizedTools = state.tools
+      this.#virtualizedSubagents = state.subagents
       this.#virtualizedWidth = width
     }
     const window = this.#virtualizer.window(this.scroller.scrollTop, height)
@@ -312,6 +494,8 @@ export class TranscriptRenderable extends BoxRenderable {
         continue
       }
       const tools = Object.values(state.tools).filter((tool) => tool.turnId === entry.agentTurn)
+      const turnSubagents = subagentsForTurn(state, entry.agentTurn)
+      const visibleSubagents = boundedSubagents(turnSubagents)
       const card = new TurnCardRenderable(
         this.ctx,
         this.#theme,
@@ -320,6 +504,8 @@ export class TranscriptRenderable extends BoxRenderable {
         width,
         formatCost(state.turns[entry.agentTurn]?.cost),
         tools,
+        visibleSubagents,
+        turnSubagents.length,
         this.#treeSitterClient,
       )
       this.scroller.insertBefore(card, this.#bottomSpacer)
@@ -331,12 +517,29 @@ export class TranscriptRenderable extends BoxRenderable {
 
   #updateTail(state: RottweilerState): void {
     const tail = state.streamingTail
-    this.streamingCard.visible = tail !== null
+    const allSubagents =
+      tail === null
+        ? state.subagentOrder
+            .map((subagentId) => state.subagents[subagentId])
+            .filter(
+              (subagent): subagent is SubagentProjection =>
+                subagent !== undefined && subagent.status === "running",
+            )
+        : subagentsForTurn(state, tail.turnId)
+    const subagents = boundedSubagents(allSubagents)
+    this.subagentPanel.update(subagents, allSubagents.length)
+    this.streamingCard.visible = tail !== null || subagents.length > 0
     if (tail === null) {
       this.streamingMarkdown.content = ""
+      this.streamingMarkdown.visible = false
+      this.#tailHeader.content = "Rottweiler · delegating"
+      this.#tailThinking.visible = false
+      this.#tailCitations.visible = false
       this.#replaceTailTools([])
+      this.streamingCard.height = subagents.length === 0 ? 0 : subagents.length + 5
       return
     }
+    this.streamingMarkdown.visible = true
     this.streamingMarkdown.content = tail.text.length === 0 ? "_Waiting for response…_" : tail.text
     this.streamingMarkdown.streaming = tail.finished === null
     this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? "streaming" : formatCost(tail.finished.cost)}`
@@ -362,7 +565,12 @@ export class TranscriptRenderable extends BoxRenderable {
     this.#tailTools.height = toolRows
     this.streamingCard.height = Math.min(
       32,
-      2 + thinkingRows + textRows + (tail.citations.length > 0 ? 1 : 0) + toolRows,
+      2 +
+        thinkingRows +
+        textRows +
+        (tail.citations.length > 0 ? 1 : 0) +
+        toolRows +
+        (subagents.length === 0 ? 0 : subagents.length + 3),
     )
   }
 
@@ -375,4 +583,23 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#tailTools.add(new ToolBlockRenderable(this.ctx, this.#theme, tool))
     }
   }
+}
+
+function subagentsForTurn(state: RottweilerState, turnId: string): SubagentProjection[] {
+  return state.subagentOrder
+    .map((subagentId) => state.subagents[subagentId])
+    .filter(
+      (subagent): subagent is SubagentProjection =>
+        subagent !== undefined && subagent.parentTurnId === turnId,
+    )
+}
+
+function boundedSubagents(subagents: readonly SubagentProjection[]): SubagentProjection[] {
+  if (subagents.length <= MAX_VISIBLE_SUBAGENTS) return [...subagents]
+  const running = subagents.filter((subagent) => subagent.status === "running")
+  const completed = subagents.filter((subagent) => subagent.status !== "running")
+  const visibleRunning = running.slice(0, MAX_VISIBLE_SUBAGENTS)
+  const remaining = MAX_VISIBLE_SUBAGENTS - visibleRunning.length
+  if (remaining === 0) return visibleRunning
+  return [...visibleRunning, ...completed.slice(-remaining)]
 }

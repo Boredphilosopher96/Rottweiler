@@ -25,6 +25,84 @@ const PROMPT: &str = "create hello.py that prints hi, run it";
 const STEERING: &str = "STEER_TOKEN_M2_CLI";
 
 #[test]
+fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
+    let root = tempdir().expect("root");
+    let run = TestRun::new(&root, "m7-parallel-worktrees");
+    init_git_repository(&run.workspace);
+    let script = root.path().join("m7-parallel.json");
+    let mut first = Vec::new();
+    for index in 0..3 {
+        let id = format!("spawn-{index}");
+        first.push(ProviderEvent::ToolCallStart {
+            id: id.clone(),
+            name: "spawn_agent".to_owned(),
+        });
+        first.push(ProviderEvent::ToolCallEnd {
+            id,
+            arguments: json!({
+                "task": format!("inspect isolated branch {index}"),
+                "agent": "explore",
+                "isolation": "worktree"
+            }),
+        });
+    }
+    first.push(ProviderEvent::Finished {
+        reason: FinishReason::ToolCalls,
+    });
+    write_script(
+        &script,
+        vec![
+            first,
+            text_events("explorer result one"),
+            text_events("explorer result two"),
+            text_events("explorer result three"),
+            text_events("collated all three explorers"),
+        ],
+    );
+
+    let output = base_command(&run.workspace, &run.home)
+        .args([
+            "-p",
+            "run three isolated explorers and collate them",
+            "--permission-mode",
+            "yolo",
+            "--output-format",
+            "stream-json",
+            "--in-memory-replay-script",
+            script.to_str().expect("script"),
+        ])
+        .output()
+        .expect("rw binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let events = parse_stream(&output.stdout);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::SubagentSpawned { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::SubagentFinished { .. }))
+            .count(),
+        3
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        EngineEvent::TextDelta { text, .. } if text.contains("collated all three explorers")
+    )));
+    assert!(git_output(&run.workspace, &["diff", "--binary", "HEAD", "--"]).is_empty());
+    assert!(git_output(&run.workspace, &["status", "--porcelain=v1"]).is_empty());
+}
+
+#[test]
 fn binary_records_then_replays_a_complete_offline_tool_turn() {
     let fixture_root = tempdir().expect("fixture root");
     let fixture_dir = fixture_root.path().join("replay");
@@ -1218,9 +1296,8 @@ struct TestRun {
 impl TestRun {
     fn new(root: &TempDir, name: &str) -> Self {
         let workspace = root.path().join(name);
-        let home = root.path().join(format!("{name}-home"));
         fs::create_dir_all(&workspace).expect("workspace");
-        fs::create_dir_all(&home).expect("home");
+        let home = private_test_directory(&root.path().join(format!("{name}-home")));
         Self { workspace, home }
     }
 
@@ -1286,14 +1363,26 @@ impl TestRun {
 }
 
 fn base_command(workspace: &Path, home: &Path) -> Command {
+    let home = private_test_directory(home);
     let mut command = Command::new(env!("CARGO_BIN_EXE_rw"));
     command
         .env_clear()
         .current_dir(workspace)
-        .env("HOME", home)
-        .env("ROTTWEILER_HOME", home)
+        .env("HOME", &home)
+        .env("ROTTWEILER_HOME", &home)
         .env("ROTTWEILER_CREDENTIAL_BACKEND", "file");
     command
+}
+
+fn private_test_directory(path: &Path) -> PathBuf {
+    fs::create_dir_all(path).expect("private test directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .expect("private test directory permissions");
+    }
+    fs::canonicalize(path).expect("canonical private test directory")
 }
 
 fn run_m3_command(
@@ -1349,14 +1438,52 @@ fn assert_ack_precedes_cause(events: &[EngineEvent], is_target: impl Fn(&EngineE
 }
 
 fn text_script(text: &str) -> Vec<Vec<ProviderEvent>> {
-    vec![vec![
+    vec![text_events(text)]
+}
+
+fn text_events(text: &str) -> Vec<ProviderEvent> {
+    vec![
         ProviderEvent::TextDelta {
             text: text.to_owned(),
         },
         ProviderEvent::Finished {
             reason: FinishReason::Stop,
         },
-    ]]
+    ]
+}
+
+fn init_git_repository(workspace: &Path) {
+    git_output(workspace, &["init", "--quiet"]);
+    fs::write(workspace.join("tracked.txt"), "base\n").expect("tracked file");
+    git_output(workspace, &["add", "tracked.txt"]);
+    git_output(workspace, &["commit", "--quiet", "-m", "base"]);
+}
+
+fn git_output(workspace: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Rottweiler Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Rottweiler Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git UTF-8")
+        .trim()
+        .to_owned()
 }
 
 fn rewrite_turn_cost(home: &Path, session_id: &str, amount_micros: u64) {

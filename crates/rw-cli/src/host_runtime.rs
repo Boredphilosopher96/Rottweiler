@@ -112,7 +112,7 @@ impl CliSessionFactory {
         allowed.sort();
         allowed.dedup();
         options.allowed_workspaces.clone_from(&allowed);
-        fs::create_dir_all(&options.storage_root)
+        crate::runtime::initialize_private_storage_root(&options.storage_root)
             .map_err(|_| HostError::Persistence("host storage could not initialize".to_owned()))?;
         Ok(Self {
             options: Arc::new(options),
@@ -870,11 +870,19 @@ mod tests {
     use super::*;
 
     fn factory(root: &Path, workspace: &Path) -> CliSessionFactory {
+        factory_with_allowed_workspaces(root, vec![workspace.to_path_buf()])
+    }
+
+    fn factory_with_allowed_workspaces(
+        root: &Path,
+        allowed_workspaces: Vec<PathBuf>,
+    ) -> CliSessionFactory {
+        let storage_root = private_test_directory(&root.join("state"));
         CliSessionFactory::new(CliHostOptions {
-            storage_root: root.join("state"),
-            credentials_path: root.join("state/credentials.json"),
+            credentials_path: storage_root.join("credentials.json"),
+            storage_root,
             config: Config::default(),
-            allowed_workspaces: vec![workspace.to_path_buf()],
+            allowed_workspaces,
             permission_mode: Some(PermissionMode::Strict),
             max_turns: 2,
             provider_mode: HostedProviderMode::DeterministicReplay {
@@ -884,6 +892,17 @@ mod tests {
             dangerously_trust: false,
         })
         .expect("factory")
+    }
+
+    fn private_test_directory(path: &Path) -> PathBuf {
+        fs::create_dir_all(path).expect("private test directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+                .expect("private test directory permissions");
+        }
+        fs::canonicalize(path).expect("canonical private test directory")
     }
 
     fn descriptor(workspace: &Path) -> SessionDescriptor {
@@ -1068,20 +1087,8 @@ mod tests {
         let workspace = fs::canonicalize(workspace).expect("canonical workspace");
         let allowed = fs::canonicalize(allowed).expect("canonical allowed");
         let outside = fs::canonicalize(outside).expect("canonical outside");
-        let factory = CliSessionFactory::new(CliHostOptions {
-            storage_root: root.path().join("state"),
-            credentials_path: root.path().join("state/credentials.json"),
-            config: Config::default(),
-            allowed_workspaces: vec![workspace.clone(), allowed.clone()],
-            permission_mode: Some(PermissionMode::Strict),
-            max_turns: 2,
-            provider_mode: HostedProviderMode::DeterministicReplay {
-                provider_name: "offline-host".to_owned(),
-                scripts: Vec::new(),
-            },
-            dangerously_trust: false,
-        })
-        .expect("factory");
+        let factory =
+            factory_with_allowed_workspaces(root.path(), vec![workspace.clone(), allowed.clone()]);
         let session_id = SessionId("hosted-add-root-policy".to_owned());
         let hosted = factory
             .create(CreateSessionRequest {

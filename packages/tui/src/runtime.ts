@@ -758,8 +758,11 @@ function commandSessionId(command: ClientCommand): string | null {
 }
 
 function eventBelongsToSession(event: WireEngineEvent, sessionId: string): boolean {
-  if (isRecord(event.meta) && typeof event.meta.session_id === "string") {
+  if ("meta" in event && isRecord(event.meta) && typeof event.meta.session_id === "string") {
     return event.meta.session_id === sessionId
+  }
+  if (event.type === "subagent_progress") {
+    return event.parent_session_id === sessionId
   }
   return !("session_id" in event) || event.session_id === undefined || event.session_id === sessionId
 }

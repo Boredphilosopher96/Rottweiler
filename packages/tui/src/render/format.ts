@@ -69,7 +69,7 @@ export function toolOutputText(output: ToolOutput | null): string {
     case "text":
       return output.text
     case "structured":
-      return JSON.stringify(output.value, null, 2)
+      return boundedStructuredText(output.value)
     case "mixed":
       return output.parts
         .map((part) => {
@@ -77,13 +77,47 @@ export function toolOutputText(output: ToolOutput | null): string {
             case "text":
               return part.text
             case "structured":
-              return JSON.stringify(part.value, null, 2)
+              return boundedStructuredText(part.value)
             case "image":
               return `[image ${part.media_type}]`
           }
         })
         .join("\n")
   }
+}
+
+function boundedStructuredText(value: unknown): string {
+  return JSON.stringify(
+    value,
+    (key, nested: unknown) => {
+      if (
+        key === "diff_artifact" &&
+        typeof nested === "object" &&
+        nested !== null &&
+        !Array.isArray(nested)
+      ) {
+        const artifact = nested as Record<string, unknown>
+        return {
+          id: artifact.id,
+          base_commit: artifact.base_commit,
+          touched_file_count: Array.isArray(artifact.touched_files)
+            ? artifact.touched_files.length
+            : 0,
+          unified_diff: typeof artifact.unified_diff === "string"
+            ? `[diff omitted from compact transcript · ${artifact.unified_diff.length} chars]`
+            : null,
+        }
+      }
+      if (typeof nested === "string" && nested.length > 16_384) {
+        return `${nested.slice(0, 16_383)}… [${nested.length - 16_383} chars omitted]`
+      }
+      if (Array.isArray(nested) && nested.length > 256) {
+        return [...nested.slice(0, 256), `[${nested.length - 256} items omitted]`]
+      }
+      return nested
+    },
+    2,
+  )
 }
 
 export function decimal(value: string): number {

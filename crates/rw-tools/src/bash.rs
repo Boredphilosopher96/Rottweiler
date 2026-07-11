@@ -258,7 +258,7 @@ fn safe_git_status_arguments(arguments: &[String]) -> bool {
     true
 }
 
-fn audited_system_git() -> Option<&'static PathBuf> {
+pub(crate) fn audited_system_git() -> Option<&'static PathBuf> {
     static SYSTEM_GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
     SYSTEM_GIT.get_or_init(resolve_audited_system_git).as_ref()
 }
@@ -3123,12 +3123,23 @@ sys.exit(92)
 
     #[cfg(unix)]
     async fn read_test_pid(path: &std::path::Path) -> rustix::process::Pid {
-        let raw = tokio::fs::read_to_string(path)
-            .await
-            .expect("pid file")
-            .trim()
-            .parse::<i32>()
-            .expect("numeric pid");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        let raw = loop {
+            match tokio::fs::read_to_string(path).await {
+                Ok(value) => {
+                    if let Ok(pid) = value.trim().parse::<i32>() {
+                        break pid;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("read pid file: {error}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "numeric pid was not published before the deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
         rustix::process::Pid::from_raw(raw).expect("positive pid")
     }
 

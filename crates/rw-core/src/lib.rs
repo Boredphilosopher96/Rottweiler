@@ -6,6 +6,7 @@ mod engine;
 mod host;
 mod init;
 mod instructions;
+mod orchestration;
 mod permission;
 mod provider_factory;
 mod subscription_credentials;
@@ -52,6 +53,17 @@ pub use instructions::{
     base_agent_system_turn, initial_session_context, load_instruction_stack,
     load_nested_instruction_stack, load_root_project_instructions,
 };
+pub use orchestration::{
+    ActorSubagentSessionFactory, DEFAULT_SUBAGENT_CONCURRENCY, DEFAULT_SUBAGENT_MAX_DEPTH,
+    DEFAULT_SUBAGENT_MAX_DURATION, DEFAULT_SUBAGENT_MAX_TURNS, NoopSubagentMetadataStore,
+    OrchestrationError, SpawnAgentTool, SubagentHandle, SubagentLaunch, SubagentLimits,
+    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentPermissionMode,
+    SubagentProgressObserver, SubagentRecoveryPhase, SubagentRecoveryPolicy,
+    SubagentRecoveryRecord, SubagentRequest, SubagentSession, SubagentSessionFactory,
+    SubagentTurnResult, WorktreeSubagentSessionFactory, diff_artifact_reference,
+    incomplete_subagent_lifecycles, interrupted_subagent_recovery_result,
+    subagent_result_tool_output,
+};
 pub use permission::{
     ClearedSessionPermissions, HeadlessPermissionMode, PermissionApprovalSnapshot,
     PermissionApprovalSummary, PermissionApprover, PermissionGate, PermissionGenerationUpdate,
@@ -68,8 +80,8 @@ pub use rw_types::PROTOCOL_VERSION;
 pub use rw_types::{
     Answer, ClientCommand, ClientId, CommandAckMeta, CommandMeta, CommandOutcome, Cost,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, RequestId, SequenceId,
-    SessionDescriptor, SessionId, ShellId, ToolOutputStream, TurnId, TurnStatus, UnrestorablePath,
-    Usage,
+    SessionDescriptor, SessionId, ShellId, SubagentIsolation, ToolOutputStream, TurnId, TurnStatus,
+    UnrestorablePath, Usage,
 };
 
 /// Stable construction and protocol surface for executable frontends.
@@ -80,13 +92,17 @@ pub use rw_types::{
 /// remain in their lower architectural layers.
 pub mod runtime_support {
     pub use rw_ext::{
+        AgentDefinition, AgentPermissionMode, AgentPromptSource, AgentRegistry, AgentRegistryError,
         ArtifactLocation, ArtifactOrigin, ArtifactScope, CLAUDE_FRONTMATTER_MIGRATION,
         CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation,
-        CommandRegistry, CommandRegistryError, CommandTemplate, DiscoveredCommand,
-        DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog, ExtensionDiscoveryConfig,
-        ExtensionDiscoveryError, HookDirective, HookDispatchStatus, HookDispatcher, HookEffect,
-        HookError, HookEvent, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
-        TemplatePart,
+        CommandRegistry, CommandRegistryError, CommandTemplate, DiscoveredAgent, DiscoveredCommand,
+        DiscoveredShellHook, DiscoveredSkill, DiscoveredWorkflow, ExtensionCatalog,
+        ExtensionDiscoveryConfig, ExtensionDiscoveryError, HookDirective, HookDispatchStatus,
+        HookDispatcher, HookEffect, HookError, HookEvent, HookFailurePolicy, HookHandler,
+        HookInvocation, HookRegistration, LoadedAgent, TemplatePart, WorkflowCondition,
+        WorkflowOnFail, WorkflowRunError, WorkflowRunReport, WorkflowRunner, WorkflowStep,
+        WorkflowStepArtifact, WorkflowStepExecutionError, WorkflowStepExecutor, WorkflowStepReport,
+        WorkflowStepRequest, WorkflowStepTarget, compose_agent_registry,
     };
     pub use rw_providers::{
         BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,
@@ -98,27 +114,30 @@ pub mod runtime_support {
         guarded_http_fetch,
     };
     pub use rw_tools::{
-        AskUserInput, AskUserTool, BashSandboxMode, BashTool, CancellationToken,
-        CapabilityManifest, CodeIntelligence, CodeIntelligenceProvider, CommandExecutor,
-        CommandFixtureRedactor, CommandOutcome as ToolCommandOutcome, CommandRequest,
-        CommandSafetyClassifier, ConfiguredSearchApi, DefinitionTool, Diagnostic,
+        ApplyWorktreeDiffTool, AskUserInput, AskUserTool, BashSandboxMode, BashTool,
+        CancellationToken, CapabilityManifest, CodeIntelligence, CodeIntelligenceProvider,
+        CommandExecutor, CommandFixtureRedactor, CommandOutcome as ToolCommandOutcome,
+        CommandRequest, CommandSafetyClassifier, ConfiguredSearchApi, DefinitionTool, Diagnostic,
         DiagnosticSeverity, DiagnosticsTool, EditTool, EgressDecision, EgressPin, EgressPolicy,
         ExecutionLease, FetchRequest, FetchResponse, GlobTool, GrepTool, IntelligenceBackend,
         IntelligenceResult, Language, Location, LsTool, LspConfig, LspServerConfig, MultiEditTool,
         MutationScope, NetworkPolicy as SandboxNetworkPolicy, NoopOutputSink, Position,
         QuestionAsker, Range, ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult,
         RenameTool, ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
+        SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode, SubagentProgressEvent,
         SupervisedEgressProxy, SymbolIndex, SymbolsTool, TodoTool, TokioCommandExecutor, Tool,
         ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
         ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool, WebFetcher, WebSearchRequest,
         WebSearchResponse, WebSearchResult, WebSearchSource, WebSearchTool, WebSearcher,
-        WorkspaceSymbolIndex, WorkspaceUriMapper, WriteTool, discover_sandboxed_lsp_servers,
+        WorkspaceBinding, WorkspaceSymbolIndex, WorkspaceUriMapper, WorktreeIsolation,
+        WorktreeLeaseRecord, WorktreeLimits, WriteTool, discover_sandboxed_lsp_servers,
         maybe_run_sandbox_helper, probe_policy_egress,
     };
     pub use rw_types::{
         Answer, ApprovalBinding, ApprovalDecision, Block, ClientCommand, ClientId, CommandOutcome,
-        Cost, EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, Role,
-        SequenceId, SessionId, SessionMode, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
+        Cost, DiffArtifactRef, EngineError, EngineErrorCategory, EngineEvent, EventMeta,
+        QuestionId, Role, SequenceId, SessionId, SessionMode, SubagentId, SubagentIsolation,
+        SubagentResult, SubagentStatus, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
         ToolOutputStream, Turn, TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
         config::{
             PermissionDecision, PermissionRule, ToolchainConfig, ToolchainRule, WebSearchConfig,

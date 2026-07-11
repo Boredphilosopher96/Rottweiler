@@ -18,6 +18,7 @@ class WorkerApp implements RuntimeApp {
   handleEvent(event: WireEngineEvent): void {
     this.state = reduceRottweilerState(this.state, engineEvent(event))
     if (
+      "meta" in event &&
       typeof event.meta === "object" &&
       event.meta !== null &&
       "sequence_id" in event.meta &&

@@ -13,6 +13,7 @@ mod registry;
 mod search;
 mod symbols;
 mod web;
+mod worktree;
 
 pub use bash::{
     BashInput, BashSandboxMode, BashTool, CommandExecutor, CommandFixtureRedactor, CommandOutcome,
@@ -34,9 +35,10 @@ pub use interaction::{
     TodoStatus, TodoTool,
 };
 pub use registry::{
-    ApprovalPreview, CancellationToken, CapabilityManifest, MutationScope, NoopOutputSink, Tool,
+    ApprovalPreview, CancellationToken, CapabilityManifest, MutationScope, NoopOutputSink,
+    SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode, SubagentProgressEvent, Tool,
     ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
-    ToolRegistry, ToolResult,
+    ToolRegistry, ToolResult, WorkspaceBinding,
 };
 pub use rw_intel::{
     CodeIntelligence, Diagnostic, DiagnosticSeverity, IntelligenceBackend, IntelligenceResult,
@@ -49,10 +51,16 @@ pub use rw_sandbox::{
     SandboxSupport, SupervisedEgressProxy, UpstreamProxy,
     maybe_run_helper as maybe_run_sandbox_helper, probe_policy_egress,
 };
+pub use rw_types::{DiffArtifact, TouchedFile, TouchedFileStatus};
 pub use search::{GlobInput, GlobTool, GrepInput, GrepTool, LsInput, LsTool};
 pub use symbols::{SymbolsInput, SymbolsTool, WorkspaceSymbolIndex};
 pub use web::{
     ConfiguredSearchApi, FetchRequest, FetchResponse, WebFetchInput, WebFetchTool, WebFetcher,
     WebSearchInput, WebSearchRequest, WebSearchResponse, WebSearchResult, WebSearchSource,
     WebSearchTool, WebSearcher,
+};
+pub use worktree::{
+    ApplyWorktreeDiffInput, ApplyWorktreeDiffTool, ChildReturnArtifact, DiffArtifactAuthority,
+    SessionDiffArtifactAuthority, WorktreeIsolation, WorktreeLease, WorktreeLeaseRecord,
+    WorktreeLimits,
 };

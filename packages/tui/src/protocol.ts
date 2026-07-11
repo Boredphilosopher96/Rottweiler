@@ -24,6 +24,8 @@ export type {
   PlanDecision,
   PlanStep,
   Question,
+  SubagentResult,
+  SubagentStatus,
   ToolCapability,
   ToolOutput,
   ToolOutputStream,

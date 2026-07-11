@@ -631,6 +631,7 @@ export const contractFixture = {
         "caused_by": null
       },
       "subagent_id": "subagent-1",
+      "child_session_id": "child-session-1",
       "task": "inspect protocol"
     },
     {
@@ -643,11 +644,27 @@ export const contractFixture = {
         "caused_by": null
       },
       "subagent_id": "subagent-1",
-      "output": {
-        "type": "text",
-        "text": "done"
-      },
-      "is_error": false
+      "result": {
+        "subagent_id": "subagent-1",
+        "session_id": "child-session-1",
+        "status": "completed",
+        "final_text": "done",
+        "touched_files": [],
+        "diff_artifact": null,
+        "usage": {
+          "input_tokens": "10",
+          "output_tokens": "5",
+          "cache_read_tokens": "0",
+          "cache_write_tokens": "0",
+          "reasoning_tokens": "0"
+        },
+        "cost": {
+          "kind": "unavailable",
+          "reason": "fixture"
+        },
+        "turns": "1",
+        "duration_millis": "5"
+      }
     },
     {
       "type": "subagent_finished",
@@ -659,13 +676,27 @@ export const contractFixture = {
         "caused_by": null
       },
       "subagent_id": "subagent-2",
-      "output": {
-        "type": "structured",
-        "value": {
-          "files": 3
-        }
-      },
-      "is_error": false
+      "result": {
+        "subagent_id": "subagent-2",
+        "session_id": "child-session-2",
+        "status": "completed",
+        "final_text": "three files",
+        "touched_files": [],
+        "diff_artifact": null,
+        "usage": {
+          "input_tokens": "10",
+          "output_tokens": "5",
+          "cache_read_tokens": "0",
+          "cache_write_tokens": "0",
+          "reasoning_tokens": "0"
+        },
+        "cost": {
+          "kind": "unavailable",
+          "reason": "fixture"
+        },
+        "turns": "1",
+        "duration_millis": "5"
+      }
     },
     {
       "type": "tool_output_pruned",

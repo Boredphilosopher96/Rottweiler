@@ -9,6 +9,8 @@ import {
 } from "./model"
 
 const MAX_U64 = 18_446_744_073_709_551_615n
+export const MAX_SUBAGENT_TASK_BYTES = 1_024
+export const MAX_TERMINAL_SUBAGENT_HISTORY = 128
 const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "command_acknowledged",
   "context_snapshot_ready",
@@ -47,6 +49,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "compaction_finished",
   "subagent_spawned",
   "subagent_finished",
+  "subagent_progress",
   "tool_output_pruned",
   "mode_changed",
   "plan_submitted",
@@ -134,6 +137,11 @@ export function reduceWireEvent(
   state: RottweilerState,
   event: WireEngineEvent,
 ): RottweilerState {
+  // Child progress is connection-scoped: it updates the retained projection
+  // without consuming or perturbing the parent's durable replay cursor.
+  if (event.type === "subagent_progress") {
+    return applyKnownEvent(state, event as EngineEvent, null)
+  }
   if (ACK_EVENT_TYPES.has(event.type as EngineEvent["type"])) {
     return KNOWN_EVENT_TYPES.has(event.type as EngineEvent["type"])
       ? applyKnownEvent(state, event as EngineEvent, null)
@@ -354,6 +362,16 @@ function applyKnownEvent(
     }
     case "conversation_rewound": {
       const target = parseU64(event.to_agent_turn)
+      const retainedSubagentIds = state.subagentOrder.filter((subagentId) => {
+        const turn = parseU64(state.subagents[subagentId]?.parentTurnId ?? null)
+        return target === null || turn === null || turn <= target
+      })
+      const subagents = Object.fromEntries(
+        retainedSubagentIds.flatMap((subagentId) => {
+          const subagent = state.subagents[subagentId]
+          return subagent === undefined ? [] : [[subagentId, subagent] as const]
+        }),
+      )
       return {
         ...state,
         transcript:
@@ -365,6 +383,8 @@ function applyKnownEvent(
               }),
         streamingTail: null,
         queuedMessages: [],
+        subagents,
+        subagentOrder: retainedSubagentIds,
       }
     }
     case "turn_started":
@@ -379,7 +399,113 @@ function applyKnownEvent(
             cost: null,
           },
         },
+    }
+    case "subagent_spawned": {
+      const existing = state.subagents[event.subagent_id]
+      const parentTurnId = currentTurnId(state)
+      let subagents = state.subagents
+      let subagentOrder = state.subagentOrder
+      if (existing !== undefined && existing.parentTurnId !== parentTurnId) {
+        const archiveKey = nextSubagentArchiveKey(
+          state.subagents,
+          event.subagent_id,
+          existing.parentTurnId,
+        )
+        subagents = {
+          ...state.subagents,
+          [archiveKey]: { ...existing, projectionId: archiveKey },
+        }
+        delete (subagents as Record<string, unknown>)[event.subagent_id]
+        subagentOrder = state.subagentOrder.map((key) =>
+          key === event.subagent_id ? archiveKey : key,
+        )
       }
+      const nextSubagents: RottweilerState["subagents"] = {
+        ...subagents,
+        [event.subagent_id]: {
+          projectionId: event.subagent_id,
+          subagentId: event.subagent_id,
+          parentTurnId,
+          task: boundedUtf8(event.task, MAX_SUBAGENT_TASK_BYTES),
+          status: "running",
+          childSessionId: event.child_session_id,
+          lastChildSequence: existing?.lastChildSequence ?? null,
+          activity: "starting",
+          summary: null,
+          touchedFileCount: 0,
+          diffArtifactId: null,
+        },
+      }
+      const nextOrder = subagentOrder.includes(event.subagent_id)
+        ? subagentOrder
+        : [...subagentOrder, event.subagent_id]
+      return {
+        ...state,
+        ...boundedSubagentHistory(nextSubagents, nextOrder),
+      }
+    }
+    case "subagent_progress": {
+      const existing = state.subagents[event.subagent_id]
+      if (existing === undefined || existing.childSessionId !== event.child_session_id) {
+        return recordInvalid(state)
+      }
+      const childSequence = event.child_sequence ?? null
+      const sequence = parseU64(childSequence)
+      if (childSequence !== null && sequence === null) {
+        return recordInvalid(state)
+      }
+      const lastSequence = parseU64(existing.lastChildSequence)
+      if (sequence !== null && lastSequence !== null && sequence <= lastSequence) {
+        return state
+      }
+      const activity = subagentActivity(event.event)
+      return {
+        ...state,
+        subagents: {
+          ...state.subagents,
+          [event.subagent_id]: {
+            projectionId: existing.projectionId,
+            subagentId: event.subagent_id,
+            parentTurnId: existing.parentTurnId,
+            task: existing.task,
+            status: existing.status,
+            childSessionId: event.child_session_id,
+            lastChildSequence: childSequence ?? existing.lastChildSequence,
+            activity,
+            summary: existing.summary,
+            touchedFileCount: existing.touchedFileCount,
+            diffArtifactId: existing.diffArtifactId,
+          },
+        },
+      }
+    }
+    case "subagent_finished": {
+      const existing = state.subagents[event.subagent_id]
+      const terminal = subagentTerminalSummary(event.result)
+      const nextSubagents: RottweilerState["subagents"] = {
+        ...state.subagents,
+        [event.subagent_id]: {
+          projectionId: existing?.projectionId ?? event.subagent_id,
+          subagentId: event.subagent_id,
+          parentTurnId: existing?.parentTurnId ?? currentTurnId(state),
+          task: boundedUtf8(existing?.task ?? event.subagent_id, MAX_SUBAGENT_TASK_BYTES),
+          status: terminal.status,
+          childSessionId: existing?.childSessionId ?? terminal.childSessionId,
+          lastChildSequence: existing?.lastChildSequence ?? null,
+          activity: existing?.activity ?? null,
+          summary: terminal.summary,
+          touchedFileCount: terminal.touchedFileCount,
+          diffArtifactId: terminal.diffArtifactId,
+        },
+      }
+      const nextOrder = state.subagentOrder.includes(event.subagent_id)
+        ? state.subagentOrder
+        : [...state.subagentOrder, event.subagent_id]
+      return {
+        ...state,
+        ...boundedSubagentHistory(nextSubagents, nextOrder),
+      }
+    }
     case "text_delta":
       return {
         ...state,
@@ -601,8 +727,6 @@ function applyKnownEvent(
       return { ...state, errors: [...state.errors.slice(-63), event.error] }
     case "context_usage_updated":
     case "compaction_attempt_finished":
-    case "subagent_spawned":
-    case "subagent_finished":
     case "tool_output_pruned":
     case "context_item_pinned":
     case "context_item_evicted":
@@ -610,6 +734,127 @@ function applyKnownEvent(
     case "command_finished":
     case "guard_triggered":
       return state
+  }
+}
+
+function nextSubagentArchiveKey(
+  subagents: RottweilerState["subagents"],
+  subagentId: string,
+  parentTurnId: string,
+): string {
+  const base = `${subagentId}@${parentTurnId}`
+  if (subagents[base] === undefined) return base
+  let ordinal = 2
+  while (subagents[`${base}#${ordinal}`] !== undefined) ordinal += 1
+  return `${base}#${ordinal}`
+}
+
+function boundedSubagentHistory(
+  subagents: RottweilerState["subagents"],
+  order: readonly string[],
+): Pick<RottweilerState, "subagents" | "subagentOrder"> {
+  const terminalIds = order.filter((id) => subagents[id]?.status !== "running")
+  const retainedTerminalIds = new Set(terminalIds.slice(-MAX_TERMINAL_SUBAGENT_HISTORY))
+  const subagentOrder = order.filter((id) => {
+    const projection = subagents[id]
+    return (
+      projection !== undefined &&
+      (projection.status === "running" || retainedTerminalIds.has(id))
+    )
+  })
+  const retainedSubagents = Object.fromEntries(
+    subagentOrder.map((id) => [id, subagents[id]!] as const),
+  )
+  return { subagents: retainedSubagents, subagentOrder }
+}
+
+function currentTurnId(state: RottweilerState): string {
+  if (state.streamingTail !== null) return state.streamingTail.turnId
+  const turns = Object.values(state.turns)
+  for (let index = turns.length - 1; index >= 0; index -= 1) {
+    if (turns[index]?.status === "running") return turns[index]!.turnId
+  }
+  return "0"
+}
+
+const TERMINAL_SUBAGENT_STATUSES = new Set([
+  "completed",
+  "failed",
+  "cancelled",
+  "timed_out",
+  "max_turns",
+] as const)
+
+function subagentTerminalSummary(
+  result: Extract<EngineEvent, { type: "subagent_finished" }>["result"],
+): {
+  readonly status: "completed" | "failed" | "cancelled" | "timed_out" | "max_turns"
+  readonly childSessionId: string | null
+  readonly summary: string | null
+  readonly touchedFileCount: number
+  readonly diffArtifactId: string | null
+} {
+  return {
+    status: TERMINAL_SUBAGENT_STATUSES.has(result.status)
+      ? result.status
+      : "failed",
+    childSessionId: result.session_id,
+    summary: boundedSummary(result.final_text),
+    touchedFileCount: result.touched_files.length,
+    diffArtifactId: result.diff_artifact?.id ?? null,
+  }
+}
+
+function boundedSummary(value: string): string {
+  return boundedUtf8(value, 512)
+}
+
+function boundedUtf8(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder()
+  const encoded = encoder.encode(value)
+  if (encoded.byteLength <= maxBytes) return value
+  const ellipsis = encoder.encode("…")
+  if (maxBytes < ellipsis.byteLength) return ".".repeat(Math.max(0, maxBytes))
+  const prefixLimit = maxBytes - ellipsis.byteLength
+  let prefix = new TextDecoder().decode(encoded.subarray(0, prefixLimit))
+  // A slice ending within a multibyte code point decodes to U+FFFD, which can
+  // itself exceed the byte budget. Remove that replacement (or any partial
+  // surrogate) until the encoded prefix is strictly within the limit.
+  while (encoder.encode(prefix).byteLength > prefixLimit) {
+    prefix = prefix.slice(0, -1)
+  }
+  return `${prefix}…`
+}
+
+function subagentActivity(event: unknown): string {
+  if (!isRecord(event) || typeof event.type !== "string") {
+    return "working"
+  }
+  switch (event.type) {
+    case "turn_started":
+      return "working"
+    case "thinking_delta":
+      return "thinking"
+    case "text_delta":
+      return "writing response"
+    case "tool_call_started":
+      return typeof event.name === "string" ? `using tool · ${event.name}` : "using tool"
+    case "tool_approval_needed":
+      return typeof event.name === "string"
+        ? `awaiting approval · ${event.name}`
+        : "awaiting approval"
+    case "tool_output_delta":
+      return "receiving tool output"
+    case "tool_call_finished":
+      return "tool finished"
+    case "question_asked":
+      return "awaiting answer"
+    case "turn_finished":
+      return "finalizing"
+    case "error":
+      return "error"
+    default:
+      return event.type.replaceAll("_", " ")
   }
 }
 
@@ -687,5 +932,5 @@ function recordUnknown(state: RottweilerState, type: string): RottweilerState {
 }
 
 export function eventHasDurableSequence(event: WireEngineEvent): boolean {
-  return isRecord(event.meta) && typeof event.meta.sequence_id === "string"
+  return "meta" in event && isRecord(event.meta) && typeof event.meta.sequence_id === "string"
 }

@@ -477,6 +477,36 @@ describe("OpenTUI engine runtime", () => {
       mode: "stale-mode",
     })
     expect(app.state.mode).toBeNull()
+    await client.subscriptions[0]?.onEvent({
+      type: "subagent_progress",
+      parent_session_id: "session-old",
+      subagent_id: "stale-child",
+      child_session_id: "stale-child-session",
+      child_sequence: "1",
+      event: { type: "thinking_delta", text: "stale" },
+    })
+    expect(app.state.subagentOrder).toEqual([])
+    await client.subscriptions[1]?.onEvent({
+      type: "subagent_spawned",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-new",
+        sequence_id: "1",
+        emitted_at: "2026-07-10T00:00:00Z",
+      },
+      subagent_id: "current-child",
+      child_session_id: "current-child-session",
+      task: "Current child",
+    })
+    await client.subscriptions[1]?.onEvent({
+      type: "subagent_progress",
+      parent_session_id: "session-new",
+      subagent_id: "current-child",
+      child_session_id: "current-child-session",
+      child_sequence: "1",
+      event: { type: "thinking_delta", text: "current" },
+    })
+    expect(app.state.subagentOrder).toEqual(["current-child"])
     await runtime.stop()
     await starting
   })

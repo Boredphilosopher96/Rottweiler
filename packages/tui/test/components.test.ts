@@ -324,6 +324,108 @@ describe("M4 retained components", () => {
     expect(notifications).toEqual(["turn_finished"])
   })
 
+  test("renders compact nested subagent progress without replacing retained rows", async () => {
+    const setup = await createTestRenderer({ width: 92, height: 20, useThread: false })
+    renderer = setup.renderer
+    const initial: RottweilerState = {
+      ...createInitialState(),
+      streamingTail: {
+        turnId: "1",
+        text: "Coordinating the implementation.",
+        thinking: "",
+        citations: [],
+        toolCallIds: [],
+        finished: null,
+      },
+      subagentOrder: ["explore", "tests"],
+      subagents: {
+        explore: {
+          projectionId: "explore",
+          subagentId: "explore",
+          parentTurnId: "1",
+          task: "Inspect provider boundaries",
+          status: "running",
+          childSessionId: "session-explore",
+          lastChildSequence: "4",
+          activity: "using tool · read",
+          summary: null,
+          touchedFileCount: 0,
+          diffArtifactId: null,
+        },
+        tests: {
+          projectionId: "tests",
+          subagentId: "tests",
+          parentTurnId: "1",
+          task: "Add orchestration tests",
+          status: "completed",
+          childSessionId: "session-tests",
+          lastChildSequence: "8",
+          activity: "finished",
+          summary: "Added deterministic coverage",
+          touchedFileCount: 2,
+          diffArtifactId: "diff-tests",
+        },
+      },
+    }
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Subagents · 1 running · 2 total")
+    expect(frame).toContain("Inspect provider boundaries · using tool · read")
+    expect(frame).toContain("Add orchestration tests · Added deterministic coverage")
+    expect(app.transcript.subagentPanel.rows.size).toBe(2)
+
+    app.setState({
+      ...initial,
+      streamingTail: null,
+      transcript: [
+        {
+          sequenceId: "9",
+          agentTurn: "1",
+          turn: {
+            role: "assistant",
+            blocks: [{ type: "text", text: "Delegated checks are complete." }],
+            meta: { synthetic: false, summary: false },
+          },
+        },
+      ],
+      subagentOrder: ["tests"],
+      subagents: { tests: initial.subagents.tests! },
+    })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("Added deterministic coverage · 2 files · diff ready")
+
+    const many = Object.fromEntries(
+      Array.from({ length: 20 }, (_, index) => [
+        `child-${index}`,
+        {
+          projectionId: `child-${index}`,
+          subagentId: `child-${index}`,
+          parentTurnId: "2",
+          task: `Bounded child ${index}`,
+          status: index < 4 ? ("running" as const) : ("completed" as const),
+          childSessionId: `session-${index}`,
+          lastChildSequence: String(index),
+          activity: index < 4 ? "working" : "finished",
+          summary: index < 4 ? null : `result ${index}`,
+          touchedFileCount: 0,
+          diffArtifactId: null,
+        },
+      ]),
+    )
+    app.setState({
+      ...initial,
+      streamingTail: { ...initial.streamingTail!, turnId: "2" },
+      subagentOrder: Object.keys(many),
+      subagents: many,
+    })
+    await setup.renderOnce()
+    expect(app.transcript.subagentPanel.rows.size).toBe(8)
+    expect(app.transcript.subagentPanel.header.plainText).toContain("20 total")
+  })
+
   test("fuzzy matching is ordered and image fallback is capability gated", async () => {
     expect(fuzzyScore("ctx", "context inspect")).toBeGreaterThan(
       fuzzyScore("ctx", "long command text x") ?? -1,

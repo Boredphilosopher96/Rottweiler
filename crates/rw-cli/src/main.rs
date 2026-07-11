@@ -30,10 +30,12 @@ mod runtime;
 mod server;
 #[allow(dead_code)]
 mod shell_broker;
+mod subagent_metadata;
 #[allow(dead_code)]
 mod supervisor;
 #[allow(dead_code)]
 mod tty;
+mod workflow_runtime;
 
 #[derive(Debug, Parser)]
 #[command(name = "rw", version, about = "Rottweiler coding-agent harness")]

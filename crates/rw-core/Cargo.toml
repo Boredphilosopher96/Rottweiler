@@ -19,6 +19,7 @@ rw-providers.workspace = true
 rw-store.workspace = true
 rw-tools.workspace = true
 rw-types.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true

@@ -141,12 +141,18 @@ impl BudgetConfig {
 pub struct EngineConfig {
     /// Maximum number of sessions that may execute concurrently.
     pub max_concurrent_sessions: usize,
+    /// Maximum nested child-session depth.
+    pub subagent_max_depth: usize,
+    /// Maximum child sessions that may execute concurrently per orchestrator.
+    pub subagent_max_concurrency: usize,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             max_concurrent_sessions: 4,
+            subagent_max_depth: 2,
+            subagent_max_concurrency: 4,
         }
     }
 }
@@ -438,6 +444,10 @@ pub struct BudgetConfigFile {
 pub struct EngineConfigFile {
     /// Optional concurrency override.
     pub max_concurrent_sessions: Option<usize>,
+    /// Optional nested child depth override.
+    pub subagent_max_depth: Option<usize>,
+    /// Optional child concurrency override.
+    pub subagent_max_concurrency: Option<usize>,
 }
 
 /// Partial model configuration.

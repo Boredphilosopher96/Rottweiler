@@ -5,11 +5,14 @@ import {
   type ContextSnapshot,
   type CostSnapshot,
   type EngineEvent,
+  type SubagentResult,
   type Turn,
 } from "../src/protocol"
 import {
   createInitialState,
   engineEvent,
+  MAX_SUBAGENT_TASK_BYTES,
+  MAX_TERMINAL_SUBAGENT_HISTORY,
   reduceRottweilerState,
   transportConnected,
   type RottweilerState,
@@ -27,6 +30,32 @@ function meta(sequence: string) {
 
 function reduce(state: RottweilerState, event: WireEngineEvent): RottweilerState {
   return reduceRottweilerState(state, engineEvent(event))
+}
+
+function childResult(
+  subagentId: string,
+  sessionId: string,
+  finalText: string,
+  status: SubagentResult["status"] = "completed",
+): SubagentResult {
+  return {
+    subagent_id: subagentId,
+    session_id: sessionId,
+    status,
+    final_text: finalText,
+    touched_files: [],
+    diff_artifact: null,
+    usage: {
+      input_tokens: "1",
+      output_tokens: "1",
+      cache_read_tokens: "0",
+      cache_write_tokens: "0",
+      reasoning_tokens: "0",
+    },
+    cost: { kind: "unavailable", reason: "fixture" },
+    turns: "1",
+    duration_millis: "1",
+  }
 }
 
 describe("pure TUI state reducer", () => {
@@ -135,6 +164,294 @@ describe("pure TUI state reducer", () => {
     })
     expect(state.transcript).toEqual([{ sequenceId: "4", agentTurn: "7", turn }])
     expect(state.streamingTail).toBeNull()
+  })
+
+  test("projects subagent lifecycle in deterministic spawn order and retains turn history", () => {
+    let state = reduce(createInitialState(), {
+      type: "turn_started",
+      meta: meta("1"),
+      turn_id: "7",
+    })
+    state = reduce(state, {
+      type: "subagent_spawned",
+      meta: meta("2"),
+      subagent_id: "child-b",
+      child_session_id: "session-child-b",
+      task: "Inspect providers",
+    })
+    state = reduce(state, {
+      type: "subagent_spawned",
+      meta: meta("3"),
+      subagent_id: "child-a",
+      child_session_id: "session-child-a",
+      task: "Inspect tools",
+    })
+    state = reduce(state, {
+      type: "subagent_finished",
+      meta: meta("4"),
+      subagent_id: "child-b",
+      result: childResult("child-b", "session-child-b", "Provider notes"),
+      output: { type: "text", text: "Provider notes" },
+      is_error: false,
+    })
+
+    expect(state.subagentOrder).toEqual(["child-b", "child-a"])
+    expect(state.subagents["child-b"]).toMatchObject({
+      task: "Inspect providers",
+      status: "completed",
+      summary: "Provider notes",
+    })
+    expect(state.subagents["child-a"]?.status).toBe("running")
+
+    state = reduce(state, { type: "turn_started", meta: meta("5"), turn_id: "8" })
+    expect(state.subagentOrder).toEqual(["child-b", "child-a"])
+    expect(state.subagents["child-b"]?.parentTurnId).toBe("7")
+    state = reduce(state, {
+      type: "subagent_spawned",
+      meta: meta("6"),
+      subagent_id: "child-b",
+      child_session_id: "session-child-b",
+      task: "Follow up on providers",
+    })
+    expect(state.subagents["child-b"]).toMatchObject({
+      parentTurnId: "8",
+      status: "running",
+      task: "Follow up on providers",
+    })
+    expect(state.subagents["child-b@7"]).toMatchObject({
+      parentTurnId: "7",
+      status: "completed",
+      summary: "Provider notes",
+    })
+    expect(state.subagentOrder).toEqual(["child-b@7", "child-a", "child-b"])
+  })
+
+  test("coalesces connection-scoped child progress without advancing the parent cursor", () => {
+    let state = reduce(createInitialState(), {
+      type: "subagent_spawned",
+      meta: meta("1"),
+      subagent_id: "child",
+      child_session_id: "session-child",
+      task: "Inspect orchestration",
+    })
+    state = reduce(state, {
+      type: "subagent_progress",
+      parent_session_id: "session-state",
+      subagent_id: "child",
+      child_session_id: "session-child",
+      child_sequence: "9",
+      event: { type: "tool_call_started", name: "grep" },
+    })
+    expect(state.lastSequence).toBe("1")
+    expect(state.subagents.child).toMatchObject({
+      childSessionId: "session-child",
+      activity: "using tool · grep",
+      status: "running",
+    })
+
+    state = reduce(state, {
+      type: "subagent_progress",
+      parent_session_id: "session-state",
+      subagent_id: "child",
+      child_session_id: "session-child",
+      child_sequence: "10",
+      event: { type: "text_delta", text: "first" },
+    })
+    const writing = state
+    state = reduce(state, {
+      type: "subagent_progress",
+      parent_session_id: "session-state",
+      subagent_id: "child",
+      child_session_id: "session-child",
+      child_sequence: "11",
+      event: { type: "text_delta", text: " second" },
+    })
+    expect(state).not.toBe(writing)
+    expect(state.lastSequence).toBe("1")
+    expect(state.subagents.child?.activity).toBe("writing response")
+    expect(state.subagents.child?.lastChildSequence).toBe("11")
+
+    const current = state
+    state = reduce(state, {
+      type: "subagent_progress",
+      parent_session_id: "session-state",
+      subagent_id: "child",
+      child_session_id: "session-child",
+      child_sequence: "10",
+      event: { type: "tool_call_started", name: "stale" },
+    })
+    expect(state).toBe(current)
+    state = reduce(state, {
+      type: "subagent_progress",
+      parent_session_id: "session-state",
+      subagent_id: "child",
+      child_session_id: "wrong-session",
+      child_sequence: "12",
+      event: { type: "tool_call_started", name: "unsafe" },
+    })
+    expect(state.protocol.invalidEvents).toBe(1)
+    state = reduce(state, {
+      type: "subagent_progress",
+      parent_session_id: "session-state",
+      subagent_id: "unknown-child",
+      child_session_id: "unknown-session",
+      child_sequence: "1",
+      event: { type: "thinking_delta", text: "unknown" },
+    })
+    expect(state.protocol.invalidEvents).toBe(2)
+    expect(state.subagentOrder).toEqual(["child"])
+  })
+
+  test("extracts a bounded terminal summary without retaining a multi-megabyte diff", () => {
+    let state = reduce(createInitialState(), {
+      type: "turn_started",
+      meta: meta("1"),
+      turn_id: "5",
+    })
+    state = reduce(state, {
+      type: "subagent_spawned",
+      meta: meta("2"),
+      subagent_id: "large-child",
+      child_session_id: "large-session",
+      task: "Return a large diff",
+    })
+    state = reduce(state, {
+      type: "subagent_finished",
+      meta: meta("3"),
+      subagent_id: "large-child",
+      is_error: false,
+      output: { type: "text", text: "Large change complete" },
+      result: {
+        ...childResult("large-child", "large-session", "Large change complete"),
+        touched_files: ["large.bin"],
+        diff_artifact: {
+          id: "large-diff",
+          base_commit: "0".repeat(40),
+          touched_files: [{ path: "large.bin", status: "modified" }],
+          unified_diff: "x".repeat(4 * 1024 * 1024),
+        },
+      },
+    })
+
+    expect(state.subagents["large-child"]).toMatchObject({
+      status: "completed",
+      summary: "Large change complete",
+      touchedFileCount: 1,
+      diffArtifactId: "large-diff",
+    })
+    expect(JSON.stringify(state).length).toBeLessThan(50_000)
+  })
+
+  test("bounds large spawn tasks and archived follow-up history in retained state", () => {
+    const runs = MAX_TERMINAL_SUBAGENT_HISTORY * 3
+    const largeTask = `large task ${"界".repeat(22_000)}`
+    const largeDiff = `UNRETAINED-DIFF-${"x".repeat(64 * 1024)}`
+
+    const replay = (): RottweilerState => {
+      let state = createInitialState()
+      let sequence = 1
+      for (let index = 0; index < runs; index += 1) {
+        state = reduce(state, {
+          type: "turn_started",
+          meta: meta(String(sequence++)),
+          turn_id: String(index + 1),
+        })
+        state = reduce(state, {
+          type: "subagent_spawned",
+          meta: meta(String(sequence++)),
+          subagent_id: "continuable-child",
+          child_session_id: "continuable-session",
+          task: `${largeTask} follow-up ${index}`,
+        })
+        state = reduce(state, {
+          type: "subagent_finished",
+          meta: meta(String(sequence++)),
+          subagent_id: "continuable-child",
+          is_error: false,
+          output: { type: "text", text: `completed ${index}` },
+          result: {
+            ...childResult(
+              "continuable-child",
+              "continuable-session",
+              `completed ${index}`,
+            ),
+            touched_files: [`file-${index}.txt`],
+            diff_artifact: {
+              id: `artifact-${index}`,
+              base_commit: "0".repeat(40),
+              touched_files: [{ path: `file-${index}.txt`, status: "modified" }],
+              unified_diff: largeDiff,
+            },
+          },
+        })
+      }
+
+      state = reduce(state, {
+        type: "turn_started",
+        meta: meta(String(sequence++)),
+        turn_id: String(runs + 1),
+      })
+      return reduce(state, {
+        type: "subagent_spawned",
+        meta: meta(String(sequence)),
+        subagent_id: "continuable-child",
+        child_session_id: "continuable-session",
+        task: `${largeTask} current follow-up`,
+      })
+    }
+
+    const state = replay()
+    const projections = Object.values(state.subagents)
+    const encoded = new TextEncoder()
+    expect(projections).toHaveLength(MAX_TERMINAL_SUBAGENT_HISTORY + 1)
+    expect(state.subagentOrder).toHaveLength(MAX_TERMINAL_SUBAGENT_HISTORY + 1)
+    expect(
+      projections.every(
+        (projection) => encoded.encode(projection.task).byteLength <= MAX_SUBAGENT_TASK_BYTES,
+      ),
+    ).toBe(true)
+    expect(state.subagents["continuable-child"]).toMatchObject({
+      status: "running",
+      parentTurnId: String(runs + 1),
+    })
+    expect(
+      projections.some((projection) => projection.diffArtifactId === `artifact-${runs - 1}`),
+    ).toBe(true)
+
+    const retained = JSON.stringify(state)
+    expect(retained).not.toContain("UNRETAINED-DIFF")
+    expect(retained.length).toBeLessThan(300_000)
+    expect(replay()).toEqual(state)
+  })
+
+  test("preserves every typed terminal subagent status", () => {
+    const statuses = ["failed", "cancelled", "timed_out", "max_turns"] as const
+    let state = reduce(createInitialState(), {
+      type: "turn_started",
+      meta: meta("1"),
+      turn_id: "6",
+    })
+    let sequence = 2
+    for (const status of statuses) {
+      const subagentId = `child-${status}`
+      const childSessionId = `session-${status}`
+      state = reduce(state, {
+        type: "subagent_spawned",
+        meta: meta(String(sequence++)),
+        subagent_id: subagentId,
+        child_session_id: childSessionId,
+        task: `Finish ${status}`,
+      })
+      state = reduce(state, {
+        type: "subagent_finished",
+        meta: meta(String(sequence++)),
+        subagent_id: subagentId,
+        result: childResult(subagentId, childSessionId, status, status),
+        output: { type: "text", text: status },
+        is_error: true,
+      })
+      expect(state.subagents[subagentId]?.status).toBe(status)
+    }
   })
 
   test("correlates command replies without moving the durable cursor", () => {

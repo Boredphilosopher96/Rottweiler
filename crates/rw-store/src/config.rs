@@ -8,7 +8,8 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use rw_types::config::{
-    Config, ConfigFile, PermissionDecision, ProviderConfig, ThinkingLevel, UpdateChannel,
+    Config, ConfigFile, EngineConfigFile, PermissionDecision, ProviderConfig, ThinkingLevel,
+    UpdateChannel,
 };
 use thiserror::Error;
 use url::{Host, Url};
@@ -16,6 +17,8 @@ use url::{Host, Url};
 use crate::trust::{FolderTrustError, FolderTrustState, FolderTrustStore};
 
 const ENV_ENGINE_SESSIONS: &str = "RW_ENGINE_MAX_CONCURRENT_SESSIONS";
+const ENV_SUBAGENT_DEPTH: &str = "RW_ENGINE_SUBAGENT_MAX_DEPTH";
+const ENV_SUBAGENT_CONCURRENCY: &str = "RW_ENGINE_SUBAGENT_MAX_CONCURRENCY";
 const ENV_MODEL_DEFAULT: &str = "RW_MODEL_DEFAULT";
 const ENV_COMPACTION_AUTO: &str = "RW_COMPACTION_AUTO";
 const ENV_COMPACTION_RESERVED: &str = "RW_COMPACTION_RESERVED";
@@ -110,12 +113,21 @@ impl LoadedConfig {
     #[must_use]
     #[allow(clippy::too_many_lines)]
     pub fn render_with_provenance(&self) -> String {
-        let mut lines = Vec::new();
-        lines.push(self.render_leaf(
-            "engine.max_concurrent_sessions",
-            &self.config.engine.max_concurrent_sessions.to_string(),
-        ));
-        lines.push(self.render_leaf("models.default", &quoted(&self.config.models.default)));
+        let mut lines = vec![
+            self.render_leaf(
+                "engine.max_concurrent_sessions",
+                &self.config.engine.max_concurrent_sessions.to_string(),
+            ),
+            self.render_leaf(
+                "engine.subagent_max_depth",
+                &self.config.engine.subagent_max_depth.to_string(),
+            ),
+            self.render_leaf(
+                "engine.subagent_max_concurrency",
+                &self.config.engine.subagent_max_concurrency.to_string(),
+            ),
+            self.render_leaf("models.default", &quoted(&self.config.models.default)),
+        ];
 
         if self.config.models.aliases.is_empty() {
             lines.push(self.render_leaf("models.aliases", "{}"));
@@ -670,6 +682,8 @@ enum FileScope {
 fn defaults_with_provenance() -> LoadedConfig {
     let provenance = [
         "engine.max_concurrent_sessions",
+        "engine.subagent_max_depth",
+        "engine.subagent_max_concurrency",
         "models.default",
         "models.aliases",
         "models.thinking",
@@ -869,11 +883,8 @@ fn apply_file(
     source: &ConfigSource,
     scope: FileScope,
 ) {
-    if let Some(engine) = file.engine.take()
-        && let Some(value) = engine.max_concurrent_sessions
-    {
-        loaded.config.engine.max_concurrent_sessions = value;
-        set_source(loaded, "engine.max_concurrent_sessions", source);
+    if let Some(engine) = file.engine.take() {
+        apply_engine_file(loaded, &engine, source);
     }
     if let Some(models) = file.models.take() {
         if let Some(value) = models.default {
@@ -950,6 +961,31 @@ fn apply_file(
         apply_security_file_sections(loaded, file, source);
     } else {
         warn_ignored_project_sections(loaded, &file, source);
+    }
+}
+
+fn apply_engine_file(loaded: &mut LoadedConfig, engine: &EngineConfigFile, source: &ConfigSource) {
+    for (key, value) in [
+        (
+            "engine.max_concurrent_sessions",
+            engine.max_concurrent_sessions,
+        ),
+        ("engine.subagent_max_depth", engine.subagent_max_depth),
+        (
+            "engine.subagent_max_concurrency",
+            engine.subagent_max_concurrency,
+        ),
+    ] {
+        if let Some(value) = value {
+            match key {
+                "engine.max_concurrent_sessions" => {
+                    loaded.config.engine.max_concurrent_sessions = value;
+                }
+                "engine.subagent_max_depth" => loaded.config.engine.subagent_max_depth = value,
+                _ => loaded.config.engine.subagent_max_concurrency = value,
+            }
+            set_source(loaded, key, source);
+        }
     }
 }
 
@@ -1046,6 +1082,8 @@ fn apply_environment(
 ) -> Result<(), ConfigError> {
     for (name, key) in [
         (ENV_ENGINE_SESSIONS, "engine.max_concurrent_sessions"),
+        (ENV_SUBAGENT_DEPTH, "engine.subagent_max_depth"),
+        (ENV_SUBAGENT_CONCURRENCY, "engine.subagent_max_concurrency"),
         (ENV_MODEL_DEFAULT, "models.default"),
         (ENV_COMPACTION_AUTO, "compaction.auto"),
         // Retain the pre-M3 spelling as a compatibility alias. The canonical
@@ -1123,18 +1161,13 @@ fn apply_override(
     } else {
         key
     };
-    if apply_m3_override(loaded, key, value, raw)? {
+    if apply_engine_override(loaded, key, value, raw)?
+        || apply_m3_override(loaded, key, value, raw)?
+    {
         set_source(loaded, key, source);
         return Ok(());
     }
     match key {
-        "engine.max_concurrent_sessions" => {
-            loaded.config.engine.max_concurrent_sessions =
-                value.parse().map_err(|_| ConfigError::CliOverride {
-                    override_value: raw.to_owned(),
-                    reason: "expected a positive integer".to_owned(),
-                })?;
-        }
         "models.default" => value.clone_into(&mut loaded.config.models.default),
         "network.proxy" => loaded.config.network.proxy = Some(value.to_owned()),
         "network.proxy_username" => {
@@ -1211,6 +1244,31 @@ fn apply_override(
     }
     set_source(loaded, key, source);
     Ok(())
+}
+
+fn apply_engine_override(
+    loaded: &mut LoadedConfig,
+    key: &str,
+    value: &str,
+    raw: &str,
+) -> Result<bool, ConfigError> {
+    let parsed = || {
+        value.parse().map_err(|_| ConfigError::CliOverride {
+            override_value: raw.to_owned(),
+            reason: "expected a positive integer".to_owned(),
+        })
+    };
+    match key {
+        "engine.max_concurrent_sessions" => {
+            loaded.config.engine.max_concurrent_sessions = parsed()?;
+        }
+        "engine.subagent_max_depth" => loaded.config.engine.subagent_max_depth = parsed()?,
+        "engine.subagent_max_concurrency" => {
+            loaded.config.engine.subagent_max_concurrency = parsed()?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 fn apply_m3_override(
@@ -1391,6 +1449,16 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     if config.engine.max_concurrent_sessions == 0 {
         return Err(ConfigError::Validation(
             "engine.max_concurrent_sessions must be greater than zero".to_owned(),
+        ));
+    }
+    if config.engine.subagent_max_depth == 0 {
+        return Err(ConfigError::Validation(
+            "engine.subagent_max_depth must be greater than zero".to_owned(),
+        ));
+    }
+    if config.engine.subagent_max_concurrency == 0 {
+        return Err(ConfigError::Validation(
+            "engine.subagent_max_concurrency must be greater than zero".to_owned(),
         ));
     }
     if config.models.default.trim().is_empty() {
@@ -2061,6 +2129,8 @@ proxy = "https://attacker.invalid"
             r#"
 [engine]
 max_concurrent_sessions = 7
+subagent_max_depth = 5
+subagent_max_concurrency = 6
 [models]
 default = "user-fast"
 aliases.big = ["gateway/user-big"]
@@ -2114,16 +2184,26 @@ channel = "stable"
                 "RW_ENGINE_MAX_CONCURRENT_SESSIONS".to_owned(),
                 "9".to_owned(),
             ),
+            ("RW_ENGINE_SUBAGENT_MAX_DEPTH".to_owned(), "7".to_owned()),
+            (
+                "RW_ENGINE_SUBAGENT_MAX_CONCURRENCY".to_owned(),
+                "8".to_owned(),
+            ),
         ]);
 
         let loaded = ConfigLoader::new(user.clone(), project.clone())
             .with_project_trust(true)
             .with_environment(environment)
-            .with_cli_overrides(vec!["engine.max_concurrent_sessions=11".to_owned()])
+            .with_cli_overrides(vec![
+                "engine.max_concurrent_sessions=11".to_owned(),
+                "engine.subagent_max_depth=9".to_owned(),
+            ])
             .load()
             .expect("layered config should load");
 
         assert_eq!(loaded.config.engine.max_concurrent_sessions, 11);
+        assert_eq!(loaded.config.engine.subagent_max_depth, 9);
+        assert_eq!(loaded.config.engine.subagent_max_concurrency, 8);
         assert_eq!(loaded.config.models.default, "env-fast");
         assert_eq!(loaded.config.models.aliases["big"], ["gateway/user-big"]);
         assert_eq!(
@@ -2462,6 +2542,19 @@ warn_at_percent = 60
         .expect_err("zero concurrency must fail validation");
 
         assert!(matches!(error, ConfigError::Validation(_)));
+        for key in [
+            "engine.subagent_max_depth",
+            "engine.subagent_max_concurrency",
+        ] {
+            let error = ConfigLoader::new(
+                root.path().join("missing-user.toml"),
+                root.path().join("missing-project.toml"),
+            )
+            .with_cli_overrides(vec![format!("{key}=0")])
+            .load()
+            .expect_err("zero subagent limit must fail validation");
+            assert!(matches!(error, ConfigError::Validation(_)));
+        }
     }
 
     #[test]

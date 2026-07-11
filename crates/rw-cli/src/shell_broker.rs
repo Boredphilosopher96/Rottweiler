@@ -862,8 +862,17 @@ mod tests {
             .expect("first server join")
             .expect("first server stop");
 
-        let (second_runtime, second_listener) =
-            ServerRuntime::create_at(paths).expect("rotated runtime");
+        let rotation_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let (second_runtime, second_listener) = loop {
+            match ServerRuntime::create_at(paths.clone()) {
+                Ok(runtime) => break runtime,
+                Err(error) if tokio::time::Instant::now() < rotation_deadline => {
+                    tracing::debug!(reason = %error, "waiting for stopped runtime socket to quiesce");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("rotated runtime: {error}"),
+            }
+        };
         let second_engine = Arc::new(CompletionEngine {
             first_generation: false,
             subscribed: Arc::new(Notify::new()),

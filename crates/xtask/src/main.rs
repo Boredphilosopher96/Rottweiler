@@ -7,12 +7,13 @@ use rw_types::{
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
     ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CompactionReason,
     ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost,
-    CostSnapshot, EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModeId,
-    ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor, PlanArtifact, PlanDecision,
-    PlanStep, PromptDump, PromptTool, Question, QuestionId, QuestionOption, QuestionResponseKind,
-    RequestId, RewindTarget, Role, SequenceId, SessionDescriptor, SessionId, ShellId,
-    StoredAttachment, SubagentId, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
-    ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
+    CostSnapshot, DiffArtifact, EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef,
+    ModeId, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor, PlanArtifact,
+    PlanDecision, PlanStep, PromptDump, PromptTool, Question, QuestionId, QuestionOption,
+    QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId, SessionDescriptor, SessionId,
+    ShellId, StoredAttachment, SubagentId, SubagentIsolation, SubagentResult, SubagentStatus,
+    ToolCallId, ToolCapability, ToolOutput, ToolOutputPart, ToolOutputStream, TouchedFile,
+    TouchedFileStatus, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
     UnrestorablePath, Usage, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
     WorkspaceStatus,
 };
@@ -147,6 +148,12 @@ fn generate_typescript() -> String {
     declaration!(ShellId);
     declaration!(QuestionId);
     declaration!(SubagentId);
+    declaration!(SubagentIsolation);
+    declaration!(SubagentStatus);
+    declaration!(TouchedFileStatus);
+    declaration!(TouchedFile);
+    declaration!(DiffArtifact);
+    declaration!(SubagentResult);
     declaration!(ContextItemId);
     declaration!(ModelAlias);
     declaration!(SequenceId);
@@ -261,6 +268,26 @@ fn contract_fixture() -> ContractFixture {
         sequence_id: SequenceId(sequence_id),
         emitted_at: "2026-01-01T00:00:00Z".to_owned(),
         caused_by: None,
+    };
+    let subagent_result = |id: &str, session: &str, text: &str| SubagentResult {
+        subagent_id: SubagentId(id.to_owned()),
+        session_id: SessionId(session.to_owned()),
+        status: SubagentStatus::Completed,
+        final_text: text.to_owned(),
+        touched_files: Vec::new(),
+        diff_artifact: None,
+        usage: Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            reasoning_tokens: 0,
+        },
+        cost: Cost::Unavailable {
+            reason: "fixture".to_owned(),
+        },
+        turns: 1,
+        duration_millis: 5,
     };
     let mixed_output = ToolOutput::Mixed {
         parts: vec![
@@ -614,23 +641,18 @@ fn contract_fixture() -> ContractFixture {
             EngineEvent::SubagentSpawned {
                 meta: event_meta(14),
                 subagent_id: SubagentId("subagent-1".to_owned()),
+                child_session_id: SessionId("child-session-1".to_owned()),
                 task: "inspect protocol".to_owned(),
             },
             EngineEvent::SubagentFinished {
                 meta: event_meta(15),
                 subagent_id: SubagentId("subagent-1".to_owned()),
-                output: ToolOutput::Text {
-                    text: "done".to_owned(),
-                },
-                is_error: false,
+                result: subagent_result("subagent-1", "child-session-1", "done"),
             },
             EngineEvent::SubagentFinished {
                 meta: event_meta(16),
                 subagent_id: SubagentId("subagent-2".to_owned()),
-                output: ToolOutput::Structured {
-                    value: json!({"files": 3}),
-                },
-                is_error: false,
+                result: subagent_result("subagent-2", "child-session-2", "three files"),
             },
             EngineEvent::ToolOutputPruned {
                 meta: event_meta(17),

@@ -1,4 +1,5 @@
-import { copyFileSync, mkdirSync, readdirSync, rmSync } from "node:fs"
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
 import type { BunPlugin } from "bun"
@@ -13,10 +14,29 @@ function cleanupOrphanedBunBuilds(): void {
   }
 }
 
+function cleanupOrphanedTempBuilds(): void {
+  for (const entry of readdirSync(tmpdir(), { withFileTypes: true })) {
+    const match = /^rottweiler-bun-build-(\d+)-/.exec(entry.name)
+    if (!entry.isDirectory() || match?.[1] === undefined) continue
+    const owner = Number(match[1])
+    let ownerIsRunning = false
+    try {
+      process.kill(owner, 0)
+      ownerIsRunning = true
+    } catch (error) {
+      ownerIsRunning = (error as NodeJS.ErrnoException).code === "EPERM"
+    }
+    if (!ownerIsRunning) {
+      rmSync(join(tmpdir(), entry.name), { recursive: true, force: true })
+    }
+  }
+}
+
 // Bun's single-executable compiler can leave large hidden temporary binaries
 // after an interrupted build. Clean on both sides so the next successful build
 // repairs a prior interruption and does not grow the repository indefinitely.
 cleanupOrphanedBunBuilds()
+cleanupOrphanedTempBuilds()
 
 function nativePackage(): string {
   if (process.platform === "darwin" && process.arch === "x64") return "@opentui/core-darwin-x64"
@@ -61,18 +81,45 @@ const nativePrelude: BunPlugin = {
 
 const outputDirectory = "dist"
 const outputExecutable = join(outputDirectory, "rottweiler-tui")
-const result = await Bun.build({
-  entrypoints: ["src/index.ts"],
-  compile: {
-    outfile: outputExecutable,
-    autoloadDotenv: false,
-    autoloadBunfig: false,
-  },
-  format: "esm",
-  minify: true,
-  bytecode: true,
-  plugins: [nativePrelude],
-}).finally(cleanupOrphanedBunBuilds)
+const compilationDirectory = mkdtempSync(join(tmpdir(), `rottweiler-bun-build-${process.pid}-`))
+const originalWorkingDirectory = process.cwd()
+let result: Awaited<ReturnType<typeof Bun.build>>
+const cleanupCompilationDirectory = () => {
+  rmSync(compilationDirectory, { recursive: true, force: true })
+}
+const interruptBuild = (signal: NodeJS.Signals) => {
+  process.chdir(originalWorkingDirectory)
+  cleanupCompilationDirectory()
+  process.exit(signal === "SIGINT" ? 130 : 143)
+}
+
+process.once("SIGINT", interruptBuild)
+process.once("SIGTERM", interruptBuild)
+
+try {
+  // Bun's executable compiler creates a large hidden `.*.bun-build` staging
+  // artifact in its working directory. Keep it out of the checkout so repeated
+  // builds do not inflate the workspace, even while a build is in progress.
+  process.chdir(compilationDirectory)
+  result = await Bun.build({
+    entrypoints: [join(import.meta.dir, "src/index.ts")],
+    compile: {
+      outfile: join(import.meta.dir, outputExecutable),
+      autoloadDotenv: false,
+      autoloadBunfig: false,
+    },
+    format: "esm",
+    minify: true,
+    bytecode: true,
+    plugins: [nativePrelude],
+  })
+} finally {
+  process.off("SIGINT", interruptBuild)
+  process.off("SIGTERM", interruptBuild)
+  process.chdir(originalWorkingDirectory)
+  cleanupCompilationDirectory()
+  cleanupOrphanedBunBuilds()
+}
 
 if (!result.success) {
   for (const message of result.logs) console.error(message)

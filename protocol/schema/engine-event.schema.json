@@ -1041,6 +1041,9 @@
         "subagent_id": {
           "$ref": "#/$defs/SubagentId"
         },
+        "child_session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "task": {
           "type": "string"
         },
@@ -1053,6 +1056,7 @@
         "type",
         "meta",
         "subagent_id",
+        "child_session_id",
         "task"
       ]
     },
@@ -1065,11 +1069,8 @@
         "subagent_id": {
           "$ref": "#/$defs/SubagentId"
         },
-        "output": {
-          "$ref": "#/$defs/ToolOutput"
-        },
-        "is_error": {
-          "type": "boolean"
+        "result": {
+          "$ref": "#/$defs/SubagentResult"
         },
         "type": {
           "type": "string",
@@ -1080,8 +1081,44 @@
         "type",
         "meta",
         "subagent_id",
-        "output",
-        "is_error"
+        "result"
+      ]
+    },
+    {
+      "description": "Connection-scoped child progress. This is never appended to the parent log.",
+      "type": "object",
+      "properties": {
+        "parent_session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "child_session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "child_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "event": true,
+        "type": {
+          "type": "string",
+          "const": "subagent_progress"
+        }
+      },
+      "required": [
+        "type",
+        "parent_session_id",
+        "subagent_id",
+        "child_session_id",
+        "event"
       ]
     },
     {
@@ -2868,6 +2905,127 @@
     "SubagentId": {
       "description": "Stable identifier of a child agent session.",
       "type": "string"
+    },
+    "SubagentResult": {
+      "description": "Predictable result returned from `spawn_agent` and workflow agent steps.",
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "status": {
+          "$ref": "#/$defs/SubagentStatus"
+        },
+        "final_text": {
+          "type": "string"
+        },
+        "touched_files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "diff_artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiffArtifact"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "usage": {
+          "$ref": "#/$defs/Usage"
+        },
+        "cost": {
+          "$ref": "#/$defs/Cost"
+        },
+        "turns": {
+          "type": "string"
+        },
+        "duration_millis": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subagent_id",
+        "session_id",
+        "status",
+        "final_text",
+        "usage",
+        "cost",
+        "turns",
+        "duration_millis"
+      ]
+    },
+    "SubagentStatus": {
+      "description": "Terminal disposition of one child-agent invocation.",
+      "type": "string",
+      "enum": [
+        "completed",
+        "failed",
+        "cancelled",
+        "timed_out",
+        "max_turns"
+      ]
+    },
+    "DiffArtifact": {
+      "description": "Complete durable patch returned by an isolated child.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "base_commit": {
+          "type": "string"
+        },
+        "touched_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/TouchedFile"
+          }
+        },
+        "unified_diff": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "base_commit",
+        "touched_files",
+        "unified_diff"
+      ]
+    },
+    "TouchedFile": {
+      "description": "A path affected by an isolated child patch.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TouchedFileStatus"
+        }
+      },
+      "required": [
+        "path",
+        "status"
+      ]
+    },
+    "TouchedFileStatus": {
+      "description": "Git change kind retained in a child diff manifest.",
+      "type": "string",
+      "enum": [
+        "added",
+        "modified",
+        "deleted",
+        "type_changed"
+      ]
     },
     "ModeId": {
       "description": "Open identifier of a built-in or extension-provided mode.",

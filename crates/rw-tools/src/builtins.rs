@@ -7,6 +7,7 @@ use crate::registry::{Tool, ToolError, ToolLimits, ToolRegistry};
 use crate::search::{GlobTool, GrepTool, LsTool};
 use crate::symbols::{SymbolsTool, WorkspaceSymbolIndex};
 use crate::web::{WebFetchTool, WebFetcher};
+use crate::worktree::{ApplyWorktreeDiffTool, DiffArtifactAuthority};
 
 /// Host-provided boundaries required by the complete first-party tool set.
 pub struct BuiltinDependencies {
@@ -14,6 +15,7 @@ pub struct BuiltinDependencies {
     pub web_fetcher: Arc<dyn WebFetcher>,
     pub question_asker: Arc<dyn QuestionAsker>,
     pub symbol_index: Arc<WorkspaceSymbolIndex>,
+    pub diff_artifact_authority: Arc<dyn DiffArtifactAuthority>,
     pub limits: ToolLimits,
 }
 
@@ -51,6 +53,9 @@ pub fn register_builtins(
         Arc::new(AskUserTool::new(dependencies.question_asker, limits)),
         Arc::new(SubmitPlanTool),
         Arc::new(SymbolsTool::new(Arc::clone(&symbol_index), limits)),
+        Arc::new(ApplyWorktreeDiffTool::new(
+            dependencies.diff_artifact_authority,
+        )),
     ];
     for tool in &tools {
         let name = tool.descriptor().name;
@@ -134,11 +139,12 @@ mod tests {
             web_fetcher: Arc::new(NoFetch),
             question_asker: Arc::new(NoQuestion),
             symbol_index: Arc::clone(&index),
+            diff_artifact_authority: Arc::new(crate::SessionDiffArtifactAuthority::default()),
             limits: ToolLimits::default(),
         };
         let mut registry = ToolRegistry::new();
         register_builtins(&mut registry, dependencies()).expect("builtins");
-        assert_eq!(registry.len(), 13);
+        assert_eq!(registry.len(), 14);
         assert!(
             index
                 .query(&SymbolQuery {
@@ -165,6 +171,7 @@ mod tests {
             "ask_user",
             "submit_plan",
             "symbols",
+            "apply_worktree_diff",
         ] {
             assert!(registry.resolve(name).is_some(), "missing {name}");
         }

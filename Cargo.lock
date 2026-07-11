@@ -2515,6 +2515,7 @@ dependencies = [
  "rw-store",
  "rw-tools",
  "rw-types",
+ "schemars",
  "serde",
  "serde_json",
  "shell-words",
@@ -2536,6 +2537,7 @@ dependencies = [
  "rw-providers",
  "rw-tools",
  "rw-types",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -2637,6 +2639,7 @@ name = "rw-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "globset",
  "grep-matcher",
  "grep-regex",

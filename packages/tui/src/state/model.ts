@@ -12,6 +12,7 @@ import type {
   PlanArtifact,
   PromptDump,
   Question,
+  SubagentStatus as SubagentTerminalStatus,
   ToolCapability,
   ToolOutput,
   ToolOutputStream,
@@ -93,6 +94,22 @@ export interface ToolProjection {
   readonly output: ToolOutput | null
   readonly isError: boolean | null
   readonly callIndex: number
+}
+
+export type SubagentStatus = "running" | SubagentTerminalStatus
+
+export interface SubagentProjection {
+  readonly projectionId: string
+  readonly subagentId: string
+  readonly parentTurnId: string
+  readonly task: string
+  readonly status: SubagentStatus
+  readonly childSessionId: string | null
+  readonly lastChildSequence: string | null
+  readonly activity: string | null
+  readonly summary: string | null
+  readonly touchedFileCount: number
+  readonly diffArtifactId: string | null
 }
 
 export interface QuestionProjection {
@@ -212,6 +229,9 @@ export interface RottweilerState {
   readonly streamingTail: StreamingTail | null
   readonly turns: Readonly<Record<string, TurnProjection>>
   readonly tools: Readonly<Record<string, ToolProjection>>
+  /** Current parent-turn children, kept separate from durable transcript history. */
+  readonly subagents: Readonly<Record<string, SubagentProjection>>
+  readonly subagentOrder: readonly string[]
   readonly questions: Readonly<Record<string, QuestionProjection>>
   readonly commandAcks: Readonly<Record<string, CommandAcknowledgement>>
   readonly queuedMessages: readonly QueuedMessageProjection[]
@@ -250,6 +270,8 @@ export function createInitialState(): RottweilerState {
     streamingTail: null,
     turns: {},
     tools: {},
+    subagents: {},
+    subagentOrder: [],
     questions: {},
     commandAcks: {},
     queuedMessages: [],

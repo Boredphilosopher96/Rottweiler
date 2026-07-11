@@ -874,6 +874,96 @@ pub struct Usage {
     pub reasoning_tokens: u64,
 }
 
+/// Terminal disposition of one child-agent invocation.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SubagentStatus {
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+    MaxTurns,
+}
+
+/// Filesystem isolation selected for one child agent.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SubagentIsolation {
+    /// Run in a private detached Git worktree and return a diff artifact.
+    #[default]
+    Worktree,
+    /// Share the parent workspace. This requires the parent's ordinary write approvals.
+    Shared,
+}
+
+/// A path affected by an isolated child patch.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct TouchedFile {
+    pub path: String,
+    pub status: TouchedFileStatus,
+}
+
+/// Git change kind retained in a child diff manifest.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum TouchedFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    TypeChanged,
+}
+
+/// Complete durable patch returned by an isolated child.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct DiffArtifact {
+    pub id: String,
+    pub base_commit: String,
+    pub touched_files: Vec<TouchedFile>,
+    pub unified_diff: String,
+}
+
+/// Bounded model-facing reference to a full durable child patch retained by the host.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct DiffArtifactRef {
+    pub artifact_id: String,
+    pub base_commit: String,
+    pub touched_files: Vec<TouchedFile>,
+    pub manifest_truncated: bool,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub patch_bytes: u64,
+    pub patch_hash: String,
+    pub preview: String,
+    pub preview_truncated: bool,
+}
+
+/// Predictable result returned from `spawn_agent` and workflow agent steps.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[ts(optional_fields = nullable)]
+pub struct SubagentResult {
+    pub subagent_id: SubagentId,
+    pub session_id: SessionId,
+    pub status: SubagentStatus,
+    pub final_text: String,
+    #[serde(default)]
+    pub touched_files: Vec<String>,
+    pub diff_artifact: Option<DiffArtifact>,
+    pub usage: Usage,
+    pub cost: Cost,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub turns: u64,
+    #[serde(with = "decimal_u64")]
+    #[schemars(with = "String")]
+    #[ts(type = "string")]
+    pub duration_millis: u64,
+}
+
 /// A workspace path that a rewind could not restore exactly.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct UnrestorablePath {
@@ -1207,13 +1297,21 @@ pub enum EngineEvent {
     SubagentSpawned {
         meta: EventMeta,
         subagent_id: SubagentId,
+        child_session_id: SessionId,
         task: String,
     },
     SubagentFinished {
         meta: EventMeta,
         subagent_id: SubagentId,
-        output: ToolOutput,
-        is_error: bool,
+        result: SubagentResult,
+    },
+    /// Connection-scoped child progress. This is never appended to the parent log.
+    SubagentProgress {
+        parent_session_id: SessionId,
+        subagent_id: SubagentId,
+        child_session_id: SessionId,
+        child_sequence: Option<SequenceId>,
+        event: Value,
     },
     ToolOutputPruned {
         meta: EventMeta,
@@ -1307,6 +1405,7 @@ impl EngineEvent {
             | Self::WorkspaceFilesFound { .. }
             | Self::WorkspaceFilePreviewReady { .. }
             | Self::WorkspaceStatusReady { .. }
+            | Self::SubagentProgress { .. }
             | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }
             | Self::WorkspaceRootsChanged { meta, .. }
@@ -1364,6 +1463,7 @@ impl EngineEvent {
             | Self::WorkspaceFilesFound { .. }
             | Self::WorkspaceFilePreviewReady { .. }
             | Self::WorkspaceStatusReady { .. }
+            | Self::SubagentProgress { .. }
             | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }
             | Self::WorkspaceRootsChanged { meta, .. }

@@ -816,19 +816,34 @@ if "TYPE_ERROR" in text:
             .await
             .expect("spawn process tree");
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while !pid_file.exists() && tokio::time::Instant::now() < deadline {
+        let descendant = loop {
+            match std::fs::read_to_string(&pid_file) {
+                Ok(value) => {
+                    if let Ok(pid) = value.parse::<i32>() {
+                        break pid;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("read descendant pid: {error}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "descendant pid was not published before the deadline"
+            );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let descendant = std::fs::read_to_string(&pid_file)
-            .expect("descendant pid")
-            .parse::<i32>()
-            .expect("numeric descendant pid");
+        };
         process.handle.kill().await.expect("kill process group");
         let descendant = rustix::process::Pid::from_raw(descendant).expect("positive pid");
-        assert_eq!(
-            rustix::process::test_kill_process(descendant),
-            Err(rustix::io::Errno::SRCH)
-        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match rustix::process::test_kill_process(descendant) {
+                Err(rustix::io::Errno::SRCH) => break,
+                Ok(()) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                result => panic!("descendant process survived group teardown: {result:?}"),
+            }
+        }
     }
 
     struct MockIntel;

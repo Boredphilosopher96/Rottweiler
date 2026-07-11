@@ -12,7 +12,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::CommandDescriptor;
+use crate::{CommandDescriptor, DiscoveredWorkflow};
 
 mod shell_hook;
 
@@ -53,6 +53,14 @@ pub struct ArtifactOrigin {
 }
 
 impl ArtifactOrigin {
+    pub(crate) fn new(scope: ArtifactScope, location: ArtifactLocation, path: PathBuf) -> Self {
+        Self {
+            scope,
+            location,
+            path,
+        }
+    }
+
     /// Project or user scope.
     #[must_use]
     pub const fn scope(&self) -> ArtifactScope {
@@ -78,6 +86,8 @@ pub enum ArtifactKind {
     Command,
     Skill,
     Hook,
+    Agent,
+    Workflow,
 }
 
 /// An untrusted project artifact visible to the folder-trust inventory.
@@ -226,12 +236,17 @@ impl CommandTemplate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct LazyMarkdownBody {
     path: PathBuf,
+    root: PathBuf,
+    relative: PathBuf,
     digest: blake3::Hash,
 }
 
 impl LazyMarkdownBody {
     fn load(&self) -> Result<String, ExtensionDiscoveryError> {
-        let contents = read_bounded_utf8(&self.path, MAX_MARKDOWN_BYTES)?;
+        let bytes = read_bounded_relative_file(&self.root, &self.relative, MAX_MARKDOWN_BYTES)?;
+        let contents = String::from_utf8(bytes).map_err(|_| ExtensionDiscoveryError::NotUtf8 {
+            path: self.path.clone(),
+        })?;
         if blake3::hash(contents.as_bytes()) != self.digest {
             return Err(ExtensionDiscoveryError::ChangedAfterDiscovery {
                 path: self.path.clone(),
@@ -373,6 +388,87 @@ pub struct DiscoveredSkill {
     body: LazyMarkdownBody,
 }
 
+/// Permission posture selected by a declarative agent definition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AgentPermissionMode {
+    Discuss,
+    Plan,
+    Execute,
+}
+
+impl AgentPermissionMode {
+    fn parse(path: &Path, value: &str) -> Result<Self, ExtensionDiscoveryError> {
+        match value {
+            "discuss" => Ok(Self::Discuss),
+            "plan" => Ok(Self::Plan),
+            "execute" => Ok(Self::Execute),
+            _ => Err(ExtensionDiscoveryError::InvalidAgent {
+                path: path.to_owned(),
+                message: "`permission-mode` must be discuss, plan, or execute".to_owned(),
+            }),
+        }
+    }
+}
+
+/// A lazily loaded declarative subagent definition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiscoveredAgent {
+    name: String,
+    description: String,
+    model: String,
+    tools: Vec<String>,
+    permission_mode: AgentPermissionMode,
+    max_turns: usize,
+    origin: ArtifactOrigin,
+    body: LazyMarkdownBody,
+}
+
+impl DiscoveredAgent {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    #[must_use]
+    pub fn tools(&self) -> &[String] {
+        &self.tools
+    }
+
+    #[must_use]
+    pub const fn permission_mode(&self) -> AgentPermissionMode {
+        self.permission_mode
+    }
+
+    #[must_use]
+    pub const fn max_turns(&self) -> usize {
+        self.max_turns
+    }
+
+    #[must_use]
+    pub const fn origin(&self) -> &ArtifactOrigin {
+        &self.origin
+    }
+
+    /// Loads the system prompt only when this agent is selected.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if the definition changed after discovery.
+    pub fn load_system_prompt(&self) -> Result<String, ExtensionDiscoveryError> {
+        self.body.load()
+    }
+}
+
 impl DiscoveredSkill {
     #[must_use]
     pub fn name(&self) -> &str {
@@ -429,6 +525,8 @@ impl DiscoveredSkill {
 pub struct ExtensionCatalog {
     commands: BTreeMap<String, DiscoveredCommand>,
     skills: BTreeMap<String, DiscoveredSkill>,
+    agents: BTreeMap<String, DiscoveredAgent>,
+    workflows: BTreeMap<String, DiscoveredWorkflow>,
     shell_hooks: Vec<DiscoveredShellHook>,
     inert_project_artifacts: Vec<InertProjectArtifact>,
 }
@@ -511,6 +609,28 @@ impl ExtensionCatalog {
         self.skills.values()
     }
 
+    #[must_use]
+    pub fn agent(&self, name: &str) -> Option<&DiscoveredAgent> {
+        self.agents.get(name)
+    }
+
+    /// Active agents in stable name order.
+    #[must_use]
+    pub fn agents(&self) -> impl ExactSizeIterator<Item = &DiscoveredAgent> {
+        self.agents.values()
+    }
+
+    #[must_use]
+    pub fn workflow(&self, name: &str) -> Option<&DiscoveredWorkflow> {
+        self.workflows.get(name)
+    }
+
+    /// Active workflows in stable name order.
+    #[must_use]
+    pub fn workflows(&self) -> impl ExactSizeIterator<Item = &DiscoveredWorkflow> {
+        self.workflows.values()
+    }
+
     /// Active declarative hooks in dispatcher order `(priority, id)`.
     #[must_use]
     pub fn shell_hooks(&self) -> &[DiscoveredShellHook] {
@@ -534,12 +654,22 @@ impl ExtensionCatalog {
         root: &Path,
     ) -> Result<(), ExtensionDiscoveryError> {
         for path in regular_children_with_extension(&root.join("commands"), "md")? {
-            let command = discover_command(scope, location, &path)?;
+            let command = discover_command(scope, location, root, &path)?;
             self.commands.entry(command.name.clone()).or_insert(command);
         }
         for path in skill_manifests(&root.join("skills"))? {
-            let skill = discover_skill(scope, location, &path)?;
+            let skill = discover_skill(scope, location, root, &path)?;
             self.skills.entry(skill.name.clone()).or_insert(skill);
+        }
+        for path in regular_children_with_extension(&root.join("agents"), "md")? {
+            let agent = discover_agent(scope, location, root, &path)?;
+            self.agents.entry(agent.name.clone()).or_insert(agent);
+        }
+        for path in regular_children_with_extension(&root.join("workflows"), "toml")? {
+            let workflow = crate::workflow::discover_workflow(scope, location, root, &path)?;
+            self.workflows
+                .entry(workflow.name().to_owned())
+                .or_insert(workflow);
         }
         let hooks_path = root.join("hooks.toml");
         if hooks_path.exists() {
@@ -579,6 +709,24 @@ impl ExtensionCatalog {
                 path,
                 contains_shell_interpolation: false,
                 executes_command: false,
+            });
+        }
+        for path in regular_children_with_extension(&root.join("agents"), "md")? {
+            self.inert_project_artifacts.push(InertProjectArtifact {
+                kind: ArtifactKind::Agent,
+                name: file_stem(&path)?,
+                path,
+                contains_shell_interpolation: false,
+                executes_command: false,
+            });
+        }
+        for path in regular_children_with_extension(&root.join("workflows"), "toml")? {
+            self.inert_project_artifacts.push(InertProjectArtifact {
+                kind: ArtifactKind::Workflow,
+                name: file_stem(&path)?,
+                path,
+                contains_shell_interpolation: false,
+                executes_command: true,
             });
         }
         let hooks_path = root.join("hooks.toml");
@@ -641,6 +789,10 @@ pub enum ExtensionDiscoveryError {
         index: usize,
         message: String,
     },
+    #[error("invalid agent definition `{path}`: {message}")]
+    InvalidAgent { path: PathBuf, message: String },
+    #[error("invalid workflow `{path}`: {message}")]
+    InvalidWorkflow { path: PathBuf, message: String },
 }
 
 #[derive(Debug)]
@@ -658,6 +810,7 @@ enum FrontmatterValue {
 fn discover_command(
     scope: ArtifactScope,
     location: ArtifactLocation,
+    root: &Path,
     path: &Path,
 ) -> Result<DiscoveredCommand, ExtensionDiscoveryError> {
     let contents = read_bounded_utf8(path, MAX_MARKDOWN_BYTES)?;
@@ -686,6 +839,13 @@ fn discover_command(
         },
         body: LazyMarkdownBody {
             path: path.to_owned(),
+            root: root.to_owned(),
+            relative: path
+                .strip_prefix(root)
+                .map_err(|_| ExtensionDiscoveryError::InvalidPath {
+                    path: path.to_owned(),
+                })?
+                .to_owned(),
             digest,
         },
     })
@@ -694,6 +854,7 @@ fn discover_command(
 fn discover_skill(
     scope: ArtifactScope,
     location: ArtifactLocation,
+    source_root: &Path,
     path: &Path,
 ) -> Result<DiscoveredSkill, ExtensionDiscoveryError> {
     let contents = read_bounded_utf8(path, MAX_MARKDOWN_BYTES)?;
@@ -721,6 +882,99 @@ fn discover_skill(
         root,
         body: LazyMarkdownBody {
             path: path.to_owned(),
+            root: source_root.to_owned(),
+            relative: path
+                .strip_prefix(source_root)
+                .map_err(|_| ExtensionDiscoveryError::InvalidPath {
+                    path: path.to_owned(),
+                })?
+                .to_owned(),
+            digest,
+        },
+    })
+}
+
+fn discover_agent(
+    scope: ArtifactScope,
+    location: ArtifactLocation,
+    root: &Path,
+    path: &Path,
+) -> Result<DiscoveredAgent, ExtensionDiscoveryError> {
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|_| ExtensionDiscoveryError::InvalidPath {
+            path: path.to_owned(),
+        })?;
+    let contents = read_bounded_relative_utf8(root, relative, MAX_MARKDOWN_BYTES)?;
+    let digest = blake3::hash(contents.as_bytes());
+    let document = parse_frontmatter(path, &contents)?;
+    let name = required_scalar(path, &document.fields, "name")?;
+    validate_artifact_name(path, &name)?;
+    if file_stem(path)? != name {
+        return Err(ExtensionDiscoveryError::InvalidAgent {
+            path: path.to_owned(),
+            message: "frontmatter `name` must match the file name".to_owned(),
+        });
+    }
+    let description = required_scalar(path, &document.fields, "description")?;
+    let model = required_scalar(path, &document.fields, "model")?;
+    validate_artifact_name(path, &model)?;
+    let tools = optional_list(&document.fields, "tools");
+    if tools.len() > 128 {
+        return Err(ExtensionDiscoveryError::InvalidAgent {
+            path: path.to_owned(),
+            message: "`tools` exceeds the 128-entry limit".to_owned(),
+        });
+    }
+    if tools.iter().any(|tool| {
+        tool.is_empty()
+            || !tool
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    }) {
+        return Err(ExtensionDiscoveryError::InvalidAgent {
+            path: path.to_owned(),
+            message: "`tools` entries must be canonical tool names".to_owned(),
+        });
+    }
+    let permission_mode = AgentPermissionMode::parse(
+        path,
+        &required_scalar(path, &document.fields, "permission-mode")?,
+    )?;
+    let max_turns = optional_scalar(path, &document.fields, "max-turns")?
+        .map_or(Ok(32_usize), |value| value.parse::<usize>())
+        .map_err(|_| ExtensionDiscoveryError::InvalidAgent {
+            path: path.to_owned(),
+            message: "`max-turns` must be an integer".to_owned(),
+        })?;
+    if !(1..=256).contains(&max_turns) {
+        return Err(ExtensionDiscoveryError::InvalidAgent {
+            path: path.to_owned(),
+            message: "`max-turns` must be between 1 and 256".to_owned(),
+        });
+    }
+    if document.body.trim().is_empty() {
+        return Err(ExtensionDiscoveryError::InvalidAgent {
+            path: path.to_owned(),
+            message: "system prompt body must not be empty".to_owned(),
+        });
+    }
+    Ok(DiscoveredAgent {
+        name,
+        description,
+        model,
+        tools,
+        permission_mode,
+        max_turns,
+        origin: ArtifactOrigin {
+            scope,
+            location,
+            path: path.to_owned(),
+        },
+        body: LazyMarkdownBody {
+            path: path.to_owned(),
+            root: root.to_owned(),
+            relative: relative.to_owned(),
             digest,
         },
     })
@@ -1209,10 +1463,24 @@ fn ensure_regular_file(path: &Path) -> Result<fs::Metadata, ExtensionDiscoveryEr
     }
 }
 
-fn read_bounded_utf8(path: &Path, limit: u64) -> Result<String, ExtensionDiscoveryError> {
+pub(super) fn read_bounded_utf8(
+    path: &Path,
+    limit: u64,
+) -> Result<String, ExtensionDiscoveryError> {
     let bytes = read_bounded_regular_file(path, limit)?;
     String::from_utf8(bytes).map_err(|_| ExtensionDiscoveryError::NotUtf8 {
         path: path.to_owned(),
+    })
+}
+
+pub(super) fn read_bounded_relative_utf8(
+    root: &Path,
+    relative: &Path,
+    limit: u64,
+) -> Result<String, ExtensionDiscoveryError> {
+    let bytes = read_bounded_relative_file(root, relative, limit)?;
+    String::from_utf8(bytes).map_err(|_| ExtensionDiscoveryError::NotUtf8 {
+        path: root.join(relative),
     })
 }
 
@@ -1473,6 +1741,110 @@ mod tests {
                 .description(),
             "user"
         );
+    }
+
+    #[test]
+    fn agents_and_workflows_follow_precedence_and_untrusted_project_is_inert() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let agent = |description: &str| {
+            format!(
+                "---\nname: review\ndescription: {description}\nmodel: fast\ntools: [read]\npermission-mode: discuss\n---\nprompt"
+            )
+        };
+        write(
+            &project.join(".agents/agents/review.md"),
+            &agent("project open"),
+        );
+        write(
+            &project.join(".rottweiler/agents/review.md"),
+            &agent("project private"),
+        );
+        write(&home.join(".agents/agents/review.md"), &agent("user open"));
+        let workflow =
+            "description = \"workflow\"\n[[step]]\nid = \"review\"\nagent = \"review\"\n";
+        write(&project.join(".agents/workflows/delivery.toml"), workflow);
+        write(&home.join(".agents/workflows/delivery.toml"), workflow);
+
+        let trusted = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
+        )
+        .expect("trusted catalog");
+        assert_eq!(
+            trusted.agent("review").expect("agent").description(),
+            "project open"
+        );
+        assert_eq!(
+            trusted
+                .workflow("delivery")
+                .expect("workflow")
+                .origin()
+                .scope(),
+            ArtifactScope::Project
+        );
+
+        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
+            .expect("untrusted catalog");
+        assert_eq!(
+            untrusted
+                .agent("review")
+                .expect("user fallback")
+                .description(),
+            "user open"
+        );
+        assert_eq!(
+            untrusted
+                .workflow("delivery")
+                .expect("user workflow")
+                .origin()
+                .scope(),
+            ArtifactScope::User
+        );
+        assert!(untrusted.inert_project_artifacts().iter().any(|artifact| {
+            artifact.kind() == ArtifactKind::Agent && artifact.name() == "review"
+        }));
+        assert!(untrusted.inert_project_artifacts().iter().any(|artifact| {
+            artifact.kind() == ArtifactKind::Workflow && artifact.name() == "delivery"
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lazy_agent_prompt_rejects_symlink_swap_after_discovery() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let agents = project.join(".agents/agents");
+        write(
+            &agents.join("audit.md"),
+            "---\nname: audit\ndescription: audit\nmodel: fast\ntools: [read]\npermission-mode: discuss\n---\ntrusted prompt",
+        );
+        let catalog = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
+        )
+        .expect("catalog");
+        let replacement = fixture.path().join("replacement");
+        write(
+            &replacement.join("audit.md"),
+            "---\nname: audit\ndescription: audit\nmodel: fast\ntools: [bash]\npermission-mode: execute\n---\nmalicious prompt",
+        );
+        fs::rename(&agents, project.join("old-agents")).expect("move agents");
+        symlink(&replacement, &agents).expect("swap symlink");
+
+        let error = catalog
+            .agent("audit")
+            .expect("agent")
+            .load_system_prompt()
+            .expect_err("symlink swap rejected");
+        assert!(matches!(
+            error,
+            ExtensionDiscoveryError::Io { .. }
+                | ExtensionDiscoveryError::UnsafeEntry { .. }
+                | ExtensionDiscoveryError::ChangedAfterDiscovery { .. }
+        ));
     }
 
     #[test]

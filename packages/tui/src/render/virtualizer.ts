@@ -23,10 +23,14 @@ export class TranscriptVirtualizer {
     this.#overscan = overscan
   }
 
-  update(entries: readonly TranscriptEntry[], width: number): void {
+  update(
+    entries: readonly TranscriptEntry[],
+    width: number,
+    extraRows: (entry: TranscriptEntry) => number = () => 0,
+  ): void {
     const normalizedWidth = Math.max(8, Math.floor(width))
     const sameWidth = normalizedWidth === this.#width
-    const nextKeys = entries.map(entryKey)
+    const nextKeys = entries.map((entry) => `${entryKey(entry)}:${extraRows(entry)}`)
     let stable = 0
     if (sameWidth) {
       const limit = Math.min(nextKeys.length, this.#keys.length)
@@ -36,7 +40,9 @@ export class TranscriptVirtualizer {
     }
     const heights = sameWidth ? this.#heights.slice(0, stable) : []
     for (let index = heights.length; index < entries.length; index += 1) {
-      heights.push(estimateEntryHeight(entries[index]!, normalizedWidth))
+      heights.push(
+        estimateEntryHeight(entries[index]!, normalizedWidth) + extraRows(entries[index]!),
+      )
     }
     const offsets = new Array<number>(heights.length + 1)
     offsets[0] = 0
