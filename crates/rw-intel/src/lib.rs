@@ -1,5 +1,13 @@
 //! Incremental, local code intelligence backed by tree-sitter.
 
+mod lsp;
+
+pub use lsp::{
+    CodeIntelligence, Diagnostic, DiagnosticSeverity, IntelligenceBackend, IntelligenceResult,
+    Location, LspConfig, LspError, LspProcessHandle, LspProcessSpawner, LspServerConfig, Position,
+    Range, RenameResult, SpawnedLspProcess, TextEdit, WorkspaceUriMapper,
+};
+
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::Read;
@@ -12,7 +20,7 @@ use thiserror::Error;
 use tree_sitter::{InputEdit, Node, Parser, Point, Tree};
 
 /// Languages supported by the always-on syntax index.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Language {
     Rust,
@@ -21,7 +29,9 @@ pub enum Language {
 }
 
 impl Language {
-    fn for_path(path: &Path) -> Option<Self> {
+    /// Detect a supported language from a source path.
+    #[must_use]
+    pub fn for_path(path: &Path) -> Option<Self> {
         match path.extension().and_then(|extension| extension.to_str()) {
             Some("rs") => Some(Self::Rust),
             Some("py") => Some(Self::Python),

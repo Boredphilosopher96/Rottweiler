@@ -49,8 +49,9 @@ fn binary_records_then_replays_a_complete_offline_tool_turn() {
     let replayed = replay.command(&fixture_dir, None, "stream-json");
     assert!(
         replayed.status.success(),
-        "replay stderr: {}",
-        String::from_utf8_lossy(&replayed.stderr)
+        "replay stderr: {}\nreplay stdout: {}",
+        String::from_utf8_lossy(&replayed.stderr),
+        String::from_utf8_lossy(&replayed.stdout)
     );
     assert_eq!(
         fs::read_to_string(replay.workspace.join("hello.py")).expect("replayed hello.py"),
@@ -148,8 +149,9 @@ fn bash_replay_serves_recorded_output_without_spawning_or_opening_a_socket() {
     let replayed = replay.command(&fixtures, None, "stream-json");
     assert!(
         replayed.status.success(),
-        "replay stderr: {}",
-        String::from_utf8_lossy(&replayed.stderr)
+        "replay stderr: {}\nreplay stdout: {}",
+        String::from_utf8_lossy(&replayed.stderr),
+        String::from_utf8_lossy(&replayed.stdout)
     );
     assert!(parse_stream(&replayed.stdout).iter().any(|event| matches!(
         event,

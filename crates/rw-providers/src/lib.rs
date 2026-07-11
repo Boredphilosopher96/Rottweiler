@@ -60,7 +60,8 @@ pub use retry::{
 };
 pub use router::{ModelCandidate, ProviderRouter, RouterError};
 pub use types::{
-    BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason, NetworkPolicy,
+    BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,
+    NATIVE_WEB_SEARCH_TOOL_NAME, NativeWebSearchCapability, NativeWebSearchRequest, NetworkPolicy,
     Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata,
     ProviderRequest, ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition, UsageAccounting,
     WireFrameSink, WireMode,

@@ -947,13 +947,15 @@ impl EngineHost {
                         return;
                     }
                 };
-                if last_seen
-                    .zip(captured_tail)
-                    .is_some_and(|(seen, tail)| seen > tail)
-                {
+                let cursor_ahead = match (last_seen, captured_tail) {
+                    (Some(_), None) => true,
+                    (Some(seen), Some(tail)) => seen > tail,
+                    (None, _) => false,
+                };
+                if cursor_ahead {
                     let _ = send
                         .send(Err(HostError::Protocol(
-                            "last seen sequence is ahead of the durable tail".to_owned(),
+                            "last seen sequence is ahead of the durable log".to_owned(),
                         )))
                         .await;
                     return;
@@ -1491,6 +1493,63 @@ mod tests {
             rejected,
             CommandOutcome::Rejected { error } if error.code == "session_capacity"
         ));
+    }
+
+    #[tokio::test]
+    async fn empty_log_rejects_sequence_zero_cursor_and_null_cursor_completes_promptly() {
+        let (host, _factory) = host(1);
+        let session = SessionId("empty-log-cursor".to_owned());
+        let bound = BoundClient {
+            client_id: ClientId("empty-log-observer".to_owned()),
+        };
+        assert_eq!(
+            host.dispatch(
+                bound.clone(),
+                ClientCommand::ResumeSession {
+                    meta: meta("spoofed", "resume-empty-log"),
+                    session_id: session.clone(),
+                    last_seen_sequence: None,
+                    role: ClientRole::Observer,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+
+        let mut invalid = host
+            .subscribe(bound.clone(), Some(session.clone()), Some(SequenceId(0)))
+            .await
+            .expect("subscription channel");
+        let error = tokio::time::timeout(Duration::from_millis(250), invalid.recv())
+            .await
+            .expect("ahead cursor must not hang")
+            .expect("protocol error item")
+            .expect_err("sequence zero is ahead of an empty log");
+        assert!(matches!(
+            error,
+            HostError::Protocol(message)
+                if message == "last seen sequence is ahead of the durable log"
+        ));
+
+        let mut valid = host
+            .subscribe(bound, Some(session.clone()), None)
+            .await
+            .expect("null cursor subscription");
+        let completed = tokio::time::timeout(Duration::from_millis(250), valid.recv())
+            .await
+            .expect("null cursor replay must complete")
+            .expect("replay completion item")
+            .expect("valid replay completion");
+        assert!(matches!(
+            &completed,
+            EngineEvent::SessionReplayCompleted {
+                session_id,
+                through_sequence: None,
+                ..
+            } if session_id == &session
+        ));
+        let wire = serde_json::to_value(completed).expect("schema-safe replay completion");
+        assert_eq!(wire["through_sequence"], serde_json::Value::Null);
     }
 
     #[tokio::test]

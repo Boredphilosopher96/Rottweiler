@@ -1,7 +1,22 @@
-import { copyFileSync, mkdirSync } from "node:fs"
+import { copyFileSync, mkdirSync, readdirSync, rmSync } from "node:fs"
 import { dirname, join } from "node:path"
 
 import type { BunPlugin } from "bun"
+
+function cleanupOrphanedBunBuilds(): void {
+  for (const entry of readdirSync(import.meta.dir)) {
+    if (/^\..+\.bun-build$/.test(entry)) {
+      // Bun normally leaves a file here, but interrupted/compiler-version
+      // changes have also produced directories. Handle both shapes.
+      rmSync(join(import.meta.dir, entry), { recursive: true, force: true })
+    }
+  }
+}
+
+// Bun's single-executable compiler can leave large hidden temporary binaries
+// after an interrupted build. Clean on both sides so the next successful build
+// repairs a prior interruption and does not grow the repository indefinitely.
+cleanupOrphanedBunBuilds()
 
 function nativePackage(): string {
   if (process.platform === "darwin" && process.arch === "x64") return "@opentui/core-darwin-x64"
@@ -57,7 +72,7 @@ const result = await Bun.build({
   minify: true,
   bytecode: true,
   plugins: [nativePrelude],
-})
+}).finally(cleanupOrphanedBunBuilds)
 
 if (!result.success) {
   for (const message of result.logs) console.error(message)

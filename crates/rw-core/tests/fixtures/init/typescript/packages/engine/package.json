@@ -1,0 +1,25 @@
+{
+  "name": "@sora/engine",
+  "version": "0.1.0",
+  "description": "Reusable, UI-agnostic Chromium browser engine on Electron.",
+  "license": "GPL-3.0-or-later",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "peerDependencies": {
+    "electron": ">=33"
+  },
+  "dependencies": {
+    "hash-wasm": "^4.12.0"
+  },
+  "keywords": [
+    "browser",
+    "chromium",
+    "electron",
+    "engine",
+    "sora"
+  ],
+  "author": "MilkmanAbi"
+}

@@ -22,6 +22,7 @@ use tracing_subscriber::EnvFilter;
 
 #[allow(dead_code)]
 mod host_runtime;
+mod project_commands;
 #[allow(dead_code)]
 mod remote;
 mod runtime;

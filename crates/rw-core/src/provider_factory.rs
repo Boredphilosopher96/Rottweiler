@@ -3,22 +3,28 @@
 use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
+use futures_util::StreamExt as _;
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, AuthProvider,
     BoxEventStream, CacheBreakpointSupport, Capabilities, FixtureRedactor,
     GITHUB_COPILOT_COMPILED_CLIENT_ID, GitHubCopilotProvider, GitHubCopilotProviderConfig,
-    GitHubCopilotRuntime, ModelPricing, NetworkPolicy, OAuthRefreshConfig,
-    OPENAI_SUBSCRIPTION_CLIENT_ID, OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT,
-    OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    OpenAiSubscriptionAuth, OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink,
-    OpenAiWireMode, PricingTable, Provider, ProviderError, ProviderErrorKind,
-    ProviderModelMetadata, ProviderRequest, ProviderRouter, ProxyAuthentication, ProxyEnvironment,
-    ProxySettings, ProxySource, RefreshTokenSink, RefreshingOAuth, RetryPolicy, RouterError,
-    Secret as ProviderSecret, StaticAuth, ThinkingLevel, UsageAccounting, WireFrameSink, WireMode,
+    GitHubCopilotRuntime, ModelPricing, NativeWebSearchCapability, NativeWebSearchRequest,
+    NetworkPolicy, OAuthRefreshConfig, OPENAI_SUBSCRIPTION_CLIENT_ID,
+    OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT,
+    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiSubscriptionAuth,
+    OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink, OpenAiWireMode, PricingTable,
+    Provider, ProviderError, ProviderErrorKind, ProviderModelMetadata, ProviderRequest,
+    ProviderRouter, ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource,
+    RefreshTokenSink, RefreshingOAuth, RetryPolicy, RouterError, Secret as ProviderSecret,
+    StaticAuth, ThinkingLevel, ToolChoice, UsageAccounting, WireFrameSink, WireMode,
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
     CredentialReference, OsKeychain, Secret as StoredSecret, SystemEnvironment,
+};
+use rw_tools::{
+    CancellationToken, ToolError, WebSearchRequest, WebSearchResponse, WebSearchResult,
+    WebSearchSource, WebSearcher,
 };
 use rw_types::{
     Cost,
@@ -221,6 +227,25 @@ impl ProviderRuntime {
             })
     }
 
+    /// Provider-native search bound to the first configured candidate for an
+    /// alias. Unsupported/fallback aliases return `None`.
+    #[must_use]
+    pub fn native_web_searcher(&self, alias: &str) -> Option<Arc<dyn WebSearcher>> {
+        let candidates = self
+            .alias_candidates
+            .get(alias)?
+            .iter()
+            .filter_map(|candidate| {
+                let model = self.models.get(candidate)?;
+                let provider = self.providers.get(candidate)?.clone();
+                ProviderNativeWebSearcher::new(provider, model.model.clone())
+                    .map(|searcher| Arc::new(searcher) as Arc<dyn WebSearcher>)
+            })
+            .collect::<Vec<_>>();
+        (!candidates.is_empty())
+            .then(|| Arc::new(ProviderNativeWebSearchRouter { candidates }) as Arc<dyn WebSearcher>)
+    }
+
     /// Runtime compaction settings captured from validated user config.
     #[must_use]
     pub const fn compaction_config(&self) -> &CompactionConfig {
@@ -361,6 +386,129 @@ impl ProviderRuntime {
             request.thinking = *thinking;
         }
         self.router.stream_alias(alias, request)
+    }
+}
+
+/// Alias/model-bound adapter from provider streams to the public web-search
+/// boundary. It uses the ordinary provider request path, preserving recorder
+/// and replay semantics.
+pub struct ProviderNativeWebSearcher {
+    provider: Arc<dyn Provider>,
+    model: String,
+}
+
+struct ProviderNativeWebSearchRouter {
+    candidates: Vec<Arc<dyn WebSearcher>>,
+}
+
+#[async_trait]
+impl WebSearcher for ProviderNativeWebSearchRouter {
+    async fn search(
+        &self,
+        request: WebSearchRequest,
+        cancellation: CancellationToken,
+    ) -> Result<WebSearchResponse, ToolError> {
+        let mut last_error = None;
+        for candidate in &self.candidates {
+            match candidate
+                .search(request.clone(), cancellation.clone())
+                .await
+            {
+                Ok(response) => return Ok(response),
+                Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            ToolError::Network("no native web-search candidate is available".to_owned())
+        }))
+    }
+}
+
+impl ProviderNativeWebSearcher {
+    #[must_use]
+    pub fn new(provider: Arc<dyn Provider>, model: String) -> Option<Self> {
+        (provider.native_web_search_capability() == NativeWebSearchCapability::Supported)
+            .then_some(Self { provider, model })
+    }
+}
+
+#[async_trait]
+impl WebSearcher for ProviderNativeWebSearcher {
+    async fn search(
+        &self,
+        request: WebSearchRequest,
+        cancellation: CancellationToken,
+    ) -> Result<WebSearchResponse, ToolError> {
+        let max_results = u16::try_from(request.max_results.min(50)).unwrap_or(50);
+        let native = NativeWebSearchRequest {
+            query: request.query.clone(),
+            max_results,
+            recency_days: request.recency_days,
+            allowed_domains: request.allowed_domains,
+        };
+        native
+            .validate_for(self.provider.native_web_search_capability())
+            .map_err(|error| ToolError::Network(error.to_string()))?;
+        let mut stream = self
+            .provider
+            .stream(ProviderRequest {
+                model: self.model.clone(),
+                turns: vec![rw_types::Turn {
+                    role: rw_types::Role::User,
+                    blocks: vec![rw_types::Block::Text {
+                        text: request.query,
+                    }],
+                    meta: rw_types::TurnMeta::default(),
+                }],
+                tools: vec![
+                    native
+                        .tool_definition()
+                        .map_err(|error| ToolError::Network(error.to_string()))?,
+                ],
+                tool_choice: ToolChoice::Auto,
+                max_output_tokens: 2_048,
+                temperature: None,
+                thinking: ThinkingLevel::Off,
+                cache_hint: None,
+            })
+            .await
+            .map_err(|error| ToolError::Network(error.to_string()))?;
+        let mut answer = String::new();
+        let mut citations = BTreeMap::<String, Option<String>>::new();
+        loop {
+            let event = tokio::select! {
+                event = stream.next() => event,
+                () = cancellation.cancelled() => return Err(ToolError::Cancelled),
+            };
+            let Some(event) = event else {
+                break;
+            };
+            match event.map_err(|error| ToolError::Network(error.to_string()))? {
+                rw_providers::ProviderEvent::TextDelta { text } => {
+                    let remaining = 4_096usize.saturating_sub(answer.len());
+                    let end = text.floor_char_boundary(remaining.min(text.len()));
+                    answer.push_str(&text[..end]);
+                }
+                rw_providers::ProviderEvent::Citation { uri, title, .. } => {
+                    if citations.len() < usize::from(max_results) {
+                        citations.entry(uri).or_insert(title);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(WebSearchResponse {
+            source: WebSearchSource::ProviderNative,
+            results: citations
+                .into_iter()
+                .map(|(url, title)| WebSearchResult {
+                    title: title.unwrap_or_else(|| url.clone()),
+                    url,
+                    snippet: answer.clone(),
+                })
+                .collect(),
+        })
     }
 }
 
@@ -1328,6 +1476,10 @@ impl Provider for ModelBoundProvider {
         self.capabilities.clone()
     }
 
+    fn native_web_search_capability(&self) -> NativeWebSearchCapability {
+        self.inner.native_web_search_capability()
+    }
+
     async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
         self.inner.model_metadata().await
     }
@@ -1878,5 +2030,81 @@ const fn convert_thinking(level: rw_types::config::ThinkingLevel) -> ThinkingLev
         rw_types::config::ThinkingLevel::Low => ThinkingLevel::Low,
         rw_types::config::ThinkingLevel::Medium => ThinkingLevel::Medium,
         rw_types::config::ThinkingLevel::High => ThinkingLevel::High,
+    }
+}
+
+#[cfg(test)]
+mod native_search_tests {
+    #![allow(clippy::expect_used)]
+
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    struct Candidate {
+        name: &'static str,
+        fail: bool,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    #[async_trait]
+    impl WebSearcher for Candidate {
+        async fn search(
+            &self,
+            _request: WebSearchRequest,
+            _cancellation: CancellationToken,
+        ) -> Result<WebSearchResponse, ToolError> {
+            self.calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(self.name);
+            if self.fail {
+                Err(ToolError::Network("candidate failed".to_owned()))
+            } else {
+                Ok(WebSearchResponse {
+                    source: WebSearchSource::ProviderNative,
+                    results: Vec::new(),
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_search_candidates_fail_over_in_alias_order() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let router = ProviderNativeWebSearchRouter {
+            candidates: vec![
+                Arc::new(Candidate {
+                    name: "primary",
+                    fail: true,
+                    calls: Arc::clone(&calls),
+                }),
+                Arc::new(Candidate {
+                    name: "fallback",
+                    fail: false,
+                    calls: Arc::clone(&calls),
+                }),
+            ],
+        };
+        router
+            .search(
+                WebSearchRequest {
+                    model_alias: Some("fast".to_owned()),
+                    query: "query".to_owned(),
+                    max_results: 5,
+                    recency_days: None,
+                    allowed_domains: Vec::new(),
+                },
+                CancellationToken::default(),
+            )
+            .await
+            .expect("fallback search");
+        assert_eq!(
+            calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            ["primary", "fallback"]
+        );
     }
 }

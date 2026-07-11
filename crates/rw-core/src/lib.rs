@@ -4,6 +4,7 @@ mod admin;
 mod copilot_credentials;
 mod engine;
 mod host;
+mod init;
 mod instructions;
 mod permission;
 mod provider_factory;
@@ -24,25 +25,32 @@ pub use admin::{
     store_provider_api_key,
 };
 pub use engine::{
-    AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals, ContextSurgeryAction,
-    EventClock, FolderTrustController, FolderTrustOperation, InterruptedToolRepair,
-    MessageDisposition, ModelContextMetadata, ModelDriver, MutationCheckpoint,
-    MutationCheckpointCoordinator, MutationCheckpointOutcome, NoopFolderTrustController,
-    NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink,
-    NoopWorkspaceRootController, RecoveredQuestion, RewindCheckpoint, SESSION_EVENT_VERSION,
-    SecretRedactor, SessionActor, SessionActorConfig, SessionCommandAction, SessionCommandContext,
-    SessionCommandOutput, SessionEventSink, SessionHandle, SessionProjectionError,
-    SessionRecoveredState, SessionSnapshot, SessionSubscription, SessionUsage, SystemEventClock,
-    TOOL_CANCELLATION_GRACE, WorkspaceRootController, WorkspaceRuntimeGeneration,
-    builtin_command_registry, builtin_hook_dispatcher, project_session_events,
+    AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals, CommandToolCall,
+    CommandToolOutputKind, ContextSurgeryAction, EventClock, FolderTrustController,
+    FolderTrustOperation, InterruptedToolRepair, MessageDisposition, ModelContextMetadata,
+    ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
+    NoopFolderTrustController, NoopMutationCheckpointCoordinator, NoopSecretRedactor,
+    NoopSessionEventSink, NoopWorkspaceRootController, RecoveredQuestion, RewindCheckpoint,
+    SESSION_EVENT_VERSION, SecretRedactor, SessionActor, SessionActorConfig, SessionCommandAction,
+    SessionCommandContext, SessionCommandOutput, SessionEventSink, SessionHandle,
+    SessionProjectionError, SessionRecoveredState, SessionSnapshot, SessionSubscription,
+    SessionUsage, SystemEventClock, TOOL_CANCELLATION_GRACE, WorkspaceRootController,
+    WorkspaceRuntimeGeneration, builtin_command_registry, builtin_hook_dispatcher,
+    project_session_events,
 };
 pub use host::{
     BoundClient, CreateSessionRequest, EngineHost, EngineHostConfig, HostError, HostQueryService,
     HostedSession, SessionFactory,
 };
+pub use init::{
+    DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,
+    apply_init_plan, plan_init,
+};
 pub use instructions::{
+    InstructionStack, MAX_INSTRUCTION_CONTEXT_BYTES, MAX_INSTRUCTION_FILES,
     MAX_ROOT_INSTRUCTIONS_BYTES, ProjectInstructions, ProjectInstructionsError,
-    base_agent_system_turn, initial_session_context, load_root_project_instructions,
+    base_agent_system_turn, initial_session_context, load_instruction_stack,
+    load_nested_instruction_stack, load_root_project_instructions,
 };
 pub use permission::{
     ClearedSessionPermissions, HeadlessPermissionMode, PermissionApprovalSnapshot,
@@ -50,7 +58,8 @@ pub use permission::{
     PermissionOutcome, PermissionRequest,
 };
 pub use provider_factory::{
-    ProviderFactory, ProviderFactoryError, ProviderRuntime, ResolvedModel, cost_from_model_metadata,
+    ProviderFactory, ProviderFactoryError, ProviderNativeWebSearcher, ProviderRuntime,
+    ResolvedModel, cost_from_model_metadata,
 };
 pub use rw_providers::{
     ProviderModelMetadata, TokenUsage as ModelTokenUsage, UsageAccounting as ModelAccounting,
@@ -70,30 +79,50 @@ pub use rw_types::{
 /// needed to assemble a headless runtime. Provider and tool implementations
 /// remain in their lower architectural layers.
 pub mod runtime_support {
+    pub use rw_ext::{
+        ArtifactLocation, ArtifactOrigin, ArtifactScope, CLAUDE_FRONTMATTER_MIGRATION,
+        CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation,
+        CommandRegistry, CommandRegistryError, CommandTemplate, DiscoveredCommand,
+        DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog, ExtensionDiscoveryConfig,
+        ExtensionDiscoveryError, HookDirective, HookDispatchStatus, HookDispatcher, HookEffect,
+        HookError, HookEvent, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
+        TemplatePart,
+    };
     pub use rw_providers::{
         BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,
         FixtureRedactor, GuardedHttpFetchError, GuardedHttpFetchRequest, GuardedHttpFetchResponse,
-        PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
-        ProxyAuthentication, ProxyEnvironment, ProxySettings, Recorder, ReplayProvider,
-        Secret as ProviderSecret, ThinkingLevel, ToolChoice, ToolDefinition, WireMode,
-        deny_outbound_network_for_process, guarded_http_fetch,
+        NativeWebSearchCapability, NativeWebSearchRequest, PricingTable, Provider, ProviderError,
+        ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyAuthentication, ProxyEnvironment,
+        ProxySettings, Recorder, ReplayProvider, Secret as ProviderSecret, ThinkingLevel,
+        ToolChoice, ToolDefinition, WireMode, deny_outbound_network_for_process,
+        guarded_http_fetch,
     };
     pub use rw_tools::{
         AskUserInput, AskUserTool, BashSandboxMode, BashTool, CancellationToken,
-        CapabilityManifest, CommandExecutor, CommandFixtureRedactor, CommandSafetyClassifier,
-        EditTool, EgressDecision, EgressPin, EgressPolicy, ExecutionLease, FetchRequest,
-        FetchResponse, GlobTool, GrepTool, LsTool, MultiEditTool, MutationScope,
-        NetworkPolicy as SandboxNetworkPolicy, QuestionAsker, ReadTool, RecordingCommandExecutor,
-        ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SupervisedEgressProxy, SymbolIndex,
-        SymbolsTool, TodoTool, TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError,
-        ToolLimits, ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool, WebFetcher,
-        WorkspaceSymbolIndex, WriteTool, maybe_run_sandbox_helper, probe_policy_egress,
+        CapabilityManifest, CodeIntelligence, CodeIntelligenceProvider, CommandExecutor,
+        CommandFixtureRedactor, CommandOutcome as ToolCommandOutcome, CommandRequest,
+        CommandSafetyClassifier, ConfiguredSearchApi, DefinitionTool, Diagnostic,
+        DiagnosticSeverity, DiagnosticsTool, EditTool, EgressDecision, EgressPin, EgressPolicy,
+        ExecutionLease, FetchRequest, FetchResponse, GlobTool, GrepTool, IntelligenceBackend,
+        IntelligenceResult, Language, Location, LsTool, LspConfig, LspServerConfig, MultiEditTool,
+        MutationScope, NetworkPolicy as SandboxNetworkPolicy, NoopOutputSink, Position,
+        QuestionAsker, Range, ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult,
+        RenameTool, ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
+        SupervisedEgressProxy, SymbolIndex, SymbolsTool, TodoTool, TokioCommandExecutor, Tool,
+        ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
+        ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool, WebFetcher, WebSearchRequest,
+        WebSearchResponse, WebSearchResult, WebSearchSource, WebSearchTool, WebSearcher,
+        WorkspaceSymbolIndex, WorkspaceUriMapper, WriteTool, discover_sandboxed_lsp_servers,
+        maybe_run_sandbox_helper, probe_policy_egress,
     };
     pub use rw_types::{
         Answer, ApprovalBinding, ApprovalDecision, Block, ClientCommand, ClientId, CommandOutcome,
         Cost, EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, Role,
-        SequenceId, SessionId, ToolCallId, ToolCapability, ToolOutput, ToolOutputStream, Turn,
-        TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage, config::PermissionDecision,
+        SequenceId, SessionId, SessionMode, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
+        ToolOutputStream, Turn, TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
+        config::{
+            PermissionDecision, PermissionRule, ToolchainConfig, ToolchainRule, WebSearchConfig,
+        },
     };
 }
 

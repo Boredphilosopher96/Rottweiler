@@ -100,6 +100,7 @@ struct PermissionMemory {
 /// and exact invocation approvals remembered at session or project scope.
 pub struct PermissionGate {
     policy: PermissionPolicy,
+    restrictive_rules: Option<Vec<PermissionRule>>,
     memory: RwLock<PermissionMemory>,
     session_rules: RwLock<Vec<PermissionRule>>,
     project_store: Option<Arc<ProjectApprovalStore>>,
@@ -130,6 +131,7 @@ impl PermissionGate {
     pub fn from_config(config: PermissionConfig) -> Self {
         Self {
             policy: PermissionPolicy::Configured(config),
+            restrictive_rules: None,
             memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
             project_store: None,
@@ -150,6 +152,7 @@ impl PermissionGate {
     pub fn for_headless_mode(mode: HeadlessPermissionMode) -> Self {
         Self {
             policy: PermissionPolicy::Headless(mode),
+            restrictive_rules: None,
             memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
             project_store: None,
@@ -267,10 +270,44 @@ impl PermissionGate {
         let generation = lock_read(&self.memory).generation.saturating_add(1);
         Ok(Self {
             policy: self.policy.clone(),
+            restrictive_rules: self.restrictive_rules.clone(),
             memory: RwLock::new(PermissionMemory {
                 workspace_namespace: workspace_namespace(roots),
                 generation,
                 session_allows: BTreeSet::new(),
+            }),
+            session_rules: RwLock::new(lock_read(&self.session_rules).clone()),
+            project_store: self.project_store.clone(),
+            command_safety: Arc::clone(&self.command_safety),
+        })
+    }
+
+    /// Clones this gate for one turn and adds a fail-closed invocation
+    /// allowlist. Base policy still applies after an invocation matches one of
+    /// these patterns, so this can only remove authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any pattern is not valid `tool(glob)` syntax.
+    pub fn restricted_to_patterns(&self, patterns: &[String]) -> Result<Self, String> {
+        let restrictive_rules = patterns
+            .iter()
+            .map(|pattern| {
+                validate_rule(pattern)?;
+                Ok(PermissionRule {
+                    pattern: pattern.clone(),
+                    action: PermissionDecision::Allow,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let memory = lock_read(&self.memory);
+        Ok(Self {
+            policy: self.policy.clone(),
+            restrictive_rules: Some(restrictive_rules),
+            memory: RwLock::new(PermissionMemory {
+                workspace_namespace: memory.workspace_namespace.clone(),
+                generation: memory.generation,
+                session_allows: memory.session_allows.clone(),
             }),
             session_rules: RwLock::new(lock_read(&self.session_rules).clone()),
             project_store: self.project_store.clone(),
@@ -495,6 +532,17 @@ impl PermissionGate {
     }
 
     fn decision_for(&self, request: &PermissionRequest) -> PermissionDecision {
+        if self.restrictive_rules.as_ref().is_some_and(|rules| {
+            rule_decision(
+                &PermissionConfig {
+                    default: PermissionDecision::Deny,
+                    rules: rules.clone(),
+                },
+                request,
+            ) != PermissionDecision::Allow
+        }) {
+            return PermissionDecision::Deny;
+        }
         if matches!(request.tool_name.as_str(), "ask_user" | "submit_plan")
             && request.capabilities.is_empty()
         {
@@ -1701,6 +1749,35 @@ mod tests {
         assert_ne!(
             identity("/bin/echo a && /bin/echo b"),
             identity("/bin/echo a ; /bin/echo b")
+        );
+    }
+
+    #[tokio::test]
+    async fn per_turn_qualified_tool_restriction_denies_broader_bash_invocations() {
+        let gate = PermissionGate::new(PermissionDecision::Allow)
+            .restricted_to_patterns(&["bash(git status)".to_owned()])
+            .expect("qualified restriction");
+        let request = |command: &str| PermissionRequest {
+            id: format!("bash-{command}"),
+            tool_name: "bash".to_owned(),
+            arguments: json!({
+                "command": command,
+                "cwd": ".",
+                "env": {},
+                "network_domains": [],
+                "sandbox": "sandboxed",
+            }),
+            capabilities: vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+            approval_diff: None,
+        };
+        let deny = Decision(ApprovalDecision::Deny);
+        assert_eq!(
+            gate.authorize(request("git status"), &deny).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            gate.authorize(request("git push"), &deny).await,
+            PermissionOutcome::Denied
         );
     }
 

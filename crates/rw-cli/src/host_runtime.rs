@@ -48,6 +48,7 @@ pub(crate) struct CliHostOptions {
     pub permission_mode: Option<PermissionMode>,
     pub max_turns: usize,
     pub provider_mode: HostedProviderMode,
+    pub dangerously_trust: bool,
 }
 
 impl CliHostOptions {
@@ -82,6 +83,7 @@ impl CliHostOptions {
             permission_mode,
             max_turns,
             provider_mode,
+            dangerously_trust,
         })
     }
 }
@@ -167,9 +169,7 @@ impl CliSessionFactory {
         .map_err(|_| HostError::Query("session workspace roots are unavailable".to_owned()))?;
         let mut roots = Vec::with_capacity(configured.len());
         for (index, root) in configured.into_iter().enumerate() {
-            let canonical = fs::canonicalize(&root).map_err(|_| {
-                HostError::Query("session workspace root is unavailable".to_owned())
-            })?;
+            let canonical = self.authorize_workspace_path(&root)?;
             if index == 0 && canonical != primary {
                 return Err(HostError::Query(
                     "session primary workspace root changed".to_owned(),
@@ -205,7 +205,8 @@ impl CliSessionFactory {
     ) -> Result<HostedSession, HostError> {
         let runtime = compose_hosted_actor(HostedSessionComposition {
             workspace: workspace.clone(),
-            additional_workspaces: self
+            additional_workspaces: Vec::new(),
+            allowed_workspace_roots: self
                 .allowed_workspaces
                 .iter()
                 .filter(|root| **root != workspace)
@@ -220,6 +221,7 @@ impl CliSessionFactory {
             permission_mode: self.options.permission_mode,
             max_turns: self.options.max_turns,
             provider_mode: self.options.provider_mode.clone(),
+            dangerously_trust: self.options.dangerously_trust,
         })
         .await
         .map_err(|error| {
@@ -879,6 +881,7 @@ mod tests {
                 provider_name: "offline-host".to_owned(),
                 scripts: Vec::new(),
             },
+            dangerously_trust: false,
         })
         .expect("factory")
     }
@@ -1050,5 +1053,91 @@ mod tests {
         let resumed = factory.resume(&session_id).await.expect("resume");
         assert_eq!(resumed.descriptor().session_id, session_id);
         assert_eq!(resumed.descriptor().workspace_name, "workspace");
+    }
+
+    #[tokio::test]
+    async fn hosted_add_dir_enforces_allowed_roots_before_generation_or_tool_access() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let allowed = root.path().join("allowed");
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::create_dir_all(&allowed).expect("allowed");
+        fs::create_dir_all(&outside).expect("outside");
+        fs::write(outside.join("OUTSIDE_CANARY.txt"), "outside").expect("outside canary");
+        let workspace = fs::canonicalize(workspace).expect("canonical workspace");
+        let allowed = fs::canonicalize(allowed).expect("canonical allowed");
+        let outside = fs::canonicalize(outside).expect("canonical outside");
+        let factory = CliSessionFactory::new(CliHostOptions {
+            storage_root: root.path().join("state"),
+            credentials_path: root.path().join("state/credentials.json"),
+            config: Config::default(),
+            allowed_workspaces: vec![workspace.clone(), allowed.clone()],
+            permission_mode: Some(PermissionMode::Strict),
+            max_turns: 2,
+            provider_mode: HostedProviderMode::DeterministicReplay {
+                provider_name: "offline-host".to_owned(),
+                scripts: Vec::new(),
+            },
+            dangerously_trust: false,
+        })
+        .expect("factory");
+        let session_id = SessionId("hosted-add-root-policy".to_owned());
+        let hosted = factory
+            .create(CreateSessionRequest {
+                session_id: session_id.clone(),
+                workspace: workspace.display().to_string(),
+                model: None,
+            })
+            .await
+            .expect("create hosted session");
+        let handle = hosted.handle();
+
+        let denied = handle
+            .send_message(format!("/add-dir {}", outside.display()))
+            .await
+            .expect_err("outside root must be denied");
+        assert!(denied.to_string().contains("authorization policy"));
+        let unchanged = handle.snapshot().await.expect("unchanged snapshot");
+        assert_eq!(unchanged.workspace_generation, 0);
+        assert_eq!(unchanged.workspace_roots.len(), 1);
+        assert_eq!(
+            factory
+                .workspace_roots_for_session(&hosted.descriptor())
+                .expect("host roots after denial"),
+            vec![workspace.clone()]
+        );
+        assert!(
+            factory
+                .preview_workspace_file(&hosted.descriptor(), "@root/1/OUTSIDE_CANARY.txt", 1024,)
+                .await
+                .is_err(),
+            "denied root must not become queryable through hosted tool paths"
+        );
+
+        let allowed_session_id = SessionId("hosted-add-root-allowed".to_owned());
+        let allowed_hosted = factory
+            .create(CreateSessionRequest {
+                session_id: allowed_session_id,
+                workspace: workspace.display().to_string(),
+                model: None,
+            })
+            .await
+            .expect("create allowed-root session");
+        let allowed_handle = allowed_hosted.handle();
+        allowed_handle
+            .send_message(format!("/add-dir {}", allowed.display()))
+            .await
+            .expect("configured allowed root");
+        let changed = allowed_handle.snapshot().await.expect("changed snapshot");
+        assert_eq!(changed.workspace_generation, 1);
+        assert_eq!(changed.workspace_roots.len(), 2);
+        assert_eq!(
+            factory
+                .workspace_roots_for_session(&allowed_hosted.descriptor())
+                .expect("host roots after allowed add"),
+            vec![workspace, allowed]
+        );
+        assert!(!outside.join("created-by-tool.txt").exists());
     }
 }

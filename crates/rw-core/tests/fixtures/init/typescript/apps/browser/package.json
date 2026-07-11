@@ -1,0 +1,25 @@
+{
+  "name": "@sora/browser",
+  "version": "0.0.1",
+  "description": "Sora \u2014 the browser product built on @sora/engine.",
+  "license": "GPL-3.0-or-later",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "smoke": "SORA_SMOKE=1 xvfb-run -a electron . --no-sandbox --disable-gpu --disable-dev-shm-usage"
+  },
+  "devDependencies": {
+    "@electron-toolkit/utils": "^4.0.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.0",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^5.4.11"
+  }
+}

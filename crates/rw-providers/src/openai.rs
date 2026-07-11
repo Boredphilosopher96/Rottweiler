@@ -12,8 +12,9 @@ use url::Url;
 use crate::types::RawSseFrame;
 use crate::{
     AuthProvider, BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason,
-    NetworkPolicy, Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
-    ProxyAuthentication, ThinkingLevel, TokenUsage, ToolChoice, WireFrameSink, WireMode,
+    NativeWebSearchCapability, NetworkPolicy, Provider, ProviderError, ProviderErrorKind,
+    ProviderEvent, ProviderRequest, ProxyAuthentication, ThinkingLevel, TokenUsage, ToolChoice,
+    WireFrameSink, WireMode,
     http::{build_client_with_proxy_auth, require_network, response_error, transport_error},
     sse::{SseDecoder, SseEvent},
 };
@@ -185,6 +186,23 @@ impl OpenAiCompatibleProvider {
         request: &ProviderRequest,
     ) -> Result<(), ProviderError> {
         request.validate_tool_choice()?;
+        let native_search = request
+            .tools
+            .iter()
+            .map(crate::types::native_web_search_request)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        if native_search.len() > 1 || (!native_search.is_empty() && request.tools.len() != 1) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "provider-native web search must be the only request tool",
+            ));
+        }
+        if let Some(search) = native_search.first() {
+            search.validate_for(self.native_web_search_capability())?;
+        }
         if !self.config.tool_calling && !request.tools.is_empty() {
             return Err(ProviderError::new(
                 ProviderErrorKind::Unsupported,
@@ -309,6 +327,16 @@ impl Provider for OpenAiCompatibleProvider {
         }
     }
 
+    fn native_web_search_capability(&self) -> NativeWebSearchCapability {
+        if self.config.wire_mode == OpenAiWireMode::Responses
+            && self.config.endpoint.host_str() == Some("api.openai.com")
+        {
+            NativeWebSearchCapability::Supported
+        } else {
+            NativeWebSearchCapability::Unsupported
+        }
+    }
+
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         self.stream_impl(request, None).await
     }
@@ -386,14 +414,26 @@ fn build_responses_request(request: &ProviderRequest, reasoning_endpoint: bool) 
     for turn in &request.turns {
         input.extend(responses_items(turn));
     }
+    let native_search = request
+        .tools
+        .iter()
+        .find_map(|tool| crate::types::native_web_search_request(tool).ok().flatten());
     let tools = request
         .tools
         .iter()
         .map(|tool| {
-            json!({
-                "type": "function", "name": tool.name,
-                "description": tool.description, "parameters": tool.input_schema,
-            })
+            if let Ok(Some(search)) = crate::types::native_web_search_request(tool) {
+                if search.allowed_domains.is_empty() {
+                    json!({"type":"web_search"})
+                } else {
+                    json!({"type":"web_search", "filters":{"allowed_domains":search.allowed_domains}})
+                }
+            } else {
+                json!({
+                    "type": "function", "name": tool.name,
+                    "description": tool.description, "parameters": tool.input_schema,
+                })
+            }
         })
         .collect::<Vec<_>>();
     let mut object = Map::from_iter([
@@ -407,6 +447,12 @@ fn build_responses_request(request: &ProviderRequest, reasoning_endpoint: bool) 
     ]);
     if !tools.is_empty() {
         object.insert("tools".to_owned(), Value::Array(tools));
+    }
+    if native_search.is_some() {
+        object.insert(
+            "include".to_owned(),
+            json!(["web_search_call.action.sources"]),
+        );
     }
     if !request.tools.is_empty() || request.tool_choice == ToolChoice::None {
         let tool_choice = match &request.tool_choice {
@@ -836,6 +882,21 @@ impl OpenAiState {
                     Ok(vec![ProviderEvent::ThinkingDelta { content, signature }])
                 }
             }
+            "response.output_item.done" if value["item"]["type"] == "web_search_call" => Ok(value
+                ["item"]["action"]["sources"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|source| {
+                    let uri = source["url"].as_str()?.to_owned();
+                    Some(ProviderEvent::Citation {
+                        uri,
+                        title: source["title"].as_str().map(str::to_owned),
+                        start_index: None,
+                        end_index: None,
+                    })
+                })
+                .collect()),
             "response.output_item.added" if value["item"]["type"] == "function_call" => {
                 self.finish_reason = Some(FinishReason::ToolCalls);
                 let index = value["output_index"].as_u64().unwrap_or_default();
@@ -1124,9 +1185,9 @@ mod tests {
     use url::Url;
 
     use crate::{
-        AuthMaterial, CacheBreakpointSupport, NetworkPolicy, ProviderErrorKind, ProviderEvent,
-        ProviderRequest, Secret, StaticAuth, ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition,
-        sse::SseEvent,
+        AuthMaterial, CacheBreakpointSupport, NativeWebSearchRequest, NetworkPolicy,
+        ProviderErrorKind, ProviderEvent, ProviderRequest, Secret, StaticAuth, ThinkingLevel,
+        TokenUsage, ToolChoice, ToolDefinition, sse::SseEvent,
     };
 
     use super::{
@@ -1196,6 +1257,10 @@ mod tests {
                 json!({"annotation":{"type":"url_citation","url":"https://example.test","title":"Example","start_index":0,"end_index":5}}),
             ),
             (
+                "response.output_item.done",
+                json!({"item":{"type":"web_search_call","action":{"sources":[{"url":"https://source.example/path","title":"Source"}]}}}),
+            ),
+            (
                 "response.completed",
                 json!({"response":{"usage":{"input_tokens":8,"output_tokens":3,"output_tokens_details":{"reasoning_tokens":1}}}}),
             ),
@@ -1216,6 +1281,7 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, ProviderEvent::Citation { .. }))
         );
+        assert!(events.iter().any(|event| matches!(event, ProviderEvent::Citation { uri, .. } if uri == "https://source.example/path")));
         let reasoning_signature = events.iter().rev().find_map(|event| match event {
             ProviderEvent::ThinkingDelta {
                 signature: Some(signature),
@@ -1234,6 +1300,43 @@ mod tests {
             events.last(),
             Some(ProviderEvent::Finished { .. })
         ));
+    }
+
+    #[test]
+    fn responses_native_search_uses_official_tool_and_sources_shape() {
+        let request = ProviderRequest {
+            model: "gpt-fixture".to_owned(),
+            turns: vec![Turn {
+                role: Role::User,
+                blocks: vec![Block::Text {
+                    text: "rust lsp".to_owned(),
+                }],
+                meta: TurnMeta::default(),
+            }],
+            tools: vec![
+                NativeWebSearchRequest {
+                    query: "rust lsp".to_owned(),
+                    max_results: 5,
+                    recency_days: None,
+                    allowed_domains: vec!["rust-lang.org".to_owned()],
+                }
+                .tool_definition()
+                .unwrap_or_else(|error| panic!("native search marker must encode: {error}")),
+            ],
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: 256,
+            temperature: None,
+            thinking: ThinkingLevel::Off,
+            cache_hint: None,
+        };
+        let body = build_responses_request(&request, false);
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(
+            body["tools"][0]["filters"]["allowed_domains"],
+            json!(["rust-lang.org"])
+        );
+        assert_eq!(body["include"], json!(["web_search_call.action.sources"]));
+        assert!(body.to_string().contains("rust lsp"));
     }
 
     #[test]

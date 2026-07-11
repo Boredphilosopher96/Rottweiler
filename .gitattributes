@@ -1,0 +1,2 @@
+# Pinned upstream acceptance fixtures are byte-for-byte Git tree snapshots.
+crates/rw-core/tests/fixtures/init/** -text whitespace=-trailing-space

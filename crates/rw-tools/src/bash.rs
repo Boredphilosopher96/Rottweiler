@@ -468,6 +468,7 @@ impl CommandFixtureRedactor for IdentityCommandFixtureRedactor {
 
 const COMMAND_REPLAY_FILE: &str = "commands.json";
 const COMMAND_REPLAY_TEMP_FILE: &str = "commands.json.tmp";
+const COMMAND_REPLAY_ROOT: &str = "${ROTTWEILER_COMMAND_ROOT}";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct CanonicalCommandRequest {
@@ -723,10 +724,25 @@ fn canonical_command_request(
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>()
         .join("/");
+    let env = request
+        .env
+        .iter()
+        .map(|(name, value)| {
+            let value_path = Path::new(value);
+            let points_to_root = value_path.is_absolute()
+                && std::fs::canonicalize(value_path).is_ok_and(|path| path == workspace_root);
+            let value = if points_to_root {
+                COMMAND_REPLAY_ROOT.to_owned()
+            } else {
+                value.clone()
+            };
+            (name.clone(), value)
+        })
+        .collect();
     Ok(CanonicalCommandRequest {
         command: request.command.clone(),
         workspace_relative_cwd,
-        env: request.env.clone(),
+        env,
         network_domains: request.network_domains.clone(),
         sandbox: request.sandbox,
     })
@@ -2579,6 +2595,16 @@ sys.exit(92)
         )
         .expect("recorder");
         let recorded_sink = Arc::new(RecordingSink::default());
+        let recorded_env = BTreeMap::from([
+            (
+                "HOME".to_owned(),
+                record_root.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "TMPDIR".to_owned(),
+                record_root.path().to_string_lossy().into_owned(),
+            ),
+        ]);
         let expected_outcome = recorder
             .run(
                 CommandRequest {
@@ -2586,7 +2612,7 @@ sys.exit(92)
                     network_domains: Vec::new(),
                     command: dangerous_command.to_owned(),
                     cwd: record_root.path().to_path_buf(),
-                    env: BTreeMap::new(),
+                    env: recorded_env,
                 },
                 CancellationToken::default(),
                 recorded_sink.clone(),
@@ -2597,6 +2623,16 @@ sys.exit(92)
         let offline_executor = ReplayCommandExecutor::load(fixtures.path(), replay_root.path())
             .expect("replay executor");
         let replayed_sink = Arc::new(RecordingSink::default());
+        let replayed_env = BTreeMap::from([
+            (
+                "HOME".to_owned(),
+                replay_root.path().to_string_lossy().into_owned(),
+            ),
+            (
+                "TMPDIR".to_owned(),
+                replay_root.path().to_string_lossy().into_owned(),
+            ),
+        ]);
         let actual_outcome = offline_executor
             .run(
                 CommandRequest {
@@ -2604,7 +2640,7 @@ sys.exit(92)
                     network_domains: Vec::new(),
                     command: dangerous_command.to_owned(),
                     cwd: replay_root.path().to_path_buf(),
-                    env: BTreeMap::new(),
+                    env: replayed_env.clone(),
                 },
                 CancellationToken::default(),
                 replayed_sink.clone(),
@@ -2625,7 +2661,7 @@ sys.exit(92)
                         network_domains: Vec::new(),
                         command: dangerous_command.to_owned(),
                         cwd: replay_root.path().to_path_buf(),
-                        env: BTreeMap::new(),
+                        env: replayed_env,
                     },
                     CancellationToken::default(),
                     Arc::new(RecordingSink::default()),

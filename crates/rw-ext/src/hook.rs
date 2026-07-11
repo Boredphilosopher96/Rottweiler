@@ -3,8 +3,12 @@ use std::{panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use futures_util::FutureExt;
+use rw_tools::CancellationToken;
+use rw_types::ToolCapability;
 use serde_json::Value;
 use thiserror::Error;
+
+const HOOK_CANCELLATION_GRACE: Duration = Duration::from_secs(2);
 
 /// Stable catalog of request/response hook points.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -26,6 +30,14 @@ pub enum HookFailurePolicy {
     FailClosed,
 }
 
+/// Filesystem effect declared by a hook before it becomes eligible to run.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HookEffect {
+    #[default]
+    ReadOnly,
+    WorkspaceMutating,
+}
+
 /// Public registration metadata shared by in-process and future RPC hooks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HookRegistration {
@@ -34,6 +46,9 @@ pub struct HookRegistration {
     priority: i32,
     failure_policy: HookFailurePolicy,
     timeout: Duration,
+    effect: HookEffect,
+    applicable_tools: Vec<String>,
+    required_capabilities: Vec<ToolCapability>,
 }
 
 impl HookRegistration {
@@ -47,6 +62,9 @@ impl HookRegistration {
             priority: 0,
             failure_policy: HookFailurePolicy::FailOpen,
             timeout: Duration::from_secs(5),
+            effect: HookEffect::ReadOnly,
+            applicable_tools: Vec::new(),
+            required_capabilities: Vec::new(),
         }
     }
 
@@ -68,6 +86,42 @@ impl HookRegistration {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Declares whether this hook may mutate the workspace.
+    #[must_use]
+    pub const fn with_effect(mut self, effect: HookEffect) -> Self {
+        self.effect = effect;
+        self
+    }
+
+    /// Restricts this registration to exact canonical tool names. An empty
+    /// list applies to every tool.
+    #[must_use]
+    pub fn with_applicable_tools(
+        mut self,
+        tools: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.applicable_tools = tools.into_iter().map(Into::into).collect();
+        self.applicable_tools.sort();
+        self.applicable_tools.dedup();
+        self
+    }
+
+    /// Declares capabilities consumed by the hook itself. The engine merges
+    /// these into the matched tool request before authorization.
+    #[must_use]
+    pub fn with_required_capabilities(
+        mut self,
+        capabilities: impl IntoIterator<Item = ToolCapability>,
+    ) -> Self {
+        self.required_capabilities.clear();
+        for capability in capabilities {
+            if !self.required_capabilities.contains(&capability) {
+                self.required_capabilities.push(capability);
+            }
+        }
         self
     }
 
@@ -95,14 +149,39 @@ impl HookRegistration {
     pub const fn timeout(&self) -> Duration {
         self.timeout
     }
+
+    #[must_use]
+    pub const fn effect(&self) -> HookEffect {
+        self.effect
+    }
+
+    #[must_use]
+    pub fn applicable_tools(&self) -> &[String] {
+        &self.applicable_tools
+    }
+
+    #[must_use]
+    pub fn applies_to_tool(&self, name: &str) -> bool {
+        self.applicable_tools.is_empty()
+            || self
+                .applicable_tools
+                .binary_search_by(|tool| tool.as_str().cmp(name))
+                .is_ok()
+    }
+
+    #[must_use]
+    pub fn required_capabilities(&self) -> &[ToolCapability] {
+        &self.required_capabilities
+    }
 }
 
 /// Immutable input to one hook. A replacement returned by one hook becomes the
 /// payload observed by the next hook.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct HookInvocation<'a> {
     event: HookEvent,
     payload: &'a Value,
+    cancellation: &'a CancellationToken,
 }
 
 impl HookInvocation<'_> {
@@ -114,6 +193,11 @@ impl HookInvocation<'_> {
     #[must_use]
     pub const fn payload(&self) -> &Value {
         self.payload
+    }
+
+    #[must_use]
+    pub const fn cancellation(&self) -> &CancellationToken {
+        self.cancellation
     }
 }
 
@@ -227,6 +311,8 @@ impl HookDispatchResult {
 pub enum HookRegistrationError {
     #[error("hook ID must not be empty or contain control characters")]
     InvalidId,
+    #[error("hook applicable tool names must use canonical lowercase snake_case")]
+    InvalidToolName,
     #[error("hook `{id}` is already registered for {event:?}")]
     Duplicate { event: HookEvent, id: String },
 }
@@ -234,6 +320,34 @@ pub enum HookRegistrationError {
 struct RegisteredHook {
     registration: HookRegistration,
     handler: Arc<dyn HookHandler>,
+}
+
+async fn invoke_registered_hook(
+    registered: &RegisteredHook,
+    event: HookEvent,
+    payload: &Value,
+) -> Result<HookDirective, HookError> {
+    let cancellation = CancellationToken::default();
+    let invocation = HookInvocation {
+        event,
+        payload,
+        cancellation: &cancellation,
+    };
+    let invoked = AssertUnwindSafe(registered.handler.invoke(invocation)).catch_unwind();
+    tokio::pin!(invoked);
+    tokio::select! {
+        result = &mut invoked => result.unwrap_or_else(|_| {
+            Err(HookError::new("panic", "hook implementation panicked"))
+        }),
+        () = tokio::time::sleep(registered.registration.timeout()) => {
+            cancellation.cancel();
+            let _ = tokio::time::timeout(HOOK_CANCELLATION_GRACE, &mut invoked).await;
+            Err(HookError::new(
+                "timeout",
+                "hook invocation exceeded its configured deadline",
+            ))
+        }
+    }
 }
 
 /// Deterministic request/response hook dispatcher.
@@ -281,6 +395,14 @@ impl HookDispatcher {
         handler: Arc<dyn HookHandler>,
     ) -> Result<(), HookRegistrationError> {
         validate_id(registration.id())?;
+        if registration.applicable_tools().iter().any(|name| {
+            name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        }) {
+            return Err(HookRegistrationError::InvalidToolName);
+        }
         let event = registration.event();
         let event_hooks = self.hooks.entry(event).or_default();
         if event_hooks
@@ -331,8 +453,65 @@ impl HookDispatcher {
             .map(|registered| &registered.registration)
     }
 
+    /// Reports whether a workspace-mutating registration can apply to this
+    /// exact canonical tool name.
+    #[must_use]
+    pub fn has_workspace_mutating_tool_hook(&self, event: HookEvent, tool_name: &str) -> bool {
+        self.registrations(event).any(|registration| {
+            registration.effect() == HookEffect::WorkspaceMutating
+                && registration.applies_to_tool(tool_name)
+        })
+    }
+
+    /// Returns the deduplicated capabilities consumed by matching hooks for
+    /// one event and canonical tool name.
+    #[must_use]
+    pub fn required_tool_capabilities(
+        &self,
+        event: HookEvent,
+        tool_name: &str,
+    ) -> Vec<ToolCapability> {
+        let mut capabilities = Vec::new();
+        for registration in self
+            .registrations(event)
+            .filter(|registration| registration.applies_to_tool(tool_name))
+        {
+            for capability in registration.required_capabilities() {
+                if !capabilities.contains(capability) {
+                    capabilities.push(capability.clone());
+                }
+            }
+        }
+        capabilities
+    }
+
+    /// Runs only one effect class for an exact tool name. This lets the engine
+    /// execute read-only pre-tool guards before opening a checkpoint while
+    /// deferring workspace-mutating hooks until after it begins.
+    pub async fn dispatch_tool_effect(
+        &self,
+        event: HookEvent,
+        payload: Value,
+        tool_name: &str,
+        effect: HookEffect,
+    ) -> HookDispatchResult {
+        self.dispatch_selected(event, payload, |registration| {
+            registration.effect() == effect && registration.applies_to_tool(tool_name)
+        })
+        .await
+    }
+
     /// Runs the event pipeline serially and applies its failure policies.
-    pub async fn dispatch(&self, event: HookEvent, mut payload: Value) -> HookDispatchResult {
+    pub async fn dispatch(&self, event: HookEvent, payload: Value) -> HookDispatchResult {
+        self.dispatch_selected(event, payload, |_| true).await
+    }
+
+    async fn dispatch_selected(
+        &self,
+        event: HookEvent,
+        mut payload: Value,
+        selected: impl Fn(&HookRegistration) -> bool,
+    ) -> HookDispatchResult {
         let mut failures = Vec::new();
         let Some(event_hooks) = self.hooks.get(&event) else {
             return HookDispatchResult {
@@ -342,29 +521,11 @@ impl HookDispatcher {
             };
         };
 
-        for registered in event_hooks {
-            let invocation = HookInvocation {
-                event,
-                payload: &payload,
-            };
-            let invoked = tokio::time::timeout(
-                registered.registration.timeout(),
-                AssertUnwindSafe(registered.handler.invoke(invocation)).catch_unwind(),
-            )
-            .await
-            .map_or_else(
-                |_| {
-                    Err(HookError::new(
-                        "timeout",
-                        "hook invocation exceeded its configured deadline",
-                    ))
-                },
-                |result| {
-                    result.unwrap_or_else(|_| {
-                        Err(HookError::new("panic", "hook implementation panicked"))
-                    })
-                },
-            );
+        for registered in event_hooks
+            .iter()
+            .filter(|registered| selected(&registered.registration))
+        {
+            let invoked = invoke_registered_hook(registered, event, &payload).await;
             match invoked {
                 Ok(HookDirective::Continue) => {}
                 Ok(HookDirective::Replace(replacement)) => payload = replacement,
@@ -418,7 +579,10 @@ fn validate_id(id: &str) -> Result<(), HookRegistrationError> {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::sync::Mutex;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use async_trait::async_trait;
     use serde_json::json;
@@ -432,6 +596,8 @@ mod tests {
 
     struct NeverReturns;
 
+    struct CleanupOnCancellation(Arc<AtomicBool>);
+
     #[async_trait]
     impl HookHandler for NeverReturns {
         async fn invoke(
@@ -439,6 +605,16 @@ mod tests {
             _invocation: HookInvocation<'_>,
         ) -> Result<HookDirective, HookError> {
             std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl HookHandler for CleanupOnCancellation {
+        async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
+            invocation.cancellation().cancelled().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            self.0.store(true, Ordering::SeqCst);
+            Ok(HookDirective::Continue)
         }
     }
 
@@ -483,6 +659,23 @@ mod tests {
             assert_eq!(result.failures().len(), 1);
             assert_eq!(result.failures()[0].error().code(), "timeout");
         }
+    }
+
+    #[tokio::test]
+    async fn timeout_cancels_and_awaits_handler_cleanup_before_returning() {
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let mut dispatcher = HookDispatcher::new();
+        dispatcher
+            .register(
+                HookRegistration::new("cleanup", HookEvent::PreTool)
+                    .with_timeout(Duration::from_millis(1))
+                    .with_failure_policy(HookFailurePolicy::FailClosed),
+                CleanupOnCancellation(Arc::clone(&cleaned)),
+            )
+            .expect("cleanup hook");
+        let result = dispatcher.dispatch(HookEvent::PreTool, Value::Null).await;
+        assert!(!result.completed());
+        assert!(cleaned.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

@@ -23,10 +23,16 @@ pub struct Config {
     pub providers: BTreeMap<String, ProviderConfig>,
     /// Outbound networking configuration.
     pub network: NetworkConfig,
+    /// User-scoped configured web-search API boundary.
+    #[serde(default)]
+    pub websearch: WebSearchConfig,
     /// Permission defaults.
     pub permissions: PermissionConfig,
     /// Sandbox classification configuration.
     pub sandbox: SandboxConfig,
+    /// Declarative formatter, linter, and test hooks.
+    #[serde(default)]
+    pub toolchain: ToolchainConfig,
     /// Opt-in telemetry configuration.
     pub telemetry: TelemetryConfig,
     /// Self-update channel configuration.
@@ -232,6 +238,29 @@ pub struct NetworkConfig {
     pub proxy_password_credential: Option<String>,
 }
 
+/// Optional generic search API used when provider-native search is unavailable.
+/// This section is accepted only from user configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebSearchConfig {
+    /// Absolute HTTP(S) endpoint without credentials, query, or fragment.
+    pub endpoint: Option<String>,
+    /// Query-string key used for the search text.
+    pub query_parameter: String,
+    /// Request header to credential-store identifier mappings.
+    pub header_credentials: BTreeMap<String, String>,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            query_parameter: "q".to_owned(),
+            header_credentials: BTreeMap::new(),
+        }
+    }
+}
+
 /// Default permission decision used when no rule matches.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -282,6 +311,37 @@ pub struct PermissionRule {
 pub struct SandboxConfig {
     /// Additional command patterns classified as safe by the user.
     pub safe_list: Vec<String>,
+}
+
+/// Declarative commands registered onto the shared post-tool hook pipeline.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolchainConfig {
+    /// Formatter applied when no more-specific rule overrides it.
+    pub formatter: Option<String>,
+    /// Linters applied when no more-specific rule overrides them.
+    pub linters: Vec<String>,
+    /// Optional default test command surfaced to initialization and commands.
+    pub test: Option<String>,
+    /// Glob-specific toolchain overrides, in declaration order.
+    #[serde(rename = "rule", alias = "rules")]
+    pub rules: Vec<ToolchainRule>,
+}
+
+/// One file-glob-specific toolchain rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToolchainRule {
+    /// Workspace-relative file glob, such as `**/*.rs`.
+    #[serde(rename = "match")]
+    pub pattern: String,
+    /// Optional formatter override. `{file}` expands to the touched path.
+    pub formatter: Option<String>,
+    /// Linter override. `{file}` expands to the touched path.
+    #[serde(default)]
+    pub linters: Vec<String>,
+    /// Optional test command associated with this file class.
+    pub test: Option<String>,
 }
 
 /// Telemetry settings. Telemetry is disabled unless explicitly enabled.
@@ -335,10 +395,14 @@ pub struct ConfigFile {
     pub providers: Option<BTreeMap<String, ProviderConfig>>,
     /// Optional network settings.
     pub network: Option<NetworkConfigFile>,
+    /// Optional user-scoped configured web-search API.
+    pub websearch: Option<WebSearchConfigFile>,
     /// Optional permission settings.
     pub permissions: Option<PermissionConfigFile>,
     /// Optional sandbox settings.
     pub sandbox: Option<SandboxConfigFile>,
+    /// Optional declarative toolchain hooks.
+    pub toolchain: Option<ToolchainConfig>,
     /// Optional telemetry settings.
     pub telemetry: Option<TelemetryConfigFile>,
     /// Optional update settings.
@@ -398,6 +462,15 @@ pub struct NetworkConfigFile {
     pub proxy_username: Option<String>,
     /// Optional keychain credential identifier for the global proxy password.
     pub proxy_password_credential: Option<String>,
+}
+
+/// Partial user-scoped configured web-search API.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchConfigFile {
+    pub endpoint: Option<String>,
+    pub query_parameter: Option<String>,
+    pub header_credentials: Option<BTreeMap<String, String>>,
 }
 
 /// Partial permission configuration.

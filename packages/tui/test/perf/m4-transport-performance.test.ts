@@ -52,7 +52,9 @@ describe("M4 transport and process acceptance gates", () => {
     const build = Bun.spawnSync(
       [process.execPath, "build", "--compile", worker, "--outfile", executable],
       {
-        cwd: fileURLToPath(new URL("../..", import.meta.url)),
+        // Keep Bun's large temporary `.*.bun-build` executables inside the
+        // per-test directory, which the registered cleanup always removes.
+        cwd: directory,
         stdin: "ignore",
         stdout: "pipe",
         stderr: "pipe",

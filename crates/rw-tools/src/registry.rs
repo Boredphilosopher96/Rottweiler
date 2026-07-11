@@ -155,6 +155,7 @@ pub struct ToolContext {
     #[cfg(unix)]
     workspace_fds: Arc<Vec<OwnedFd>>,
     session_id: Option<SessionId>,
+    model_alias: Option<String>,
     result_limit_bytes: usize,
     pub cancellation: CancellationToken,
     pub output: Arc<dyn ToolOutputSink>,
@@ -231,6 +232,7 @@ impl ToolContext {
             #[cfg(unix)]
             workspace_fds: Arc::new(workspace_fds),
             session_id: None,
+            model_alias: None,
             result_limit_bytes: ToolLimits::default().max_result_bytes,
             cancellation: CancellationToken::default(),
             output: Arc::new(NoopOutputSink),
@@ -258,6 +260,20 @@ impl ToolContext {
     pub fn with_session_id(mut self, session_id: SessionId) -> Self {
         self.session_id = Some(session_id);
         self
+    }
+
+    /// Bind the model alias selected for this exact turn. Tools must not cache
+    /// this across turns because `/model` and custom-command overrides can
+    /// select a different provider backend.
+    #[must_use]
+    pub fn with_model_alias(mut self, model_alias: impl Into<String>) -> Self {
+        self.model_alias = Some(model_alias.into());
+        self
+    }
+
+    #[must_use]
+    pub fn model_alias(&self) -> Option<&str> {
+        self.model_alias.as_deref()
     }
 
     #[must_use]
@@ -673,6 +689,7 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, context: &ToolContext, input: Value) -> Result<ToolResult, ToolError>;
 }
 
+#[derive(Clone)]
 struct RegisteredTool {
     tool: Arc<dyn Tool>,
     descriptor: ToolDescriptor,
@@ -805,6 +822,26 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// Builds a registry containing only the exact requested tool names.
+    /// Existing guarded registrations are shared; no implementation is
+    /// reconstructed and capability snapshots remain unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::InvalidInput`] if any requested name is unknown.
+    pub fn subset<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Result<Self, ToolError> {
+        let mut tools = BTreeMap::new();
+        for name in names {
+            let registered = self.tools.get(name).ok_or_else(|| {
+                ToolError::InvalidInput(format!("allowed tool is not registered: {name}"))
+            })?;
+            tools
+                .entry(name.to_owned())
+                .or_insert_with(|| registered.clone());
+        }
+        Ok(Self { tools })
+    }
+
     #[must_use]
     pub fn len(&self) -> usize {
         self.tools.len()
@@ -869,6 +906,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["a", "z"]
         );
+        let subset = registry.subset(["a"]).expect("known subset");
+        assert_eq!(subset.len(), 1);
+        assert!(subset.resolve("a").is_some());
+        assert!(subset.resolve("z").is_none());
+        assert!(matches!(
+            registry.subset(["missing"]),
+            Err(ToolError::InvalidInput(_))
+        ));
     }
 
     #[test]

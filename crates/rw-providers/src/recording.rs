@@ -66,7 +66,13 @@ struct RecordedCapabilities {
     max_context_tokens: Option<u64>,
     max_output_tokens: Option<u64>,
     wire_mode: WireMode,
+    #[serde(default)]
+    native_web_search: RecordedNativeWebSearchSupport,
 }
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+struct RecordedNativeWebSearchSupport(bool);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,6 +96,7 @@ impl From<&Capabilities> for RecordedCapabilities {
             max_context_tokens: value.max_context_tokens,
             max_output_tokens: value.max_output_tokens,
             wire_mode: value.wire_mode,
+            native_web_search: RecordedNativeWebSearchSupport::default(),
         }
     }
 }
@@ -472,6 +479,15 @@ impl Recorder {
         self.activity.flush().await;
         self.writer.flush().await
     }
+
+    fn recorded_capabilities(&self, capabilities: &Capabilities) -> RecordedCapabilities {
+        let mut recorded = RecordedCapabilities::from(capabilities);
+        recorded.native_web_search = RecordedNativeWebSearchSupport(
+            self.inner.native_web_search_capability()
+                == crate::NativeWebSearchCapability::Supported,
+        );
+        recorded
+    }
 }
 
 #[async_trait]
@@ -482,6 +498,10 @@ impl Provider for Recorder {
 
     fn capabilities(&self) -> Capabilities {
         self.inner.capabilities()
+    }
+
+    fn native_web_search_capability(&self) -> crate::NativeWebSearchCapability {
+        self.inner.native_web_search_capability()
     }
 
     async fn model_metadata(&self) -> Result<Option<crate::ProviderModelMetadata>, ProviderError> {
@@ -511,7 +531,7 @@ impl Provider for Recorder {
                 let context = RecordingContext {
                     directory: self.directory.clone(),
                     provider,
-                    capabilities: RecordedCapabilities::from(&capabilities),
+                    capabilities: self.recorded_capabilities(&capabilities),
                     model_metadata: None,
                     wire_mode: capabilities.wire_mode,
                     request_hash,
@@ -537,7 +557,7 @@ impl Provider for Recorder {
             context: Some(RecordingContext {
                 directory: self.directory.clone(),
                 provider,
-                capabilities: RecordedCapabilities::from(&capabilities),
+                capabilities: self.recorded_capabilities(&capabilities),
                 model_metadata,
                 wire_mode,
                 request_hash,
@@ -846,11 +866,31 @@ pub struct ReplayProvider {
     name: String,
     directory: PathBuf,
     capabilities: Capabilities,
+    recorded_capabilities: RecordedCapabilities,
     model_metadata: Option<ProviderModelMetadata>,
     occurrences: Arc<Mutex<BTreeMap<String, u64>>>,
 }
 
 impl ReplayProvider {
+    /// Reads the persisted native-search capability without constructing a
+    /// replay stream. Older manifests deserialize this capability as false.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the recording manifest or fixtures are missing,
+    /// malformed, or inconsistent.
+    pub async fn recorded_native_web_search_capability(
+        name: &str,
+        directory: &Path,
+    ) -> Result<crate::NativeWebSearchCapability, ProviderError> {
+        let (capabilities, _) = load_recorded_capabilities(directory, name).await?;
+        Ok(if capabilities.native_web_search.0 {
+            crate::NativeWebSearchCapability::Supported
+        } else {
+            crate::NativeWebSearchCapability::Unsupported
+        })
+    }
+
     /// Loads a network-free provider and validates the recorded capability
     /// manifest against every provider-scoped fixture before returning.
     ///
@@ -864,11 +904,14 @@ impl ReplayProvider {
     ) -> Result<Self, ProviderError> {
         let name = name.into();
         let directory = directory.into();
-        let (capabilities, model_metadata) = load_recorded_capabilities(&directory, &name).await?;
+        let (recorded_capabilities, model_metadata) =
+            load_recorded_capabilities(&directory, &name).await?;
+        let capabilities = recorded_capabilities.clone().into();
         Ok(Self {
             name,
             directory,
             capabilities,
+            recorded_capabilities,
             model_metadata,
             occurrences: Arc::new(Mutex::new(BTreeMap::new())),
         })
@@ -883,6 +926,14 @@ impl Provider for ReplayProvider {
 
     fn capabilities(&self) -> Capabilities {
         self.capabilities.clone()
+    }
+
+    fn native_web_search_capability(&self) -> crate::NativeWebSearchCapability {
+        if self.recorded_capabilities.native_web_search.0 {
+            crate::NativeWebSearchCapability::Supported
+        } else {
+            crate::NativeWebSearchCapability::Unsupported
+        }
     }
 
     async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
@@ -917,7 +968,7 @@ impl Provider for ReplayProvider {
             || fixture.provider != self.name
             || !fixture_matches_manifest(
                 &fixture,
-                &RecordedCapabilities::from(&self.capabilities),
+                &self.recorded_capabilities,
                 self.model_metadata.as_ref(),
             )
             || fixture.request_hash != hash
@@ -1053,7 +1104,7 @@ fn raw_replay_mismatch() -> ProviderError {
 async fn load_recorded_capabilities(
     directory: &Path,
     provider: &str,
-) -> Result<(Capabilities, Option<ProviderModelMetadata>), ProviderError> {
+) -> Result<(RecordedCapabilities, Option<ProviderModelMetadata>), ProviderError> {
     let manifest_path = capability_manifest_path(directory, provider);
     let manifest_bytes = tokio::fs::read(&manifest_path).await.map_err(|_| {
         ProviderError::new(
@@ -1120,7 +1171,7 @@ async fn load_recorded_capabilities(
             ));
         }
     }
-    Ok((manifest.capabilities.into(), manifest.model_metadata))
+    Ok((manifest.capabilities, manifest.model_metadata))
 }
 
 fn ensure_capability_manifest(
@@ -1290,7 +1341,9 @@ fn validate_metadata_capabilities(
     capabilities: &RecordedCapabilities,
     metadata: &ProviderModelMetadata,
 ) -> Result<(), ProviderError> {
-    if RecordedCapabilities::from(&metadata.capabilities) != *capabilities {
+    let mut metadata_capabilities = RecordedCapabilities::from(&metadata.capabilities);
+    metadata_capabilities.native_web_search = capabilities.native_web_search;
+    if metadata_capabilities != *capabilities {
         return Err(ProviderError::new(
             ProviderErrorKind::Protocol,
             "provider model metadata capabilities do not match the recorded capabilities",
@@ -1344,7 +1397,9 @@ fn validate_manifest(provider: &str, manifest: &CapabilityManifest) -> Result<()
         ));
     }
     if manifest.model_metadata.as_ref().is_some_and(|metadata| {
-        RecordedCapabilities::from(&metadata.capabilities) != manifest.capabilities
+        let mut metadata_capabilities = RecordedCapabilities::from(&metadata.capabilities);
+        metadata_capabilities.native_web_search = manifest.capabilities.native_web_search;
+        metadata_capabilities != manifest.capabilities
     }) {
         return Err(ProviderError::new(
             ProviderErrorKind::Protocol,
@@ -1460,19 +1515,21 @@ mod tests {
 
     use crate::types::RawSseFrame;
     use crate::{
-        BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason, Provider,
-        ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest,
-        ThinkingLevel, TokenUsage, ToolChoice, UsageAccounting, WireFrameSink, WireMode,
+        BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason, NativeWebSearchRequest,
+        Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata,
+        ProviderRequest, ThinkingLevel, TokenUsage, ToolChoice, UsageAccounting, WireFrameSink,
+        WireMode,
     };
 
     use super::{
-        FixtureRedactor, RecordFixture, Recorder, ReplayProvider, canonicalize, fixture_path,
-        request_hash,
+        FixtureRedactor, RecordFixture, RecordedCapabilities, Recorder, ReplayProvider,
+        canonicalize, fixture_path, request_hash,
     };
 
     struct FixtureProvider {
         name: String,
     }
+    struct ResponsesWithoutNativeProvider;
 
     struct SequenceProvider {
         calls: AtomicUsize,
@@ -1931,6 +1988,28 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl Provider for ResponsesWithoutNativeProvider {
+        fn name(&self) -> &'static str {
+            "responses-without-native"
+        }
+
+        fn capabilities(&self) -> Capabilities {
+            Capabilities {
+                wire_mode: WireMode::OpenAiResponses,
+                ..test_capabilities()
+            }
+        }
+
+        async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+            Ok(Box::pin(futures_util::stream::iter([Ok(
+                ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                },
+            )])))
+        }
+    }
+
     fn request() -> ProviderRequest {
         ProviderRequest {
             model: "fixture-model".to_owned(),
@@ -1982,6 +2061,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn legacy_capability_manifest_defaults_native_search_to_unsupported() {
+        let value = serde_json::json!({
+            "tool_calling": true,
+            "vision": false,
+            "thinking": false,
+            "cache_breakpoints": "none",
+            "max_context_tokens": null,
+            "max_output_tokens": null,
+            "wire_mode": "open_ai_responses"
+        });
+        let capabilities: RecordedCapabilities = serde_json::from_value(value)
+            .unwrap_or_else(|error| panic!("legacy capabilities must parse: {error}"));
+        assert!(!capabilities.native_web_search.0);
+    }
+
     #[tokio::test]
     async fn replay_is_byte_identical_and_does_not_call_live_provider() {
         let nonce = SystemTime::now()
@@ -2015,6 +2110,81 @@ mod tests {
         let replay_bytes = serde_json::to_vec(&replay)
             .unwrap_or_else(|error| panic!("replay events serialize: {error}"));
         assert_eq!(live_bytes, replay_bytes);
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn responses_wire_mode_does_not_infer_native_search_support() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("rw-responses-no-search-{nonce}"));
+        let recorder = Recorder::new(
+            Arc::new(ResponsesWithoutNativeProvider),
+            &directory,
+            FixtureRedactor::default(),
+        );
+        recorder
+            .stream(request())
+            .await
+            .unwrap_or_else(|error| panic!("record stream must start: {error}"))
+            .collect::<Vec<_>>()
+            .await;
+        recorder
+            .flush()
+            .await
+            .unwrap_or_else(|error| panic!("recording must flush: {error}"));
+        let replay = ReplayProvider::load("responses-without-native", &directory)
+            .await
+            .unwrap_or_else(|error| panic!("replay provider must load: {error}"));
+        assert_eq!(
+            replay.native_web_search_capability(),
+            crate::NativeWebSearchCapability::Unsupported
+        );
+        let _ = tokio::fs::remove_dir_all(directory).await;
+    }
+
+    #[tokio::test]
+    async fn native_search_marker_round_trips_through_normal_record_replay() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("rw-native-search-replay-{nonce}"));
+        let mut search_request = request();
+        search_request.tools = vec![
+            NativeWebSearchRequest {
+                query: "recorded search".to_owned(),
+                max_results: 4,
+                recency_days: None,
+                allowed_domains: vec!["example.com".to_owned()],
+            }
+            .tool_definition()
+            .unwrap_or_else(|error| panic!("search marker must encode: {error}")),
+        ];
+        let recorder = Recorder::new(
+            Arc::new(FixtureProvider {
+                name: "native-search".to_owned(),
+            }),
+            &directory,
+            FixtureRedactor::default(),
+        );
+        let live = recorder
+            .stream(search_request.clone())
+            .await
+            .unwrap_or_else(|error| panic!("record stream must start: {error}"))
+            .collect::<Vec<_>>()
+            .await;
+        let replay = ReplayProvider::load("native-search", &directory)
+            .await
+            .unwrap_or_else(|error| panic!("replay provider must load: {error}"))
+            .stream(search_request)
+            .await
+            .unwrap_or_else(|error| panic!("replay must start: {error}"))
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(live, replay);
         let _ = tokio::fs::remove_dir_all(directory).await;
     }
 

@@ -7,6 +7,7 @@
 mod bash;
 mod builtins;
 mod files;
+mod intelligence;
 mod interaction;
 mod registry;
 mod search;
@@ -24,6 +25,10 @@ pub use files::{
     EditInput, EditOperation, EditTool, MultiEditInput, MultiEditTool, ReadInput, ReadTool,
     WriteInput, WriteTool,
 };
+pub use intelligence::{
+    CodeIntelligenceProvider, DefinitionTool, DiagnosticsInput, DiagnosticsTool, PositionInput,
+    ReferencesTool, RenameInput, RenameTool, SandboxedLspSpawner, discover_sandboxed_lsp_servers,
+};
 pub use interaction::{
     AskUserInput, AskUserTool, QuestionAsker, SubmitPlanTool, TodoAction, TodoInput, TodoItem,
     TodoStatus, TodoTool,
@@ -33,7 +38,11 @@ pub use registry::{
     ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
     ToolRegistry, ToolResult,
 };
-pub use rw_intel::SymbolIndex;
+pub use rw_intel::{
+    CodeIntelligence, Diagnostic, DiagnosticSeverity, IntelligenceBackend, IntelligenceResult,
+    Language, Location, LspConfig, LspProcessHandle, LspProcessSpawner, LspServerConfig, Position,
+    Range, RenameResult, SpawnedLspProcess, SymbolIndex, WorkspaceUriMapper,
+};
 #[doc(hidden)]
 pub use rw_sandbox::{
     EgressDecision, EgressPin, EgressPolicy, NetworkPolicy, SandboxError, SandboxPolicy,
@@ -42,4 +51,8 @@ pub use rw_sandbox::{
 };
 pub use search::{GlobInput, GlobTool, GrepInput, GrepTool, LsInput, LsTool};
 pub use symbols::{SymbolsInput, SymbolsTool, WorkspaceSymbolIndex};
-pub use web::{FetchRequest, FetchResponse, WebFetchInput, WebFetchTool, WebFetcher};
+pub use web::{
+    ConfiguredSearchApi, FetchRequest, FetchResponse, WebFetchInput, WebFetchTool, WebFetcher,
+    WebSearchInput, WebSearchRequest, WebSearchResponse, WebSearchResult, WebSearchSource,
+    WebSearchTool, WebSearcher,
+};

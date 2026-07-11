@@ -9,6 +9,141 @@ use thiserror::Error;
 
 use crate::ModelPricing;
 
+/// Reserved marker translated only by adapters that explicitly advertise
+/// provider-native web search.
+pub const NATIVE_WEB_SEARCH_TOOL_NAME: &str = "__rottweiler_provider_native_web_search";
+
+/// Whether a selected model/API can execute a provider-hosted web search.
+///
+/// This is intentionally separate from [`Capabilities`] until model discovery
+/// has positively identified the feature; adapters must not infer support only
+/// from their wire dialect.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeWebSearchCapability {
+    #[default]
+    Unsupported,
+    Supported,
+}
+
+/// Provider-neutral representation of an explicitly requested native search.
+/// Adapters that advertise [`NativeWebSearchCapability::Supported`] translate
+/// this into their provider's built-in search tool shape.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NativeWebSearchRequest {
+    pub query: String,
+    pub max_results: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recency_days: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_domains: Vec<String>,
+}
+
+impl NativeWebSearchRequest {
+    /// Validate provider-independent limits before an adapter serializes a
+    /// request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-request error for an empty/oversized query, an
+    /// out-of-range result count, or malformed domain filters.
+    pub fn validate(&self) -> Result<(), ProviderError> {
+        if self.query.trim().is_empty() || self.query.len() > 4_096 {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "web search query must contain 1 to 4096 bytes",
+            ));
+        }
+        if !(1..=50).contains(&self.max_results) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "web search result limit must be between 1 and 50",
+            ));
+        }
+        if self.allowed_domains.len() > 20
+            || self
+                .allowed_domains
+                .iter()
+                .any(|domain| !valid_search_domain(domain))
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "web search domain filter is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Validate both the request and the model-discovered feature flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns unsupported when the selected model has not positively
+    /// advertised native search, or invalid request when request bounds fail.
+    pub fn validate_for(&self, capability: NativeWebSearchCapability) -> Result<(), ProviderError> {
+        if capability != NativeWebSearchCapability::Supported {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Unsupported,
+                "selected model does not advertise provider-native web search",
+            ));
+        }
+        self.validate()
+    }
+
+    /// Encode this request into the normal provider request stream so existing
+    /// record/replay middleware captures native search without a side channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid request when bounds fail or encoding is unavailable.
+    pub fn tool_definition(&self) -> Result<ToolDefinition, ProviderError> {
+        self.validate()?;
+        let input_schema = serde_json::to_value(self).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "native web-search request could not be encoded",
+            )
+        })?;
+        Ok(ToolDefinition {
+            name: NATIVE_WEB_SEARCH_TOOL_NAME.to_owned(),
+            description: "Internal provider-native web search".to_owned(),
+            input_schema,
+        })
+    }
+}
+
+pub(crate) fn native_web_search_request(
+    tool: &ToolDefinition,
+) -> Result<Option<NativeWebSearchRequest>, ProviderError> {
+    if tool.name != NATIVE_WEB_SEARCH_TOOL_NAME {
+        return Ok(None);
+    }
+    let request: NativeWebSearchRequest = serde_json::from_value(tool.input_schema.clone())
+        .map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "native web-search marker is malformed",
+            )
+        })?;
+    request.validate()?;
+    Ok(Some(request))
+}
+
+fn valid_search_domain(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain.is_ascii()
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+}
+
 /// A provider-neutral request assembled by the engine.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRequest {
@@ -339,6 +474,39 @@ impl ProviderError {
     }
 }
 
+#[cfg(test)]
+mod web_search_tests {
+    use super::*;
+
+    #[test]
+    fn native_search_request_is_explicitly_bounded() {
+        let request = NativeWebSearchRequest {
+            query: "rust language server".to_owned(),
+            max_results: 10,
+            recency_days: Some(30),
+            allowed_domains: vec!["rust-lang.org".to_owned()],
+        };
+        assert_eq!(request.validate(), Ok(()));
+        assert!(matches!(
+            request.validate_for(NativeWebSearchCapability::Unsupported),
+            Err(ProviderError {
+                kind: ProviderErrorKind::Unsupported,
+                ..
+            })
+        ));
+
+        let mut invalid = request;
+        invalid.allowed_domains = vec!["https://attacker.invalid/path".to_owned()];
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProviderError {
+                kind: ProviderErrorKind::InvalidRequest,
+                ..
+            })
+        ));
+    }
+}
+
 /// A sendable provider event stream.
 pub type BoxEventStream =
     Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send + 'static>>;
@@ -364,6 +532,11 @@ pub trait Provider: Send + Sync {
 
     /// Declared features for graceful engine degradation.
     fn capabilities(&self) -> Capabilities;
+
+    /// Explicit adapter-level provider-native search capability.
+    fn native_web_search_capability(&self) -> NativeWebSearchCapability {
+        NativeWebSearchCapability::Unsupported
+    }
 
     /// Resolves authenticated model metadata when a provider has a dynamic
     /// catalog. Static providers use the default `None` result.

@@ -3,9 +3,11 @@
 pub mod checkpoint;
 pub mod config;
 pub mod credentials;
+pub mod memory;
 pub mod session;
 pub mod trust;
 
+pub use memory::{MemoryEntry, MemoryError, ProjectMemoryStore};
 pub use session::{
     AccountingLedger, AccountingTotals, TurnAccountingEntry, UtcDayKey, UtcTimestamp,
 };

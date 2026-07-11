@@ -316,6 +316,32 @@ impl LoadedConfig {
                     .map_or_else(|| "<unset>".to_owned(), quoted),
             ),
         );
+        lines.push(
+            self.render_leaf(
+                "websearch.endpoint",
+                &self
+                    .config
+                    .websearch
+                    .endpoint
+                    .as_deref()
+                    .map_or_else(|| "<unset>".to_owned(), quoted),
+            ),
+        );
+        lines.push(self.render_leaf(
+            "websearch.query_parameter",
+            &quoted(&self.config.websearch.query_parameter),
+        ));
+        lines.push(self.render_leaf(
+            "websearch.header_credentials",
+            &format!(
+                "{:?}",
+                self.config
+                    .websearch
+                    .header_credentials
+                    .keys()
+                    .collect::<Vec<_>>()
+            ),
+        ));
         lines.push(self.render_leaf(
             "permissions.default",
             permission_name(self.config.permissions.default),
@@ -323,6 +349,36 @@ impl LoadedConfig {
         lines.push(self.render_leaf(
             "sandbox.safe_list",
             &format!("{:?}", self.config.sandbox.safe_list),
+        ));
+        lines.push(
+            self.render_leaf(
+                "toolchain.formatter",
+                &self
+                    .config
+                    .toolchain
+                    .formatter
+                    .as_deref()
+                    .map_or_else(|| "<unset>".to_owned(), quoted),
+            ),
+        );
+        lines.push(self.render_leaf(
+            "toolchain.linters",
+            &format!("{:?}", self.config.toolchain.linters),
+        ));
+        lines.push(
+            self.render_leaf(
+                "toolchain.test",
+                &self
+                    .config
+                    .toolchain
+                    .test
+                    .as_deref()
+                    .map_or_else(|| "<unset>".to_owned(), quoted),
+            ),
+        );
+        lines.push(self.render_leaf(
+            "toolchain.rules",
+            &format!("{:?}", self.config.toolchain.rules),
         ));
         lines.push(self.render_leaf(
             "telemetry.enabled",
@@ -631,8 +687,15 @@ fn defaults_with_provenance() -> LoadedConfig {
         "network.proxy",
         "network.proxy_username",
         "network.proxy_password_credential",
+        "websearch.endpoint",
+        "websearch.query_parameter",
+        "websearch.header_credentials",
         "permissions.default",
         "sandbox.safe_list",
+        "toolchain.formatter",
+        "toolchain.linters",
+        "toolchain.test",
+        "toolchain.rules",
         "telemetry.enabled",
         "updates.channel",
     ]
@@ -866,6 +929,17 @@ fn apply_file(
             set_source(loaded, "budget.warn_at_percent", source);
         }
     }
+    if let Some(toolchain) = file.toolchain.take() {
+        loaded.config.toolchain = toolchain;
+        for key in [
+            "toolchain.formatter",
+            "toolchain.linters",
+            "toolchain.test",
+            "toolchain.rules",
+        ] {
+            set_source(loaded, key, source);
+        }
+    }
     if scope == FileScope::User {
         if let Some(telemetry) = file.telemetry.take()
             && let Some(value) = telemetry.enabled
@@ -884,6 +958,20 @@ fn apply_security_file_sections(
     file: ConfigFile,
     source: &ConfigSource,
 ) {
+    if let Some(websearch) = file.websearch {
+        if let Some(value) = websearch.endpoint {
+            loaded.config.websearch.endpoint = Some(value);
+            set_source(loaded, "websearch.endpoint", source);
+        }
+        if let Some(value) = websearch.query_parameter {
+            loaded.config.websearch.query_parameter = value;
+            set_source(loaded, "websearch.query_parameter", source);
+        }
+        if let Some(value) = websearch.header_credentials {
+            loaded.config.websearch.header_credentials = value;
+            set_source(loaded, "websearch.header_credentials", source);
+        }
+    }
     if let Some(network) = file.network {
         if let Some(value) = network.proxy {
             loaded.config.network.proxy = Some(value);
@@ -935,6 +1023,7 @@ fn warn_ignored_project_sections(
 ) {
     for (present, section) in [
         (file.network.is_some(), "network"),
+        (file.websearch.is_some(), "websearch"),
         (file.providers.is_some(), "providers"),
         (file.permissions.is_some(), "permissions"),
         (file.sandbox.is_some(), "sandbox.safe_list"),
@@ -1331,6 +1420,7 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         .budget
         .validate()
         .map_err(|message| ConfigError::Validation(message.to_owned()))?;
+    validate_websearch(&config.websearch)?;
     for rule in &config.permissions.rules {
         let Some((tool, pattern)) = rule.pattern.split_once('(') else {
             return Err(ConfigError::Validation(format!(
@@ -1373,6 +1463,7 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             )));
         }
     }
+    validate_toolchain(&config.toolchain)?;
     if let Some(proxy) = &config.network.proxy {
         validate_proxy("network.proxy", proxy)?;
     }
@@ -1386,6 +1477,135 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         validate_provider(name, provider)?;
     }
     Ok(())
+}
+
+fn validate_toolchain(config: &rw_types::config::ToolchainConfig) -> Result<(), ConfigError> {
+    for (label, command) in [
+        ("toolchain.formatter", config.formatter.as_deref()),
+        ("toolchain.test", config.test.as_deref()),
+    ] {
+        if command.is_some_and(invalid_toolchain_command) {
+            return Err(ConfigError::Validation(format!(
+                "{label} must be a non-empty one-line command"
+            )));
+        }
+    }
+    if config
+        .linters
+        .iter()
+        .any(|command| invalid_toolchain_command(command))
+    {
+        return Err(ConfigError::Validation(
+            "toolchain.linters must contain non-empty one-line commands".to_owned(),
+        ));
+    }
+    for rule in &config.rules {
+        if rule.pattern.trim().is_empty()
+            || globset::GlobBuilder::new(&rule.pattern)
+                .literal_separator(true)
+                .backslash_escape(true)
+                .build()
+                .is_err()
+        {
+            return Err(ConfigError::Validation(format!(
+                "toolchain rule contains invalid file glob {:?}",
+                rule.pattern
+            )));
+        }
+        if rule
+            .formatter
+            .as_deref()
+            .is_some_and(invalid_toolchain_command)
+            || rule.test.as_deref().is_some_and(invalid_toolchain_command)
+            || rule
+                .linters
+                .iter()
+                .any(|command| invalid_toolchain_command(command))
+        {
+            return Err(ConfigError::Validation(format!(
+                "toolchain rule {:?} contains an invalid command",
+                rule.pattern
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_websearch(config: &rw_types::config::WebSearchConfig) -> Result<(), ConfigError> {
+    if let Some(endpoint) = &config.endpoint {
+        let parsed = Url::parse(endpoint).map_err(|_| {
+            ConfigError::Validation("websearch.endpoint must be an absolute HTTP(S) URL".to_owned())
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || parsed.host().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(ConfigError::Validation(
+                "websearch.endpoint must not contain credentials, query, or fragment".to_owned(),
+            ));
+        }
+    }
+    if config.query_parameter.is_empty()
+        || !config
+            .query_parameter
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(ConfigError::Validation(
+            "websearch.query_parameter is invalid".to_owned(),
+        ));
+    }
+    for (name, credential) in &config.header_credentials {
+        let lower = name.to_ascii_lowercase();
+        if name.is_empty()
+            || !name.is_ascii()
+            || !name.bytes().all(is_http_token_byte)
+            || matches!(
+                lower.as_str(),
+                "host" | "connection" | "proxy-authorization"
+            )
+            || credential.trim().is_empty()
+            || credential
+                .chars()
+                .any(|character| matches!(character, '\0' | '\r' | '\n'))
+        {
+            return Err(ConfigError::Validation(format!(
+                "websearch header {name:?} is invalid or reserved"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
+}
+
+fn invalid_toolchain_command(command: &str) -> bool {
+    command.trim().is_empty()
+        || command
+            .chars()
+            .any(|character| character == '\0' || matches!(character, '\n' | '\r'))
 }
 
 fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<(), ConfigError> {
@@ -2457,5 +2677,136 @@ oauth_client_id = "attacker-client"
             .expect_err("scope collision must not load as user config");
 
         assert!(matches!(error, ConfigError::ScopeCollision(found) if found == path));
+    }
+
+    #[test]
+    fn toolchain_hooks_are_validated_and_project_overrides_require_trust() {
+        let root = tempdir().expect("temporary directory should be created");
+        let user = root.path().join("user.toml");
+        let project = root.path().join("project.toml");
+        fs::write(
+            &user,
+            r#"
+[toolchain]
+formatter = "rustfmt {file}"
+linters = ["cargo clippy --message-format short"]
+test = "cargo test"
+"#,
+        )
+        .expect("user toolchain config");
+        fs::write(
+            &project,
+            r#"
+[toolchain]
+formatter = "prettier --write {file}"
+linters = ["eslint {file}"]
+test = "bun test"
+
+[[toolchain.rule]]
+match = "packages/**/*.ts"
+formatter = "biome format --write {file}"
+linters = ["biome check {file}"]
+"#,
+        )
+        .expect("project toolchain config");
+
+        let untrusted = ConfigLoader::new(user.clone(), project.clone())
+            .load()
+            .expect("untrusted project config remains inert");
+        assert_eq!(
+            untrusted.config.toolchain.formatter.as_deref(),
+            Some("rustfmt {file}")
+        );
+        assert_eq!(
+            untrusted.provenance("toolchain.formatter"),
+            Some(&ConfigSource::UserFile(user.clone()))
+        );
+
+        let trusted = ConfigLoader::new(user, project.clone())
+            .with_project_trust(true)
+            .load()
+            .expect("trusted project toolchain config");
+        assert_eq!(
+            trusted.config.toolchain.formatter.as_deref(),
+            Some("prettier --write {file}")
+        );
+        assert_eq!(trusted.config.toolchain.rules.len(), 1);
+        assert_eq!(
+            trusted.provenance("toolchain.rules"),
+            Some(&ConfigSource::ProjectFile(project))
+        );
+
+        let invalid = root.path().join("invalid.toml");
+        fs::write(&invalid, "[toolchain]\nformatter = \"   \"\n")
+            .expect("invalid toolchain config");
+        let error = ConfigLoader::new(invalid, root.path().join("missing.toml"))
+            .load()
+            .expect_err("blank toolchain commands fail validation");
+        assert!(error.to_string().contains("toolchain.formatter"));
+    }
+
+    #[test]
+    fn websearch_endpoint_and_headers_are_user_scoped_even_for_trusted_projects() {
+        let root = tempdir().expect("temporary directory should be created");
+        let user = root.path().join("user.toml");
+        let project = root.path().join("project.toml");
+        fs::write(
+            &user,
+            r#"
+[websearch]
+endpoint = "https://search.example/v1"
+query_parameter = "query"
+
+[websearch.header_credentials]
+Authorization = "search-api-token"
+"X-Client" = "rottweiler"
+"#,
+        )
+        .expect("user search config");
+        fs::write(
+            &project,
+            r#"
+[websearch]
+endpoint = "https://project-attacker.invalid/search"
+query_parameter = "override"
+
+[websearch.header_credentials]
+Authorization = "project-attacker-credential"
+"#,
+        )
+        .expect("project search config");
+
+        let loaded = ConfigLoader::new(user.clone(), project)
+            .with_project_trust(true)
+            .load()
+            .expect("trusted project still cannot set search egress");
+        assert_eq!(
+            loaded.config.websearch.endpoint.as_deref(),
+            Some("https://search.example/v1")
+        );
+        assert_eq!(loaded.config.websearch.query_parameter, "query");
+        assert_eq!(
+            loaded.provenance("websearch.endpoint"),
+            Some(&ConfigSource::UserFile(user))
+        );
+        assert!(loaded.warnings().iter().any(|warning| {
+            warning.message().contains("[websearch]")
+                && warning.message().contains("security-sensitive")
+        }));
+        let rendered = loaded.render_with_provenance();
+        assert!(rendered.contains("Authorization"));
+        assert!(!rendered.contains("Bearer"));
+        assert!(!rendered.contains("project-attacker-credential"));
+
+        let invalid = root.path().join("invalid.toml");
+        fs::write(
+            &invalid,
+            "[websearch]\nendpoint = \"https://search.example\"\n[websearch.header_credentials]\nHost = \"attacker-credential\"\n",
+        )
+        .expect("invalid search config");
+        let error = ConfigLoader::new(invalid, root.path().join("missing.toml"))
+            .load()
+            .expect_err("reserved search headers fail validation");
+        assert!(error.to_string().contains("websearch header"));
     }
 }

@@ -89,6 +89,13 @@ impl WorkspaceSymbolIndex {
         Ok(())
     }
 
+    /// Ordered per-root indexes used by the optional LSP facade. Added roots
+    /// have the same index as their `@root/N` virtual path prefix.
+    #[must_use]
+    pub fn root_indexes(&self) -> &[Arc<SymbolIndex>] {
+        &self.indexes
+    }
+
     /// Updates one plain or `@root/N` virtual path.
     ///
     /// # Errors

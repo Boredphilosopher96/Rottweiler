@@ -2460,6 +2460,7 @@ dependencies = [
  "clap",
  "futures-util",
  "getrandom 0.4.3",
+ "globset",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2473,6 +2474,7 @@ dependencies = [
  "rw-store",
  "serde",
  "serde_json",
+ "shell-words",
  "tempfile",
  "tokio",
  "toml",
@@ -2528,28 +2530,36 @@ name = "rw-ext"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "futures-util",
+ "rustix",
  "rw-providers",
  "rw-tools",
  "rw-types",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml",
 ]
 
 [[package]]
 name = "rw-intel"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "ignore",
  "rw-types",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tree-sitter",
  "tree-sitter-python",
  "tree-sitter-rust",
  "tree-sitter-typescript",
+ "url",
 ]
 
 [[package]]

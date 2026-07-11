@@ -192,6 +192,29 @@ impl SessionEventLog {
     pub fn load<T: DeserializeOwned>(&self) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
         load_events(&self.file)
     }
+
+    /// Loads an existing session log without acquiring the lifetime writer lock.
+    ///
+    /// This is the read-only boundary for host queries while the owning actor
+    /// may still be active. A concurrent append is detected by the stable-file
+    /// read and returned as an error rather than projecting a torn record.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe id or path, missing log, concurrent
+    /// mutation, malformed record, schema mismatch, or non-contiguous sequence.
+    pub fn load_existing<T: DeserializeOwned>(
+        root: &Path,
+        session_id: &str,
+    ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+        validate_session_id(session_id)?;
+        #[cfg(unix)]
+        let file = open_existing_session_file(root, session_id)?;
+        #[cfg(not(unix))]
+        let file = open_existing_session_file_portable(root, session_id)?;
+        ensure_regular_file(&file)?;
+        load_events(&file)
+    }
 }
 
 /// One denormalized row in the session listing/search index.
@@ -1400,6 +1423,39 @@ fn open_session_file(root: &Path, session_id: &str) -> Result<File, SessionStore
 }
 
 #[cfg(unix)]
+fn open_existing_session_file(root: &Path, session_id: &str) -> Result<File, SessionStoreError> {
+    let root = File::open(root)?;
+    if !root.metadata()?.is_dir() {
+        return Err(SessionStoreError::UnsafeSessionDirectory);
+    }
+    let flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::DIRECTORY
+        | rustix::fs::OFlags::NONBLOCK
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW;
+    let sessions = File::from(
+        rustix::fs::openat(&root, "sessions", flags, rustix::fs::Mode::empty())
+            .map_err(std::io::Error::from)?,
+    );
+    let session = File::from(
+        rustix::fs::openat(&sessions, session_id, flags, rustix::fs::Mode::empty())
+            .map_err(std::io::Error::from)?,
+    );
+    let event_flags = rustix::fs::OFlags::RDONLY
+        | rustix::fs::OFlags::NONBLOCK
+        | rustix::fs::OFlags::CLOEXEC
+        | rustix::fs::OFlags::NOFOLLOW;
+    rustix::fs::openat(
+        &session,
+        "events.jsonl",
+        event_flags,
+        rustix::fs::Mode::empty(),
+    )
+    .map(File::from)
+    .map_err(|error| std::io::Error::from(error).into())
+}
+
+#[cfg(unix)]
 fn open_or_create_directory(parent: &File, name: &str) -> Result<File, SessionStoreError> {
     let flags = rustix::fs::OFlags::RDONLY
         | rustix::fs::OFlags::DIRECTORY
@@ -1485,6 +1541,27 @@ fn open_session_file_portable(
     };
     sync_event_file(&file)?;
     Ok(file)
+}
+
+#[cfg(not(unix))]
+fn open_existing_session_file_portable(
+    root: &Path,
+    session_id: &str,
+) -> Result<File, SessionStoreError> {
+    let sessions = root.join("sessions");
+    let directory = sessions.join(session_id);
+    let path = directory.join("events.jsonl");
+    for candidate in [root, sessions.as_path(), directory.as_path()] {
+        let metadata = fs::symlink_metadata(candidate)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(SessionStoreError::UnsafeSessionDirectory);
+        }
+    }
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(SessionStoreError::UnsafeEventFileType);
+    }
+    File::open(path).map_err(Into::into)
 }
 
 #[cfg(not(unix))]

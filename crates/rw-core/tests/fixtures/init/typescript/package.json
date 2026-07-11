@@ -1,0 +1,26 @@
+{
+  "name": "sora-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "license": "GPL-3.0-or-later",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @sora/browser",
+    "build": "npm run build -w @sora/browser",
+    "start": "npm run start -w @sora/browser",
+    "smoke": "npm run smoke -w @sora/browser",
+    "typecheck": "npm run typecheck -w @sora/engine && npm run typecheck -w @sora/browser",
+    "test": "node --experimental-strip-types tests/pure.test.ts",
+    "verify": "npm run typecheck && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "hash-wasm": "^4.12.0"
+  }
+}
