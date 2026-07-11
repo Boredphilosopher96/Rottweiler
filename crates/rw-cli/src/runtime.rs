@@ -14,6 +14,8 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
 use rustyline::{DefaultEditor, error::ReadlineError};
+#[cfg(test)]
+use rw_core::runtime_support::probe_sandbox;
 use rw_core::runtime_support::{
     ApplyWorktreeDiffTool, ApprovalBinding, ApprovalDecision, AskUserInput, AskUserTool,
     BackgroundKillTool, BackgroundOutputTool, BackgroundProcessLimits, BackgroundProcessManager,
@@ -12310,6 +12312,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn production_toolchain_runs_sandboxed_rustfmt_and_offline_clippy() {
         let rustfmt_available = std::process::Command::new("rustfmt")
             .arg("--version")
@@ -12388,6 +12391,38 @@ mod tests {
             )
             .await;
 
+        let sandbox = probe_sandbox();
+        if sandbox.support != SandboxSupport::Enforced {
+            assert_eq!(
+                std::fs::read_to_string(root.path().join("crate/src/lib.rs"))
+                    .expect("unchanged source"),
+                "pub fn bad(value:&Vec<u8>)->usize{value.len()}\n",
+                "an unavailable sandbox must fail closed before rustfmt mutates the workspace"
+            );
+            if result.completed() {
+                assert_eq!(result.payload()["is_error"], true);
+                let output: ToolOutput = serde_json::from_value(result.payload()["output"].clone())
+                    .expect("tool output with sandbox diagnostics");
+                let ToolOutput::Text { text } = output else {
+                    panic!("sandbox refusal diagnostics must append to text output")
+                };
+                assert!(text.contains("Toolchain diagnostics"), "{text}");
+                assert!(text.contains("formatter exit code:"), "{text}");
+                assert!(text.contains("linter exit code:"), "{text}");
+            } else {
+                assert_eq!(result.failures().len(), 1, "{:#?}", result.status());
+                assert_eq!(
+                    result.failures()[0].policy(),
+                    HookFailurePolicy::FailClosed,
+                    "sandbox launch errors must not be allowed open"
+                );
+            }
+            assert!(
+                sandbox.warning.is_some(),
+                "an unavailable sandbox capability must explain the degradation"
+            );
+            return;
+        }
         assert!(result.completed(), "{:#?}", result.status());
         assert_eq!(
             std::fs::read_to_string(root.path().join("crate/src/lib.rs"))
@@ -14433,7 +14468,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::if_not_else, clippy::too_many_lines)]
     async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() {
         let root = tempdir().expect("root");
         let primary = root.path().join("primary");
@@ -14618,7 +14653,7 @@ mod tests {
             .begin(&session, 2, "bash-added", &MutationScope::OpaqueWorkspace)
             .await
             .expect("opaque checkpoint");
-        generation
+        let bash_result = generation
             .tools
             .resolve("bash")
             .expect("bash tool")
@@ -14626,40 +14661,65 @@ mod tests {
                 &context,
                 serde_json::json!({"command":"printf shell > shell.txt","cwd":"@root/1"}),
             )
-            .await
-            .expect("sandboxed bash in added root");
-        generation
-            .checkpoints
-            .finish(&opaque, MutationCheckpointOutcome::Completed)
-            .await
-            .expect("finish opaque");
-        assert_eq!(
-            std::fs::read(added.join("shell.txt")).expect("bash output"),
-            b"shell"
-        );
-        let escaped = generation
-            .tools
-            .resolve("bash")
-            .expect("bash tool")
-            .execute(
-                &context,
-                serde_json::json!({"command":"printf escape > ../parent-shell.txt","cwd":"@root/1"}),
-            )
-            .await
-            .expect("sandbox reports command exit");
-        assert!(escaped.content.contains("exit code:"));
-        assert!(!root.path().join("parent-shell.txt").exists());
-        let rewind = generation
-            .checkpoints
-            .prepare_apply_rewind(&session, 1, "rewind-live-root-bash")
-            .await
-            .expect("rewind bash root");
-        assert!(!added.join("shell.txt").exists());
-        generation
-            .checkpoints
-            .acknowledge_rewind(&rewind)
-            .await
-            .expect("ack bash rewind");
+            .await;
+        let sandbox = probe_sandbox();
+        if sandbox.support != SandboxSupport::Enforced {
+            generation
+                .checkpoints
+                .finish(&opaque, MutationCheckpointOutcome::Failed)
+                .await
+                .expect("finish refused opaque mutation");
+            if let Ok(output) = bash_result {
+                assert!(
+                    output.content.contains("exit code:"),
+                    "sandbox refusal must be visible to the model: {}",
+                    output.content
+                );
+            }
+            assert!(
+                !added.join("shell.txt").exists(),
+                "an unavailable sandbox must fail closed before mutating the workspace"
+            );
+            assert!(
+                sandbox.warning.is_some(),
+                "an unavailable sandbox capability must explain the degradation"
+            );
+        } else {
+            let bash_result = bash_result.expect("sandboxed bash in added root");
+            assert_eq!(bash_result.data["exit_code"], 0);
+            generation
+                .checkpoints
+                .finish(&opaque, MutationCheckpointOutcome::Completed)
+                .await
+                .expect("finish opaque");
+            assert_eq!(
+                std::fs::read(added.join("shell.txt")).expect("bash output"),
+                b"shell"
+            );
+            let escaped = generation
+                .tools
+                .resolve("bash")
+                .expect("bash tool")
+                .execute(
+                    &context,
+                    serde_json::json!({"command":"printf escape > ../parent-shell.txt","cwd":"@root/1"}),
+                )
+                .await
+                .expect("sandbox reports command exit");
+            assert!(escaped.content.contains("exit code:"));
+            assert!(!root.path().join("parent-shell.txt").exists());
+            let rewind = generation
+                .checkpoints
+                .prepare_apply_rewind(&session, 1, "rewind-live-root-bash")
+                .await
+                .expect("rewind bash root");
+            assert!(!added.join("shell.txt").exists());
+            generation
+                .checkpoints
+                .acknowledge_rewind(&rewind)
+                .await
+                .expect("ack bash rewind");
+        }
 
         let pending = RuntimeWorkspaceRootController {
             checkpoint_root: checkpoint_root.clone(),

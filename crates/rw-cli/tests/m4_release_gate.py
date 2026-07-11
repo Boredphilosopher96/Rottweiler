@@ -1057,6 +1057,7 @@ def ssh_loopback_gate(
         {
             "ROTTWEILER_REMOTE_RW": str(wrapper),
             "ROTTWEILER_SSH_BIN": "/usr/bin/ssh",
+            "ROTTWEILER_DRIVER_READY_MARKER": DRIVER_READY_MARKER.decode("ascii"),
         }
     )
     local = spawn_pty(
@@ -1066,7 +1067,9 @@ def ssh_loopback_gate(
         ["--dangerously-trust", "--permission-mode", "strict"],
     )
     try:
-        read_until(local, FIRST_PAINT_MARKER, timeout=10)
+        local_ready = read_until(local, DRIVER_READY_MARKER, timeout=20)
+        if FIRST_PAINT_MARKER not in local_ready:
+            raise RuntimeError("local TUI became driver-ready without rendering its first paint")
         os.write(local.fd, PROMPT_MARKER.encode() + KITTY_SUBMIT)
         local_capture = read_until(local, RESPONSE_MARKER.encode(), timeout=10)
         require_visible_markers(local_capture)
@@ -1092,7 +1095,9 @@ def ssh_loopback_gate(
         ],
     )
     try:
-        read_until(remote, FIRST_PAINT_MARKER, timeout=10)
+        remote_ready = read_until(remote, DRIVER_READY_MARKER, timeout=20)
+        if FIRST_PAINT_MARKER not in remote_ready:
+            raise RuntimeError("remote TUI became driver-ready without rendering its first paint")
         os.write(remote.fd, PROMPT_MARKER.encode() + KITTY_SUBMIT)
         remote_capture = read_until(remote, RESPONSE_MARKER.encode(), timeout=10)
         require_visible_markers(remote_capture)

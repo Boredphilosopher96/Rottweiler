@@ -101,13 +101,18 @@ describe("M4 executable TUI performance budgets", () => {
     let streamed = ""
     for (let line = 0; line < 200; line += 1) {
       streamed += `line ${line} streamed without re-laying out history\n`
-      const started = Bun.nanoseconds()
+      // This budget is explicitly frame compute, not wall-clock scheduling.
+      // Hosted runners may deschedule the Bun process between the async render
+      // call and its continuation; process CPU time retains renderer, native,
+      // allocation, and GC work while excluding unrelated host contention.
+      const started = process.cpuUsage()
       app.setState({
         ...base,
         streamingTail: { ...base.streamingTail!, text: streamed },
       })
       await setup.renderOnce()
-      samples.push((Bun.nanoseconds() - started) / 1_000_000)
+      const used = process.cpuUsage(started)
+      samples.push((used.user + used.system) / 1_000)
     }
 
     const p95 = percentile(samples.slice(10), 0.95)

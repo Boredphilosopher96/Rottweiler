@@ -79,6 +79,35 @@ fn copy_fixture(name: &str, destination: &Path) {
     );
 }
 
+fn prepare_python_command_canary(workspace: &Path) {
+    // Keep planning and generated-instruction assertions pinned to the exact
+    // upstream snapshot. Its application test suite is not part of the init
+    // contract, though, and imports stdlib modules removed by newer Python
+    // releases (notably `cgi` in Python 3.13). Replace only the temporary
+    // copy's upstream tests after inference so the exact generated command
+    // still has to launch, discover, execute, and pass a real unittest using
+    // the runner available on the host.
+    must(
+        fs::remove_dir_all(workspace.join("test")),
+        "remove runtime-sensitive upstream Python tests from temporary fixture",
+    );
+    must(
+        fs::write(
+            workspace.join("test_inferred_command.py"),
+            r#"import pathlib
+import unittest
+
+
+class GeneratedCommandCanary(unittest.TestCase):
+    def test_unittest_discovery_runs_from_the_project_root(self):
+        marker = pathlib.Path("tox.ini").read_text(encoding="utf-8")
+        self.assertIn("-m unittest discover", marker)
+"#,
+        ),
+        "write Python generated-command canary",
+    );
+}
+
 #[test]
 fn init_golden_fixtures_infer_first_try_test_commands() {
     for (fixture, expected) in [
@@ -110,6 +139,9 @@ fn init_golden_fixtures_infer_first_try_test_commands() {
             .unwrap_or_else(|error| panic!("load generated instructions: {error}"))
             .unwrap_or_else(|| panic!("fresh session loads generated AGENTS.md"));
         assert!(loaded.content().contains(&format!("`{expected}`")));
+        if fixture == "python" {
+            prepare_python_command_canary(root.path());
+        }
         let executed = must(
             run_first_declared_test(root.path(), loaded.content()),
             "run first generated test command",
