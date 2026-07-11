@@ -198,6 +198,12 @@ export interface WorkspaceStatusProjection {
   readonly truncated: boolean
 }
 
+export interface WorkspaceRootsProjection {
+  readonly generation: string
+  readonly effectiveFromTurn: string
+  readonly roots: readonly string[]
+}
+
 export interface RottweilerState {
   readonly connection: ConnectionProjection
   readonly lastSequence: string | null
@@ -228,6 +234,7 @@ export interface RottweilerState {
   readonly workspaceFiles: readonly WorkspaceFileChoice[]
   readonly workspacePreview: WorkspacePreviewProjection | null
   readonly workspaceStatus: WorkspaceStatusProjection | null
+  readonly workspaceRoots: WorkspaceRootsProjection | null
 }
 
 export function createInitialState(): RottweilerState {
@@ -275,5 +282,6 @@ export function createInitialState(): RottweilerState {
     workspaceFiles: [],
     workspacePreview: null,
     workspaceStatus: null,
+    workspaceRoots: null,
   }
 }

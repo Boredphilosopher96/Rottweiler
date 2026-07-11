@@ -827,9 +827,10 @@ mod tests {
 
     use hyper::{Uri, client::conn::http1 as client_http1};
     use rw_core::{
-        CommandAckMeta, CommandMeta, EngineError, EngineErrorCategory, PROTOCOL_VERSION, RequestId,
-        SessionDescriptor,
+        CommandAckMeta, CommandMeta, EngineError, EngineErrorCategory, EventMeta, PROTOCOL_VERSION,
+        RequestId, SessionDescriptor, TurnId,
     };
+    use rw_store::session::SessionEventLog;
     use tempfile::tempdir;
     use tokio::net::UnixStream;
 
@@ -1204,6 +1205,104 @@ mod tests {
         let event_body = String::from_utf8(event_body.to_vec()).expect("UTF-8 SSE");
         assert!(event_body.contains("event: engine"));
         assert!(event_body.contains("\"type\":\"sessions_listed\""));
+
+        shutdown.send(true).expect("stop server");
+        server.await.expect("server join").expect("server result");
+    }
+
+    #[tokio::test]
+    async fn remote_auth_canaries_never_enter_events_persistence_or_diagnostics() {
+        let root = tempdir().expect("runtime root");
+        let (runtime, listener) = ServerRuntime::create(root.path()).expect("runtime");
+        let bootstrap = fs::read_to_string(&runtime.paths.token).expect("bootstrap token");
+        let engine = Arc::new(StubEngine::default());
+        let state = ServerState::new(engine, &runtime);
+        let initial_diagnostics = format!("{runtime:?} {state:?}");
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve(listener, state, shutdown_rx));
+
+        let connected = unix_request(
+            &runtime.paths.socket,
+            request_builder(Method::POST, "/v1/connect")
+                .header(AUTHORIZATION, format!("Bearer {}", bootstrap.trim()))
+                .body(Full::new(Bytes::new()))
+                .expect("connect request"),
+        )
+        .await;
+        assert_eq!(connected.status(), StatusCode::CREATED);
+        let credentials: ClientCredentials = serde_json::from_slice(
+            &connected
+                .into_body()
+                .collect()
+                .await
+                .expect("connect body")
+                .to_bytes(),
+        )
+        .expect("client credentials");
+
+        let events = unix_request(
+            &runtime.paths.socket,
+            request_builder(Method::GET, "/v1/events")
+                .header(AUTHORIZATION, format!("Bearer {}", credentials.token))
+                .header(CLIENT_HEADER, &credentials.client_id.0)
+                .header(ACCEPT, "text/event-stream")
+                .body(Full::new(Bytes::new()))
+                .expect("events request"),
+        )
+        .await;
+        assert_eq!(events.status(), StatusCode::OK);
+        let event_body = String::from_utf8(
+            events
+                .into_body()
+                .collect()
+                .await
+                .expect("event body")
+                .to_bytes()
+                .to_vec(),
+        )
+        .expect("UTF-8 SSE");
+        let streamed_json = event_body
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .expect("serialized SSE event");
+        let streamed_event: EngineEvent =
+            serde_json::from_str(streamed_json).expect("streamed EngineEvent");
+        let reserialized_streamed =
+            serde_json::to_string(&streamed_event).expect("streamed event serializes");
+
+        let durable_event = EngineEvent::TurnStarted {
+            meta: EventMeta {
+                protocol_version: PROTOCOL_VERSION,
+                session_id: SessionId("remote-canary-session".to_owned()),
+                sequence_id: SequenceId(0),
+                emitted_at: "2026-01-01T00:00:00.000Z".to_owned(),
+                caused_by: None,
+            },
+            turn_id: TurnId("1".to_owned()),
+        };
+        let serialized_durable =
+            serde_json::to_string(&durable_event).expect("durable event serializes");
+        let mut log =
+            SessionEventLog::open(root.path(), "remote-canary-session").expect("session event log");
+        log.append_expected(SequenceId(0), durable_event.clone())
+            .expect("persist durable event");
+        let persisted = fs::read_to_string(log.path()).expect("events.jsonl");
+        let diagnostics = format!("{initial_diagnostics} {streamed_event:?} {durable_event:?}");
+
+        for canary in [bootstrap.trim(), credentials.token.as_str()] {
+            for artifact in [
+                event_body.as_str(),
+                reserialized_streamed.as_str(),
+                serialized_durable.as_str(),
+                persisted.as_str(),
+                diagnostics.as_str(),
+            ] {
+                assert!(
+                    !artifact.contains(canary),
+                    "remote authentication canary entered an event or diagnostic"
+                );
+            }
+        }
 
         shutdown.send(true).expect("stop server");
         server.await.expect("server join").expect("server result");

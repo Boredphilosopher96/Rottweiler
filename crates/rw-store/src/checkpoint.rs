@@ -1310,6 +1310,9 @@ fn capture_regular_confined(
     if !FileType::from_raw_mode(stat.st_mode).is_file() {
         return Err(CheckpointError::UnsupportedFileKind(key.to_owned()));
     }
+    #[cfg(target_os = "linux")]
+    let mode = Some(Mode::from_raw_mode(stat.st_mode).as_raw_mode() & 0o7777);
+    #[cfg(not(target_os = "linux"))]
     let mode = Some(u32::from(
         Mode::from_raw_mode(stat.st_mode).as_raw_mode() & 0o7777,
     ));
@@ -1343,8 +1346,14 @@ fn restore_regular_confined(
         file.write_all(bytes)?;
         file.flush()?;
         if let Some(mode) = unix_mode {
-            let mode = u16::try_from(mode).map_err(|_| CheckpointError::CorruptManifest)?;
+            #[cfg(target_os = "linux")]
             rustix::fs::fchmod(&file, Mode::from_raw_mode(mode)).map_err(std::io::Error::from)?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                let mode = u16::try_from(mode).map_err(|_| CheckpointError::CorruptManifest)?;
+                rustix::fs::fchmod(&file, Mode::from_raw_mode(mode))
+                    .map_err(std::io::Error::from)?;
+            }
         }
         file.sync_all()?;
         rustix::fs::renameat(&parent, temporary.as_str(), &parent, name.as_str())

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod proxy;
-pub use proxy::SupervisedEgressProxy;
+pub use proxy::{EgressPin, ProxyLifecycle, SupervisedEgressProxy, UpstreamProxy};
 
 /// Identifies this workspace component in diagnostics.
 pub const COMPONENT: &str = "sandbox";
@@ -22,7 +22,7 @@ pub const COMPONENT: &str = "sandbox";
 pub const HELPER_ARG: &str = "__rottweiler-sandbox-helper";
 
 /// Network authority granted to a sandboxed process.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkPolicy {
     /// All socket connection and bind attempts are denied.
@@ -30,12 +30,15 @@ pub enum NetworkPolicy {
     Deny,
     /// Egress is possible only through a separately supervised policy proxy.
     ///
-    /// Transparent proxy plumbing is not yet implemented.  Launch planning
-    /// therefore fails closed for this value instead of silently granting
-    /// ambient network access.
+    /// Linux routes the isolated namespace through a private relay; macOS
+    /// grants only the supervisor's exact loopback port. Missing relay state
+    /// fails closed instead of granting ambient network access.
     PolicyProxy {
         /// Loopback port of the supervised host-side proxy.
         port: u16,
+        /// Private pathname socket used by the Linux network-namespace relay.
+        #[serde(default)]
+        relay_path: Option<PathBuf>,
     },
 }
 
@@ -88,8 +91,8 @@ impl SandboxPolicy {
 
     /// Network authority for the child.
     #[must_use]
-    pub const fn network(&self) -> NetworkPolicy {
-        self.network
+    pub const fn network(&self) -> &NetworkPolicy {
+        &self.network
     }
 
     /// Returns a policy with identical roots and different network authority.
@@ -103,7 +106,7 @@ impl SandboxPolicy {
 }
 
 /// One executable and argument vector.  No shell interpolation is involved.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct LaunchPlan {
     /// Program to spawn.
     pub program: PathBuf,
@@ -112,6 +115,19 @@ pub struct LaunchPlan {
     /// User-visible degradation warnings.  An enforceable plan never carries a
     /// warning; unsupported configurations return an error instead.
     pub warnings: Vec<String>,
+    /// Open descriptor pinning the exact already-running Linux engine inode
+    /// until the namespace launcher crosses `exec(2)`.
+    #[cfg(target_os = "linux")]
+    helper_pin: Option<std::fs::File>,
+}
+
+impl LaunchPlan {
+    /// Transfers the Linux helper inode pin to the process launcher.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn take_helper_pin(&mut self) -> Option<std::fs::File> {
+        self.helper_pin.take()
+    }
 }
 
 /// Strength of sandbox support on the current host.
@@ -335,21 +351,43 @@ pub fn probe() -> SandboxCapability {
     #[cfg(target_os = "linux")]
     {
         use landlock::{ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr};
+        use std::process::{Command, Stdio};
 
+        let Some(unshare) = audited_linux_tool(&["/usr/bin/unshare"]) else {
+            return unavailable("trusted /usr/bin/unshare is unavailable");
+        };
         let available = Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
             .handle_access(AccessFs::from_all(ABI::V3))
             .and_then(Ruleset::create)
             .is_ok();
-        if available {
+        let namespaces = available
+            && Command::new(unshare)
+                .args([
+                    "--user",
+                    "--map-current-user",
+                    "--net",
+                    "--pid",
+                    "--fork",
+                    "--kill-child",
+                    "--",
+                    "/usr/bin/true",
+                ])
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success());
+        if namespaces {
             SandboxCapability {
                 support: SandboxSupport::Enforced,
-                backend: "landlock-v3+seccomp",
+                backend: "user+netns+landlock-v3+seccomp",
                 warning: None,
             }
         } else {
             unavailable(
-                "Landlock V3 is not fully available; commands require prompts and sandboxed execution is refused",
+                "Landlock V3 or unprivileged user/network namespaces are unavailable; commands require prompts and sandboxed execution is refused",
             )
         }
     }
@@ -362,6 +400,61 @@ pub fn probe() -> SandboxCapability {
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         unavailable("OS sandboxing is unavailable on this platform; approve every command")
+    }
+}
+
+/// Probes the stricter per-command policy-egress transport independently from
+/// the filesystem sandbox. The Linux probe executes a disposable user/network
+/// namespace setup so administrators get a distinct fail-closed diagnosis when
+/// user namespaces are disabled by kernel, container, or LSM policy.
+#[must_use]
+pub fn probe_policy_egress() -> SandboxCapability {
+    #[cfg(target_os = "macos")]
+    {
+        probe()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::{Command, Stdio};
+
+        let Some(unshare) = audited_linux_tool(&["/usr/bin/unshare"]) else {
+            return unavailable("trusted /usr/bin/unshare is unavailable");
+        };
+        let Some(ip) = audited_linux_tool(&["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"]) else {
+            return unavailable("trusted iproute2 is unavailable");
+        };
+        let status = Command::new(unshare)
+            .args([
+                "--user",
+                "--map-current-user",
+                "--net",
+                "--pid",
+                "--fork",
+                "--kill-child",
+                "--",
+            ])
+            .arg(ip)
+            .args(["link", "set", "dev", "lo", "up"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if status.is_ok_and(|status| status.success()) {
+            SandboxCapability {
+                support: SandboxSupport::Enforced,
+                backend: "user+netns-loopback-relay",
+                warning: None,
+            }
+        } else {
+            unavailable(
+                "unprivileged Linux user/network namespaces are blocked; policy egress is refused",
+            )
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        unavailable("policy egress is unavailable on this platform")
     }
 }
 
@@ -412,17 +505,43 @@ pub fn shell_launch_plan(
     }
     #[cfg(target_os = "linux")]
     {
-        if matches!(policy.network, NetworkPolicy::PolicyProxy { .. }) {
-            return Err(SandboxError::PolicyProxyUnavailable);
-        }
+        let (helper_executable, helper_pin) = pin_linux_helper(helper_executable)?;
         let encoded = serde_json::to_os_string(policy)?;
         let mut args = vec![OsString::from(HELPER_ARG), encoded];
         args.push(shell.as_os_str().to_owned());
         args.extend_from_slice(shell_args);
+        if let NetworkPolicy::PolicyProxy {
+            port,
+            relay_path: Some(relay_path),
+        } = &policy.network
+        {
+            if *port == 0 || !relay_path.is_absolute() {
+                return Err(SandboxError::PolicyProxyUnavailable);
+            }
+            let unshare = audited_linux_tool(&["/usr/bin/unshare"])
+                .ok_or(SandboxError::PolicyProxyUnavailable)?;
+            let mut unshare_args = linux_namespace_args(&helper_executable);
+            unshare_args.extend(args);
+            return Ok(LaunchPlan {
+                program: unshare,
+                args: unshare_args,
+                warnings: Vec::new(),
+                helper_pin: Some(helper_pin),
+            });
+        }
+        if matches!(&policy.network, NetworkPolicy::PolicyProxy { .. }) {
+            return Err(SandboxError::PolicyProxyUnavailable);
+        }
+        let unshare = audited_linux_tool(&["/usr/bin/unshare"]).ok_or_else(|| {
+            SandboxError::Unavailable("trusted /usr/bin/unshare is unavailable".to_owned())
+        })?;
+        let mut unshare_args = linux_namespace_args(&helper_executable);
+        unshare_args.extend(args);
         Ok(LaunchPlan {
-            program: helper_executable.to_path_buf(),
-            args,
+            program: unshare,
+            args: unshare_args,
             warnings: Vec::new(),
+            helper_pin: Some(helper_pin),
         })
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -436,6 +555,70 @@ pub fn shell_launch_plan(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn linux_namespace_args(helper: &Path) -> Vec<OsString> {
+    vec![
+        OsString::from("--user"),
+        OsString::from("--map-current-user"),
+        OsString::from("--net"),
+        OsString::from("--pid"),
+        OsString::from("--fork"),
+        OsString::from("--kill-child"),
+        OsString::from("--"),
+        helper.as_os_str().to_owned(),
+    ]
+}
+
+#[cfg(target_os = "linux")]
+fn pin_linux_helper(helper: &Path) -> Result<(PathBuf, std::fs::File), SandboxError> {
+    use std::fs::File;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let canonical = helper
+        .canonicalize()
+        .map_err(|_| SandboxError::UntrustedHelper)?;
+    if canonical != helper {
+        return Err(SandboxError::UntrustedHelper);
+    }
+    let before = canonical
+        .metadata()
+        .map_err(|_| SandboxError::UntrustedHelper)?;
+    if !before.is_file() || before.mode() & 0o111 == 0 {
+        return Err(SandboxError::UntrustedHelper);
+    }
+    let file = File::open(&canonical).map_err(|_| SandboxError::UntrustedHelper)?;
+    let pinned = file.metadata().map_err(|_| SandboxError::UntrustedHelper)?;
+    let running = Path::new("/proc/self/exe")
+        .metadata()
+        .map_err(|_| SandboxError::UntrustedHelper)?;
+    if (before.dev(), before.ino()) != (pinned.dev(), pinned.ino())
+        || (pinned.dev(), pinned.ino()) != (running.dev(), running.ino())
+    {
+        return Err(SandboxError::UntrustedHelper);
+    }
+    let descriptor = file.as_raw_fd();
+    rustix::io::fcntl_setfd(&file, rustix::io::FdFlags::empty())
+        .map_err(|_| SandboxError::UntrustedHelper)?;
+    Ok((PathBuf::from(format!("/proc/self/fd/{descriptor}")), file))
+}
+
+#[cfg(target_os = "linux")]
+fn audited_linux_tool(candidates: &[&str]) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    candidates.iter().find_map(|candidate| {
+        let expected = Path::new(candidate);
+        let canonical = expected.canonicalize().ok()?;
+        if canonical != expected {
+            return None;
+        }
+        let metadata = canonical.metadata().ok()?;
+        (metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0)
+            .then_some(canonical)
+    })
+}
+
 #[cfg(target_os = "macos")]
 fn seatbelt_profile(policy: &SandboxPolicy) -> String {
     let writable = (0..policy.write_roots.len())
@@ -445,9 +628,9 @@ fn seatbelt_profile(policy: &SandboxPolicy) -> String {
     // `allow default` preserves host toolchain compatibility.  The two deny
     // rules are the security boundary: write operations outside the canonical
     // roots and all network operations are rejected by Seatbelt.
-    let network = match policy.network {
+    let network = match &policy.network {
         NetworkPolicy::Deny => "(deny network*)".to_owned(),
-        NetworkPolicy::PolicyProxy { port } => format!(
+        NetworkPolicy::PolicyProxy { port, .. } => format!(
             "(deny network-outbound (require-not (remote ip \"localhost:{port}\"))) (deny network-bind) (deny network-inbound)"
         ),
     };
@@ -493,29 +676,200 @@ where
 mod linux {
     use std::collections::BTreeMap;
     use std::convert::TryInto as _;
-    use std::os::unix::process::CommandExt as _;
+    use std::io;
+    use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
+    use std::path::Path;
     use std::process::Command;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+    use std::thread;
+    use std::time::Duration;
 
     use landlock::{
         ABI, Access, AccessFs, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreatedAttr,
         RulesetStatus,
     };
-    use seccompiler::{BpfProgram, SeccompAction, SeccompFilter};
+    use seccompiler::{
+        BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
+        SeccompRule,
+    };
 
-    use super::{NetworkPolicy, OsString, SandboxError, SandboxPolicy, serde_json};
+    use super::{
+        NetworkPolicy, OsString, SandboxError, SandboxPolicy, audited_linux_tool, serde_json,
+    };
 
     pub(super) fn run_helper(args: &[OsString]) -> Result<std::convert::Infallible, SandboxError> {
         if args.len() < 4 {
             return Err(SandboxError::MalformedHelper);
         }
         let policy: SandboxPolicy = serde_json::from_os_str(&args[2])?;
-        if policy.write_roots.is_empty() || policy.network != NetworkPolicy::Deny {
+        if policy.write_roots.is_empty() {
+            return Err(SandboxError::MalformedHelper);
+        }
+        let helper_pin = inherited_helper_pin(args)?;
+        if let NetworkPolicy::PolicyProxy {
+            port,
+            relay_path: Some(relay_path),
+        } = &policy.network
+        {
+            return run_proxy_helper(&policy, *port, relay_path, &args[3], &args[4..], helper_pin);
+        }
+        if policy.network != NetworkPolicy::Deny {
             return Err(SandboxError::MalformedHelper);
         }
         install_landlock(&policy)?;
-        install_network_floor()?;
-        let error = Command::new(&args[3]).args(&args[4..]).exec();
+        install_network_floor(false)?;
+        let error = command_without_helper_pin(&args[3], &args[4..], helper_pin).exec();
         Err(SandboxError::Exec(error))
+    }
+
+    fn inherited_helper_pin(args: &[OsString]) -> Result<Option<u32>, SandboxError> {
+        let Some(executable) = args.first().and_then(|argument| argument.to_str()) else {
+            return Err(SandboxError::MalformedHelper);
+        };
+        let Some(descriptor) = executable.strip_prefix("/proc/self/fd/") else {
+            return Ok(None);
+        };
+        descriptor
+            .parse::<u32>()
+            .ok()
+            .filter(|descriptor| *descriptor >= 3)
+            .map(Some)
+            .ok_or(SandboxError::MalformedHelper)
+    }
+
+    fn command_without_helper_pin(
+        program: &OsString,
+        args: &[OsString],
+        helper_pin: Option<u32>,
+    ) -> Command {
+        let Some(helper_pin) = helper_pin else {
+            let mut command = Command::new(program);
+            command.args(args);
+            return command;
+        };
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!("set -e\nexec {helper_pin}<&-\nexec \"$@\""))
+            .arg("rottweiler-helper-fd-closer")
+            .arg(program)
+            .args(args);
+        command
+    }
+
+    fn run_proxy_helper(
+        policy: &SandboxPolicy,
+        port: u16,
+        relay_path: &Path,
+        program: &OsString,
+        args: &[OsString],
+        helper_pin: Option<u32>,
+    ) -> Result<std::convert::Infallible, SandboxError> {
+        if port == 0 || !relay_path.is_absolute() {
+            return Err(SandboxError::MalformedHelper);
+        }
+        rustix::process::set_dumpable_behavior(rustix::process::DumpableBehavior::NotDumpable)
+            .map_err(sandbox_backend)?;
+        raise_loopback()?;
+        let listener =
+            TcpListener::bind((Ipv4Addr::LOCALHOST, port)).map_err(SandboxError::Proxy)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(SandboxError::Proxy)?;
+        let running = Arc::new(AtomicBool::new(true));
+        let relay_running = Arc::clone(&running);
+        let relay_path = relay_path.to_path_buf();
+        let relay = thread::Builder::new()
+            .name("rottweiler-egress-netns-relay".to_owned())
+            .spawn(move || serve_namespace_relay(&listener, &relay_path, &relay_running))
+            .map_err(SandboxError::Proxy)?;
+
+        install_landlock(policy)?;
+        install_network_floor(true)?;
+        let status = command_without_helper_pin(program, args, helper_pin)
+            .status()
+            .map_err(SandboxError::Exec)?;
+        running.store(false, Ordering::Release);
+        let _ = TcpStream::connect_timeout(
+            &(Ipv4Addr::LOCALHOST, port).into(),
+            Duration::from_millis(100),
+        );
+        let _ = relay.join();
+        if let Some(code) = status.code() {
+            std::process::exit(code);
+        }
+        std::process::exit(128 + status.signal().unwrap_or(1));
+    }
+
+    fn raise_loopback() -> Result<(), SandboxError> {
+        let ip =
+            audited_linux_tool(&["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip"]).ok_or_else(|| {
+                SandboxError::Unavailable(
+                    "Linux policy egress requires a trusted iproute2 executable".to_owned(),
+                )
+            })?;
+        let status = Command::new(ip)
+            .args(["link", "set", "dev", "lo", "up"])
+            .env_clear()
+            .status()
+            .map_err(SandboxError::Exec)?;
+        if !status.success() {
+            return Err(SandboxError::Unavailable(
+                "Linux network namespace loopback setup failed".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn serve_namespace_relay(listener: &TcpListener, relay_path: &Path, running: &Arc<AtomicBool>) {
+        let active = Arc::new(AtomicUsize::new(0));
+        while running.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((client, _)) => {
+                    if active
+                        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                            (count < 64).then_some(count + 1)
+                        })
+                        .is_err()
+                    {
+                        continue;
+                    }
+                    let path = relay_path.to_path_buf();
+                    let active = Arc::clone(&active);
+                    let _ = thread::Builder::new()
+                        .name("rottweiler-egress-netns-connection".to_owned())
+                        .spawn(move || {
+                            if let Ok(upstream) = UnixStream::connect(path) {
+                                let _ = tunnel_tcp_to_unix(client, upstream);
+                            }
+                            active.fetch_sub(1, Ordering::AcqRel);
+                        });
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    fn tunnel_tcp_to_unix(mut client: TcpStream, mut upstream: UnixStream) -> io::Result<()> {
+        let mut client_read = client.try_clone()?;
+        let mut upstream_write = upstream.try_clone()?;
+        let forward = thread::spawn(move || {
+            let result = io::copy(&mut client_read, &mut upstream_write);
+            let _ = upstream_write.shutdown(Shutdown::Write);
+            result
+        });
+        let reverse = io::copy(&mut upstream, &mut client);
+        let _ = client.shutdown(Shutdown::Write);
+        let _ = forward.join();
+        reverse.map(|_| ())
     }
 
     fn install_landlock(policy: &SandboxPolicy) -> Result<(), SandboxError> {
@@ -552,16 +906,54 @@ mod linux {
         Ok(())
     }
 
-    fn install_network_floor() -> Result<(), SandboxError> {
-        let denied = [
-            libc::SYS_connect,
+    fn install_network_floor(policy_proxy: bool) -> Result<(), SandboxError> {
+        let mut denied = [
             libc::SYS_bind,
             libc::SYS_accept,
             libc::SYS_accept4,
+            libc::SYS_socketpair,
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
         ]
         .into_iter()
         .map(|syscall| (syscall, Vec::new()))
         .collect::<BTreeMap<_, _>>();
+        if policy_proxy {
+            let non_inet = SeccompRule::new(vec![
+                SeccompCondition::new(
+                    0,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Ne,
+                    libc::AF_INET as u64,
+                )
+                .map_err(sandbox_backend)?,
+                SeccompCondition::new(
+                    0,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Ne,
+                    libc::AF_INET6 as u64,
+                )
+                .map_err(sandbox_backend)?,
+            ])
+            .map_err(sandbox_backend)?;
+            denied.insert(libc::SYS_socket, vec![non_inet]);
+        } else {
+            // Deny socket creation outright. The empty network namespace is
+            // the authority boundary; these syscall rails additionally cover
+            // inherited descriptors and UDP/raw/async submission paths.
+            denied.insert(libc::SYS_socket, Vec::new());
+            denied.insert(libc::SYS_connect, Vec::new());
+            for syscall in [
+                libc::SYS_sendto,
+                libc::SYS_sendmsg,
+                libc::SYS_sendmmsg,
+                libc::SYS_recvmsg,
+                libc::SYS_recvmmsg,
+            ] {
+                denied.insert(syscall, Vec::new());
+            }
+        }
         let filter: BpfProgram = SeccompFilter::new(
             denied,
             SeccompAction::Allow,
@@ -583,6 +975,12 @@ mod linux {
 /// environment contents.
 #[derive(Debug, Error)]
 pub enum SandboxError {
+    /// An explicit corporate proxy URL failed structural validation.
+    #[error("configured corporate proxy URL is invalid")]
+    InvalidProxy,
+    /// A caller-supplied target DNS pin was structurally invalid.
+    #[error("validated egress DNS pin is invalid")]
+    InvalidEgressPin,
     /// A writable root could not be canonicalized.
     #[error("sandbox write root is invalid: {path}")]
     InvalidWriteRoot {
@@ -598,7 +996,7 @@ pub enum SandboxError {
     /// Platform support is absent or too weak.
     #[error("{0}")]
     Unavailable(String),
-    /// Proxy-only networking cannot yet be constructed safely.
+    /// The requested proxy-only route could not be constructed safely.
     #[error("sandbox policy-proxy networking is unavailable; refusing ambient network access")]
     PolicyProxyUnavailable,
     /// Local egress proxy lifecycle failure.
@@ -607,6 +1005,10 @@ pub enum SandboxError {
     /// Internal helper arguments were malformed.
     #[error("malformed internal sandbox-helper invocation")]
     MalformedHelper,
+    /// The Linux sandbox helper could not be pinned to a trusted executable
+    /// inode.
+    #[error("sandbox helper executable is not trusted")]
+    UntrustedHelper,
     /// JSON profile encoding failed.
     #[error("sandbox profile encoding failed")]
     ProfileEncoding(#[from] ::serde_json::Error),
@@ -670,12 +1072,44 @@ mod tests {
         assert!(maybe_run_helper(["rw", HELPER_ARG]).is_err());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn running_helper_is_pinned_even_inside_write_root_and_injected_copy_is_refused() {
+        use std::fs;
+
+        let executable = std::env::current_exe().expect("current executable");
+        let writable_target = executable.parent().expect("target directory");
+        let policy = SandboxPolicy::new([writable_target], NetworkPolicy::Deny).expect("policy");
+        let mut plan = shell_launch_plan(&policy, &executable, Path::new("/usr/bin/true"), &[])
+            .expect("self-hosted launch plan");
+        assert!(plan.take_helper_pin().is_some());
+        assert!(plan.args.iter().any(|argument| {
+            argument
+                .to_str()
+                .is_some_and(|argument| argument.starts_with("/proc/self/fd/"))
+        }));
+        for required in ["--net", "--pid", "--fork", "--kill-child"] {
+            assert!(plan.args.iter().any(|argument| argument == required));
+        }
+
+        let replacement_dir = tempdir().expect("replacement directory");
+        let injected = replacement_dir.path().join("injected-helper");
+        fs::copy(&executable, &injected).expect("injected helper copy");
+        assert!(matches!(
+            shell_launch_plan(&policy, &injected, Path::new("/usr/bin/true"), &[]),
+            Err(SandboxError::UntrustedHelper)
+        ));
+    }
+
     #[test]
     fn network_grant_fails_closed_until_the_policy_proxy_is_present() {
         let directory = tempdir().expect("temporary directory");
         let policy = SandboxPolicy::new(
             [directory.path()],
-            NetworkPolicy::PolicyProxy { port: 3128 },
+            NetworkPolicy::PolicyProxy {
+                port: 3128,
+                relay_path: None,
+            },
         )
         .expect("policy");
         #[cfg(target_os = "macos")]
@@ -818,6 +1252,7 @@ sys.exit(92)'
             [directory.path()],
             NetworkPolicy::PolicyProxy {
                 port: proxy.address().port(),
+                relay_path: None,
             },
         )
         .expect("policy");

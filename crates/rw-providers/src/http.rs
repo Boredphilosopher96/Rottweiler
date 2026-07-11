@@ -22,6 +22,9 @@ pub struct GuardedHttpFetchRequest {
     pub headers: Vec<(String, String)>,
     /// Explicitly resolved proxy; ambient proxy discovery is always disabled.
     pub proxy: Option<Url>,
+    /// Optional Basic authentication for the explicit proxy. Debug output is
+    /// redacted by [`ProxyAuthentication`].
+    pub proxy_authentication: Option<ProxyAuthentication>,
     /// Validated DNS host/address pin for the target, when it used a hostname.
     pub dns_pin: Option<(String, SocketAddr)>,
     /// Maximum accepted response bytes.
@@ -79,6 +82,13 @@ pub async fn guarded_http_fetch(
         )
         .into());
     }
+    if request.proxy.is_none() && request.proxy_authentication.is_some() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "proxy authentication requires an explicit proxy",
+        )
+        .into());
+    }
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -88,12 +98,15 @@ pub async fn guarded_http_fetch(
         builder = builder.resolve(host, *address);
     }
     if let Some(proxy) = &request.proxy {
-        let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|_| {
+        let mut proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|_| {
             ProviderError::new(
                 ProviderErrorKind::InvalidRequest,
                 "configured HTTP proxy URL is invalid",
             )
         })?;
+        if let Some(authentication) = &request.proxy_authentication {
+            proxy = proxy.basic_auth(authentication.username(), authentication.password());
+        }
         builder = builder.proxy(proxy);
     }
     let client = builder.build().map_err(transport_error)?;
@@ -332,6 +345,7 @@ mod tests {
             url: url.clone(),
             headers: vec![("accept".to_owned(), "text/plain".to_owned())],
             proxy: None,
+            proxy_authentication: None,
             dns_pin: None,
             max_bytes: 8,
         })
@@ -352,6 +366,7 @@ mod tests {
             url: Url::parse("https://example.invalid/").expect("target URL"),
             headers: Vec::new(),
             proxy: Some(Url::parse("http://127.0.0.1:8080").expect("proxy URL")),
+            proxy_authentication: None,
             dns_pin: Some((
                 "example.invalid".to_owned(),
                 "1.1.1.1:443".parse().expect("pin"),
@@ -367,5 +382,55 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn guarded_fetch_chains_through_authenticated_explicit_proxy() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("local address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let length = socket.read(&mut buffer).await.expect("request");
+                if length == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..length]);
+                if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(bytes).expect("UTF-8 request");
+            assert!(
+                request.starts_with("GET http://example.invalid/through-proxy HTTP/1.1\r\n"),
+                "{request:?}"
+            );
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains("\r\nproxy-authorization: basic dxnlcjpzzwnyzxqty2fuyxj5\r\n"),
+                "{request:?}"
+            );
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .await
+                .expect("response");
+        });
+        let authentication = ProxyAuthentication::new("user", crate::Secret::new("secret-canary"));
+        assert!(!format!("{authentication:?}").contains("secret-canary"));
+        let response = guarded_http_fetch(GuardedHttpFetchRequest {
+            url: Url::parse("http://example.invalid/through-proxy").expect("target URL"),
+            headers: Vec::new(),
+            proxy: Some(Url::parse(&format!("http://{address}")).expect("proxy URL")),
+            proxy_authentication: Some(authentication),
+            dns_pin: None,
+            max_bytes: 8,
+        })
+        .await
+        .expect("fetch through proxy");
+        server.await.expect("server task");
+        assert_eq!(response.body, b"ok");
     }
 }

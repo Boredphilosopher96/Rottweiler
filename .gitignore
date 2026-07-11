@@ -1,4 +1,5 @@
 /target/
+/dist/
 *.profraw
 .DS_Store
 .idea/

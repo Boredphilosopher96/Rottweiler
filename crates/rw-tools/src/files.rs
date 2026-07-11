@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use rw_intel::{IntelError, SymbolIndex};
+use rw_intel::IntelError;
 use rw_types::ToolCapability;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ use crate::registry::{
     ApprovalPreview, CandidateLocation, CapabilityManifest, MutationScope, Tool, ToolContext,
     ToolDescriptor, ToolError, ToolLimits, ToolResult, input_schema, parse_input,
 };
+use crate::symbols::WorkspaceSymbolIndex;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -102,7 +103,7 @@ pub struct WriteInput {
 #[derive(Clone)]
 pub struct WriteTool {
     limits: ToolLimits,
-    symbol_index: Option<Arc<SymbolIndex>>,
+    symbol_index: Option<Arc<WorkspaceSymbolIndex>>,
 }
 
 impl WriteTool {
@@ -115,7 +116,7 @@ impl WriteTool {
     }
 
     #[must_use]
-    pub fn with_symbol_index(mut self, index: Arc<SymbolIndex>) -> Self {
+    pub fn with_symbol_index(mut self, index: Arc<WorkspaceSymbolIndex>) -> Self {
         self.symbol_index = Some(index);
         self
     }
@@ -210,7 +211,7 @@ enum MatchMode {
 #[derive(Clone)]
 pub struct EditTool {
     limits: ToolLimits,
-    symbol_index: Option<Arc<SymbolIndex>>,
+    symbol_index: Option<Arc<WorkspaceSymbolIndex>>,
 }
 
 impl EditTool {
@@ -223,7 +224,7 @@ impl EditTool {
     }
 
     #[must_use]
-    pub fn with_symbol_index(mut self, index: Arc<SymbolIndex>) -> Self {
+    pub fn with_symbol_index(mut self, index: Arc<WorkspaceSymbolIndex>) -> Self {
         self.symbol_index = Some(index);
         self
     }
@@ -286,7 +287,7 @@ impl Tool for EditTool {
 #[derive(Clone)]
 pub struct MultiEditTool {
     limits: ToolLimits,
-    symbol_index: Option<Arc<SymbolIndex>>,
+    symbol_index: Option<Arc<WorkspaceSymbolIndex>>,
 }
 
 impl MultiEditTool {
@@ -299,7 +300,7 @@ impl MultiEditTool {
     }
 
     #[must_use]
-    pub fn with_symbol_index(mut self, index: Arc<SymbolIndex>) -> Self {
+    pub fn with_symbol_index(mut self, index: Arc<WorkspaceSymbolIndex>) -> Self {
         self.symbol_index = Some(index);
         self
     }
@@ -489,7 +490,7 @@ fn ensure_size(size: usize, limit: usize) -> Result<(), ToolError> {
 }
 
 fn update_symbol_index(
-    index: Option<&SymbolIndex>,
+    index: Option<&WorkspaceSymbolIndex>,
     context: &ToolContext,
     path: &std::path::Path,
     source: &str,
@@ -542,9 +543,11 @@ async fn atomic_write_unix(
                         context.relative_display(path).display()
                     )));
                 }
-                Some(std::fs::Permissions::from_mode(
-                    u32::from(stat.st_mode) & 0o7777,
-                ))
+                #[cfg(target_os = "linux")]
+                let mode = stat.st_mode;
+                #[cfg(not(target_os = "linux"))]
+                let mode = u32::from(stat.st_mode);
+                Some(std::fs::Permissions::from_mode(mode & 0o7777))
             }
             Err(rustix::io::Errno::NOENT) => None,
             Err(source) => {
@@ -982,12 +985,16 @@ mod tests {
         let root = tempdir().expect("temp directory");
         let path = root.path().join("lib.rs");
         fs::write(&path, "struct Old;").expect("fixture");
-        let index = Arc::new(SymbolIndex::new(root.path()).expect("index").with_limits(
-            rw_intel::IndexLimits {
-                max_file_bytes: 32,
-                ..rw_intel::IndexLimits::default()
-            },
-        ));
+        let index = Arc::new(
+            WorkspaceSymbolIndex::new_with_limits(
+                [root.path()],
+                rw_intel::IndexLimits {
+                    max_file_bytes: 32,
+                    ..rw_intel::IndexLimits::default()
+                },
+            )
+            .expect("index"),
+        );
         index
             .update_source("lib.rs", "struct Old;")
             .expect("old symbol");
@@ -1019,7 +1026,7 @@ mod tests {
         let path = root.path().join("tool.rs");
         fs::write(&path, "fn before() {}\n").expect("fixture");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("permissions");
-        let index = Arc::new(SymbolIndex::new(root.path()).expect("index"));
+        let index = Arc::new(WorkspaceSymbolIndex::new([root.path()]).expect("index"));
         let context = ToolContext::new(root.path()).expect("context");
         EditTool::new(ToolLimits::default())
             .with_symbol_index(Arc::clone(&index))
@@ -1036,6 +1043,53 @@ mod tests {
         let symbols = index.symbols_for_file("tool.rs").expect("indexed symbols");
         assert!(symbols.iter().any(|symbol| symbol.name == "after"));
         assert!(!symbols.iter().any(|symbol| symbol.name == "before"));
+    }
+
+    #[tokio::test]
+    async fn edit_updates_only_the_stable_added_root_symbol_index() {
+        let primary = tempdir().expect("primary");
+        let added = tempdir().expect("added");
+        fs::write(primary.path().join("same.rs"), "fn primary_before() {}\n")
+            .expect("primary source");
+        fs::write(added.path().join("same.rs"), "fn added_before() {}\n").expect("added source");
+        let index =
+            Arc::new(WorkspaceSymbolIndex::new([primary.path(), added.path()]).expect("index"));
+        index
+            .update_source("same.rs", "fn primary_before() {}\n")
+            .expect("primary index");
+        index
+            .update_source("@root/1/same.rs", "fn added_before() {}\n")
+            .expect("added index");
+        let context =
+            ToolContext::from_workspace_roots([primary.path(), added.path()]).expect("context");
+        EditTool::new(ToolLimits::default())
+            .with_symbol_index(index.clone())
+            .execute(
+                &context,
+                json!({"path":"@root/1/same.rs","old":"added_before","new":"added_after"}),
+            )
+            .await
+            .expect("edit added root");
+        assert!(
+            index
+                .symbols_for_file("same.rs")
+                .expect("primary symbols")
+                .iter()
+                .any(|symbol| symbol.name == "primary_before")
+        );
+        let added_symbols = index
+            .symbols_for_file("@root/1/same.rs")
+            .expect("added symbols");
+        assert!(
+            added_symbols
+                .iter()
+                .any(|symbol| symbol.name == "added_after")
+        );
+        assert!(
+            added_symbols
+                .iter()
+                .all(|symbol| symbol.name != "added_before")
+        );
     }
 
     #[cfg(unix)]

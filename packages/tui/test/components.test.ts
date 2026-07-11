@@ -198,6 +198,43 @@ describe("M4 retained components", () => {
     )
   })
 
+  test("makes unsandboxed bash approvals conspicuous with the exact command", async () => {
+    const setup = await createTestRenderer({ width: 112, height: 24, useThread: false })
+    renderer = setup.renderer
+    const state: RottweilerState = {
+      ...createInitialState(),
+      tools: {
+        bash: {
+          toolCallId: "bash",
+          turnId: "1",
+          name: "bash",
+          args: { command: "docker build .", sandbox: "unsandboxed" },
+          status: "awaiting_approval",
+          capabilities: ["execute", "write_filesystem", "network"],
+          rationale: "UNSANDBOXED EXECUTION: this command bypasses native isolation",
+          diff: null,
+          chunks: [],
+          output: null,
+          isError: null,
+          callIndex: 0,
+        },
+      },
+    }
+    const app = createRottweilerApp(renderer, {
+      initialState: state,
+      sessionId: "session-components",
+      clientId: "client-components",
+      requestId: () => "request-components",
+      onCommand() {},
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.interactionPanel.title).toContain("UNSANDBOXED")
+    expect(app.interactionPanel.prompt.plainText).toContain("$ docker build .")
+    expect(app.interactionPanel.prompt.plainText).toContain("UNSANDBOXED EXECUTION")
+  })
+
   test("renders a completed submitted plan and routes explicit approval", async () => {
     const setup = await createTestRenderer({ width: 112, height: 30, useThread: false })
     renderer = setup.renderer

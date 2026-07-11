@@ -325,6 +325,37 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
+        "generation": {
+          "type": "string"
+        },
+        "effective_from_turn": {
+          "type": "string"
+        },
+        "roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkspaceRootDescriptor"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_roots_changed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "generation",
+        "effective_from_turn",
+        "roots"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
         "driver_client_id": {
           "$ref": "#/$defs/ClientId"
         },
@@ -2588,6 +2619,28 @@
         "session_id",
         "sequence_id",
         "emitted_at"
+      ]
+    },
+    "WorkspaceRootDescriptor": {
+      "description": "One stable session workspace root. Durable/wire events use only virtual\n`@root/N` paths; canonical host paths stay in private local metadata.",
+      "type": "object",
+      "properties": {
+        "index": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string"
+        },
+        "machine_local": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "index",
+        "path",
+        "machine_local"
       ]
     },
     "StoredAttachment": {

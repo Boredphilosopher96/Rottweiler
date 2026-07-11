@@ -2470,7 +2470,6 @@ dependencies = [
  "rustix",
  "rustyline",
  "rw-core",
- "rw-sandbox",
  "rw-store",
  "serde",
  "serde_json",
@@ -2589,8 +2588,11 @@ dependencies = [
 name = "rw-sandbox"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "landlock",
  "libc",
+ "rustix",
+ "rustls",
  "rw-types",
  "seccompiler",
  "serde",
@@ -2598,6 +2600,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "url",
+ "webpki-roots",
 ]
 
 [[package]]

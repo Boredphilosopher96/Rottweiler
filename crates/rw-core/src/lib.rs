@@ -9,7 +9,7 @@ mod permission;
 mod provider_factory;
 mod subscription_credentials;
 
-pub use rw_types::config::{BudgetConfig, CompactionConfig, Config};
+pub use rw_types::config::{BudgetConfig, CompactionConfig, Config, PermissionConfig};
 pub use rw_types::{
     AccountingAttribution, AttachmentData, CommandDescriptor, ContextItemId, ContextSnapshot,
     CostSnapshot, ModeId, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor,
@@ -28,11 +28,12 @@ pub use engine::{
     EventClock, FolderTrustController, FolderTrustOperation, InterruptedToolRepair,
     MessageDisposition, ModelContextMetadata, ModelDriver, MutationCheckpoint,
     MutationCheckpointCoordinator, MutationCheckpointOutcome, NoopFolderTrustController,
-    NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink, RecoveredQuestion,
-    RewindCheckpoint, SESSION_EVENT_VERSION, SecretRedactor, SessionActor, SessionActorConfig,
-    SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,
-    SessionHandle, SessionProjectionError, SessionRecoveredState, SessionSnapshot,
-    SessionSubscription, SessionUsage, SystemEventClock, TOOL_CANCELLATION_GRACE,
+    NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink,
+    NoopWorkspaceRootController, RecoveredQuestion, RewindCheckpoint, SESSION_EVENT_VERSION,
+    SecretRedactor, SessionActor, SessionActorConfig, SessionCommandAction, SessionCommandContext,
+    SessionCommandOutput, SessionEventSink, SessionHandle, SessionProjectionError,
+    SessionRecoveredState, SessionSnapshot, SessionSubscription, SessionUsage, SystemEventClock,
+    TOOL_CANCELLATION_GRACE, WorkspaceRootController, WorkspaceRuntimeGeneration,
     builtin_command_registry, builtin_hook_dispatcher, project_session_events,
 };
 pub use host::{
@@ -44,8 +45,9 @@ pub use instructions::{
     base_agent_system_turn, initial_session_context, load_root_project_instructions,
 };
 pub use permission::{
-    HeadlessPermissionMode, PermissionApprover, PermissionGate, PermissionOutcome,
-    PermissionRequest,
+    ClearedSessionPermissions, HeadlessPermissionMode, PermissionApprovalSnapshot,
+    PermissionApprovalSummary, PermissionApprover, PermissionGate, PermissionGenerationUpdate,
+    PermissionOutcome, PermissionRequest,
 };
 pub use provider_factory::{
     ProviderFactory, ProviderFactoryError, ProviderRuntime, ResolvedModel, cost_from_model_metadata,
@@ -72,16 +74,20 @@ pub mod runtime_support {
         BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,
         FixtureRedactor, GuardedHttpFetchError, GuardedHttpFetchRequest, GuardedHttpFetchResponse,
         PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
-        ProxyEnvironment, ProxySettings, Recorder, ReplayProvider, ThinkingLevel, ToolChoice,
-        ToolDefinition, WireMode, deny_outbound_network_for_process, guarded_http_fetch,
+        ProxyAuthentication, ProxyEnvironment, ProxySettings, Recorder, ReplayProvider,
+        Secret as ProviderSecret, ThinkingLevel, ToolChoice, ToolDefinition, WireMode,
+        deny_outbound_network_for_process, guarded_http_fetch,
     };
     pub use rw_tools::{
-        AskUserInput, AskUserTool, BashTool, CancellationToken, CapabilityManifest,
-        CommandExecutor, CommandFixtureRedactor, EditTool, ExecutionLease, FetchRequest,
-        FetchResponse, GlobTool, GrepTool, LsTool, MultiEditTool, MutationScope, QuestionAsker,
-        ReadTool, RecordingCommandExecutor, ReplayCommandExecutor, SymbolIndex, SymbolsTool,
-        TodoTool, TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits,
-        ToolRegistry, ToolResult, WebFetchTool, WebFetcher, WriteTool,
+        AskUserInput, AskUserTool, BashSandboxMode, BashTool, CancellationToken,
+        CapabilityManifest, CommandExecutor, CommandFixtureRedactor, CommandSafetyClassifier,
+        EditTool, EgressDecision, EgressPin, EgressPolicy, ExecutionLease, FetchRequest,
+        FetchResponse, GlobTool, GrepTool, LsTool, MultiEditTool, MutationScope,
+        NetworkPolicy as SandboxNetworkPolicy, QuestionAsker, ReadTool, RecordingCommandExecutor,
+        ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SupervisedEgressProxy, SymbolIndex,
+        SymbolsTool, TodoTool, TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError,
+        ToolLimits, ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool, WebFetcher,
+        WorkspaceSymbolIndex, WriteTool, maybe_run_sandbox_helper, probe_policy_egress,
     };
     pub use rw_types::{
         Answer, ApprovalBinding, ApprovalDecision, Block, ClientCommand, ClientId, CommandOutcome,

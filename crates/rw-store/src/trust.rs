@@ -94,10 +94,16 @@ impl FolderTrustAssessment {
     /// Stable, path-relative inventory suitable for an interactive prompt.
     #[must_use]
     pub fn render_prompt(&self) -> String {
+        self.render_prompt_with_workspace(&self.workspace.display().to_string())
+    }
+
+    /// Stable inventory rendered with a caller-supplied non-sensitive
+    /// workspace label such as `@root/0`.
+    #[must_use]
+    pub fn render_prompt_with_workspace(&self, workspace: &str) -> String {
         let mut lines = vec![format!(
             "workspace: {}\nstate: {:?}\nexecutable project inventory:",
-            self.workspace.display(),
-            self.state
+            workspace, self.state
         )];
         if self.inventory.is_empty() {
             lines.push("  (none)".to_owned());
@@ -251,22 +257,39 @@ impl FolderTrustStore {
     /// Fails if executable content changed since the prompt or the private
     /// ledger cannot be safely replaced.
     pub fn grant(&self, assessment: &FolderTrustAssessment) -> Result<(), FolderTrustError> {
+        self.grant_all(std::slice::from_ref(assessment))
+    }
+
+    /// Atomically grant trust to several exact assessed workspace inventories.
+    ///
+    /// Every inventory is rechecked under one writer lock before the ledger is
+    /// replaced, so a multi-root grant cannot partially commit.
+    ///
+    /// # Errors
+    ///
+    /// Fails if any inventory changed or the private ledger cannot be locked,
+    /// read, or atomically replaced.
+    pub fn grant_all(&self, assessments: &[FolderTrustAssessment]) -> Result<(), FolderTrustError> {
         let _lock = self.acquire_write_lock()?;
-        let current = self.assess(&assessment.workspace)?;
-        if current.executable_hash != assessment.executable_hash
-            || current.inventory != assessment.inventory
-        {
-            return Err(FolderTrustError::ChangedDuringGrant);
+        for assessment in assessments {
+            let current = self.assess(&assessment.workspace)?;
+            if current.executable_hash != assessment.executable_hash
+                || current.inventory != assessment.inventory
+            {
+                return Err(FolderTrustError::ChangedDuringGrant);
+            }
         }
         let mut ledger = self.read_ledger()?;
-        let key = workspace_key(&assessment.workspace)?;
-        ledger.workspaces.insert(
-            key,
-            TrustedWorkspace {
-                executable_hash: assessment.executable_hash.clone(),
-                inventory: assessment.inventory.clone(),
-            },
-        );
+        for assessment in assessments {
+            let key = workspace_key(&assessment.workspace)?;
+            ledger.workspaces.insert(
+                key,
+                TrustedWorkspace {
+                    executable_hash: assessment.executable_hash.clone(),
+                    inventory: assessment.inventory.clone(),
+                },
+            );
+        }
         self.write_ledger(&ledger)
     }
 
@@ -276,14 +299,30 @@ impl FolderTrustStore {
     ///
     /// Fails if the workspace or private ledger cannot be read/written.
     pub fn revoke(&self, workspace: &Path) -> Result<(), FolderTrustError> {
-        let workspace =
-            fs::canonicalize(workspace).map_err(|source| FolderTrustError::Workspace {
-                path: workspace.to_owned(),
-                source,
-            })?;
+        self.revoke_all(std::slice::from_ref(&workspace.to_path_buf()))
+    }
+
+    /// Atomically revoke trust for several canonical workspace identities.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a workspace cannot be canonicalized or the private ledger
+    /// cannot be locked, read, or atomically replaced.
+    pub fn revoke_all(&self, workspaces: &[PathBuf]) -> Result<(), FolderTrustError> {
+        let workspaces = workspaces
+            .iter()
+            .map(|workspace| {
+                fs::canonicalize(workspace).map_err(|source| FolderTrustError::Workspace {
+                    path: workspace.to_owned(),
+                    source,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let _lock = self.acquire_write_lock()?;
         let mut ledger = self.read_ledger()?;
-        ledger.workspaces.remove(&workspace_key(&workspace)?);
+        for workspace in workspaces {
+            ledger.workspaces.remove(&workspace_key(&workspace)?);
+        }
         self.write_ledger(&ledger)
     }
 

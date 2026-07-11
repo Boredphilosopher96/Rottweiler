@@ -29,5 +29,10 @@ url.workspace = true
 [dev-dependencies]
 tempfile = "3.23"
 
+[[test]]
+name = "linux_safe_list_network"
+path = "tests/linux_safe_list_network.rs"
+harness = false
+
 [lints]
 workspace = true

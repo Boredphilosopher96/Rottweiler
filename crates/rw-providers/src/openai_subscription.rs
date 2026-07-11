@@ -555,6 +555,9 @@ mod tests {
     #[derive(Default)]
     struct RecordingSink(Mutex<Vec<(String, Option<String>, String)>>);
 
+    #[derive(Default)]
+    struct FailingSink(Mutex<Vec<(String, Option<String>, String)>>);
+
     impl fmt::Debug for RecordingSink {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter.write_str("RecordingSink([REDACTED])")
@@ -581,16 +584,56 @@ mod tests {
         }
     }
 
-    fn jwt(account_id: &str, expiry: u64) -> String {
+    impl fmt::Debug for FailingSink {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("FailingSink([REDACTED])")
+        }
+    }
+
+    #[async_trait]
+    impl OpenAiSubscriptionTokenSink for FailingSink {
+        async fn persist(
+            &self,
+            access_token: &Secret,
+            rotated_refresh_token: Option<&Secret>,
+            account_id: &Secret,
+        ) -> Result<(), ProviderError> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((
+                    access_token.expose_secret().to_owned(),
+                    rotated_refresh_token.map(|token| token.expose_secret().to_owned()),
+                    account_id.expose_secret().to_owned(),
+                ));
+            Err(ProviderError::new(
+                crate::ProviderErrorKind::Authentication,
+                format!(
+                    "sink-failure-canary {} {} {}",
+                    access_token.expose_secret(),
+                    rotated_refresh_token
+                        .map(Secret::expose_secret)
+                        .unwrap_or_default(),
+                    account_id.expose_secret()
+                ),
+            ))
+        }
+    }
+
+    fn jwt_with_claims(claims: &serde_json::Value) -> String {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
         let payload = URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&json!({
-                "https://api.openai.com/auth": {"chatgpt_account_id": account_id},
-                "exp": expiry,
-            }))
-            .unwrap_or_else(|error| panic!("JWT fixture must encode: {error}")),
+            serde_json::to_vec(claims)
+                .unwrap_or_else(|error| panic!("JWT fixture must encode: {error}")),
         );
         format!("{header}.{payload}.signature")
+    }
+
+    fn jwt(account_id: &str, expiry: u64) -> String {
+        jwt_with_claims(&json!({
+            "https://api.openai.com/auth": {"chatgpt_account_id": account_id},
+            "exp": expiry,
+        }))
     }
 
     async fn spawn_token_server(body: String) -> (Url, tokio::task::JoinHandle<String>) {
@@ -746,6 +789,46 @@ mod tests {
         assert!(request.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
     }
 
+    #[test]
+    fn conflicting_jwt_account_claims_follow_explicit_precedence() {
+        let all_claims = jwt_with_claims(&json!({
+            "chatgpt_account_id": "acct-top-level",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-namespaced"
+            },
+            "organizations": [
+                {"id": "acct-first-organization"},
+                {"id": "acct-second-organization"}
+            ]
+        }));
+        assert_eq!(
+            extract_openai_subscription_account_id(&all_claims).as_deref(),
+            Some("acct-top-level")
+        );
+
+        let namespaced_and_organizations = jwt_with_claims(&json!({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct-namespaced"
+            },
+            "organizations": [{"id": "acct-first-organization"}]
+        }));
+        assert_eq!(
+            extract_openai_subscription_account_id(&namespaced_and_organizations).as_deref(),
+            Some("acct-namespaced")
+        );
+
+        let organizations_only = jwt_with_claims(&json!({
+            "organizations": [
+                {"id": "acct-first-organization"},
+                {"id": "acct-second-organization"}
+            ]
+        }));
+        assert_eq!(
+            extract_openai_subscription_account_id(&organizations_only).as_deref(),
+            Some("acct-first-organization")
+        );
+    }
+
     #[tokio::test]
     async fn refresh_is_deduplicated_and_material_has_account_headers_without_leaks() {
         let account = "acct-refresh-fixture";
@@ -813,6 +896,67 @@ mod tests {
         let debug = format!("{auth:?} {redactor:?}");
         for secret in ["initial-refresh-canary", "rotated-refresh-canary", account] {
             assert!(!debug.contains(secret));
+        }
+    }
+
+    #[tokio::test]
+    async fn subscription_bundle_persistence_failure_withholds_bearer_and_sanitizes_canaries() {
+        let account = "acct-persist-failure-canary";
+        let access = jwt(account, u64::MAX / 2);
+        let rotated = "rotated-persist-failure-canary";
+        let response = json!({
+            "id_token": jwt(account, u64::MAX / 2),
+            "access_token": access,
+            "refresh_token": rotated,
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        })
+        .to_string();
+        let (token_endpoint, token_task) = spawn_token_server(response).await;
+        let sink = Arc::new(FailingSink::default());
+        let auth = OpenAiSubscriptionAuth::with_proxy(
+            OpenAiSubscriptionAuthConfig {
+                token_endpoint,
+                client_id: OPENAI_SUBSCRIPTION_CLIENT_ID.to_owned(),
+                access_token: None,
+                refresh_token: Secret::new("initial-persist-failure-canary"),
+                account_id: Some(Secret::new(account)),
+                originator: "rottweiler".to_owned(),
+                user_agent: "rottweiler/test".to_owned(),
+                session_id: "rw-session-persist-failure".to_owned(),
+            },
+            None,
+            None,
+            sink.clone(),
+            Arc::new(FixtureRedactor::default()),
+        )
+        .unwrap_or_else(|error| panic!("subscription auth must build: {error}"));
+
+        let Err(failure) = auth.material().await else {
+            panic!("bearer material must not escape a failed bundle persistence")
+        };
+        token_task
+            .await
+            .unwrap_or_else(|error| panic!("token task must join: {error}"));
+        let persisted = sink
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].0, access);
+        assert_eq!(persisted[0].1.as_deref(), Some(rotated));
+        assert_eq!(persisted[0].2, account);
+
+        let diagnostic = format!("{failure} {failure:?} {auth:?} {sink:?}");
+        assert!(diagnostic.contains("could not persist refreshed"));
+        for canary in [
+            access.as_str(),
+            rotated,
+            account,
+            "initial-persist-failure-canary",
+            "sink-failure-canary",
+        ] {
+            assert!(!diagnostic.contains(canary));
         }
     }
 }

@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
-use rw_intel::SymbolIndex;
-
 use crate::bash::{BashTool, CommandExecutor};
 use crate::files::{EditTool, MultiEditTool, ReadTool, WriteTool};
 use crate::interaction::{AskUserTool, QuestionAsker, SubmitPlanTool, TodoTool};
 use crate::registry::{Tool, ToolError, ToolLimits, ToolRegistry};
 use crate::search::{GlobTool, GrepTool, LsTool};
-use crate::symbols::SymbolsTool;
+use crate::symbols::{SymbolsTool, WorkspaceSymbolIndex};
 use crate::web::{WebFetchTool, WebFetcher};
 
 /// Host-provided boundaries required by the complete first-party tool set.
@@ -15,14 +13,14 @@ pub struct BuiltinDependencies {
     pub command_executor: Arc<dyn CommandExecutor>,
     pub web_fetcher: Arc<dyn WebFetcher>,
     pub question_asker: Arc<dyn QuestionAsker>,
-    pub symbol_index: Arc<SymbolIndex>,
+    pub symbol_index: Arc<WorkspaceSymbolIndex>,
     pub limits: ToolLimits,
 }
 
 /// Session-lifecycle handles retained by core after registry construction.
 pub struct BuiltinHandles {
     pub todo: Arc<TodoTool>,
-    pub symbol_index: Arc<SymbolIndex>,
+    pub symbol_index: Arc<WorkspaceSymbolIndex>,
 }
 
 /// Register the first-party tool set through the same public API used by extensions.
@@ -61,7 +59,7 @@ pub fn register_builtins(
         }
     }
     symbol_index
-        .index_workspace()
+        .index_workspaces()
         .map_err(|error| ToolError::Intelligence(error.to_string()))?;
     for tool in tools {
         registry.register(tool)?;
@@ -76,6 +74,7 @@ mod tests {
     use std::fs;
 
     use async_trait::async_trait;
+    use rw_intel::SymbolQuery;
     use tempfile::tempdir;
 
     use super::*;
@@ -129,7 +128,7 @@ mod tests {
         let root = tempdir().expect("temp directory");
         fs::write(root.path().join("startup.rs"), "pub struct StartupSymbol;")
             .expect("startup source");
-        let index = Arc::new(SymbolIndex::new(root.path()).expect("index"));
+        let index = Arc::new(WorkspaceSymbolIndex::new([root.path()]).expect("index"));
         let dependencies = || BuiltinDependencies {
             command_executor: Arc::new(NoCommand),
             web_fetcher: Arc::new(NoFetch),
@@ -142,7 +141,12 @@ mod tests {
         assert_eq!(registry.len(), 13);
         assert!(
             index
-                .symbols_for_file("startup.rs")
+                .query(&SymbolQuery {
+                    pattern: "StartupSymbol".to_owned(),
+                    roles: Vec::new(),
+                    languages: Vec::new(),
+                    limit: 10,
+                })
                 .expect("startup symbols")
                 .iter()
                 .any(|symbol| symbol.name == "StartupSymbol")

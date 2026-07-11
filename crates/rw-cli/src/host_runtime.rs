@@ -28,7 +28,7 @@ use crate::{
     PermissionMode,
     runtime::{
         HostedProviderMode, HostedSessionComposition, compose_hosted_actor,
-        load_session_metadata_any, new_session_id,
+        load_session_metadata_any, load_session_workspace_roots, new_session_id,
     },
 };
 
@@ -159,13 +159,24 @@ impl CliSessionFactory {
         descriptor: &SessionDescriptor,
     ) -> Result<Vec<PathBuf>, HostError> {
         let primary = self.workspace_for_session(descriptor)?;
-        let mut roots = vec![primary.clone()];
-        roots.extend(
-            self.allowed_workspaces
-                .iter()
-                .filter(|root| **root != primary)
-                .cloned(),
-        );
+        let configured = load_session_workspace_roots(
+            &self.options.storage_root,
+            &primary,
+            &descriptor.session_id.0,
+        )
+        .map_err(|_| HostError::Query("session workspace roots are unavailable".to_owned()))?;
+        let mut roots = Vec::with_capacity(configured.len());
+        for (index, root) in configured.into_iter().enumerate() {
+            let canonical = fs::canonicalize(&root).map_err(|_| {
+                HostError::Query("session workspace root is unavailable".to_owned())
+            })?;
+            if index == 0 && canonical != primary {
+                return Err(HostError::Query(
+                    "session primary workspace root changed".to_owned(),
+                ));
+            }
+            roots.push(canonical);
+        }
         Ok(roots)
     }
 

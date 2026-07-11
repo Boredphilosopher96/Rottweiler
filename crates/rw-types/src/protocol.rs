@@ -238,6 +238,15 @@ pub struct WorkspaceStatus {
     pub truncated: bool,
 }
 
+/// One stable session workspace root. Durable/wire events use only virtual
+/// `@root/N` paths; canonical host paths stay in private local metadata.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct WorkspaceRootDescriptor {
+    pub index: u32,
+    pub path: String,
+    pub machine_local: bool,
+}
+
 /// Optional structured unified diff attached to a mutating-tool approval.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct ApprovalBinding {
@@ -1001,6 +1010,18 @@ pub enum EngineEvent {
         meta: EventMeta,
         driver_client_id: ClientId,
     },
+    WorkspaceRootsChanged {
+        meta: EventMeta,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        generation: u64,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        effective_from_turn: u64,
+        roots: Vec<WorkspaceRootDescriptor>,
+    },
     DriverChanged {
         meta: EventMeta,
         driver_client_id: ClientId,
@@ -1288,6 +1309,7 @@ impl EngineEvent {
             | Self::WorkspaceStatusReady { .. }
             | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }
+            | Self::WorkspaceRootsChanged { meta, .. }
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
@@ -1344,6 +1366,7 @@ impl EngineEvent {
             | Self::WorkspaceStatusReady { .. }
             | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }
+            | Self::WorkspaceRootsChanged { meta, .. }
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::UserMessageAccepted { meta, .. }

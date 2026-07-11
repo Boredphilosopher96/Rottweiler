@@ -24,6 +24,16 @@ pub enum RemotePermissionMode {
     Yolo,
 }
 
+impl RemotePermissionMode {
+    const fn as_cli_value(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::AutoSafe => "auto-safe",
+            Self::Yolo => "yolo",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SshCommand {
     pub program: PathBuf,
@@ -42,30 +52,28 @@ pub struct RemoteConfig {
     pub additional_workspaces: Vec<PathBuf>,
     pub dangerously_trust: bool,
     pub model: Option<String>,
-    pub permission_mode: RemotePermissionMode,
+    pub permission_mode: Option<RemotePermissionMode>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RemoteError {
-    StrictPermissionRequired,
-    InvalidHost,
-    InvalidSocketPath,
-    InvalidRemoteExecutable,
-    InvalidSession,
-    InvalidWorkspace,
-    InvalidModel,
+    Host,
+    SocketPath,
+    RemoteExecutable,
+    Session,
+    Workspace,
+    Model,
 }
 
 impl std::fmt::Display for RemoteError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::StrictPermissionRequired => "remote sessions require strict permission mode",
-            Self::InvalidHost => "remote SSH host is invalid",
-            Self::InvalidSocketPath => "remote forwarding requires absolute Unix socket paths",
-            Self::InvalidRemoteExecutable => "remote rw executable must be an absolute path",
-            Self::InvalidSession => "remote session id is invalid",
-            Self::InvalidWorkspace => "remote workspace must be an absolute safe path",
-            Self::InvalidModel => "remote model alias is invalid",
+            Self::Host => "remote SSH host is invalid",
+            Self::SocketPath => "remote forwarding requires absolute Unix socket paths",
+            Self::RemoteExecutable => "remote rw executable must be an absolute path",
+            Self::Session => "remote session id is invalid",
+            Self::Workspace => "remote workspace must be an absolute safe path",
+            Self::Model => "remote model alias is invalid",
         })
     }
 }
@@ -74,9 +82,6 @@ impl std::error::Error for RemoteError {}
 
 impl RemoteConfig {
     pub fn validate(&self) -> Result<(), RemoteError> {
-        if self.permission_mode != RemotePermissionMode::Strict {
-            return Err(RemoteError::StrictPermissionRequired);
-        }
         if self.host.is_empty()
             || self.host.starts_with('-')
             || self
@@ -84,13 +89,13 @@ impl RemoteConfig {
                 .chars()
                 .any(|character| character.is_control() || character.is_whitespace())
         {
-            return Err(RemoteError::InvalidHost);
+            return Err(RemoteError::Host);
         }
         if !is_absolute_socket(&self.remote_socket) || !is_absolute_socket(&self.local_socket) {
-            return Err(RemoteError::InvalidSocketPath);
+            return Err(RemoteError::SocketPath);
         }
         if !is_safe_absolute_path(&self.remote_rw_executable) {
-            return Err(RemoteError::InvalidRemoteExecutable);
+            return Err(RemoteError::RemoteExecutable);
         }
         if self.session_id.is_empty()
             || self.session_id.len() > 128
@@ -99,17 +104,17 @@ impl RemoteConfig {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
         {
-            return Err(RemoteError::InvalidSession);
+            return Err(RemoteError::Session);
         }
         if !is_safe_absolute_path(&self.remote_workspace) {
-            return Err(RemoteError::InvalidWorkspace);
+            return Err(RemoteError::Workspace);
         }
         if self
             .additional_workspaces
             .iter()
             .any(|path| !is_safe_absolute_path(path))
         {
-            return Err(RemoteError::InvalidWorkspace);
+            return Err(RemoteError::Workspace);
         }
         if self.model.as_ref().is_some_and(|model| {
             model.is_empty()
@@ -117,28 +122,35 @@ impl RemoteConfig {
                     .chars()
                     .any(|value| value == '\0' || value.is_control())
         }) {
-            return Err(RemoteError::InvalidModel);
+            return Err(RemoteError::Model);
         }
         Ok(())
     }
 
-    /// Starts or attaches the remote engine. Detach and strict mode are
-    /// unconditional, so a local UI exit never terminates the remote engine.
+    /// Starts or attaches the remote engine. Detach is unconditional, so a
+    /// local UI exit never terminates the remote engine. An omitted permission
+    /// mode lets the remote host load its own user policy.
     pub fn engine_start_command(&self) -> Result<SshCommand, RemoteError> {
         self.validate()?;
         let mut remote_argv = vec![
             self.remote_rw_executable.to_string_lossy().into_owned(),
             "serve".to_owned(),
             "--detach".to_owned(),
-            "--permission-mode".to_owned(),
-            "strict".to_owned(),
+        ];
+        if let Some(mode) = self.permission_mode {
+            remote_argv.extend([
+                "--permission-mode".to_owned(),
+                mode.as_cli_value().to_owned(),
+            ]);
+        }
+        remote_argv.extend([
             "--socket".to_owned(),
             self.remote_socket.to_string_lossy().into_owned(),
             "--session".to_owned(),
             self.session_id.clone(),
             "--workspace".to_owned(),
             self.remote_workspace.to_string_lossy().into_owned(),
-        ];
+        ]);
         if let Some(model) = &self.model {
             remote_argv.extend(["--model".to_owned(), model.clone()]);
         }
@@ -424,7 +436,7 @@ mod tests {
             additional_workspaces: Vec::new(),
             dangerously_trust: false,
             model: None,
-            permission_mode: RemotePermissionMode::Strict,
+            permission_mode: Some(RemotePermissionMode::Strict),
         }
     }
 
@@ -476,22 +488,32 @@ mod tests {
         assert!(rendered.contains("--dangerously-trust"));
 
         candidate.additional_workspaces = vec![PathBuf::from("relative")];
-        assert_eq!(candidate.validate(), Err(RemoteError::InvalidWorkspace));
+        assert_eq!(candidate.validate(), Err(RemoteError::Workspace));
     }
 
     #[test]
-    fn remote_never_relaxes_permissions_or_accepts_ssh_option_injection() {
+    fn remote_forwards_explicit_permission_modes_and_rejects_ssh_option_injection() {
         for mode in [RemotePermissionMode::AutoSafe, RemotePermissionMode::Yolo] {
             let mut candidate = config();
-            candidate.permission_mode = mode;
-            assert_eq!(
-                candidate.validate(),
-                Err(RemoteError::StrictPermissionRequired)
-            );
+            candidate.permission_mode = Some(mode);
+            let command = candidate.engine_start_command().expect("permission mode");
+            let rendered = command.args.last().expect("remote argv").to_string_lossy();
+            assert!(rendered.contains(&format!("'{}'", mode.as_cli_value())));
         }
+        let mut inherited = config();
+        inherited.permission_mode = None;
+        let command = inherited.engine_start_command().expect("inherited policy");
+        assert!(
+            !command
+                .args
+                .last()
+                .expect("remote argv")
+                .to_string_lossy()
+                .contains("--permission-mode")
+        );
         let mut candidate = config();
         candidate.host = "-oProxyCommand=bad".to_owned();
-        assert_eq!(candidate.validate(), Err(RemoteError::InvalidHost));
+        assert_eq!(candidate.validate(), Err(RemoteError::Host));
         let mut candidate = config();
         candidate.remote_socket = PathBuf::from("/tmp/socket;touch-pwned");
         assert!(candidate.validate().is_ok());

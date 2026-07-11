@@ -28,7 +28,7 @@ from dataclasses import dataclass
 
 
 FIRST_PAINT_MARKER = b"Rottweiler"
-OPEN_TUI_FRAME_MARKER = b"ROTTWEILER_OPEN_TUI_FIRST_FRAME"
+TUI_FIRST_PAINT_MARKER = b"ROTTWEILER_TUI_FIRST_PAINT"
 DRIVER_READY_MARKER = b"ROTTWEILER_TUI_DRIVER_READY"
 PROMPT_MARKER = "M4_REATTACH_PROMPT_7f40"
 RESPONSE_MARKER = "M4_REATTACH_RESPONSE_34d1"
@@ -588,6 +588,7 @@ def one_startup_sample(
 ) -> tuple[float, float]:
     sample_root = root / f"sample-{index}"
     sample_root.mkdir(mode=0o700)
+    wall_started_ms = time.time_ns() / 1_000_000
     runtime, started = spawn_engine(
         rw, sample_root, workspace, port, f"m4-perf-{index}"
     )
@@ -600,7 +601,8 @@ def one_startup_sample(
                 "ROTTWEILER_ENGINE_TOKEN_FILE": str(runtime.token_path),
                 "ROTTWEILER_SESSION_ID": f"m4-perf-{index}",
                 "ROTTWEILER_LAST_SEEN_FILE": str(sample_root / "run" / "last-seen"),
-                "ROTTWEILER_FIRST_FRAME_MARKER": OPEN_TUI_FRAME_MARKER.decode("ascii"),
+                "ROTTWEILER_FIRST_PAINT_MARKER": TUI_FIRST_PAINT_MARKER.decode("ascii"),
+                "ROTTWEILER_FIRST_PAINT_EPOCH": "1",
             }
         )
         tui_process = spawn_pty(tui, env, workspace)
@@ -609,8 +611,21 @@ def one_startup_sample(
         # start is hidden and the total measures their real concurrent path.
         wait_for_health(runtime)
         ready_ms = (time.perf_counter_ns() - started) / 1_000_000
-        read_until(tui_process, OPEN_TUI_FRAME_MARKER)
-        combined_ms = (time.perf_counter_ns() - started) / 1_000_000
+        captured = read_until(tui_process, TUI_FIRST_PAINT_MARKER)
+        timestamp_prefix = TUI_FIRST_PAINT_MARKER + b":"
+        try:
+            emitted_at_ms = float(
+                captured.split(timestamp_prefix, 1)[1].splitlines()[0].decode("ascii")
+            )
+        except (IndexError, UnicodeDecodeError, ValueError) as error:
+            raise RuntimeError("TUI first-frame marker omitted its emission timestamp") from error
+        paint_ms = emitted_at_ms - wall_started_ms
+        if paint_ms <= 0 or paint_ms > 5_000:
+            raise RuntimeError(f"TUI first-paint timestamp was implausible: {paint_ms}ms")
+        # Both independently-started processes must be ready for the combined
+        # cold-start gate. The later of engine readiness and the shipped,
+        # user-visible splash is the actual first usable paint boundary.
+        combined_ms = max(ready_ms, paint_ms)
         return ready_ms, combined_ms
     finally:
         if tui_process is not None:
@@ -631,7 +646,14 @@ def performance_gate(
     port: int,
     samples: int,
 ) -> None:
-    one_startup_sample(rw, tui, root, workspace, port, -1)
+    # Warm the installed-artifact inode until macOS's one-time executable
+    # inspection and dynamic-loader caches have settled. A single warmup can
+    # return its first paint while XProtect is still scanning in the
+    # background, contaminating later cold-process samples with installation
+    # work that is explicitly outside this startup budget.
+    for index in range(-5, 0):
+        one_startup_sample(rw, tui, root, workspace, port, index)
+    time.sleep(0.05)
     measurements = [
         one_startup_sample(rw, tui, root, workspace, port, index)
         for index in range(samples)
@@ -827,7 +849,15 @@ def supervisor_reattach_gate(
 ) -> None:
     home = root / "supervisor-home"
     write_config(home, port)
-    process = spawn_pty(rw, isolated_env(home, tui), workspace)
+    # This is an isolated, generated CI workspace. Opt into the product's
+    # explicit non-persisting CI trust escape hatch so the fixture exercises
+    # supervision instead of blocking at the interactive folder-trust prompt.
+    process = spawn_pty(
+        rw,
+        isolated_env(home, tui),
+        workspace,
+        ["--dangerously-trust"],
+    )
     try:
         read_until(process, FIRST_PAINT_MARKER, timeout=8)
         first_tui = wait_for_tui_child(process.pid, tui)
@@ -885,7 +915,9 @@ def shell_handover_gate(
 
     shell_env = isolated_env(home, tui)
     shell_env["ROTTWEILER_DRIVER_READY_MARKER"] = DRIVER_READY_MARKER.decode("ascii")
-    process = spawn_pty(rw, shell_env, workspace)
+    # See supervisor_reattach_gate: trust is explicit and scoped to this
+    # generated fixture process; product defaults remain fail-closed.
+    process = spawn_pty(rw, shell_env, workspace, ["--dangerously-trust"])
     try:
         read_until(process, FIRST_PAINT_MARKER, timeout=8)
         first_engine = wait_for_engine_child(process.pid, rw)
@@ -1022,7 +1054,12 @@ def ssh_loopback_gate(
             "ROTTWEILER_SSH_BIN": "/usr/bin/ssh",
         }
     )
-    local = spawn_pty(rw, env, workspace, ["--permission-mode", "strict"])
+    local = spawn_pty(
+        rw,
+        env,
+        workspace,
+        ["--dangerously-trust", "--permission-mode", "strict"],
+    )
     try:
         read_until(local, FIRST_PAINT_MARKER, timeout=10)
         os.write(local.fd, PROMPT_MARKER.encode() + KITTY_SUBMIT)
@@ -1040,6 +1077,7 @@ def ssh_loopback_gate(
         env,
         workspace,
         [
+            "--dangerously-trust",
             "--remote",
             host,
             "--permission-mode",

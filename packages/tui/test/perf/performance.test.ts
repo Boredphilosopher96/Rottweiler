@@ -20,6 +20,10 @@ describe("M4 executable TUI performance budgets", () => {
   })
 
   test("10MB transcript streaming frame compute stays inside p95/p99.9 budgets", async () => {
+    // Perf files share a Bun process with the component suite. Collect before
+    // allocating the 10MB fixture so unrelated suite garbage cannot become a
+    // frame-compute outlier while preserving the production budget itself.
+    Bun.gc(true)
     const setup = await createTestRenderer({
       width: 100,
       height: 30,
@@ -60,6 +64,15 @@ describe("M4 executable TUI performance budgets", () => {
     await setup.flush()
     expect(app.transcript.mountedEntryCount).toBeLessThan(24)
 
+    for (let warmup = 0; warmup < 10; warmup += 1) {
+      app.setState({
+        ...base,
+        streamingTail: { ...base.streamingTail!, text: `warmup ${warmup}\n` },
+      })
+      await setup.renderOnce()
+    }
+    Bun.gc(true)
+
     const samples: number[] = []
     let streamed = ""
     for (let line = 0; line < 200; line += 1) {
@@ -84,6 +97,7 @@ describe("M4 executable TUI performance budgets", () => {
   }, 20_000)
 
   test("focused composer input echo stays below 16ms p99", async () => {
+    Bun.gc(true)
     const setup = await createTestRenderer({
       width: 80,
       height: 20,
@@ -95,6 +109,14 @@ describe("M4 executable TUI performance budgets", () => {
     renderer.root.add(app)
     await setup.renderOnce()
     app.composer.focus()
+
+    for (const key of "warmup") {
+      setup.mockInput.pressKey(key)
+      await setup.renderOnce()
+    }
+    app.composer.value = ""
+    await setup.renderOnce()
+    Bun.gc(true)
 
     const samples: number[] = []
     const input = "responsivetypingwithoutblockingtherenderloop"

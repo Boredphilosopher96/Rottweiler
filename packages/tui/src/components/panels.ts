@@ -114,10 +114,12 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#activeQuestion = null
     this.#activePlan = null
     this.visible = true
-    this.title = " Permission required "
+    const bash = bashApproval(tool)
+    this.title = bash?.unsandboxed === true ? " UNSANDBOXED approval required " : " Permission required "
     const diff = readUnifiedDiff(tool.diff)
     const truncated = diff?.truncated === true
-    this.prompt.content = `${tool.name} requests ${tool.capabilities.join(", ") || "permission"}\n${
+    const command = bash === null ? "" : `\n$ ${bash.command}`
+    this.prompt.content = `${tool.name} requests ${tool.capabilities.join(", ") || "permission"}${command}\n${
       truncated
         ? "Diff exceeds the review limit. Approval is disabled until the complete change can be reviewed."
         : (tool.rationale ?? "Review this action.")
@@ -221,6 +223,17 @@ export class InteractionPanelRenderable extends BoxRenderable {
       this.#diff = null
     }
   }
+}
+
+function bashApproval(tool: ToolProjection): { readonly command: string; readonly unsandboxed: boolean } | null {
+  if (tool.name !== "bash" || tool.args === null || typeof tool.args !== "object") {
+    return null
+  }
+  const args = tool.args as Record<string, unknown>
+  if (typeof args.command !== "string") {
+    return null
+  }
+  return { command: args.command, unsandboxed: args.sandbox === "unsandboxed" }
 }
 
 export interface ContextPanelCallbacks {

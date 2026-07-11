@@ -46,6 +46,13 @@ jobs:
       - run: bun run build
         working-directory: packages/tui
 
+  security-tests:
+    name: M5 Linux sandbox security acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: crates/rw-sandbox/tests/linux_security_gate.sh
+
   performance:
     name: M2 and M4 performance budgets
     runs-on: macos-15

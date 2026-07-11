@@ -23,6 +23,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "workspace_status_ready",
   "host_shutdown",
   "session_created",
+  "workspace_roots_changed",
   "driver_changed",
   "message_queued",
   "user_message_accepted",
@@ -322,6 +323,15 @@ function applyKnownEvent(
           ...state.queuedMessages,
           { position: event.position, content: event.content },
         ],
+      }
+    case "workspace_roots_changed":
+      return {
+        ...state,
+        workspaceRoots: {
+          generation: event.generation,
+          effectiveFromTurn: event.effective_from_turn,
+          roots: event.roots.map((root) => root.path),
+        },
       }
     case "user_message_accepted":
       return state

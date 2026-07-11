@@ -13,7 +13,8 @@ use rw_types::{
     RequestId, RewindTarget, Role, SequenceId, SessionDescriptor, SessionId, ShellId,
     StoredAttachment, SubagentId, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
     ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
-    UnrestorablePath, Usage, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    UnrestorablePath, Usage, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
+    WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Serialize;
@@ -171,6 +172,7 @@ fn generate_typescript() -> String {
     declaration!(WorkspaceFileMatch);
     declaration!(WorkspaceFilePreview);
     declaration!(WorkspaceStatus);
+    declaration!(WorkspaceRootDescriptor);
     declaration!(UnifiedDiff);
     declaration!(ApprovalBinding);
     declaration!(ApprovalDecision);

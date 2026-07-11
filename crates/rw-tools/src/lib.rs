@@ -14,9 +14,10 @@ mod symbols;
 mod web;
 
 pub use bash::{
-    BashInput, BashTool, CommandExecutor, CommandFixtureRedactor, CommandOutcome, CommandRequest,
-    CommandSafety, ExecutionLease, IdentityCommandFixtureRedactor, RecordingCommandExecutor,
-    ReplayCommandExecutor, TokioCommandExecutor, classify_safe_command,
+    BashInput, BashSandboxMode, BashTool, CommandExecutor, CommandFixtureRedactor, CommandOutcome,
+    CommandRequest, CommandSafety, CommandSafetyClassifier, ExecutionLease,
+    IdentityCommandFixtureRedactor, RecordingCommandExecutor, ReplayCommandExecutor,
+    TokioCommandExecutor, classify_safe_command,
 };
 pub use builtins::{BuiltinDependencies, BuiltinHandles, register_builtins};
 pub use files::{
@@ -33,6 +34,12 @@ pub use registry::{
     ToolRegistry, ToolResult,
 };
 pub use rw_intel::SymbolIndex;
+#[doc(hidden)]
+pub use rw_sandbox::{
+    EgressDecision, EgressPin, EgressPolicy, NetworkPolicy, SandboxError, SandboxPolicy,
+    SandboxSupport, SupervisedEgressProxy, UpstreamProxy,
+    maybe_run_helper as maybe_run_sandbox_helper, probe_policy_egress,
+};
 pub use search::{GlobInput, GlobTool, GrepInput, GrepTool, LsInput, LsTool};
-pub use symbols::{SymbolsInput, SymbolsTool};
+pub use symbols::{SymbolsInput, SymbolsTool, WorkspaceSymbolIndex};
 pub use web::{FetchRequest, FetchResponse, WebFetchInput, WebFetchTool, WebFetcher};

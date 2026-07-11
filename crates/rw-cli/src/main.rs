@@ -11,6 +11,7 @@ use std::{
 use async_trait::async_trait;
 use clap::{Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result, miette};
+use rw_core::runtime_support::maybe_run_sandbox_helper;
 use rw_core::{
     ClientCommand, ClientId, CommandOutcome, CreateSessionRequest, DEFAULT_MODEL_CATALOG_URL,
     EngineEvent, EngineHost, EngineHostConfig, GitHubCopilotLogin, OAuthLogin, ProviderApiKey,
@@ -237,9 +238,7 @@ enum AuthCommand {
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
-    if rw_sandbox::maybe_run_helper(std::env::args_os())
-        .map_err(|error| miette!(error.to_string()))?
-    {
+    if maybe_run_sandbox_helper(std::env::args_os()).map_err(|error| miette!(error.to_string()))? {
         return Ok(());
     }
     tracing_subscriber::fmt()
@@ -942,12 +941,6 @@ fn runtime_artifacts_ready(paths: &server::ServerRuntimePaths) -> bool {
 
 #[allow(clippy::too_many_lines)]
 async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
-    if cli
-        .permission_mode
-        .is_some_and(|mode| mode != PermissionMode::Strict)
-    {
-        return Err(miette!("remote sessions require --permission-mode strict"));
-    }
     if cli.continue_latest {
         return Err(miette!(
             "--continue is ambiguous for a remote host; use --resume <session> or the session picker"
@@ -981,7 +974,11 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         additional_workspaces: cli.add_dirs.clone(),
         dangerously_trust: cli.dangerously_trust,
         model: cli.model.clone(),
-        permission_mode: remote::RemotePermissionMode::Strict,
+        permission_mode: cli.permission_mode.map(|mode| match mode {
+            PermissionMode::Strict => remote::RemotePermissionMode::Strict,
+            PermissionMode::AutoSafe => remote::RemotePermissionMode::AutoSafe,
+            PermissionMode::Yolo => remote::RemotePermissionMode::Yolo,
+        }),
     };
     let tui_executable = locate_tui_executable()?;
     let mut remote_runtime = TokioRemoteRecoveryRuntime::new(config, local_paths.clone());

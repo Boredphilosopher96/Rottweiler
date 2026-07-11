@@ -22,7 +22,8 @@ pub use protocol::{
     PromptDump, PromptTool, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
     RewindTarget, SequenceId, SessionDescriptor, SessionId, SessionMode, ShellId, StoredAttachment,
     SubagentId, ToolCapability, ToolOutputStream, TurnAccounting, TurnId, TurnStatus, UnifiedDiff,
-    UnrestorablePath, Usage, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    UnrestorablePath, Usage, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
+    WorkspaceStatus,
 };
 
 /// Version of the protocol emitted by these types.

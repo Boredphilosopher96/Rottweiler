@@ -17,15 +17,17 @@ use rustyline::{DefaultEditor, error::ReadlineError};
 use rw_core::runtime_support::{
     ApprovalBinding, ApprovalDecision, AskUserInput, AskUserTool, BashTool, Block, BoxEventStream,
     CacheBreakpointSupport, CacheHint, CancellationToken, Capabilities, CapabilityManifest,
-    CommandFixtureRedactor, EditTool, ExecutionLease, FetchRequest, FetchResponse, FixtureRedactor,
-    GlobTool, GrepTool, GuardedHttpFetchError, GuardedHttpFetchRequest, LsTool, MultiEditTool,
-    MutationScope, PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent,
-    ProviderRequest, ProxyEnvironment, ProxySettings, QuestionAsker, ReadTool, Recorder,
-    RecordingCommandExecutor, ReplayCommandExecutor, ReplayProvider, SessionId, SymbolIndex,
-    SymbolsTool, ThinkingLevel, TodoTool, TokioCommandExecutor, Tool, ToolCapability, ToolChoice,
-    ToolContext, ToolDefinition, ToolDescriptor, ToolError, ToolLimits, ToolOutput, ToolRegistry,
-    ToolResult, Turn, WebFetchTool, WebFetcher, WireMode, WriteTool,
-    deny_outbound_network_for_process, guarded_http_fetch,
+    CommandFixtureRedactor, CommandSafetyClassifier, EditTool, EgressDecision, EgressPin,
+    EgressPolicy, ExecutionLease, FetchRequest, FetchResponse, FixtureRedactor, GlobTool, GrepTool,
+    GuardedHttpFetchError, GuardedHttpFetchRequest, LsTool, MultiEditTool, MutationScope,
+    PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
+    ProxyEnvironment, ProxySettings, QuestionAsker, ReadTool, Recorder, RecordingCommandExecutor,
+    ReplayCommandExecutor, ReplayProvider, SandboxNetworkPolicy, SandboxPolicy, SandboxSupport,
+    SessionId, SupervisedEgressProxy, SymbolsTool, ThinkingLevel, TodoTool, TokioCommandExecutor,
+    Tool, ToolCapability, ToolChoice, ToolContext, ToolDefinition, ToolDescriptor, ToolError,
+    ToolLimits, ToolOutput, ToolRegistry, ToolResult, Turn, UpstreamProxy, WebFetchTool,
+    WebFetcher, WireMode, WorkspaceSymbolIndex, WriteTool, deny_outbound_network_for_process,
+    guarded_http_fetch, probe_policy_egress,
 };
 use rw_core::{
     AccountingAttribution, AgentLoopError, BudgetLedgerQuery, BudgetLedgerTotals, Config,
@@ -37,12 +39,10 @@ use rw_core::{
     builtin_command_registry, builtin_hook_dispatcher, initial_session_context,
     project_session_events,
 };
-use rw_sandbox::{
-    EgressDecision, EgressPolicy, NetworkPolicy as SandboxNetworkPolicy, SandboxPolicy,
-};
 use rw_store::{
     checkpoint::{CheckpointStore, OpaqueMutation, RewindHandle},
     config::ConfigLoader,
+    credentials::{CredentialManager, CredentialReference},
     session::{
         AccountingLedger, SessionEventLog, SessionIndex, SessionProjection, SessionSummary,
         TurnAccountingEntry, UtcTimestamp,
@@ -67,7 +67,16 @@ const CHECKPOINT_ROOTS_VERSION: u16 = 1;
 #[serde(deny_unknown_fields)]
 struct CheckpointRootMapping {
     version: u16,
+    generations: Vec<CheckpointRootGeneration>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointRootGeneration {
+    generation: u64,
+    effective_from_turn: u64,
     roots: Vec<PathBuf>,
+    committed: bool,
 }
 
 pub(crate) struct RunOptions {
@@ -154,7 +163,9 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     }
     let workspace =
         std::fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
-    let workspace_roots = canonical_workspace_roots(&workspace, &options.additional_workspaces)?;
+    let mut workspace_roots =
+        canonical_workspace_roots(&workspace, &options.additional_workspaces)?;
+    let mut persisted_workspace_generation = 0_u64;
     if options.permission_mode == Some(PermissionMode::Yolo)
         && workspace == Path::new("/")
         && rustix::process::geteuid().is_root()
@@ -205,6 +216,19 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     // metadata read/write or checkpoint recovery may happen before it.
     let log = SessionEventLog::open(&storage_root, &session_id)
         .map_err(|error| miette!("session log could not open: {error}"))?;
+    if resuming {
+        let committed = project_session_events(&load_session_events(&log)?)
+            .map_err(|error| miette!("session root projection failed: {error}"))?;
+        if let Some(generation) = restore_persisted_workspace_roots(
+            &checkpoint_root(&storage_root, &workspace, &session_id),
+            &workspace,
+            &workspace_roots,
+            committed.workspace_generation,
+        )? {
+            persisted_workspace_generation = generation.generation;
+            workspace_roots = generation.roots;
+        }
+    }
     let execution_lease_path = storage_root
         .join("sessions")
         .join(&session_id)
@@ -222,7 +246,16 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         .unwrap_or_else(|| loaded_config.config.models.default.clone());
     let (initial_context, persisted_model_alias) = if resuming {
         let metadata = load_session_metadata(&storage_root, &session_id, &workspace)?;
-        (metadata.initial_session_context, metadata.model_alias)
+        let mut context = metadata.initial_session_context;
+        let recorded_count = metadata.workspace_roots.len().max(1);
+        for root in workspace_roots.iter().skip(recorded_count) {
+            if let Some(instructions) = rw_core::load_root_project_instructions(root)
+                .map_err(|error| miette!("project instructions could not load: {error}"))?
+            {
+                context.push(instructions.as_system_turn());
+            }
+        }
+        (context, metadata.model_alias)
     } else {
         let context = initial_session_context(&workspace)
             .map_err(|error| miette!("project instructions could not load: {error}"))?;
@@ -232,6 +265,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
             &workspace,
             &configured_model_alias,
             &context,
+            &workspace_roots,
         )?;
         (context, configured_model_alias.clone())
     };
@@ -313,14 +347,29 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     };
     let tool_workspace_roots = workspace_roots.clone();
     let tool_execution_lease = Arc::clone(&execution_lease);
-    let global_proxy = loaded_config
-        .config
-        .network
-        .proxy
-        .as_deref()
-        .map(Url::parse)
-        .transpose()
-        .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
+    let proxy_config = loaded_config.config.clone();
+    let proxy_credentials_path = config_loader.credentials_path().clone();
+    let proxy_redactor = fixture_redactor.clone();
+    let global_proxy = tokio::task::spawn_blocking(move || {
+        resolve_tool_proxy(
+            &proxy_config,
+            &proxy_credentials_path,
+            offline_fixture,
+            &proxy_redactor,
+        )
+    })
+    .await
+    .map_err(|error| miette!("tool proxy credential worker failed: {error}"))??;
+    let root_question_asker = Arc::clone(&question_asker);
+    let command_safety = Arc::new(
+        CommandSafetyClassifier::new(&loaded_config.config.sandbox.safe_list)
+            .map_err(|error| miette!(error))?,
+    );
+    let tool_command_safety = Arc::clone(&command_safety);
+    let root_command_safety = Arc::clone(&command_safety);
+    let root_command_fixture_mode = command_fixture_mode.clone();
+    let root_global_proxy = global_proxy.clone();
+    let root_execution_lease = Arc::clone(&execution_lease);
     let built_tools = tokio::task::spawn_blocking(move || {
         build_tools(
             &tool_workspace_roots,
@@ -329,6 +378,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
             global_proxy.as_ref(),
             command_fixture_mode,
             tool_execution_lease,
+            &tool_command_safety,
         )
     })
     .await
@@ -515,16 +565,30 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         None => PermissionGate::from_config(loaded_config.config.permissions.clone()),
     }
     .with_workspace_roots(&workspace_roots)
-    .with_project_approval_file(project_approvals);
+    .with_command_safety(Arc::clone(&command_safety))
+    .with_project_approval_file(project_approvals.clone());
     let permissions = Arc::new(permissions);
     let folder_trust = Arc::new(RuntimeFolderTrustController::new(
         storage_root.join("trust.json"),
-        workspace.clone(),
+        workspace_roots.clone(),
     ));
+    let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        checkpoint_root,
+        question_asker: root_question_asker,
+        offline: offline_fixture,
+        global_proxy: root_global_proxy,
+        command_fixture_mode: root_command_fixture_mode,
+        execution_lease: root_execution_lease,
+        command_safety: root_command_safety,
+        trust_store_path: storage_root.join("trust.json"),
+    });
     let actor = SessionActor::spawn(SessionActorConfig {
         session_id: SessionId(session_id.clone()),
         workspace_root: workspace,
         additional_workspace_roots: workspace_roots.into_iter().skip(1).collect(),
+        workspace_generation: recovered
+            .workspace_generation
+            .max(persisted_workspace_generation),
         initial_session_context: initial_context,
         model_alias,
         model,
@@ -537,6 +601,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         secret_redactor: Arc::new(SharedEngineSecretRedactor(engine_redactor)),
         checkpoints: checkpoint_coordinator,
         folder_trust,
+        workspace_roots: workspace_root_controller,
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -608,7 +673,9 @@ pub(crate) async fn compose_hosted_actor(
     if workspace != options.workspace {
         return Err(miette!("hosted workspace must already be canonical"));
     }
-    let workspace_roots = canonical_workspace_roots(&workspace, &options.additional_workspaces)?;
+    let mut workspace_roots =
+        canonical_workspace_roots(&workspace, &options.additional_workspaces)?;
+    let mut persisted_workspace_generation = 0_u64;
     if options.permission_mode == Some(PermissionMode::Yolo)
         && workspace == Path::new("/")
         && rustix::process::geteuid().is_root()
@@ -631,6 +698,19 @@ pub(crate) async fn compose_hosted_actor(
     let session_id = options.session_id.0.clone();
     let log = SessionEventLog::open(&options.storage_root, &session_id)
         .map_err(|error| miette!("session log could not open: {error}"))?;
+    if options.resume {
+        let committed = project_session_events(&load_session_events(&log)?)
+            .map_err(|error| miette!("session root projection failed: {error}"))?;
+        if let Some(generation) = restore_persisted_workspace_roots(
+            &checkpoint_root(&options.storage_root, &workspace, &session_id),
+            &workspace,
+            &workspace_roots,
+            committed.workspace_generation,
+        )? {
+            persisted_workspace_generation = generation.generation;
+            workspace_roots = generation.roots;
+        }
+    }
     let execution_lease_path = options
         .storage_root
         .join("sessions")
@@ -649,7 +729,16 @@ pub(crate) async fn compose_hosted_actor(
         .unwrap_or_else(|| options.config.models.default.clone());
     let (initial_context, persisted_model_alias) = if options.resume {
         let metadata = load_session_metadata(&options.storage_root, &session_id, &workspace)?;
-        (metadata.initial_session_context, metadata.model_alias)
+        let mut context = metadata.initial_session_context;
+        let recorded_count = metadata.workspace_roots.len().max(1);
+        for root in workspace_roots.iter().skip(recorded_count) {
+            if let Some(instructions) = rw_core::load_root_project_instructions(root)
+                .map_err(|error| miette!("project instructions could not load: {error}"))?
+            {
+                context.push(instructions.as_system_turn());
+            }
+        }
+        (context, metadata.model_alias)
     } else {
         let context = initial_session_context(&workspace)
             .map_err(|error| miette!("project instructions could not load: {error}"))?;
@@ -659,6 +748,7 @@ pub(crate) async fn compose_hosted_actor(
             &workspace,
             &configured_model_alias,
             &context,
+            &workspace_roots,
         )?;
         (context, configured_model_alias)
     };
@@ -714,24 +804,41 @@ pub(crate) async fn compose_hosted_actor(
     } else {
         CommandFixtureMode::Live
     };
-    let global_proxy = options
-        .config
-        .network
-        .proxy
-        .as_deref()
-        .map(Url::parse)
-        .transpose()
-        .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
+    let proxy_config = options.config.clone();
+    let proxy_credentials_path = options.credentials_path.clone();
+    let proxy_redactor = fixture_redactor.clone();
+    let global_proxy = tokio::task::spawn_blocking(move || {
+        resolve_tool_proxy(
+            &proxy_config,
+            &proxy_credentials_path,
+            offline,
+            &proxy_redactor,
+        )
+    })
+    .await
+    .map_err(|error| miette!("tool proxy credential worker failed: {error}"))??;
     let tool_workspace_roots = workspace_roots.clone();
     let tool_execution_lease = Arc::clone(&execution_lease);
+    let root_question_asker: Arc<dyn QuestionAsker> = Arc::new(HeadlessQuestionAsker);
+    let command_safety = Arc::new(
+        CommandSafetyClassifier::new(&options.config.sandbox.safe_list)
+            .map_err(|error| miette!(error))?,
+    );
+    let tool_command_safety = Arc::clone(&command_safety);
+    let root_command_safety = Arc::clone(&command_safety);
+    let tool_question_asker = Arc::clone(&root_question_asker);
+    let root_command_fixture_mode = command_fixture_mode.clone();
+    let root_global_proxy = global_proxy.clone();
+    let root_execution_lease = Arc::clone(&execution_lease);
     let built_tools = tokio::task::spawn_blocking(move || {
         build_tools(
             &tool_workspace_roots,
-            Arc::new(HeadlessQuestionAsker),
+            tool_question_asker,
             offline,
             global_proxy.as_ref(),
             command_fixture_mode,
             tool_execution_lease,
+            &tool_command_safety,
         )
     })
     .await
@@ -799,16 +906,30 @@ pub(crate) async fn compose_hosted_actor(
         None => PermissionGate::from_config(options.config.permissions.clone()),
     }
     .with_workspace_roots(&workspace_roots)
-    .with_project_approval_file(project_approvals);
+    .with_command_safety(Arc::clone(&command_safety))
+    .with_project_approval_file(project_approvals.clone());
     let permissions = Arc::new(permissions);
     let folder_trust = Arc::new(RuntimeFolderTrustController::new(
         options.storage_root.join("trust.json"),
-        workspace.clone(),
+        workspace_roots.clone(),
     ));
+    let workspace_root_controller = Arc::new(RuntimeWorkspaceRootController {
+        checkpoint_root: checkpoint_root(&options.storage_root, &workspace, &session_id),
+        question_asker: root_question_asker,
+        offline,
+        global_proxy: root_global_proxy,
+        command_fixture_mode: root_command_fixture_mode,
+        execution_lease: root_execution_lease,
+        command_safety: root_command_safety,
+        trust_store_path: options.storage_root.join("trust.json"),
+    });
     let handle = SessionActor::spawn(SessionActorConfig {
         session_id: options.session_id,
         workspace_root: workspace,
         additional_workspace_roots: workspace_roots.into_iter().skip(1).collect(),
+        workspace_generation: recovered
+            .workspace_generation
+            .max(persisted_workspace_generation),
         initial_session_context: initial_context,
         model_alias: persisted_model_alias,
         model,
@@ -821,6 +942,7 @@ pub(crate) async fn compose_hosted_actor(
         secret_redactor: Arc::new(SharedEngineSecretRedactor(engine_redactor)),
         checkpoints: checkpoint_coordinator,
         folder_trust,
+        workspace_roots: workspace_root_controller,
         recovered,
         max_turns: options.max_turns,
         identical_tool_failure_limit: DEFAULT_DOOM_LOOP_LIMIT,
@@ -864,6 +986,10 @@ pub(crate) struct SessionMetadata {
     pub workspace: PathBuf,
     pub model_alias: String,
     initial_session_context: Vec<Turn>,
+    #[serde(default)]
+    pub workspace_generation: u64,
+    #[serde(default)]
+    pub workspace_roots: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1306,22 +1432,30 @@ fn open_checkpoint_stores(
     }
     std::fs::create_dir_all(root).into_diagnostic()?;
     let mapping_path = root.join("workspace-roots.json");
-    let expected = CheckpointRootMapping {
+    let initial = CheckpointRootMapping {
         version: CHECKPOINT_ROOTS_VERSION,
-        roots: workspace_roots.to_vec(),
+        generations: vec![CheckpointRootGeneration {
+            generation: 0,
+            effective_from_turn: 1,
+            roots: workspace_roots.to_vec(),
+            committed: true,
+        }],
     };
     match std::fs::read(&mapping_path) {
         Ok(bytes) => {
             let existing: CheckpointRootMapping = serde_json::from_slice(&bytes)
                 .map_err(|error| miette!("checkpoint root mapping is corrupt: {error}"))?;
-            if existing != expected {
+            if existing.version != CHECKPOINT_ROOTS_VERSION
+                || existing.generations.last().map(|entry| &entry.roots)
+                    != Some(&workspace_roots.to_vec())
+            {
                 return Err(miette!(
                     "checkpoint root mapping changed; refusing to resume with reordered or replaced workspace roots"
                 ));
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            persist_private_json(&mapping_path, &expected)?;
+            persist_private_json(&mapping_path, &initial)?;
         }
         Err(error) => return Err(miette!("checkpoint root mapping could not load: {error}")),
     }
@@ -1337,6 +1471,158 @@ fn open_checkpoint_stores(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(Arc::new(stores))
+}
+
+fn append_checkpoint_root_generation(
+    root: &Path,
+    current_roots: &[PathBuf],
+    roots: &[PathBuf],
+    generation: u64,
+    effective_from_turn: u64,
+) -> Result<()> {
+    let path = root.join("workspace-roots.json");
+    let mut mapping: CheckpointRootMapping = serde_json::from_slice(
+        &std::fs::read(&path)
+            .map_err(|error| miette!("checkpoint root journal could not load: {error}"))?,
+    )
+    .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
+    let previous = mapping
+        .generations
+        .last()
+        .ok_or_else(|| miette!("checkpoint root journal is empty"))?;
+    if mapping.version != CHECKPOINT_ROOTS_VERSION
+        || previous.roots != current_roots
+        || generation != previous.generation.saturating_add(1)
+        || roots.len() != current_roots.len() + 1
+        || roots.iter().take(current_roots.len()).ne(current_roots)
+        || effective_from_turn < previous.effective_from_turn
+    {
+        return Err(miette!(
+            "checkpoint root generation is not a strict stable-index append"
+        ));
+    }
+    mapping.generations.push(CheckpointRootGeneration {
+        generation,
+        effective_from_turn,
+        roots: roots.to_vec(),
+        committed: false,
+    });
+    persist_private_json(&path, &mapping)
+}
+
+fn commit_checkpoint_root_generation(root: &Path, generation: u64) -> Result<()> {
+    let path = root.join("workspace-roots.json");
+    let mut mapping: CheckpointRootMapping = serde_json::from_slice(
+        &std::fs::read(&path)
+            .map_err(|error| miette!("checkpoint root journal could not load: {error}"))?,
+    )
+    .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
+    let entry = mapping
+        .generations
+        .last_mut()
+        .filter(|entry| entry.generation == generation)
+        .ok_or_else(|| miette!("prepared workspace generation is unavailable"))?;
+    entry.committed = true;
+    persist_private_json(&path, &mapping)
+}
+
+fn abort_checkpoint_root_generation(root: &Path, generation: u64) -> Result<()> {
+    let path = root.join("workspace-roots.json");
+    let mut mapping: CheckpointRootMapping = serde_json::from_slice(
+        &std::fs::read(&path)
+            .map_err(|error| miette!("checkpoint root journal could not load: {error}"))?,
+    )
+    .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
+    if mapping
+        .generations
+        .last()
+        .is_some_and(|entry| entry.generation == generation && !entry.committed)
+    {
+        mapping.generations.pop();
+        if mapping.generations.is_empty() {
+            return Err(miette!(
+                "checkpoint root journal cannot remove its base generation"
+            ));
+        }
+        persist_private_json(&path, &mapping)?;
+    }
+    Ok(())
+}
+
+fn load_checkpoint_root_generation(root: &Path) -> Result<Option<CheckpointRootGeneration>> {
+    let path = root.join("workspace-roots.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(miette!("checkpoint root journal could not load: {error}")),
+    };
+    let mapping: CheckpointRootMapping = serde_json::from_slice(&bytes)
+        .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
+    if mapping.version != CHECKPOINT_ROOTS_VERSION {
+        return Err(miette!("checkpoint root journal version is unsupported"));
+    }
+    Ok(mapping
+        .generations
+        .iter()
+        .rev()
+        .find(|generation| generation.committed)
+        .cloned())
+}
+
+pub(crate) fn load_session_workspace_roots(
+    storage_root: &Path,
+    workspace: &Path,
+    session_id: &str,
+) -> Result<Vec<PathBuf>> {
+    let root = checkpoint_root(storage_root, workspace, session_id);
+    Ok(load_checkpoint_root_generation(&root)?.map_or_else(
+        || vec![workspace.to_path_buf()],
+        |generation| generation.roots,
+    ))
+}
+
+fn restore_persisted_workspace_roots(
+    root: &Path,
+    primary: &Path,
+    supplied: &[PathBuf],
+    committed_generation: u64,
+) -> Result<Option<CheckpointRootGeneration>> {
+    let path = root.join("workspace-roots.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(miette!("checkpoint root journal could not load: {error}")),
+    };
+    let mut mapping: CheckpointRootMapping = serde_json::from_slice(&bytes)
+        .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
+    let Some(position) = mapping
+        .generations
+        .iter()
+        .position(|entry| entry.generation == committed_generation)
+    else {
+        return Err(miette!(
+            "committed workspace generation is absent from the local root journal"
+        ));
+    };
+    let needs_rewrite =
+        position + 1 < mapping.generations.len() || !mapping.generations[position].committed;
+    if position + 1 < mapping.generations.len() {
+        mapping.generations.truncate(position + 1);
+    }
+    mapping.generations[position].committed = true;
+    if needs_rewrite {
+        persist_private_json(&path, &mapping)?;
+    }
+    let Some(mut generation) = mapping.generations.last().cloned() else {
+        return Ok(None);
+    };
+    generation.roots = canonical_workspace_roots(primary, &generation.roots[1..])?;
+    if supplied.len() > 1 && supplied != generation.roots {
+        return Err(miette!(
+            "resume workspace roots differ from the durable stable-index generation"
+        ));
+    }
+    Ok(Some(generation))
 }
 
 fn persist_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -1389,6 +1675,7 @@ fn persist_session_metadata(
     workspace: &Path,
     model_alias: &str,
     initial_session_context: &[Turn],
+    workspace_roots: &[PathBuf],
 ) -> Result<()> {
     validate_session_id(session_id)?;
     let sessions = storage_root.join("sessions");
@@ -1401,6 +1688,8 @@ fn persist_session_metadata(
         workspace: workspace.to_path_buf(),
         model_alias: model_alias.to_owned(),
         initial_session_context: initial_session_context.to_vec(),
+        workspace_generation: 0,
+        workspace_roots: workspace_roots.to_vec(),
     };
     let bytes = serde_json::to_vec(&metadata).into_diagnostic()?;
     let path = directory.join("metadata.json");
@@ -1825,16 +2114,165 @@ fn load_session_events(log: &SessionEventLog) -> Result<Vec<EngineEvent>> {
 
 struct RuntimeFolderTrustController {
     store: FolderTrustStore,
-    workspace: PathBuf,
+    workspaces: Vec<PathBuf>,
+}
+
+struct RuntimeWorkspaceRootController {
+    checkpoint_root: PathBuf,
+    question_asker: Arc<dyn QuestionAsker>,
+    offline: bool,
+    global_proxy: Option<ResolvedToolProxy>,
+    command_fixture_mode: CommandFixtureMode,
+    execution_lease: Arc<ExecutionLease>,
+    command_safety: Arc<CommandSafetyClassifier>,
+    trust_store_path: PathBuf,
+}
+
+#[async_trait]
+impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
+    async fn append_root(
+        &self,
+        requested: &Path,
+        current_roots: &[PathBuf],
+        current_generation: u64,
+        effective_from_turn: u64,
+        permissions: Arc<PermissionGate>,
+    ) -> std::result::Result<rw_core::WorkspaceRuntimeGeneration, AgentLoopError> {
+        let requested = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            current_roots[0].join(requested)
+        };
+        let canonical = std::fs::canonicalize(&requested).map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "requested workspace root is unavailable".to_owned(),
+            )
+        })?;
+        if !canonical.is_dir() || current_roots.contains(&canonical) {
+            return Err(AgentLoopError::InvalidConfiguration(
+                "workspace root must be a new canonical directory".to_owned(),
+            ));
+        }
+        FolderTrustStore::new(self.trust_store_path.clone())
+            .assess(&canonical)
+            .map_err(|_error| {
+                AgentLoopError::InvalidConfiguration(
+                    "workspace root trust assessment failed".to_owned(),
+                )
+            })?;
+        let mut roots = current_roots.to_vec();
+        roots.push(canonical.clone());
+        let supplemental_context = rw_core::load_root_project_instructions(&canonical)
+            .map_err(|_error| {
+                AgentLoopError::InvalidConfiguration(
+                    "workspace root instructions could not load".to_owned(),
+                )
+            })?
+            .map(|instructions| vec![instructions.as_system_turn()])
+            .unwrap_or_default();
+        let built = build_tools(
+            &roots,
+            Arc::clone(&self.question_asker),
+            self.offline,
+            self.global_proxy.as_ref(),
+            self.command_fixture_mode.clone(),
+            Arc::clone(&self.execution_lease),
+            &self.command_safety,
+        )
+        .map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace tool generation could not prepare".to_owned(),
+            )
+        })?;
+        let permissions = Arc::new(permissions.fork_for_workspace_roots(&roots).map_err(
+            |_error| {
+                AgentLoopError::Persistence(
+                    "workspace permission generation could not prepare".to_owned(),
+                )
+            },
+        )?);
+        let generation = current_generation.saturating_add(1);
+        append_checkpoint_root_generation(
+            &self.checkpoint_root,
+            current_roots,
+            &roots,
+            generation,
+            effective_from_turn,
+        )
+        .map_err(|_error| {
+            AgentLoopError::Persistence("workspace generation journal could not prepare".to_owned())
+        })?;
+        let stores = match open_checkpoint_stores(&self.checkpoint_root, &roots) {
+            Ok(stores) => stores,
+            Err(_error) => {
+                let _ = abort_checkpoint_root_generation(&self.checkpoint_root, generation);
+                return Err(AgentLoopError::Persistence(
+                    "workspace checkpoint generation could not prepare".to_owned(),
+                ));
+            }
+        };
+        Ok(rw_core::WorkspaceRuntimeGeneration {
+            generation,
+            effective_from_turn,
+            roots: roots.clone(),
+            tools: built.registry,
+            permissions,
+            checkpoints: Arc::new(DurableCheckpointCoordinator::from_stores(stores)),
+            folder_trust: Arc::new(RuntimeFolderTrustController::new(
+                self.trust_store_path.clone(),
+                roots,
+            )),
+            supplemental_context,
+        })
+    }
+
+    async fn commit_generation(&self, generation: u64) -> std::result::Result<(), AgentLoopError> {
+        commit_checkpoint_root_generation(&self.checkpoint_root, generation).map_err(|_error| {
+            AgentLoopError::Persistence("workspace generation marker could not commit".to_owned())
+        })
+    }
+
+    async fn abort_generation(&self, generation: u64) -> std::result::Result<(), AgentLoopError> {
+        abort_checkpoint_root_generation(&self.checkpoint_root, generation).map_err(|_error| {
+            AgentLoopError::Persistence("workspace generation could not abort".to_owned())
+        })
+    }
 }
 
 impl RuntimeFolderTrustController {
-    fn new(store_path: PathBuf, workspace: PathBuf) -> Self {
+    fn new(store_path: PathBuf, workspaces: Vec<PathBuf>) -> Self {
         Self {
             store: FolderTrustStore::new(store_path),
-            workspace,
+            workspaces,
         }
     }
+}
+
+fn trust_confirmation_token(assessments: &[rw_store::trust::FolderTrustAssessment]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"rottweiler-folder-trust-confirmation-v1\0");
+    for assessment in assessments {
+        let workspace = assessment.workspace().as_os_str().as_encoded_bytes();
+        hasher.update(
+            &u64::try_from(workspace.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
+        hasher.update(workspace);
+        hasher.update(assessment.executable_hash().as_bytes());
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn render_trust_assessments(assessments: &[rw_store::trust::FolderTrustAssessment]) -> String {
+    assessments
+        .iter()
+        .enumerate()
+        .map(|(index, assessment)| {
+            assessment.render_prompt_with_workspace(&format!("@root/{index}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[async_trait]
@@ -1844,34 +2282,61 @@ impl FolderTrustController for RuntimeFolderTrustController {
         operation: FolderTrustOperation,
     ) -> std::result::Result<String, AgentLoopError> {
         let store = self.store.clone();
-        let workspace = self.workspace.clone();
+        let workspaces = self.workspaces.clone();
         tokio::task::spawn_blocking(move || {
-            let trust_error = |error: rw_store::trust::FolderTrustError| {
-                AgentLoopError::Persistence(format!("folder trust failed: {error}"))
+            let trust_error = |_error: rw_store::trust::FolderTrustError| {
+                AgentLoopError::Persistence("folder trust operation failed".to_owned())
             };
-            let assessment = store.assess(&workspace).map_err(&trust_error)?;
+            let assessments = workspaces
+                .iter()
+                .map(|workspace| store.assess(workspace).map_err(&trust_error))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
             match operation {
-                FolderTrustOperation::Status => Ok(assessment.render_prompt()),
-                FolderTrustOperation::Grant => {
-                    store.grant(&assessment).map_err(&trust_error)?;
-                    let current = store.assess(&workspace).map_err(&trust_error)?;
+                FolderTrustOperation::Status => Ok(render_trust_assessments(&assessments)),
+                FolderTrustOperation::Grant { confirmation: None } => {
+                    let token = trust_confirmation_token(&assessments);
                     Ok(format!(
-                        "{}folder trust granted; executable project configuration activates in the next session\n",
-                        current.render_prompt()
+                        "{}\nreview the exact inventory and confirm with `/trust grant {token}`\n",
+                        render_trust_assessments(&assessments)
+                    ))
+                }
+                FolderTrustOperation::Grant {
+                    confirmation: Some(confirmation),
+                } => {
+                    let expected = trust_confirmation_token(&assessments);
+                    if confirmation != expected {
+                        return Err(AgentLoopError::InvalidConfiguration(
+                            "folder trust confirmation is stale or does not match the current root inventories; run `/trust grant` again"
+                                .to_owned(),
+                        ));
+                    }
+                    store.grant_all(&assessments).map_err(&trust_error)?;
+                    let current = workspaces
+                        .iter()
+                        .map(|workspace| store.assess(workspace).map_err(&trust_error))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    Ok(format!(
+                        "{}\nfolder trust granted for all workspace roots; executable project configuration activates in the next session\n",
+                        render_trust_assessments(&current)
                     ))
                 }
                 FolderTrustOperation::Revoke => {
-                    store.revoke(&workspace).map_err(&trust_error)?;
-                    let current = store.assess(&workspace).map_err(&trust_error)?;
+                    store.revoke_all(&workspaces).map_err(&trust_error)?;
+                    let current = workspaces
+                        .iter()
+                        .map(|workspace| store.assess(workspace).map_err(&trust_error))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
                     Ok(format!(
-                        "{}folder trust revoked; executable project configuration unloads in the next session\n",
-                        current.render_prompt()
+                        "{}\nfolder trust revoked for all workspace roots; executable project configuration unloads in the next session\n",
+                        render_trust_assessments(&current)
                     ))
                 }
             }
         })
         .await
-        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+        .map_err(|_error| {
+            AgentLoopError::Persistence("folder trust operation failed".to_owned())
+        })?
     }
 }
 
@@ -2575,6 +3040,7 @@ impl Provider for ScriptProvider {
     }
 }
 
+#[derive(Clone)]
 enum CommandFixtureMode {
     Live,
     Record {
@@ -2585,6 +3051,53 @@ enum CommandFixtureMode {
         directory: PathBuf,
     },
     Offline,
+}
+
+#[derive(Clone)]
+struct ResolvedToolProxy {
+    url: Url,
+    upstream: UpstreamProxy,
+}
+
+fn resolve_tool_proxy(
+    config: &Config,
+    credentials_path: &Path,
+    offline: bool,
+    redactor: &FixtureRedactor,
+) -> Result<Option<ResolvedToolProxy>> {
+    if offline {
+        return Ok(None);
+    }
+    let Some(configured) = config.network.proxy.as_deref() else {
+        return Ok(None);
+    };
+    let url = Url::parse(configured)
+        .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
+    let mut upstream = UpstreamProxy::new(url.clone())
+        .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
+    match (
+        config.network.proxy_username.as_deref(),
+        config.network.proxy_password_credential.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(username), Some(reference)) => {
+            let resolved = CredentialManager::system(credentials_path)
+                .resolve(&CredentialReference::new(reference))
+                .map_err(|error| miette!("global proxy credential could not resolve: {error}"))?;
+            for warning in resolved.warnings() {
+                eprintln!("warning: {warning}");
+            }
+            let password = resolved.secret().expose_secret().clone();
+            redactor.register_known_value(&password);
+            upstream = upstream.with_basic_auth(username, &password);
+        }
+        _ => {
+            return Err(miette!(
+                "global proxy authentication requires username and password credential reference"
+            ));
+        }
+    }
+    Ok(Some(ResolvedToolProxy { url, upstream }))
 }
 
 struct SharedCommandFixtureRedactor(FixtureRedactor);
@@ -2648,19 +3161,21 @@ impl rw_core::SecretRedactor for SharedEngineSecretRedactor {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_tools(
     workspace_roots: &[PathBuf],
     question_asker: Arc<dyn QuestionAsker>,
     offline: bool,
-    global_proxy: Option<&Url>,
+    global_proxy: Option<&ResolvedToolProxy>,
     command_fixture_mode: CommandFixtureMode,
     execution_lease: Arc<ExecutionLease>,
+    command_safety: &Arc<CommandSafetyClassifier>,
 ) -> Result<BuiltTools> {
     let workspace = workspace_roots
         .first()
         .ok_or_else(|| miette!("tool composition requires a primary workspace"))?;
     let symbols = Arc::new(
-        SymbolIndex::new(workspace)
+        WorkspaceSymbolIndex::new(workspace_roots)
             .map_err(|error| miette!("symbol index could not start: {error}"))?,
     );
     let limits = ToolLimits::default();
@@ -2678,51 +3193,65 @@ fn build_tools(
         SandboxPolicy::new(&sandbox_roots, SandboxNetworkPolicy::Deny)
             .map_err(|error| miette!("OS sandbox policy could not be built: {error}"))?,
     );
-    // Each approved live command receives its own proxy and exact Seatbelt
-    // endpoint. Replay/offline never bind sockets, Linux remains unavailable
-    // pending a netns bridge, and configured corporate proxies fail closed.
+    // Each approved live command receives its own supervised proxy. macOS
+    // binds Seatbelt to its exact port; Linux exposes that port only inside a
+    // disposable user/network namespace and relays over a private Unix socket.
+    // Replay/offline never probes, resolves credentials, or binds sockets.
     let policy_egress_available = command_mode_can_open_proxy(&command_fixture_mode)
-        && global_proxy.is_none()
-        && cfg!(target_os = "macos");
+        && probe_policy_egress().support == SandboxSupport::Enforced;
     let command_executor = || {
         Arc::new(
             TokioCommandExecutor::with_execution_lease(Arc::clone(&execution_lease))
                 .sandboxed(Arc::clone(&sandbox_policy))
-                .with_policy_egress(policy_egress_available),
+                .with_command_safety(Arc::clone(command_safety))
+                .with_policy_egress(policy_egress_available)
+                .with_upstream_proxy(global_proxy.map(|proxy| proxy.upstream.clone())),
         )
     };
-    let bash: Arc<dyn Tool> = match command_fixture_mode {
-        CommandFixtureMode::Live => Arc::new(BashTool::new(command_executor(), limits)),
-        CommandFixtureMode::Record {
-            directory,
-            redactor,
-        } => Arc::new(BashTool::new(
-            Arc::new(
-                RecordingCommandExecutor::new_with_redactor(
-                    command_executor(),
-                    directory,
-                    workspace,
-                    Arc::new(SharedCommandFixtureRedactor(redactor)),
+    let bash: Arc<dyn Tool> =
+        match command_fixture_mode {
+            CommandFixtureMode::Live => Arc::new(
+                BashTool::new(command_executor(), limits)
+                    .with_command_safety(Arc::clone(command_safety)),
+            ),
+            CommandFixtureMode::Record {
+                directory,
+                redactor,
+            } => Arc::new(
+                BashTool::new(
+                    Arc::new(
+                        RecordingCommandExecutor::new_with_redactor(
+                            command_executor(),
+                            directory,
+                            workspace,
+                            Arc::new(SharedCommandFixtureRedactor(redactor)),
+                        )
+                        .map_err(|error| miette!("command recorder could not start: {error}"))?,
+                    ),
+                    limits,
                 )
-                .map_err(|error| miette!("command recorder could not start: {error}"))?,
+                .with_command_safety(Arc::clone(command_safety)),
             ),
-            limits,
-        )),
-        CommandFixtureMode::Replay { directory } => Arc::new(BashTool::new(
-            Arc::new(
-                ReplayCommandExecutor::load(directory, workspace)
-                    .map_err(|error| miette!("command replay could not load: {error}"))?,
+            CommandFixtureMode::Replay { directory } => Arc::new(
+                BashTool::new(
+                    Arc::new(
+                        ReplayCommandExecutor::load(directory, workspace)
+                            .map_err(|error| miette!("command replay could not load: {error}"))?,
+                    ),
+                    limits,
+                )
+                .with_command_safety(Arc::clone(command_safety)),
             ),
-            limits,
-        )),
-        CommandFixtureMode::Offline => Arc::new(BashTool::new(
-            Arc::new(
-                ReplayCommandExecutor::empty(workspace)
-                    .map_err(|error| miette!("offline command replay could not start: {error}"))?,
+            CommandFixtureMode::Offline => Arc::new(
+                BashTool::new(
+                    Arc::new(ReplayCommandExecutor::empty(workspace).map_err(|error| {
+                        miette!("offline command replay could not start: {error}")
+                    })?),
+                    limits,
+                )
+                .with_command_safety(Arc::clone(command_safety)),
             ),
-            limits,
-        )),
-    };
+        };
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadTool::new(limits)),
         Arc::new(WriteTool::new(limits).with_symbol_index(Arc::clone(&symbols))),
@@ -2791,12 +3320,12 @@ struct BuiltTools {
 
 struct LazySymbolsTool {
     inner: SymbolsTool,
-    index: Arc<SymbolIndex>,
+    index: Arc<WorkspaceSymbolIndex>,
     initialized: tokio::sync::Mutex<bool>,
 }
 
 impl LazySymbolsTool {
-    fn new(index: Arc<SymbolIndex>, limits: ToolLimits) -> Self {
+    fn new(index: Arc<WorkspaceSymbolIndex>, limits: ToolLimits) -> Self {
         Self {
             inner: SymbolsTool::new(Arc::clone(&index), limits),
             index,
@@ -2819,7 +3348,7 @@ impl Tool for LazySymbolsTool {
         let mut initialized = self.initialized.lock().await;
         if !*initialized {
             let index = Arc::clone(&self.index);
-            tokio::task::spawn_blocking(move || index.index_workspace())
+            tokio::task::spawn_blocking(move || index.index_workspaces())
                 .await
                 .map_err(|error| ToolError::Intelligence(error.to_string()))?
                 .map_err(|error| ToolError::Intelligence(error.to_string()))?;
@@ -2893,6 +3422,12 @@ impl QuestionAsker for HeadlessQuestionAsker {
 struct PolicyWebFetcher {
     allow_loopback: bool,
     proxies: ProxySettings,
+    corporate_proxy: Option<ResolvedToolProxy>,
+}
+
+struct ValidatedWebTarget {
+    direct_pin: Option<(String, SocketAddr)>,
+    proxy_pin: EgressPin,
 }
 
 struct OfflineWebFetcher;
@@ -2911,14 +3446,16 @@ impl WebFetcher for OfflineWebFetcher {
 }
 
 impl PolicyWebFetcher {
-    fn new(allow_loopback: bool, global_proxy: Option<Url>) -> Self {
+    fn new(allow_loopback: bool, global_proxy: Option<ResolvedToolProxy>) -> Self {
+        let configured_url = global_proxy.as_ref().map(|proxy| proxy.url.clone());
         Self {
             allow_loopback,
             proxies: ProxySettings {
-                global: global_proxy,
+                global: configured_url,
                 per_provider: BTreeMap::new(),
                 environment: ProxyEnvironment::capture(),
             },
+            corporate_proxy: global_proxy,
         }
     }
 
@@ -2926,7 +3463,7 @@ impl PolicyWebFetcher {
         &self,
         url: &Url,
         policy: &EgressPolicy,
-    ) -> std::result::Result<Option<(String, SocketAddr)>, ToolError> {
+    ) -> std::result::Result<ValidatedWebTarget, ToolError> {
         if !matches!(url.scheme(), "http" | "https")
             || url.username() != ""
             || url.password().is_some()
@@ -2946,7 +3483,12 @@ impl PolicyWebFetcher {
                     address.to_string().as_str(),
                     &[IpAddr::V4(address)],
                 )?;
-                Ok(None)
+                let socket = SocketAddr::new(IpAddr::V4(address), port);
+                Ok(ValidatedWebTarget {
+                    direct_pin: None,
+                    proxy_pin: EgressPin::new(&address.to_string(), port, vec![socket])
+                        .map_err(|error| ToolError::Network(error.to_string()))?,
+                })
             }
             Some(Host::Ipv6(address)) => {
                 self.validate_ip(IpAddr::V6(address))?;
@@ -2955,7 +3497,12 @@ impl PolicyWebFetcher {
                     address.to_string().as_str(),
                     &[IpAddr::V6(address)],
                 )?;
-                Ok(None)
+                let socket = SocketAddr::new(IpAddr::V6(address), port);
+                Ok(ValidatedWebTarget {
+                    direct_pin: None,
+                    proxy_pin: EgressPin::new(&address.to_string(), port, vec![socket])
+                        .map_err(|error| ToolError::Network(error.to_string()))?,
+                })
             }
             Some(Host::Domain(host)) => {
                 let addresses = tokio::net::lookup_host((host, port))
@@ -2970,7 +3517,11 @@ impl PolicyWebFetcher {
                 }
                 let ips = addresses.iter().map(SocketAddr::ip).collect::<Vec<_>>();
                 validate_egress_decision(policy, host, &ips)?;
-                Ok(Some((host.to_owned(), addresses[0])))
+                Ok(ValidatedWebTarget {
+                    direct_pin: Some((host.to_owned(), addresses[0])),
+                    proxy_pin: EgressPin::new(host, port, addresses)
+                        .map_err(|error| ToolError::Network(error.to_string()))?,
+                })
             }
             None => Err(ToolError::Network("URL has no host".to_owned())),
         }
@@ -3013,7 +3564,7 @@ impl WebFetcher for PolicyWebFetcher {
             if cancellation.is_cancelled() {
                 return Err(ToolError::Cancelled);
             }
-            let pin = self.validate_and_pin(&request.url, &policy).await?;
+            let validated = self.validate_and_pin(&request.url, &policy).await?;
             let mut outgoing = Vec::with_capacity(request.headers.len());
             for (name, value) in &request.headers {
                 let lower = name.to_ascii_lowercase();
@@ -3026,28 +3577,44 @@ impl WebFetcher for PolicyWebFetcher {
                     )));
                 }
                 if origin(&request.url) != original_origin
-                    && matches!(lower.as_str(), "authorization" | "cookie")
+                    && !cross_origin_webfetch_header_is_safe(&lower)
                 {
                     continue;
                 }
                 outgoing.push((name.clone(), value.clone()));
             }
-            let proxy = self
-                .proxies
-                .resolve_global(&request.url)
-                .map(|resolution| resolution.url);
-            if proxy.is_some() {
-                return Err(ToolError::Network(
-                    "webfetch through a forward proxy is refused because the target DNS pin cannot be enforced"
-                        .to_owned(),
-                ));
-            }
+            let proxy_resolution = self.proxies.resolve_global(&request.url);
+            let mut supervised_proxy = None;
+            let (proxy, dns_pin) = if let Some(resolution) = proxy_resolution {
+                let upstream = self
+                    .corporate_proxy
+                    .as_ref()
+                    .filter(|configured| configured.url == resolution.url)
+                    .map_or_else(
+                        || UpstreamProxy::new(resolution.url.clone()),
+                        |configured| Ok(configured.upstream.clone()),
+                    )
+                    .map_err(|error| ToolError::Network(error.to_string()))?;
+                let local = SupervisedEgressProxy::start_with_upstream_and_pins(
+                    policy.clone(),
+                    Some(upstream),
+                    vec![validated.proxy_pin],
+                )
+                .map_err(|error| ToolError::Network(error.to_string()))?;
+                let url = Url::parse(&local.url())
+                    .map_err(|error| ToolError::Network(error.to_string()))?;
+                supervised_proxy = Some(local);
+                (Some(url), None)
+            } else {
+                (None, validated.direct_pin)
+            };
             let response = tokio::select! {
                 response = guarded_http_fetch(GuardedHttpFetchRequest {
                     url: request.url.clone(),
                     headers: outgoing,
                     proxy,
-                    dns_pin: pin,
+                    proxy_authentication: None,
+                    dns_pin,
                     max_bytes: request.max_bytes,
                 }) => {
                     response.map_err(|error| match error {
@@ -3061,6 +3628,7 @@ impl WebFetcher for PolicyWebFetcher {
                 },
                 () = cancellation.cancelled() => return Err(ToolError::Cancelled),
             };
+            drop(supervised_proxy);
             if is_redirect(response.status) {
                 if redirect == MAX_REDIRECTS {
                     return Err(ToolError::Network(
@@ -3087,6 +3655,10 @@ impl WebFetcher for PolicyWebFetcher {
         }
         Err(ToolError::Network("webfetch redirect loop".to_owned()))
     }
+}
+
+fn cross_origin_webfetch_header_is_safe(name: &str) -> bool {
+    matches!(name, "accept" | "accept-language" | "user-agent")
 }
 
 fn validate_egress_decision(
@@ -3944,13 +4516,58 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn cross_origin_webfetch_redirects_drop_custom_credentials() {
+        for credential in [
+            "authorization",
+            "cookie",
+            "x-api-key",
+            "x-auth-token",
+            "proxy-authorization",
+        ] {
+            assert!(!cross_origin_webfetch_header_is_safe(credential));
+        }
+        for safe in ["accept", "accept-language", "user-agent"] {
+            assert!(cross_origin_webfetch_header_is_safe(safe));
+        }
+    }
+
     #[tokio::test]
-    async fn webfetch_fails_closed_when_a_forward_proxy_would_bypass_target_pinning() {
-        let fetcher = PolicyWebFetcher::new(
-            true,
-            Some(Url::parse("http://127.0.0.1:9").expect("proxy URL")),
-        );
-        let error = fetcher
+    async fn webfetch_chains_through_authenticated_proxy_after_target_pin() {
+        use std::net::TcpListener;
+        use std::thread;
+
+        let corporate = TcpListener::bind("127.0.0.1:0").expect("corporate proxy");
+        let address = corporate.local_addr().expect("corporate address");
+        let worker = thread::spawn(move || {
+            let (mut stream, _) = corporate.accept().expect("accept");
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let length = stream.read(&mut buffer).expect("request");
+                if length == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..length]);
+                if bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(bytes).expect("request UTF-8");
+            assert!(request.starts_with("GET http://127.0.0.1:8/target HTTP/1.1\r\n"));
+            assert!(request.contains(
+                "\r\nProxy-Authorization: Basic dXNlcjp3ZWJmZXRjaC1zZWNyZXQtY2FuYXJ5\r\n"
+            ));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("response");
+        });
+        let url = Url::parse(&format!("http://{address}")).expect("proxy URL");
+        let upstream = UpstreamProxy::new(url.clone())
+            .expect("upstream")
+            .with_basic_auth("user", "webfetch-secret-canary");
+        let fetcher = PolicyWebFetcher::new(true, Some(ResolvedToolProxy { url, upstream }));
+        let response = fetcher
             .fetch(
                 FetchRequest {
                     url: Url::parse("http://127.0.0.1:8/target").expect("target URL"),
@@ -3960,12 +4577,23 @@ mod tests {
                 CancellationToken::default(),
             )
             .await
-            .expect_err("proxy webfetch must fail closed");
-        assert!(matches!(
-            error,
-            ToolError::Network(message)
-                if message.contains("target DNS pin cannot be enforced")
-        ));
+            .expect("proxy webfetch");
+        worker.join().expect("proxy worker");
+        assert_eq!(response.body, b"ok");
+    }
+
+    #[test]
+    fn offline_tool_proxy_resolution_never_touches_credentials() {
+        let mut config = Config::default();
+        config.network.proxy = Some("http://127.0.0.1:9".to_owned());
+        config.network.proxy_username = Some("user".to_owned());
+        config.network.proxy_password_credential = Some("missing-secret".to_owned());
+        let missing = PathBuf::from("/definitely/missing/credentials.toml");
+        assert!(
+            resolve_tool_proxy(&config, &missing, true, &FixtureRedactor::default())
+                .expect("offline resolution")
+                .is_none()
+        );
     }
 
     #[test]
@@ -4147,6 +4775,7 @@ mod tests {
             session_id: SessionId(session_id.to_owned()),
             workspace_root: workspace,
             additional_workspace_roots: Vec::new(),
+            workspace_generation: 0,
             initial_session_context: vec![system],
             model_alias: profile.model_alias.clone(),
             model,
@@ -4159,6 +4788,7 @@ mod tests {
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
             checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
+            workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
             recovered: rw_core::SessionRecoveredState {
                 conversation: vec![user],
                 ..rw_core::SessionRecoveredState::default()
@@ -4678,26 +5308,74 @@ mod tests {
     #[tokio::test]
     async fn runtime_trust_controller_persists_grant_and_revoke_for_slash_commands() {
         let root = tempdir().expect("root");
-        let workspace = root.path().join("workspace");
-        let project_config = workspace.join(".rottweiler/config.toml");
-        std::fs::create_dir_all(project_config.parent().expect("project parent"))
-            .expect("project directory");
-        std::fs::write(&project_config, "[models]\ndefault = \"fast\"\n").expect("project config");
-        let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
+        let workspaces = [root.path().join("workspace"), root.path().join("added")];
+        let configs = workspaces
+            .each_ref()
+            .map(|workspace| workspace.join(".rottweiler/config.toml"));
+        for (index, config) in configs.iter().enumerate() {
+            std::fs::create_dir_all(config.parent().expect("project parent"))
+                .expect("project directory");
+            std::fs::write(config, format!("[models]\ndefault = \"fast-{index}\"\n"))
+                .expect("project config");
+        }
+        let workspaces = workspaces
+            .map(|workspace| std::fs::canonicalize(workspace).expect("canonical workspace"));
         let ledger = root.path().join("private/trust.json");
-        let controller = RuntimeFolderTrustController::new(ledger.clone(), workspace);
+        let controller = RuntimeFolderTrustController::new(ledger.clone(), workspaces.to_vec());
 
+        let status = controller
+            .execute(FolderTrustOperation::Status)
+            .await
+            .expect("status");
+        assert_eq!(status.matches("state: Untrusted").count(), 2);
+        for (index, workspace) in workspaces.iter().enumerate() {
+            assert!(status.contains(&format!("@root/{index}")));
+            assert!(!status.contains(&workspace.to_string_lossy().to_string()));
+        }
+        let preview = controller
+            .execute(FolderTrustOperation::Grant { confirmation: None })
+            .await
+            .expect("grant preview");
+        let stale_token = preview
+            .split("`/trust grant ")
+            .nth(1)
+            .and_then(|tail| tail.split('`').next())
+            .expect("confirmation token")
+            .to_owned();
+        std::fs::write(&configs[1], "[models]\ndefault = \"changed\"\n")
+            .expect("change after preview");
         assert!(
             controller
-                .execute(FolderTrustOperation::Status)
+                .execute(FolderTrustOperation::Grant {
+                    confirmation: Some(stale_token),
+                })
                 .await
-                .expect("status")
-                .contains("state: Untrusted")
+                .is_err(),
+            "changed inventory must invalidate the bound confirmation"
         );
-        let granted = controller
-            .execute(FolderTrustOperation::Grant)
+        assert!(
+            !ledger.is_file(),
+            "stale confirmation must not grant any root"
+        );
+
+        let preview = controller
+            .execute(FolderTrustOperation::Grant { confirmation: None })
             .await
-            .expect("grant");
+            .expect("fresh preview");
+        assert!(preview.contains("config.toml"));
+        let token = preview
+            .split("`/trust grant ")
+            .nth(1)
+            .and_then(|tail| tail.split('`').next())
+            .expect("fresh confirmation token")
+            .to_owned();
+        let granted = controller
+            .execute(FolderTrustOperation::Grant {
+                confirmation: Some(token),
+            })
+            .await
+            .expect("confirmed grant");
+        assert_eq!(granted.matches("state: Trusted").count(), 2);
         assert!(granted.contains("state: Trusted"));
         assert!(granted.contains("activates in the next session"));
         assert!(ledger.is_file(), "grant must persist the trust ledger");
@@ -4706,8 +5384,239 @@ mod tests {
             .execute(FolderTrustOperation::Revoke)
             .await
             .expect("revoke");
-        assert!(revoked.contains("state: Untrusted"));
+        assert_eq!(revoked.matches("state: Untrusted").count(), 2);
         assert!(revoked.contains("unloads in the next session"));
+        for output in [&preview, &granted, &revoked] {
+            for workspace in &workspaces {
+                assert!(!output.contains(&workspace.to_string_lossy().to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn aborted_workspace_root_generation_is_retry_clean() {
+        let root = tempdir().expect("root");
+        let primary = root.path().join("primary");
+        let added = root.path().join("added");
+        let checkpoint = root.path().join("checkpoint");
+        std::fs::create_dir(&primary).expect("primary");
+        std::fs::create_dir(&added).expect("added");
+        let primary = std::fs::canonicalize(primary).expect("canonical primary");
+        let added = std::fs::canonicalize(added).expect("canonical added");
+        open_checkpoint_stores(&checkpoint, std::slice::from_ref(&primary))
+            .expect("base generation");
+        let appended = vec![primary.clone(), added];
+        append_checkpoint_root_generation(
+            &checkpoint,
+            std::slice::from_ref(&primary),
+            &appended,
+            1,
+            2,
+        )
+        .expect("prepare generation");
+        abort_checkpoint_root_generation(&checkpoint, 1).expect("abort generation");
+        let recovered = load_checkpoint_root_generation(&checkpoint)
+            .expect("load base")
+            .expect("base generation");
+        assert_eq!(recovered.generation, 0);
+        assert_eq!(recovered.roots, vec![primary.clone()]);
+        append_checkpoint_root_generation(
+            &checkpoint,
+            std::slice::from_ref(&primary),
+            &appended,
+            1,
+            2,
+        )
+        .expect("retry same generation");
+        abort_checkpoint_root_generation(&checkpoint, 1).expect("cleanup retry");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn live_root_generation_immediately_swaps_tools_sandbox_and_checkpoints() {
+        let root = tempdir().expect("root");
+        let primary = root.path().join("primary");
+        let added = root.path().join("added");
+        let private = root.path().join("private");
+        std::fs::create_dir_all(&primary).expect("primary");
+        std::fs::create_dir_all(&added).expect("added");
+        std::fs::create_dir_all(&private).expect("private");
+        let primary = std::fs::canonicalize(primary).expect("canonical primary");
+        let added = std::fs::canonicalize(added).expect("canonical added");
+        let checkpoint_root = private.join("checkpoint");
+        open_checkpoint_stores(&checkpoint_root, std::slice::from_ref(&primary))
+            .expect("initial checkpoint mapping");
+        let lease = Arc::new(
+            ExecutionLease::acquire(private.join("execution.lock")).expect("execution lease"),
+        );
+        let approvals = private.join("approvals.json");
+        let permissions = Arc::new(
+            PermissionGate::from_config(rw_core::PermissionConfig::default())
+                .with_workspace_roots([&primary])
+                .with_project_approval_file(approvals),
+        );
+        let controller = RuntimeWorkspaceRootController {
+            checkpoint_root: checkpoint_root.clone(),
+            question_asker: Arc::new(HeadlessQuestionAsker),
+            offline: false,
+            global_proxy: None,
+            command_fixture_mode: CommandFixtureMode::Live,
+            execution_lease: lease,
+            command_safety: Arc::new(CommandSafetyClassifier::default()),
+            trust_store_path: private.join("trust.json"),
+        };
+        let generation = rw_core::WorkspaceRootController::append_root(
+            &controller,
+            &added,
+            std::slice::from_ref(&primary),
+            0,
+            1,
+            permissions,
+        )
+        .await
+        .expect("prepare generation");
+        rw_core::WorkspaceRootController::commit_generation(&controller, 1)
+            .await
+            .expect("commit generation");
+        let context = ToolContext::from_workspace_roots(&generation.roots).expect("tool context");
+        let session = SessionId("live-root-test".to_owned());
+
+        let known = generation
+            .checkpoints
+            .begin(
+                &session,
+                1,
+                "write-added",
+                &MutationScope::Paths(vec![PathBuf::from("@root/1/created.txt")]),
+            )
+            .await
+            .expect("known checkpoint");
+        generation
+            .tools
+            .resolve("write")
+            .expect("write tool")
+            .execute(
+                &context,
+                serde_json::json!({"path":"@root/1/created.txt","content":"live-root"}),
+            )
+            .await
+            .expect("write added root");
+        generation
+            .checkpoints
+            .finish(&known, MutationCheckpointOutcome::Completed)
+            .await
+            .expect("finish known");
+        let listing = generation
+            .tools
+            .resolve("ls")
+            .expect("ls tool")
+            .execute(&context, serde_json::json!({"path":"."}))
+            .await
+            .expect("search roots");
+        assert!(listing.content.contains("@root/1/created.txt"));
+        assert!(
+            generation
+                .tools
+                .resolve("write")
+                .expect("write tool")
+                .execute(
+                    &context,
+                    serde_json::json!({"path":"@root/1/../parent.txt","content":"escape"}),
+                )
+                .await
+                .is_err()
+        );
+        let rewind = generation
+            .checkpoints
+            .prepare_apply_rewind(&session, 0, "rewind-live-root")
+            .await
+            .expect("rewind added root");
+        assert!(!added.join("created.txt").exists());
+        generation
+            .checkpoints
+            .acknowledge_rewind(&rewind)
+            .await
+            .expect("ack rewind");
+
+        let opaque = generation
+            .checkpoints
+            .begin(&session, 2, "bash-added", &MutationScope::OpaqueWorkspace)
+            .await
+            .expect("opaque checkpoint");
+        generation
+            .tools
+            .resolve("bash")
+            .expect("bash tool")
+            .execute(
+                &context,
+                serde_json::json!({"command":"printf shell > shell.txt","cwd":"@root/1"}),
+            )
+            .await
+            .expect("sandboxed bash in added root");
+        generation
+            .checkpoints
+            .finish(&opaque, MutationCheckpointOutcome::Completed)
+            .await
+            .expect("finish opaque");
+        assert_eq!(
+            std::fs::read(added.join("shell.txt")).expect("bash output"),
+            b"shell"
+        );
+        let escaped = generation
+            .tools
+            .resolve("bash")
+            .expect("bash tool")
+            .execute(
+                &context,
+                serde_json::json!({"command":"printf escape > ../parent-shell.txt","cwd":"@root/1"}),
+            )
+            .await
+            .expect("sandbox reports command exit");
+        assert!(escaped.content.contains("exit code:"));
+        assert!(!root.path().join("parent-shell.txt").exists());
+        let rewind = generation
+            .checkpoints
+            .prepare_apply_rewind(&session, 1, "rewind-live-root-bash")
+            .await
+            .expect("rewind bash root");
+        assert!(!added.join("shell.txt").exists());
+        generation
+            .checkpoints
+            .acknowledge_rewind(&rewind)
+            .await
+            .expect("ack bash rewind");
+
+        let pending = RuntimeWorkspaceRootController {
+            checkpoint_root: checkpoint_root.clone(),
+            question_asker: Arc::new(HeadlessQuestionAsker),
+            offline: false,
+            global_proxy: None,
+            command_fixture_mode: CommandFixtureMode::Live,
+            execution_lease: Arc::new(
+                ExecutionLease::acquire(private.join("execution-2.lock")).expect("second lease"),
+            ),
+            command_safety: Arc::new(CommandSafetyClassifier::default()),
+            trust_store_path: private.join("trust.json"),
+        };
+        let third = root.path().join("third");
+        std::fs::create_dir(&third).expect("third root");
+        let third = std::fs::canonicalize(third).expect("canonical third");
+        let _prepared = rw_core::WorkspaceRootController::append_root(
+            &pending,
+            &third,
+            &generation.roots,
+            1,
+            2,
+            Arc::clone(&generation.permissions),
+        )
+        .await
+        .expect("prepare uncommitted generation");
+        let recovered =
+            restore_persisted_workspace_roots(&checkpoint_root, &primary, &generation.roots, 1)
+                .expect("recover committed generation")
+                .expect("generation");
+        assert_eq!(recovered.roots, generation.roots);
+        assert!(!recovered.roots.contains(&third));
     }
 
     #[tokio::test]
@@ -4871,6 +5780,7 @@ mod tests {
             session_id: session,
             workspace_root: workspace.clone(),
             additional_workspace_roots: Vec::new(),
+            workspace_generation: 0,
             initial_session_context: Vec::new(),
             model_alias: "fast".to_owned(),
             model,
@@ -4883,6 +5793,7 @@ mod tests {
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
             checkpoints,
             folder_trust: Arc::new(rw_core::NoopFolderTrustController),
+            workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
             recovered: rw_core::SessionRecoveredState::default(),
             max_turns: 4,
             identical_tool_failure_limit: 5,

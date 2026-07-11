@@ -6,16 +6,26 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[[test]]
+name = "linux_helper_driver"
+path = "tests/linux_helper_driver.rs"
+harness = false
+
 [dependencies]
+base64.workspace = true
 rw-types.workspace = true
+rustls = { version = "0.23.41", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tempfile = "3.23"
 url.workspace = true
+webpki-roots = "1.0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.5"
 libc = "0.2.183"
+rustix.workspace = true
 seccompiler = "0.5.0"
 
 [dev-dependencies]

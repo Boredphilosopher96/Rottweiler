@@ -1,13 +1,15 @@
+use std::fmt::Write as _;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt, fs,
+    io::Write as _,
     path::{Path, PathBuf},
-    sync::RwLock,
+    sync::{Arc, Mutex, OnceLock, RwLock},
 };
 
 use async_trait::async_trait;
 use globset::GlobBuilder;
-use rw_tools::{CommandSafety, classify_safe_command};
+use rw_tools::{BashSandboxMode, CommandSafety, CommandSafetyClassifier, classify_safe_command};
 use rw_types::{
     ApprovalDecision, SessionMode, ToolCapability, UnifiedDiff,
     config::{PermissionConfig, PermissionDecision, PermissionRule},
@@ -31,6 +33,7 @@ pub struct PermissionRequest {
 pub enum PermissionOutcome {
     Allowed,
     Denied,
+    RememberedApprovalUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -56,15 +59,51 @@ pub struct PermissionSnapshot {
     pub project_approvals: usize,
 }
 
+/// Opaque, non-secret description of one remembered exact approval.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PermissionApprovalSummary {
+    pub id: String,
+    pub tool_name: String,
+    pub canonical_summary: String,
+}
+
+/// Remembered approvals grouped by their revocation scope.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PermissionApprovalSnapshot {
+    pub session: Vec<PermissionApprovalSummary>,
+    pub project: Vec<PermissionApprovalSummary>,
+}
+
+/// Counts returned after clearing session-scoped permission state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClearedSessionPermissions {
+    pub rules: usize,
+    pub approvals: usize,
+}
+
+/// Result of atomically switching the permission workspace generation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PermissionGenerationUpdate {
+    pub generation: u64,
+    pub invalidated_session_approvals: usize,
+    pub invalidated_project_approvals: usize,
+}
+
+#[derive(Default)]
+struct PermissionMemory {
+    workspace_namespace: Vec<String>,
+    generation: u64,
+    session_allows: BTreeSet<RememberedApproval>,
+}
+
 /// Single mandatory permission chokepoint with mode overlays, pattern rules,
 /// and exact invocation approvals remembered at session or project scope.
 pub struct PermissionGate {
     policy: PermissionPolicy,
-    workspace_namespace: Vec<String>,
+    memory: RwLock<PermissionMemory>,
     session_rules: RwLock<Vec<PermissionRule>>,
-    session_allows: RwLock<BTreeSet<PermissionKey>>,
-    project_allows: RwLock<BTreeSet<PermissionKey>>,
-    project_file: Option<PathBuf>,
+    project_store: Option<Arc<ProjectApprovalStore>>,
+    command_safety: Arc<CommandSafetyClassifier>,
 }
 
 impl fmt::Debug for PermissionGate {
@@ -73,7 +112,7 @@ impl fmt::Debug for PermissionGate {
             .debug_struct("PermissionGate")
             .field("policy", &self.policy)
             .field("snapshot", &self.snapshot())
-            .field("project_persistence", &self.project_file.is_some())
+            .field("project_persistence", &self.project_store.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -91,11 +130,10 @@ impl PermissionGate {
     pub fn from_config(config: PermissionConfig) -> Self {
         Self {
             policy: PermissionPolicy::Configured(config),
-            workspace_namespace: Vec::new(),
+            memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
-            session_allows: RwLock::new(BTreeSet::new()),
-            project_allows: RwLock::new(BTreeSet::new()),
-            project_file: None,
+            project_store: None,
+            command_safety: Arc::new(CommandSafetyClassifier::default()),
         }
     }
 
@@ -104,9 +142,7 @@ impl PermissionGate {
     #[must_use]
     pub fn with_project_approval_file(mut self, path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let loaded = load_project_approvals(&path).unwrap_or_default();
-        self.project_allows = RwLock::new(loaded);
-        self.project_file = Some(path);
+        self.project_store = Some(shared_project_store(&path));
         self
     }
 
@@ -114,12 +150,18 @@ impl PermissionGate {
     pub fn for_headless_mode(mode: HeadlessPermissionMode) -> Self {
         Self {
             policy: PermissionPolicy::Headless(mode),
-            workspace_namespace: Vec::new(),
+            memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
-            session_allows: RwLock::new(BTreeSet::new()),
-            project_allows: RwLock::new(BTreeSet::new()),
-            project_file: None,
+            project_store: None,
+            command_safety: Arc::new(CommandSafetyClassifier::default()),
         }
+    }
+
+    /// Installs the same immutable user-scoped classifier used by bash execution.
+    #[must_use]
+    pub fn with_command_safety(mut self, safety: Arc<CommandSafetyClassifier>) -> Self {
+        self.command_safety = safety;
+        self
     }
 
     #[must_use]
@@ -136,35 +178,111 @@ impl PermissionGate {
                 (PermissionDecision::Allow, Vec::new())
             }
         };
+        let session_rules = lock_read(&self.session_rules).clone();
+        let memory = lock_read(&self.memory);
+        let project_approvals = self
+            .project_store
+            .as_ref()
+            .and_then(|store| store.refresh().ok())
+            .map_or(0, |approvals| {
+                approvals
+                    .iter()
+                    .filter(|approval| {
+                        approval.key.workspace_namespace == memory.workspace_namespace
+                    })
+                    .count()
+            });
         PermissionSnapshot {
             default,
             rules,
-            session_rules: lock_read(&self.session_rules).clone(),
-            session_approvals: lock_read(&self.session_allows).len(),
-            project_approvals: lock_read(&self.project_allows).len(),
+            session_rules,
+            session_approvals: memory.session_allows.len(),
+            project_approvals,
         }
     }
 
     /// Binds remembered approvals to the complete ordered root identity.
     #[must_use]
-    pub fn with_workspace_roots(
-        mut self,
-        roots: impl IntoIterator<Item = impl AsRef<Path>>,
-    ) -> Self {
-        let mut namespace = blake3::Hasher::new();
-        namespace.update(b"rottweiler-permission-workspace-roots-v1\0");
-        let mut count = 0_u64;
-        for root in roots {
-            let canonical =
-                fs::canonicalize(root.as_ref()).unwrap_or_else(|_| root.as_ref().to_path_buf());
-            let bytes = canonical.as_os_str().as_encoded_bytes();
-            namespace.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
-            namespace.update(bytes);
-            count = count.saturating_add(1);
+    pub fn with_workspace_roots(self, roots: impl IntoIterator<Item = impl AsRef<Path>>) -> Self {
+        {
+            let mut memory = lock_write(&self.memory);
+            memory.workspace_namespace = workspace_namespace(roots);
+            memory.generation = 1;
         }
-        namespace.update(&count.to_le_bytes());
-        self.workspace_namespace = vec![namespace.finalize().to_hex().to_string()];
         self
+    }
+
+    /// Atomically switches the complete ordered root identity and invalidates
+    /// approvals granted under the previous generation. An unchanged root set
+    /// is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when clearing the private project approval file fails;
+    /// the in-memory generation is left unchanged in that case.
+    pub fn replace_workspace_roots(
+        &self,
+        roots: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Result<PermissionGenerationUpdate, std::io::Error> {
+        let namespace = workspace_namespace(roots);
+        let mut memory = lock_write(&self.memory);
+        if memory.workspace_namespace == namespace {
+            return Ok(PermissionGenerationUpdate {
+                generation: memory.generation,
+                invalidated_session_approvals: 0,
+                invalidated_project_approvals: 0,
+            });
+        }
+        let invalidated_project_approvals = if let Some(store) = &self.project_store {
+            store.clear_all()?
+        } else {
+            0
+        };
+        let update = PermissionGenerationUpdate {
+            generation: memory.generation.saturating_add(1),
+            invalidated_session_approvals: memory.session_allows.len(),
+            invalidated_project_approvals,
+        };
+        memory.workspace_namespace = namespace;
+        memory.generation = update.generation;
+        memory.session_allows.clear();
+        Ok(update)
+    }
+
+    /// Prepares a replacement gate for an atomic live-root generation swap.
+    /// Policy and session rules are copied, while remembered session approvals
+    /// are omitted. Project approvals remain untouched in the shared ledger
+    /// and cannot match the replacement's new namespace.
+    /// The current gate's policy, rules, namespace, generation, and session
+    /// approvals are never mutated.
+    ///
+    /// # Errors
+    ///
+    /// This operation performs no persistence, but retains a fallible return
+    /// type so controllers can use one prepare/swap contract.
+    pub fn fork_for_workspace_roots(
+        &self,
+        roots: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Result<Self, std::io::Error> {
+        let generation = lock_read(&self.memory).generation.saturating_add(1);
+        Ok(Self {
+            policy: self.policy.clone(),
+            memory: RwLock::new(PermissionMemory {
+                workspace_namespace: workspace_namespace(roots),
+                generation,
+                session_allows: BTreeSet::new(),
+            }),
+            session_rules: RwLock::new(lock_read(&self.session_rules).clone()),
+            project_store: self.project_store.clone(),
+            command_safety: Arc::clone(&self.command_safety),
+        })
+    }
+
+    pub(crate) fn execution_identity(request: &PermissionRequest) -> String {
+        fingerprint(
+            b"rottweiler-permission-execution-identity-v1\0",
+            canonical_key_arguments(request).as_bytes(),
+        )
     }
 
     /// Adds or replaces one session-scoped rule. Session rules disappear when
@@ -196,6 +314,58 @@ impl PermissionGate {
         let removed = rules.len();
         rules.clear();
         removed
+    }
+
+    /// Clears session-scoped rules and remembered `AllowSession` decisions.
+    pub fn clear_session_permissions(&self) -> ClearedSessionPermissions {
+        let rules = self.clear_session_rules();
+        let mut memory = lock_write(&self.memory);
+        let approvals = memory.session_allows.len();
+        memory.session_allows.clear();
+        ClearedSessionPermissions { rules, approvals }
+    }
+
+    /// Returns opaque approval ids and summaries containing metadata only,
+    /// never canonical argument values or fingerprints.
+    #[must_use]
+    pub fn approval_snapshot(&self) -> PermissionApprovalSnapshot {
+        let memory = lock_read(&self.memory);
+        let project = self
+            .project_store
+            .as_ref()
+            .and_then(|store| store.refresh().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|approval| approval.key.workspace_namespace == memory.workspace_namespace)
+            .collect::<BTreeSet<_>>();
+        PermissionApprovalSnapshot {
+            session: memory
+                .session_allows
+                .iter()
+                .map(RememberedApproval::summary)
+                .collect(),
+            project: project.iter().map(RememberedApproval::summary).collect(),
+        }
+    }
+
+    /// Revokes one opaque session approval id, or all session approvals when
+    /// `id` is `None`. Returns the number removed.
+    pub fn revoke_session_approvals(&self, id: Option<&str>) -> usize {
+        let mut memory = lock_write(&self.memory);
+        revoke_approvals(&mut memory.session_allows, id)
+    }
+
+    /// Revokes one opaque project approval id, or all project approvals when
+    /// `id` is `None`, and atomically updates private persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated project approval set cannot be
+    /// persisted. In-memory approvals remain unchanged on failure.
+    pub fn revoke_project_approvals(&self, id: Option<&str>) -> Result<usize, std::io::Error> {
+        self.project_store
+            .as_ref()
+            .map_or(Ok(0), |store| store.revoke(id))
     }
 
     pub async fn authorize(
@@ -232,6 +402,9 @@ impl PermissionGate {
         {
             return PermissionOutcome::Denied;
         }
+        if request.tool_name == "bash" && bash_sandbox_mode(&request).is_none() {
+            return PermissionOutcome::Denied;
+        }
         if request.tool_name == "webfetch"
             && request
                 .arguments
@@ -245,13 +418,14 @@ impl PermissionGate {
         if request.tool_name == "submit_plan" && mode != SessionMode::Plan {
             return PermissionOutcome::Denied;
         }
-        if mode != SessionMode::Execute && !is_mode_read_only(&request) {
+        if mode != SessionMode::Execute
+            && !(is_read_only(&request) || is_builtin_read_only_bash(&request))
+        {
             return PermissionOutcome::Denied;
         }
         if ask_override == Some(PermissionOutcome::Denied) {
             return PermissionOutcome::Denied;
         }
-        let key = PermissionKey::from_request(&request, &self.workspace_namespace);
         match self.decision_for(&request) {
             PermissionDecision::Allow => PermissionOutcome::Allowed,
             PermissionDecision::Deny => PermissionOutcome::Denied,
@@ -259,28 +433,58 @@ impl PermissionGate {
                 if let Some(outcome) = ask_override {
                     return outcome;
                 }
-                if lock_read(&self.session_allows).contains(&key)
-                    || lock_read(&self.project_allows).contains(&key)
-                {
+                let rememberable = rememberable_request(&request);
+                let (key, generation, remembered) = {
+                    let memory = lock_read(&self.memory);
+                    let key = PermissionKey::from_request(&request, &memory.workspace_namespace);
+                    let remembered = rememberable
+                        && (contains_approval(&memory.session_allows, &key)
+                            || self
+                                .project_store
+                                .as_ref()
+                                .is_some_and(|store| store.contains(&key).unwrap_or(false)));
+                    (key, memory.generation, remembered)
+                };
+                if remembered {
                     return PermissionOutcome::Allowed;
                 }
                 match approver.decide(request).await {
-                    ApprovalDecision::AllowOnce => PermissionOutcome::Allowed,
+                    ApprovalDecision::AllowOnce => {
+                        if lock_read(&self.memory).generation == generation {
+                            PermissionOutcome::Allowed
+                        } else {
+                            PermissionOutcome::Denied
+                        }
+                    }
                     ApprovalDecision::AllowSession => {
-                        lock_write(&self.session_allows).insert(key);
+                        if !rememberable {
+                            return PermissionOutcome::RememberedApprovalUnavailable;
+                        }
+                        let mut memory = lock_write(&self.memory);
+                        if memory.generation != generation {
+                            return PermissionOutcome::Denied;
+                        }
+                        let Some(approval) = RememberedApproval::new("session", key) else {
+                            return PermissionOutcome::Denied;
+                        };
+                        replace_approval(&mut memory.session_allows, approval);
                         PermissionOutcome::Allowed
                     }
                     ApprovalDecision::AllowProject => {
-                        let mut approvals = lock_write(&self.project_allows);
-                        approvals.insert(key.clone());
+                        if !rememberable {
+                            return PermissionOutcome::RememberedApprovalUnavailable;
+                        }
+                        let memory = lock_write(&self.memory);
+                        if memory.generation != generation {
+                            return PermissionOutcome::Denied;
+                        }
                         if self
-                            .project_file
+                            .project_store
                             .as_ref()
-                            .is_some_and(|path| persist_project_approvals(path, &approvals).is_ok())
+                            .is_some_and(|store| store.grant(key).is_ok())
                         {
                             PermissionOutcome::Allowed
                         } else {
-                            approvals.remove(&key);
                             PermissionOutcome::Denied
                         }
                     }
@@ -296,12 +500,8 @@ impl PermissionGate {
         {
             return PermissionDecision::Allow;
         }
-        let safe_listed = request.tool_name == "bash"
-            && request
-                .arguments
-                .get("command")
-                .and_then(Value::as_str)
-                .is_some_and(|command| classify_safe_command(command) == CommandSafety::SafeListed);
+        let unsandboxed = bash_sandbox_mode(request) == Some(BashSandboxMode::Unsandboxed);
+        let safe_listed = self.is_safe_listed_bash(request);
         match &self.policy {
             PermissionPolicy::Configured(config) => {
                 let mut effective = config.clone();
@@ -309,7 +509,18 @@ impl PermissionGate {
                     .rules
                     .extend(lock_read(&self.session_rules).iter().cloned());
                 let configured = rule_decision(&effective, request);
-                if configured == PermissionDecision::Ask && safe_listed {
+                if unsandboxed {
+                    let explicit = unsandboxed_rule_decision(&effective, request);
+                    if configured == PermissionDecision::Deny
+                        || explicit == Some(PermissionDecision::Deny)
+                    {
+                        PermissionDecision::Deny
+                    } else if explicit == Some(PermissionDecision::Allow) {
+                        PermissionDecision::Allow
+                    } else {
+                        PermissionDecision::Ask
+                    }
+                } else if configured == PermissionDecision::Ask && safe_listed {
                     PermissionDecision::Allow
                 } else {
                     configured
@@ -322,6 +533,26 @@ impl PermissionGate {
                     HeadlessPermissionMode::Yolo => PermissionDecision::Allow,
                 };
                 let rules = lock_read(&self.session_rules).clone();
+                if unsandboxed {
+                    let policy = PermissionConfig { default, rules };
+                    let configured = rule_decision(&policy, request);
+                    let explicit = unsandboxed_rule_decision(&policy, request);
+                    return match mode {
+                        HeadlessPermissionMode::AutoSafe => PermissionDecision::Deny,
+                        _ if configured == PermissionDecision::Deny
+                            || explicit == Some(PermissionDecision::Deny) =>
+                        {
+                            PermissionDecision::Deny
+                        }
+                        HeadlessPermissionMode::Strict
+                            if explicit == Some(PermissionDecision::Allow) =>
+                        {
+                            PermissionDecision::Allow
+                        }
+                        HeadlessPermissionMode::Strict => PermissionDecision::Ask,
+                        HeadlessPermissionMode::Yolo => PermissionDecision::Allow,
+                    };
+                }
                 if rules.is_empty() {
                     match mode {
                         HeadlessPermissionMode::Strict if safe_listed => PermissionDecision::Allow,
@@ -338,6 +569,24 @@ impl PermissionGate {
             }
         }
     }
+
+    fn is_safe_listed_bash(&self, request: &PermissionRequest) -> bool {
+        request.tool_name == "bash"
+            && bash_sandbox_mode(request) == Some(BashSandboxMode::Sandboxed)
+            && request
+                .arguments
+                .get("network_domains")
+                .is_none_or(|domains| {
+                    normalize_network_domains(domains).is_some_and(|domains| domains.is_empty())
+                })
+            && request
+                .arguments
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| {
+                    self.command_safety.classify(command) == CommandSafety::SafeListed
+                })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -349,10 +598,48 @@ enum PermissionPolicy {
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 struct PermissionKey {
     tool_name: String,
-    canonical_arguments: String,
+    arguments_fingerprint: String,
     capabilities: Vec<String>,
     approval_fingerprint: Option<String>,
     workspace_namespace: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct RememberedApproval {
+    id: String,
+    key: PermissionKey,
+}
+
+impl RememberedApproval {
+    fn new(scope: &str, key: PermissionKey) -> Option<Self> {
+        let mut random = [0_u8; 32];
+        getrandom::fill(&mut random).ok()?;
+        let opaque = hex(&random);
+        Some(Self {
+            id: format!("{scope}:{opaque}"),
+            key,
+        })
+    }
+
+    fn summary(&self) -> PermissionApprovalSummary {
+        let capabilities = if self.key.capabilities.is_empty() {
+            "none".to_owned()
+        } else {
+            self.key.capabilities.join(",")
+        };
+        let approval = self
+            .key
+            .approval_fingerprint
+            .as_ref()
+            .map_or("none", |_| "diff-bound");
+        PermissionApprovalSummary {
+            id: self.id.clone(),
+            tool_name: self.key.tool_name.clone(),
+            canonical_summary: format!(
+                "exact-invocation=hidden capabilities={capabilities} approval={approval}"
+            ),
+        }
+    }
 }
 
 impl PermissionKey {
@@ -366,7 +653,10 @@ impl PermissionKey {
         capabilities.dedup();
         Self {
             tool_name: request.tool_name.clone(),
-            canonical_arguments: canonical_key_arguments(request),
+            arguments_fingerprint: fingerprint(
+                b"rottweiler-permission-arguments-v1\0",
+                canonical_key_arguments(request).as_bytes(),
+            ),
             capabilities,
             approval_fingerprint: request.approval_diff.as_ref().map(|diff| {
                 format!(
@@ -377,6 +667,49 @@ impl PermissionKey {
             workspace_namespace: workspace_namespace.to_vec(),
         }
     }
+}
+
+fn fingerprint(domain: &[u8], value: &[u8]) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(domain);
+    hash.update(&u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hash.update(value);
+    hash.finalize().to_hex().to_string()
+}
+
+fn revoke_approvals(approvals: &mut BTreeSet<RememberedApproval>, id: Option<&str>) -> usize {
+    let before = approvals.len();
+    if let Some(id) = id {
+        approvals.retain(|approval| approval.id != id);
+    } else {
+        approvals.clear();
+    }
+    before.saturating_sub(approvals.len())
+}
+
+fn contains_approval(approvals: &BTreeSet<RememberedApproval>, key: &PermissionKey) -> bool {
+    approvals.iter().any(|approval| &approval.key == key)
+}
+
+fn replace_approval(approvals: &mut BTreeSet<RememberedApproval>, approval: RememberedApproval) {
+    approvals.retain(|existing| existing.key != approval.key);
+    approvals.insert(approval);
+}
+
+fn workspace_namespace(roots: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<String> {
+    let mut namespace = blake3::Hasher::new();
+    namespace.update(b"rottweiler-permission-workspace-roots-v1\0");
+    let mut count = 0_u64;
+    for root in roots {
+        let canonical =
+            fs::canonicalize(root.as_ref()).unwrap_or_else(|_| root.as_ref().to_path_buf());
+        let bytes = canonical.as_os_str().as_encoded_bytes();
+        namespace.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+        namespace.update(bytes);
+        count = count.saturating_add(1);
+    }
+    namespace.update(&count.to_le_bytes());
+    vec![namespace.finalize().to_hex().to_string()]
 }
 
 fn canonical_key_arguments(request: &PermissionRequest) -> String {
@@ -390,12 +723,12 @@ fn canonical_key_arguments(request: &PermissionRequest) -> String {
     }
     if request.tool_name == "bash"
         && let Some(command) = arguments.get("command").and_then(Value::as_str)
-        && let Some(commands) = canonical_shell_commands(command)
+        && let Some(commands) = exact_shell_identity(command, &arguments)
         && let Some(object) = arguments.as_object_mut()
     {
         object.insert(
             "command".to_owned(),
-            Value::Array(commands.into_iter().map(Value::String).collect()),
+            serde_json::to_value(commands).unwrap_or(Value::Null),
         );
     }
     if let Some(object) = arguments.as_object_mut()
@@ -408,6 +741,248 @@ fn canonical_key_arguments(request: &PermissionRequest) -> String {
         );
     }
     canonical_json(&arguments)
+}
+
+#[derive(Serialize)]
+struct ExactShellCommand {
+    operator_after: Option<String>,
+    assignments: Vec<(String, String)>,
+    argv: Vec<String>,
+    executable: ExactExecutableIdentity,
+}
+
+#[derive(Serialize)]
+struct ExactExecutableIdentity {
+    requested: String,
+    resolved: Option<ResolvedExecutableIdentity>,
+}
+
+#[derive(Serialize)]
+struct ResolvedExecutableIdentity {
+    canonical_path: Vec<u8>,
+    content_hash: String,
+    trusted_immutable: bool,
+}
+
+fn exact_shell_identity(command: &str, arguments: &Value) -> Option<Vec<ExactShellCommand>> {
+    let cwd = arguments
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let request_env = arguments.get("env").and_then(Value::as_object);
+    split_compound_with_operators(command)?
+        .into_iter()
+        .map(|(segment, operator_after)| {
+            let words = shell_words::split(&segment).ok()?;
+            let executable_index = words.iter().position(|word| !is_assignment(word))?;
+            let assignments = words[..executable_index]
+                .iter()
+                .map(|assignment| assignment.split_once('='))
+                .map(|assignment| {
+                    assignment.map(|(name, value)| (name.to_owned(), value.to_owned()))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let argv = words[executable_index..].to_vec();
+            let requested = argv.first()?.clone();
+            let inline_path = assignments
+                .iter()
+                .rev()
+                .find_map(|(name, value)| (name == "PATH").then_some(value.as_str()));
+            let request_path = request_env
+                .and_then(|env| env.get("PATH"))
+                .and_then(Value::as_str);
+            let inherited_path = std::env::var_os("PATH");
+            let path = inline_path
+                .map(std::ffi::OsString::from)
+                .or_else(|| request_path.map(std::ffi::OsString::from))
+                .or(inherited_path);
+            Some(ExactShellCommand {
+                operator_after,
+                assignments,
+                argv,
+                executable: ExactExecutableIdentity {
+                    requested: requested.clone(),
+                    resolved: resolve_executable_identity(&requested, &cwd, path.as_deref()),
+                },
+            })
+        })
+        .collect()
+}
+
+fn resolve_executable_identity(
+    executable: &str,
+    cwd: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Option<ResolvedExecutableIdentity> {
+    let executable_path = Path::new(executable);
+    let candidates = if executable_path.components().count() > 1 || executable_path.is_absolute() {
+        vec![if executable_path.is_absolute() {
+            executable_path.to_path_buf()
+        } else {
+            cwd.join(executable_path)
+        }]
+    } else {
+        path.map(std::env::split_paths)
+            .into_iter()
+            .flatten()
+            .map(|directory| {
+                if directory.is_absolute() {
+                    directory.join(executable_path)
+                } else {
+                    cwd.join(directory).join(executable_path)
+                }
+            })
+            .collect()
+    };
+    for candidate in candidates {
+        let Ok(canonical) = fs::canonicalize(&candidate) else {
+            continue;
+        };
+        if !fs::metadata(&canonical).is_ok_and(|metadata| metadata.is_file()) {
+            continue;
+        }
+        let Ok(mut file) = fs::File::open(&canonical) else {
+            continue;
+        };
+        let mut hasher = blake3::Hasher::new();
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            let read = std::io::Read::read(&mut file, &mut buffer).ok()?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        return Some(ResolvedExecutableIdentity {
+            canonical_path: canonical.as_os_str().as_encoded_bytes().to_vec(),
+            content_hash: hasher.finalize().to_hex().to_string(),
+            trusted_immutable: trusted_immutable_executable(&canonical),
+        });
+    }
+    None
+}
+
+#[cfg(unix)]
+fn trusted_immutable_executable(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    fs::metadata(path).is_ok_and(|metadata| {
+        metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+    })
+}
+
+#[cfg(not(unix))]
+fn trusted_immutable_executable(_path: &Path) -> bool {
+    false
+}
+
+fn rememberable_request(request: &PermissionRequest) -> bool {
+    if request.tool_name != "bash" {
+        return true;
+    }
+    let Some(command) = request.arguments.get("command").and_then(Value::as_str) else {
+        return false;
+    };
+    if command.contains(['`', '$', '*', '?', '[', ']', '{', '}', '~', '\r']) {
+        return false;
+    }
+    let Some(commands) = exact_shell_identity(command, &request.arguments) else {
+        return false;
+    };
+    !commands.is_empty() && commands.iter().all(rememberable_shell_command)
+}
+
+fn rememberable_shell_command(command: &ExactShellCommand) -> bool {
+    if command.assignments.iter().any(|(name, _)| name == "PATH") {
+        return false;
+    }
+    let executable = Path::new(&command.executable.requested)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if matches!(
+        executable,
+        "eval" | "cd" | "export" | "unset" | "source" | "." | "alias" | "unalias" | "set" | "exec"
+    ) {
+        return false;
+    }
+    let interpreter = matches!(
+        executable,
+        "sh" | "bash" | "zsh" | "dash" | "python" | "python3" | "node" | "ruby" | "perl"
+    );
+    if interpreter && command.argv.iter().skip(1).any(|argument| argument == "-c") {
+        return false;
+    }
+    command
+        .executable
+        .resolved
+        .as_ref()
+        .is_some_and(|identity| identity.trusted_immutable)
+}
+
+fn split_compound_with_operators(command: &str) -> Option<Vec<(String, Option<String>)>> {
+    let chars = command.char_indices().collect::<Vec<_>>();
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    let mut index = 0;
+    while index < chars.len() {
+        let (offset, character) = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if character == '\\' && !single {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if character == '\'' && !double {
+            single = !single;
+            index += 1;
+            continue;
+        }
+        if character == '"' && !single {
+            double = !double;
+            index += 1;
+            continue;
+        }
+        if !single && !double {
+            let next = chars.get(index + 1).map(|(_, next)| *next);
+            let operator = match (character, next) {
+                ('&', Some('&')) => Some(("&&", 2)),
+                ('|', Some('|')) => Some(("||", 2)),
+                (';', _) => Some((";", 1)),
+                ('|', _) => Some(("|", 1)),
+                ('\n', _) => Some(("\n", 1)),
+                ('&' | '(' | ')' | '<' | '>', _) => return None,
+                _ => None,
+            };
+            if let Some((operator, delimiter_len)) = operator {
+                let segment = command.get(start..offset)?.trim();
+                if segment.is_empty() {
+                    return None;
+                }
+                segments.push((segment.to_owned(), Some(operator.to_owned())));
+                index += delimiter_len;
+                start = chars.get(index).map_or(command.len(), |(next, _)| *next);
+                continue;
+            }
+        }
+        index += 1;
+    }
+    if single || double || escaped {
+        return None;
+    }
+    let tail = command.get(start..)?.trim();
+    if tail.is_empty() {
+        return None;
+    }
+    segments.push((tail.to_owned(), None));
+    Some(segments)
 }
 
 fn canonical_webfetch_origin(value: &str) -> Option<String> {
@@ -460,14 +1035,29 @@ fn is_read_only(request: &PermissionRequest) -> bool {
                 .all(|capability| matches!(capability, ToolCapability::ReadFilesystem)))
 }
 
-fn is_mode_read_only(request: &PermissionRequest) -> bool {
-    is_read_only(request)
-        || (request.tool_name == "bash"
-            && request
-                .arguments
-                .get("command")
-                .and_then(Value::as_str)
-                .is_some_and(|command| classify_safe_command(command) == CommandSafety::SafeListed))
+fn bash_sandbox_mode(request: &PermissionRequest) -> Option<BashSandboxMode> {
+    match request.arguments.get("sandbox") {
+        None => Some(BashSandboxMode::Sandboxed),
+        Some(Value::String(mode)) if mode == "sandboxed" => Some(BashSandboxMode::Sandboxed),
+        Some(Value::String(mode)) if mode == "unsandboxed" => Some(BashSandboxMode::Unsandboxed),
+        Some(_) => None,
+    }
+}
+
+fn is_builtin_read_only_bash(request: &PermissionRequest) -> bool {
+    request.tool_name == "bash"
+        && bash_sandbox_mode(request) == Some(BashSandboxMode::Sandboxed)
+        && request
+            .arguments
+            .get("network_domains")
+            .is_none_or(|domains| {
+                normalize_network_domains(domains).is_some_and(|domains| domains.is_empty())
+            })
+        && request
+            .arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| classify_safe_command(command) == CommandSafety::SafeListed)
 }
 
 fn rule_decision(config: &PermissionConfig, request: &PermissionRequest) -> PermissionDecision {
@@ -513,6 +1103,49 @@ fn rule_decision(config: &PermissionConfig, request: &PermissionRequest) -> Perm
         }
     } else {
         config.default
+    }
+}
+
+/// Returns authority from the explicit `bash_unsandboxed(pattern)` namespace.
+/// Ordinary `bash(pattern)` allows never imply permission to bypass the native
+/// sandbox; their deny decisions are still honored by `decision_for`.
+fn unsandboxed_rule_decision(
+    config: &PermissionConfig,
+    request: &PermissionRequest,
+) -> Option<PermissionDecision> {
+    if request.tool_name != "bash"
+        || bash_sandbox_mode(request) != Some(BashSandboxMode::Unsandboxed)
+    {
+        return None;
+    }
+    let targets = canonical_arguments(request)?;
+    let mut all_allowed = !targets.is_empty();
+    let mut any_asked = false;
+    let mut any_matched = false;
+    for target in targets {
+        let mut target_decision = None;
+        for rule in &config.rules {
+            let Some((tool, pattern)) = parse_rule(&rule.pattern) else {
+                continue;
+            };
+            if tool != "bash_unsandboxed" || !glob_matches(pattern, &target) {
+                continue;
+            }
+            any_matched = true;
+            if rule.action == PermissionDecision::Deny {
+                return Some(PermissionDecision::Deny);
+            }
+            target_decision = Some(rule.action);
+        }
+        any_asked |= target_decision == Some(PermissionDecision::Ask);
+        all_allowed &= target_decision == Some(PermissionDecision::Allow);
+    }
+    if any_asked {
+        Some(PermissionDecision::Ask)
+    } else if all_allowed && any_matched {
+        Some(PermissionDecision::Allow)
+    } else {
+        None
     }
 }
 
@@ -591,7 +1224,11 @@ fn canonical_json(value: &Value) -> String {
 }
 
 fn canonical_shell_commands(command: &str) -> Option<Vec<String>> {
-    if command.contains('`') || command.contains("$(") {
+    // Permission allow rules must bind the argv the process will actually
+    // receive. Shell expansion happens after tokenization, so unresolved
+    // variables, globs, braces, and tildes fall back to the configured default
+    // instead of matching an allow rule over misleading literal text.
+    if command.contains(['`', '$', '*', '?', '[', ']', '{', '}', '~']) {
         return None;
     }
     let segments = split_compound(command)?;
@@ -602,8 +1239,8 @@ fn canonical_shell_commands(command: &str) -> Option<Vec<String>> {
             return None;
         }
         let command_index = argv.iter().position(|argument| !is_assignment(argument))?;
-        if command_index > 0 {
-            argv.drain(..command_index);
+        if command_index != 0 {
+            return None;
         }
         let binary = Path::new(argv.first()?).file_name()?.to_str()?.to_owned();
         if binary == "eval"
@@ -719,42 +1356,233 @@ fn split_compound(command: &str) -> Option<Vec<String>> {
     Some(segments)
 }
 
-fn load_project_approvals(path: &Path) -> Result<BTreeSet<PermissionKey>, std::io::Error> {
+struct ProjectApprovalStore {
+    path: PathBuf,
+    transaction: Mutex<()>,
+    cached: RwLock<BTreeSet<RememberedApproval>>,
+}
+
+impl ProjectApprovalStore {
+    fn refresh(&self) -> Result<BTreeSet<RememberedApproval>, std::io::Error> {
+        let _transaction = lock_mutex(&self.transaction);
+        let _file_lock = CrossProcessApprovalLock::acquire(&self.path)?;
+        let approvals = load_project_approvals(&self.path)?;
+        lock_write(&self.cached).clone_from(&approvals);
+        Ok(approvals)
+    }
+
+    fn contains(&self, key: &PermissionKey) -> Result<bool, std::io::Error> {
+        self.refresh()
+            .map(|approvals| contains_approval(&approvals, key))
+    }
+
+    fn grant(&self, key: PermissionKey) -> Result<(), std::io::Error> {
+        self.update(|approvals| {
+            if !contains_approval(approvals, &key) {
+                let approval = RememberedApproval::new("project", key).ok_or_else(|| {
+                    std::io::Error::other("secure random approval id generation failed")
+                })?;
+                replace_approval(approvals, approval);
+            }
+            Ok(())
+        })
+    }
+
+    fn revoke(&self, id: Option<&str>) -> Result<usize, std::io::Error> {
+        let mut removed = 0;
+        self.update(|approvals| {
+            removed = revoke_approvals(approvals, id);
+            Ok(())
+        })?;
+        Ok(removed)
+    }
+
+    fn clear_all(&self) -> Result<usize, std::io::Error> {
+        self.revoke(None)
+    }
+
+    fn update(
+        &self,
+        change: impl FnOnce(&mut BTreeSet<RememberedApproval>) -> Result<(), std::io::Error>,
+    ) -> Result<(), std::io::Error> {
+        let _transaction = lock_mutex(&self.transaction);
+        let _file_lock = CrossProcessApprovalLock::acquire(&self.path)?;
+        let mut approvals = load_project_approvals(&self.path)?;
+        let original = approvals.clone();
+        change(&mut approvals)?;
+        if approvals != original {
+            persist_project_approvals(&self.path, &approvals)?;
+        }
+        *lock_write(&self.cached) = approvals;
+        Ok(())
+    }
+}
+
+fn shared_project_store(path: &Path) -> Arc<ProjectApprovalStore> {
+    static STORES: OnceLock<Mutex<BTreeMap<PathBuf, Arc<ProjectApprovalStore>>>> = OnceLock::new();
+    let normalized = normalize_approval_path(path);
+    let registry = STORES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut registry = lock_mutex(registry);
+    Arc::clone(registry.entry(normalized.clone()).or_insert_with(|| {
+        let store = Arc::new(ProjectApprovalStore {
+            path: normalized,
+            transaction: Mutex::new(()),
+            cached: RwLock::new(BTreeSet::new()),
+        });
+        let _ = store.refresh();
+        store
+    }))
+}
+
+fn normalize_approval_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    let Some(parent) = absolute.parent() else {
+        return absolute;
+    };
+    fs::canonicalize(parent)
+        .map(|parent| parent.join(absolute.file_name().unwrap_or_default()))
+        .unwrap_or(absolute)
+}
+
+struct CrossProcessApprovalLock {
+    _file: fs::File,
+}
+
+impl CrossProcessApprovalLock {
+    fn acquire(path: &Path) -> Result<Self, std::io::Error> {
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "durable project approvals require a supported cross-process file lock",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            fs::create_dir_all(parent)?;
+            set_private_directory(parent)?;
+            let lock_path = sibling_path(path, "lock")?;
+            let mut options = fs::OpenOptions::new();
+            options.read(true).write(true).create(true);
+            options
+                .mode(0o600)
+                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits().cast_signed());
+            let file = options.open(lock_path)?;
+            rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)?;
+            Ok(Self { _file: file })
+        }
+    }
+}
+
+fn load_project_approvals(path: &Path) -> Result<BTreeSet<RememberedApproval>, std::io::Error> {
     if !path.exists() {
         return Ok(BTreeSet::new());
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "project approval ledger is not a regular file",
+        ));
     }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if fs::metadata(path)?.permissions().mode() & 0o077 != 0 {
-            return Ok(BTreeSet::new());
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "project approval ledger is not private",
+            ));
         }
     }
-    serde_json::from_slice(&fs::read(path)?).or(Ok(BTreeSet::new()))
+    serde_json::from_slice(&fs::read(path)?).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("project approval ledger is malformed: {error}"),
+        )
+    })
 }
 
 fn persist_project_approvals(
     path: &Path,
-    approvals: &BTreeSet<PermissionKey>,
+    approvals: &BTreeSet<RememberedApproval>,
 ) -> Result<(), std::io::Error> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
+    set_private_directory(parent)?;
+    let encoded = serde_json::to_vec(approvals)
+        .map_err(|error| std::io::Error::other(format!("approval encoding failed: {error}")))?;
+    let temporary = unique_temporary_path(path)?;
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(&encoded)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        if let Err(error) = fs::File::open(parent).and_then(|directory| directory.sync_all()) {
+            let _ = fs::remove_file(path);
+            let _ = fs::File::open(parent).and_then(|directory| directory.sync_all());
+            return Err(error);
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn set_private_directory(path: &Path) -> Result<(), std::io::Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
-    let temporary = path.with_extension("tmp");
-    fs::write(
-        &temporary,
-        serde_json::to_vec(approvals).unwrap_or_default(),
-    )?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+fn unique_temporary_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random)
+        .map_err(|_| std::io::Error::other("secure random temp name generation failed"))?;
+    let suffix = hex(&random);
+    sibling_path(path, &format!("tmp.{suffix}"))
+}
+
+fn sibling_path(path: &Path, suffix: &str) -> Result<PathBuf, std::io::Error> {
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "approval ledger has no file name",
+        )
+    })?;
+    let mut sibling = name.to_os_string();
+    sibling.push(format!(".{suffix}"));
+    Ok(path.with_file_name(sibling))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        let _ = write!(&mut encoded, "{byte:02x}");
     }
-    fs::rename(temporary, path)
+    encoded
 }
 
 fn lock_read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
@@ -764,6 +1592,11 @@ fn lock_read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 
 fn lock_write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     lock.write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn lock_mutex<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
@@ -804,6 +1637,29 @@ mod tests {
         }
     }
 
+    fn bash_request(command: &str, cwd: &Path) -> PermissionRequest {
+        PermissionRequest {
+            id: "exact-bash".to_owned(),
+            tool_name: "bash".to_owned(),
+            arguments: json!({
+                "command": command,
+                "cwd": cwd,
+                "env": {},
+                "network_domains": [],
+            }),
+            capabilities: vec![ToolCapability::Execute],
+            approval_diff: None,
+        }
+    }
+
+    fn independent_project_store(path: &Path) -> ProjectApprovalStore {
+        ProjectApprovalStore {
+            path: path.to_path_buf(),
+            transaction: Mutex::new(()),
+            cached: RwLock::new(BTreeSet::new()),
+        }
+    }
+
     #[test]
     fn canonical_shell_requires_every_simple_command_and_normalizes_rm_flags() {
         assert_eq!(
@@ -812,6 +1668,179 @@ mod tests {
         );
         assert!(canonical_shell_commands("bash -c 'git status'").is_none());
         assert!(canonical_shell_commands("echo $(cat secret)").is_none());
+        for command in [
+            "LD_PRELOAD=/tmp/injected.so cat file",
+            "cat $FILE",
+            "cat ${FILE}",
+            "cat *.rs",
+            "cat file?.rs",
+            "cat [ab].rs",
+            "printf {a,b}",
+            "cat ~/secret",
+        ] {
+            assert!(
+                canonical_shell_commands(command).is_none(),
+                "runtime-expanded command matched an allow-rule target: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_shell_identity_preserves_assignments_argv_boundaries_order_and_operators() {
+        let cwd = tempfile::tempdir().expect("cwd");
+        let identity = |command| canonical_key_arguments(&bash_request(command, cwd.path()));
+        assert_ne!(
+            identity("FLAG=a /bin/echo x"),
+            identity("FLAG=b /bin/echo x")
+        );
+        assert_ne!(identity("/bin/echo 'a b'"), identity("/bin/echo a b"));
+        assert_ne!(
+            identity("/bin/echo a && /bin/echo b"),
+            identity("/bin/echo b && /bin/echo a")
+        );
+        assert_ne!(
+            identity("/bin/echo a && /bin/echo b"),
+            identity("/bin/echo a ; /bin/echo b")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exact_bash_session_and_project_approvals_do_not_collide() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for (scope, decision) in [
+            ("session", ApprovalDecision::AllowSession),
+            ("project", ApprovalDecision::AllowProject),
+        ] {
+            let gate = PermissionGate::new(PermissionDecision::Ask)
+                .with_workspace_roots([root.path()])
+                .with_project_approval_file(root.path().join(format!("{scope}.json")));
+            let approved = bash_request("/bin/echo safe", root.path());
+            assert_eq!(
+                gate.authorize(approved.clone(), &Decision(decision)).await,
+                PermissionOutcome::Allowed
+            );
+            let deny = CountingDeny(AtomicUsize::new(0));
+            for command in [
+                "FLAG=changed /bin/echo safe",
+                "/bin/echo 'safe value'",
+                "/bin/echo safe && /bin/echo done",
+                "/bin/echo done && /bin/echo safe",
+            ] {
+                assert_eq!(
+                    gate.authorize(bash_request(command, root.path()), &deny)
+                        .await,
+                    PermissionOutcome::Denied,
+                    "{scope} approval collided for {command}"
+                );
+            }
+            assert_eq!(deny.0.load(Ordering::SeqCst), 4);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn complex_or_mutable_bash_authority_degrades_to_allow_once_and_is_never_remembered() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let script = root.path().join("script");
+        fs::write(&script, "#!/bin/sh\nprintf mutable\n").expect("script");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("executable");
+        for command in [
+            "/bin/echo ok > output",
+            "/bin/echo $(/bin/echo nested)",
+            "/bin/rm *.tmp",
+            "/bin/rm file?.tmp",
+            "/bin/rm [ab].tmp",
+            "/bin/echo {first,second}",
+            "/bin/echo ~/secret",
+            "/bin/echo background &",
+            "/bin/sh -c '/bin/echo nested'",
+            "eval /bin/echo unsafe",
+            "cd /tmp",
+            "export PATH=/tmp",
+            "PATH=/tmp /bin/echo changed",
+            "./script safe",
+        ] {
+            let gate = PermissionGate::new(PermissionDecision::Ask)
+                .with_workspace_roots([root.path()])
+                .with_project_approval_file(root.path().join(format!(
+                    "complex-{}.json",
+                    blake3::hash(command.as_bytes()).to_hex()
+                )));
+            let invocation = bash_request(command, root.path());
+            assert_eq!(
+                gate.authorize(
+                    invocation.clone(),
+                    &Decision(ApprovalDecision::AllowProject),
+                )
+                .await,
+                PermissionOutcome::RememberedApprovalUnavailable,
+                "remembered scope should be unavailable for {command}"
+            );
+            assert_eq!(gate.snapshot().project_approvals, 0);
+            assert_eq!(gate.snapshot().session_approvals, 0);
+            assert_eq!(
+                gate.authorize(invocation.clone(), &Decision(ApprovalDecision::AllowOnce),)
+                    .await,
+                PermissionOutcome::Allowed,
+                "one-time approval should remain usable for {command}"
+            );
+            assert_eq!(
+                gate.authorize(invocation, &Decision(ApprovalDecision::Deny))
+                    .await,
+                PermissionOutcome::Denied,
+                "non-rememberable command was recalled: {command}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn audited_root_owned_simple_executable_can_be_remembered() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for decision in [
+            ApprovalDecision::AllowSession,
+            ApprovalDecision::AllowProject,
+        ] {
+            let gate = PermissionGate::new(PermissionDecision::Ask)
+                .with_workspace_roots([root.path()])
+                .with_project_approval_file(root.path().join(format!("{decision:?}.json")));
+            let invocation = bash_request("/bin/echo stable", root.path());
+            assert_eq!(
+                gate.authorize(invocation.clone(), &Decision(decision))
+                    .await,
+                PermissionOutcome::Allowed
+            );
+            assert_eq!(
+                gate.authorize(invocation, &Decision(ApprovalDecision::Deny))
+                    .await,
+                PermissionOutcome::Allowed
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn durable_project_approvals_fail_closed_without_portable_file_lock() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let gate = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(root.path().join("approvals.json"));
+        let request = PermissionRequest {
+            id: "write".to_owned(),
+            tool_name: "write".to_owned(),
+            arguments: json!({"path": "file.txt", "content": "content"}),
+            capabilities: vec![ToolCapability::WriteFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            gate.authorize(request, &Decision(ApprovalDecision::AllowProject))
+                .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(gate.snapshot().project_approvals, 0);
     }
 
     #[tokio::test]
@@ -848,6 +1877,22 @@ mod tests {
                 )
                 .await,
                 PermissionOutcome::Denied
+            );
+        }
+        for expanded in [
+            "MODE=unsafe git status",
+            "git status $FLAGS",
+            "git status *.rs",
+            "git status ~/other-worktree",
+        ] {
+            assert_eq!(
+                gate.authorize(
+                    request(expanded, vec![ToolCapability::ReadFilesystem]),
+                    &Decision(ApprovalDecision::Deny)
+                )
+                .await,
+                PermissionOutcome::Denied,
+                "runtime-expanded command bypassed the approval fallback: {expanded}"
             );
         }
     }
@@ -899,6 +1944,440 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approval_listing_is_opaque_and_revocation_updates_private_persistence() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let approval_file = root.path().join("approvals.json");
+        let gate = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(&approval_file);
+        let session_request = request(
+            "printf SECRET_SESSION_CANARY",
+            vec![ToolCapability::Execute],
+        );
+        let project_request = request(
+            "printf SECRET_PROJECT_CANARY",
+            vec![ToolCapability::Execute],
+        );
+        let hidden_fingerprint =
+            PermissionKey::from_request(&project_request, &workspace_namespace([root.path()]))
+                .arguments_fingerprint;
+        assert_eq!(
+            gate.authorize(
+                session_request.clone(),
+                &Decision(ApprovalDecision::AllowSession),
+            )
+            .await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            gate.authorize(
+                project_request.clone(),
+                &Decision(ApprovalDecision::AllowProject),
+            )
+            .await,
+            PermissionOutcome::Allowed
+        );
+        let approvals = gate.approval_snapshot();
+        assert_eq!(approvals.session.len(), 1);
+        assert_eq!(approvals.project.len(), 1);
+        let rendered = serde_json::to_string(&approvals).expect("approval snapshot");
+        assert!(!rendered.contains("SECRET_SESSION_CANARY"));
+        assert!(!rendered.contains("SECRET_PROJECT_CANARY"));
+        assert!(!rendered.contains("arguments_fingerprint"));
+        assert!(!rendered.contains(&hidden_fingerprint));
+        assert_eq!(
+            approvals.project[0].canonical_summary,
+            "exact-invocation=hidden capabilities=Execute approval=none"
+        );
+        assert!(
+            !std::fs::read_to_string(&approval_file)
+                .expect("private approvals")
+                .contains("SECRET_PROJECT_CANARY")
+        );
+        let stable = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(&approval_file)
+            .approval_snapshot();
+        assert_eq!(stable.project[0].id, approvals.project[0].id);
+
+        assert_eq!(
+            gate.revoke_session_approvals(Some(&approvals.session[0].id)),
+            1
+        );
+        assert_eq!(
+            gate.revoke_project_approvals(Some(&approvals.project[0].id))
+                .expect("persist project revocation"),
+            1
+        );
+        assert!(gate.approval_snapshot().session.is_empty());
+        assert!(gate.approval_snapshot().project.is_empty());
+        let deny = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            gate.authorize(session_request, &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            gate.authorize(project_request, &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(deny.0.load(Ordering::SeqCst), 2);
+
+        let reloaded = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(&approval_file);
+        assert_eq!(reloaded.snapshot().project_approvals, 0);
+    }
+
+    #[test]
+    fn independent_project_stores_reload_merge_and_never_resurrect_revoked_authority() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("approvals.json");
+        let first = independent_project_store(&path);
+        let second = independent_project_store(&path);
+        let namespace = workspace_namespace([root.path()]);
+        let key_a = PermissionKey::from_request(
+            &request("printf authority-a", vec![ToolCapability::Execute]),
+            &namespace,
+        );
+        let key_b = PermissionKey::from_request(
+            &request("printf authority-b", vec![ToolCapability::Execute]),
+            &namespace,
+        );
+        first.grant(key_a.clone()).expect("grant A");
+        let stale = second.refresh().expect("stale gate load");
+        let id_a = stale
+            .iter()
+            .find(|entry| entry.key == key_a)
+            .expect("A")
+            .id
+            .clone();
+        assert_eq!(first.revoke(Some(&id_a)).expect("revoke A"), 1);
+        assert!(!second.contains(&key_a).expect("fresh deny in gate2"));
+
+        second.grant(key_b.clone()).expect("stale gate grants B");
+        let authoritative = first.refresh().expect("authoritative reload");
+        assert!(!contains_approval(&authoritative, &key_a));
+        assert!(contains_approval(&authoritative, &key_b));
+        assert_eq!(authoritative.len(), 1);
+        let stable_id = authoritative.iter().next().expect("B").id.clone();
+        let reloaded = independent_project_store(&path)
+            .refresh()
+            .expect("reload stable id");
+        assert_eq!(reloaded.iter().next().expect("reloaded B").id, stable_id);
+    }
+
+    #[tokio::test]
+    async fn project_revocation_in_one_gate_immediately_denies_another_gate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("approvals.json");
+        let first = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(&path);
+        let second = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(&path);
+        let authority_a = request("printf authority-a", vec![ToolCapability::Execute]);
+        let authority_b = request("printf authority-b", vec![ToolCapability::Execute]);
+        assert_eq!(
+            first
+                .authorize(
+                    authority_a.clone(),
+                    &Decision(ApprovalDecision::AllowProject),
+                )
+                .await,
+            PermissionOutcome::Allowed
+        );
+        let deny = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            second.authorize(authority_a.clone(), &deny).await,
+            PermissionOutcome::Allowed
+        );
+        let id_a = first.approval_snapshot().project[0].id.clone();
+        assert_eq!(
+            first
+                .revoke_project_approvals(Some(&id_a))
+                .expect("revoke A"),
+            1
+        );
+        assert_eq!(
+            second.authorize(authority_a.clone(), &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            second
+                .authorize(
+                    authority_b.clone(),
+                    &Decision(ApprovalDecision::AllowProject)
+                )
+                .await,
+            PermissionOutcome::Allowed
+        );
+        let authoritative = first.approval_snapshot();
+        assert_eq!(authoritative.project.len(), 1);
+        assert_eq!(authoritative.project[0].tool_name, "bash");
+        assert_eq!(
+            first.authorize(authority_a, &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            first.authorize(authority_b, &deny).await,
+            PermissionOutcome::Allowed
+        );
+    }
+
+    #[test]
+    fn concurrent_independent_project_grant_and_revoke_serialize_without_lost_updates() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("approvals.json");
+        let first = Arc::new(independent_project_store(&path));
+        let second = Arc::new(independent_project_store(&path));
+        let namespace = workspace_namespace([root.path()]);
+        let key_a = PermissionKey::from_request(
+            &request("printf authority-a", vec![ToolCapability::Execute]),
+            &namespace,
+        );
+        let key_b = PermissionKey::from_request(
+            &request("printf authority-b", vec![ToolCapability::Execute]),
+            &namespace,
+        );
+        first.grant(key_a.clone()).expect("grant A");
+        let id_a = first
+            .refresh()
+            .expect("load A")
+            .iter()
+            .next()
+            .expect("A")
+            .id
+            .clone();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            let first = Arc::clone(&first);
+            let first_barrier = Arc::clone(&barrier);
+            scope.spawn(move || {
+                first_barrier.wait();
+                first.revoke(Some(&id_a)).expect("concurrent revoke A");
+            });
+            let second = Arc::clone(&second);
+            let second_barrier = Arc::clone(&barrier);
+            let key_b = key_b.clone();
+            scope.spawn(move || {
+                second_barrier.wait();
+                second.grant(key_b).expect("concurrent grant B");
+            });
+        });
+        let authoritative = independent_project_store(&path)
+            .refresh()
+            .expect("authoritative reload");
+        assert!(!contains_approval(&authoritative, &key_a));
+        assert!(contains_approval(&authoritative, &key_b));
+        assert_eq!(authoritative.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_project_write_is_private_unique_and_cleans_failed_rename() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let target = root.path().join("approvals.json");
+        fs::create_dir(&target).expect("rename-blocking directory");
+        let namespace = workspace_namespace([root.path()]);
+        let key = PermissionKey::from_request(
+            &request("printf durable", vec![ToolCapability::Execute]),
+            &namespace,
+        );
+        let approval = RememberedApproval::new("project", key).expect("random id");
+        let approvals = BTreeSet::from([approval]);
+        assert!(persist_project_approvals(&target, &approvals).is_err());
+        let prefix = format!(
+            "{}.",
+            target.file_name().expect("target name").to_string_lossy()
+        );
+        assert!(
+            fs::read_dir(root.path())
+                .expect("root entries")
+                .filter_map(Result::ok)
+                .all(|entry| !entry.file_name().to_string_lossy().starts_with(&prefix))
+        );
+
+        fs::remove_dir(&target).expect("remove blocker");
+        persist_project_approvals(&target, &approvals).expect("durable write");
+        assert_eq!(
+            fs::metadata(&target)
+                .expect("ledger metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(load_project_approvals(&target).expect("reload"), approvals);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_project_ledger_is_not_overwritten_by_a_stale_grant() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("approvals.json");
+        fs::write(&path, b"{malformed").expect("malformed ledger");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("private ledger");
+        let namespace = workspace_namespace([root.path()]);
+        let key = PermissionKey::from_request(
+            &request("printf stale", vec![ToolCapability::Execute]),
+            &namespace,
+        );
+        let store = independent_project_store(&path);
+        assert!(store.grant(key).is_err());
+        assert_eq!(
+            fs::read(&path).expect("unchanged malformed ledger"),
+            b"{malformed"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_session_removes_rules_and_allow_session_approvals() {
+        let gate = PermissionGate::new(PermissionDecision::Ask);
+        gate.add_session_rule(PermissionRule {
+            pattern: "bash(cargo test*)".to_owned(),
+            action: PermissionDecision::Allow,
+        })
+        .expect("session rule");
+        assert_eq!(
+            gate.authorize(
+                request("printf remember", vec![ToolCapability::Execute]),
+                &Decision(ApprovalDecision::AllowSession),
+            )
+            .await,
+            PermissionOutcome::Allowed
+        );
+        let cleared = gate.clear_session_permissions();
+        assert_eq!(cleared.rules, 1);
+        assert_eq!(cleared.approvals, 1);
+        assert!(gate.snapshot().session_rules.is_empty());
+        assert_eq!(gate.snapshot().session_approvals, 0);
+    }
+
+    #[tokio::test]
+    async fn workspace_generation_swap_invalidates_old_session_and_project_approvals() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let added = root.path().join("added");
+        std::fs::create_dir(&added).expect("added root");
+        let approval_file = root.path().join("approvals.json");
+        let gate = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(&approval_file);
+        let session_request = request("printf session", vec![ToolCapability::Execute]);
+        let project_request = request("printf project", vec![ToolCapability::Execute]);
+        assert_eq!(
+            gate.authorize(
+                session_request.clone(),
+                &Decision(ApprovalDecision::AllowSession),
+            )
+            .await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            gate.authorize(
+                project_request.clone(),
+                &Decision(ApprovalDecision::AllowProject),
+            )
+            .await,
+            PermissionOutcome::Allowed
+        );
+        let update = gate
+            .replace_workspace_roots([root.path(), added.as_path()])
+            .expect("workspace generation swap");
+        assert_eq!(update.generation, 2);
+        assert_eq!(update.invalidated_session_approvals, 1);
+        assert_eq!(update.invalidated_project_approvals, 1);
+        assert_eq!(gate.snapshot().session_approvals, 0);
+        assert_eq!(gate.snapshot().project_approvals, 0);
+
+        let deny = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            gate.authorize(session_request, &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            gate.authorize(project_request, &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(deny.0.load(Ordering::SeqCst), 2);
+        let unchanged = gate
+            .replace_workspace_roots([root.path(), added.as_path()])
+            .expect("same generation");
+        assert_eq!(unchanged.generation, 2);
+        assert_eq!(unchanged.invalidated_session_approvals, 0);
+        assert_eq!(unchanged.invalidated_project_approvals, 0);
+    }
+
+    #[tokio::test]
+    async fn workspace_gate_fork_preserves_rules_without_inheriting_session_authority() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let added = root.path().join("added");
+        fs::create_dir(&added).expect("added root");
+        let approval_file = root.path().join("approvals.json");
+        let original = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(&approval_file);
+        original
+            .add_session_rule(PermissionRule {
+                pattern: "bash(cargo test*)".to_owned(),
+                action: PermissionDecision::Allow,
+            })
+            .expect("session rule");
+        let remembered = request("printf remembered", vec![ToolCapability::Execute]);
+        assert_eq!(
+            original
+                .authorize(
+                    remembered.clone(),
+                    &Decision(ApprovalDecision::AllowSession),
+                )
+                .await,
+            PermissionOutcome::Allowed
+        );
+        let project = bash_request("/bin/echo project", root.path());
+        assert_eq!(
+            original
+                .authorize(project.clone(), &Decision(ApprovalDecision::AllowProject),)
+                .await,
+            PermissionOutcome::Allowed
+        );
+        let persisted_before = fs::read(&approval_file).expect("project ledger");
+        let replacement = original
+            .fork_for_workspace_roots([root.path(), added.as_path()])
+            .expect("replacement gate");
+        assert_eq!(
+            replacement.snapshot().session_rules,
+            original.snapshot().session_rules
+        );
+        assert_eq!(replacement.snapshot().session_approvals, 0);
+        assert_eq!(replacement.snapshot().project_approvals, 0);
+        assert_eq!(
+            fs::read(&approval_file).expect("unchanged ledger"),
+            persisted_before
+        );
+        let deny = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            replacement.authorize(remembered.clone(), &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            original.authorize(remembered, &deny).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            replacement.authorize(project.clone(), &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            original.authorize(project, &deny).await,
+            PermissionOutcome::Allowed
+        );
+    }
+
+    #[tokio::test]
     async fn command_allow_rule_cannot_silently_add_network_authority() {
         let command_rule = PermissionRule {
             pattern: "bash(cargo test*)".to_owned(),
@@ -945,6 +2424,219 @@ mod tests {
             PermissionOutcome::Allowed
         );
         assert_eq!(deny.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn user_safe_list_is_zero_prompt_only_for_sandboxed_networkless_commands() {
+        let safety = Arc::new(
+            CommandSafetyClassifier::new(&["cargo test*".to_owned()]).expect("user safe-list"),
+        );
+        let gate = PermissionGate::new(PermissionDecision::Ask).with_command_safety(safety);
+        let request = |command: &str, sandbox: &str, domains: Vec<&str>| PermissionRequest {
+            id: "safe-list-call".to_owned(),
+            tool_name: "bash".to_owned(),
+            arguments: json!({
+                "command": command,
+                "sandbox": sandbox,
+                "network_domains": domains,
+            }),
+            capabilities: vec![ToolCapability::Execute, ToolCapability::Network],
+            approval_diff: None,
+        };
+
+        let deny = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            gate.authorize(request("cargo test", "sandboxed", vec![]), &deny)
+                .await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(deny.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            gate.authorize(
+                request("cargo test && rm -rf target", "sandboxed", vec![]),
+                &deny,
+            )
+            .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            gate.authorize(
+                request("cargo test", "sandboxed", vec!["example.com"]),
+                &deny,
+            )
+            .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            gate.authorize(request("cargo test", "unsandboxed", vec![]), &deny)
+                .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(deny.0.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn unsandboxed_escape_hatch_requires_explicit_and_exact_authority() {
+        let root = tempfile::tempdir().expect("root");
+        let unsandboxed = PermissionRequest {
+            id: "unsandboxed-call".to_owned(),
+            tool_name: "bash".to_owned(),
+            arguments: json!({
+                "command": "/bin/echo canary",
+                "cwd": root.path(),
+                "env": {},
+                "network_domains": [],
+                "sandbox": "unsandboxed",
+            }),
+            capabilities: vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+            approval_diff: None,
+        };
+        let generic_allow = PermissionGate::from_config(PermissionConfig {
+            default: PermissionDecision::Ask,
+            rules: vec![PermissionRule {
+                pattern: "bash(echo*)".to_owned(),
+                action: PermissionDecision::Allow,
+            }],
+        });
+        let prompted = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            generic_allow
+                .authorize(unsandboxed.clone(), &prompted)
+                .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(prompted.0.load(Ordering::SeqCst), 1);
+
+        let gate = PermissionGate::new(PermissionDecision::Ask).with_workspace_roots([root.path()]);
+        assert_eq!(
+            gate.authorize(
+                unsandboxed.clone(),
+                &Decision(ApprovalDecision::AllowSession),
+            )
+            .await,
+            PermissionOutcome::Allowed
+        );
+        let no_prompt = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            gate.authorize(unsandboxed.clone(), &no_prompt).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
+
+        let mut sandboxed = unsandboxed.clone();
+        sandboxed.arguments["sandbox"] = Value::String("sandboxed".to_owned());
+        assert_eq!(
+            gate.authorize(sandboxed, &no_prompt).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 1);
+
+        let mode_deny = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            PermissionGate::new(PermissionDecision::Ask)
+                .authorize_in_mode(unsandboxed.clone(), &mode_deny, None, SessionMode::Plan,)
+                .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(mode_deny.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            PermissionGate::for_headless_mode(HeadlessPermissionMode::AutoSafe)
+                .authorize(unsandboxed.clone(), &mode_deny)
+                .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            PermissionGate::for_headless_mode(HeadlessPermissionMode::Yolo)
+                .authorize(unsandboxed, &mode_deny)
+                .await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(mode_deny.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn explicitly_typed_unsandboxed_patterns_are_rememberable_without_generic_escalation() {
+        let root = tempfile::tempdir().expect("root");
+        let request = |command: &str| PermissionRequest {
+            id: "unsandboxed-pattern".to_owned(),
+            tool_name: "bash".to_owned(),
+            arguments: json!({
+                "command": command,
+                "cwd": root.path(),
+                "env": {},
+                "network_domains": [],
+                "sandbox": "unsandboxed",
+            }),
+            capabilities: vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+            approval_diff: None,
+        };
+        let explicit_rule = PermissionRule {
+            pattern: "bash_unsandboxed(echo *)".to_owned(),
+            action: PermissionDecision::Allow,
+        };
+        let gate = PermissionGate::from_config(PermissionConfig {
+            default: PermissionDecision::Ask,
+            rules: vec![explicit_rule.clone()],
+        });
+        let no_prompt = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            gate.authorize(request("/bin/echo first"), &no_prompt).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            gate.authorize(request("/bin/printf first"), &no_prompt)
+                .await,
+            PermissionOutcome::Denied
+        );
+
+        let denied = PermissionGate::from_config(PermissionConfig {
+            default: PermissionDecision::Ask,
+            rules: vec![
+                explicit_rule.clone(),
+                PermissionRule {
+                    pattern: "bash(echo*)".to_owned(),
+                    action: PermissionDecision::Deny,
+                },
+            ],
+        });
+        assert_eq!(
+            denied
+                .authorize(request("/bin/echo first"), &no_prompt)
+                .await,
+            PermissionOutcome::Denied
+        );
+
+        let strict = PermissionGate::for_headless_mode(HeadlessPermissionMode::Strict);
+        strict
+            .add_session_rule(explicit_rule.clone())
+            .expect("typed session rule");
+        assert_eq!(
+            strict
+                .authorize(request("/bin/echo session"), &no_prompt)
+                .await,
+            PermissionOutcome::Allowed
+        );
+        let auto_safe = PermissionGate::for_headless_mode(HeadlessPermissionMode::AutoSafe);
+        auto_safe
+            .add_session_rule(explicit_rule)
+            .expect("typed session rule");
+        assert_eq!(
+            auto_safe
+                .authorize(request("/bin/echo session"), &no_prompt)
+                .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            gate.authorize_in_mode(
+                request("/bin/echo plan"),
+                &no_prompt,
+                None,
+                SessionMode::Plan,
+            )
+            .await,
+            PermissionOutcome::Denied
+        );
     }
 
     #[tokio::test]
@@ -1163,7 +2855,7 @@ mod tests {
             id: "bash".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({
-                "command": "cargo test",
+                "command": "/bin/echo test",
                 "cwd": "crate-a",
                 "env": {"PATH": "/trusted/bin", "GIT_CONFIG_COUNT": "0"},
                 "network_domains": []
@@ -1182,8 +2874,8 @@ mod tests {
             PermissionOutcome::Allowed
         );
         for arguments in [
-            json!({"command": "cargo test", "cwd": "crate-b", "env": {"PATH": "/trusted/bin"}, "network_domains": []}),
-            json!({"command": "cargo test", "cwd": "crate-a", "env": {"PATH": "/attacker/bin"}, "network_domains": []}),
+            json!({"command": "/bin/echo test", "cwd": "crate-b", "env": {"PATH": "/trusted/bin"}, "network_domains": []}),
+            json!({"command": "/bin/echo test", "cwd": "crate-a", "env": {"PATH": "/attacker/bin"}, "network_domains": []}),
         ] {
             let mut changed = bash.clone();
             changed.arguments = arguments;
@@ -1205,7 +2897,7 @@ mod tests {
             fs::create_dir(root).expect("workspace root");
         }
         let approvals = temp.path().join("approvals.json");
-        let invocation = request("cargo test", vec![ToolCapability::Execute]);
+        let invocation = request("/bin/echo test", vec![ToolCapability::Execute]);
         let initial = PermissionGate::new(PermissionDecision::Ask)
             .with_workspace_roots([&first, &second])
             .with_project_approval_file(&approvals);
@@ -1238,7 +2930,7 @@ mod tests {
             id: "network-domains".to_owned(),
             tool_name: "bash".to_owned(),
             arguments: json!({
-                "command": "cargo test",
+                "command": "/bin/echo network",
                 "cwd": ".",
                 "env": {},
                 "network_domains": domains,

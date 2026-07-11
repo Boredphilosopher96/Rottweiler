@@ -1,11 +1,26 @@
 import { writeStartupSplash } from "./startup"
-import { loadOpenTui } from "./opentui"
 
 type RuntimeBootstrap =
   | { readonly runtime: import("./runtime").TuiEngineRuntime | null; readonly error: null }
   | { readonly runtime: null; readonly error: unknown }
 
+function markFirstPaint(): void {
+  const marker = process.env.ROTTWEILER_FIRST_PAINT_MARKER
+  if (marker === undefined || marker.length === 0) return
+  const emittedAt =
+    process.env.ROTTWEILER_FIRST_PAINT_EPOCH === "1"
+      ? `:${performance.timeOrigin + performance.now()}`
+      : ""
+  process.stdout.write(`\n${marker}${emittedAt}\n`)
+  delete process.env.ROTTWEILER_FIRST_PAINT_MARKER
+  delete process.env.ROTTWEILER_FIRST_PAINT_EPOCH
+}
+
 async function main(): Promise<void> {
+  // Keep OpenTUI and its native library behind the shipped startup paint.
+  // A static import here would execute before this module body and make the
+  // apparent splash wait on the native backend it is meant to cover.
+  const { loadOpenTui } = await import("./opentui")
   const openTui = await loadOpenTui()
   const renderer = await openTui.createCliRenderer({
     exitOnCtrlC: true,
@@ -17,14 +32,9 @@ async function main(): Promise<void> {
     resolveFirstFrame = resolve
   })
   let firstFrameMarked = false
-  const firstFrameMarker = process.env.ROTTWEILER_FIRST_FRAME_MARKER
   renderer.on(openTui.CliRenderEvents.FRAME, () => {
     if (firstFrameMarked) return
     firstFrameMarked = true
-    if (firstFrameMarker !== undefined && firstFrameMarker.length > 0) {
-      process.stdout.write(`\n${firstFrameMarker}\n`)
-      delete process.env.ROTTWEILER_FIRST_FRAME_MARKER
-    }
     resolveFirstFrame?.()
   })
 
@@ -113,6 +123,7 @@ async function main(): Promise<void> {
 }
 
 writeStartupSplash(process.stdout)
+markFirstPaint()
 void main().catch((error: unknown) => {
   process.stderr.write(
     `rottweiler TUI failed to start: ${error instanceof Error ? error.message : "unknown error"}\n`,

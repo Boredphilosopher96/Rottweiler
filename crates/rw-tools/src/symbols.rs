@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::{
+    path::{Component, Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
-use rw_intel::{Language, SymbolIndex, SymbolQuery, SymbolRole};
+use rw_intel::{IndexLimits, IntelError, Language, Symbol, SymbolIndex, SymbolQuery, SymbolRole};
 use rw_types::ToolCapability;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -32,14 +35,141 @@ const fn default_limit() -> usize {
 
 #[derive(Clone)]
 pub struct SymbolsTool {
-    index: Arc<SymbolIndex>,
+    index: Arc<WorkspaceSymbolIndex>,
     limits: ToolLimits,
 }
 
 impl SymbolsTool {
     #[must_use]
-    pub fn new(index: Arc<SymbolIndex>, limits: ToolLimits) -> Self {
+    pub fn new(index: Arc<WorkspaceSymbolIndex>, limits: ToolLimits) -> Self {
         Self { index, limits }
+    }
+}
+
+/// Stable-index symbol aggregation across every workspace root.
+pub struct WorkspaceSymbolIndex {
+    indexes: Vec<Arc<SymbolIndex>>,
+}
+
+impl WorkspaceSymbolIndex {
+    /// Creates one independent incremental index per ordered canonical root.
+    ///
+    /// # Errors
+    ///
+    /// Returns an indexing error when any root cannot be canonicalized.
+    pub fn new(roots: impl IntoIterator<Item = impl AsRef<Path>>) -> Result<Self, IntelError> {
+        Self::new_with_limits(roots, IndexLimits::default())
+    }
+
+    /// Creates root indexes with explicit resource limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an indexing error when any root cannot be canonicalized.
+    pub fn new_with_limits(
+        roots: impl IntoIterator<Item = impl AsRef<Path>>,
+        limits: IndexLimits,
+    ) -> Result<Self, IntelError> {
+        let indexes = roots
+            .into_iter()
+            .map(|root| SymbolIndex::new(root).map(|index| Arc::new(index.with_limits(limits))))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { indexes })
+    }
+
+    /// Indexes supported files under every root.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first filesystem, parsing, or index-lock error.
+    pub fn index_workspaces(&self) -> Result<(), IntelError> {
+        for index in &self.indexes {
+            index.index_workspace()?;
+        }
+        Ok(())
+    }
+
+    /// Updates one plain or `@root/N` virtual path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid root routing or rejected source content.
+    pub fn update_source(&self, path: impl AsRef<Path>, source: &str) -> Result<usize, IntelError> {
+        let (index, relative) = self.route(path.as_ref())?;
+        self.indexes[index].update_source(relative, source)
+    }
+
+    /// Removes one virtual path from its owning root index.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid root routing or a poisoned index lock.
+    pub fn remove_path(&self, path: impl AsRef<Path>) -> Result<bool, IntelError> {
+        let (index, relative) = self.route(path.as_ref())?;
+        self.indexes[index].remove_path(relative)
+    }
+
+    /// Returns symbols for one virtual file path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid root routing or a poisoned index lock.
+    pub fn symbols_for_file(&self, path: impl AsRef<Path>) -> Result<Vec<Symbol>, IntelError> {
+        let (index, relative) = self.route(path.as_ref())?;
+        self.indexes[index].symbols_for_file(relative)
+    }
+
+    /// Queries every root and rewrites added-root results to `@root/N` paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any root index cannot be queried.
+    pub fn query(&self, query: &SymbolQuery) -> Result<Vec<Symbol>, IntelError> {
+        let mut matches = Vec::new();
+        for (root_index, index) in self.indexes.iter().enumerate() {
+            let mut root_matches = index.query(query)?;
+            if root_index > 0 {
+                for symbol in &mut root_matches {
+                    symbol.location.path = PathBuf::from("@root")
+                        .join(root_index.to_string())
+                        .join(&symbol.location.path);
+                }
+            }
+            matches.extend(root_matches);
+        }
+        matches.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.location.path.cmp(&right.location.path))
+                .then_with(|| left.location.line.cmp(&right.location.line))
+                .then_with(|| left.location.column.cmp(&right.location.column))
+        });
+        matches.truncate(query.limit.clamp(1, 10_000));
+        Ok(matches)
+    }
+
+    fn route(&self, path: &Path) -> Result<(usize, PathBuf), IntelError> {
+        let mut components = path.components();
+        let Some(first) = components.next() else {
+            return Err(IntelError::PathEscape(path.to_path_buf()));
+        };
+        if matches!(first, Component::Normal(value) if value == "@root") {
+            let index = match components.next() {
+                Some(Component::Normal(value)) => value
+                    .to_str()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|index| *index > 0 && *index < self.indexes.len())
+                    .ok_or_else(|| IntelError::PathEscape(path.to_path_buf()))?,
+                _ => return Err(IntelError::PathEscape(path.to_path_buf())),
+            };
+            let relative = components.collect::<PathBuf>();
+            if relative.as_os_str().is_empty() {
+                return Err(IntelError::PathEscape(path.to_path_buf()));
+            }
+            Ok((index, relative))
+        } else {
+            Ok((0, path.to_path_buf()))
+        }
     }
 }
 
@@ -122,7 +252,7 @@ mod tests {
     #[tokio::test]
     async fn exposes_the_incremental_index_as_a_tool() {
         let root = tempdir().expect("temp directory");
-        let index = Arc::new(SymbolIndex::new(root.path()).expect("index"));
+        let index = Arc::new(WorkspaceSymbolIndex::new([root.path()]).expect("index"));
         index
             .update_source("lib.rs", "pub struct Rottweiler;")
             .expect("source");
@@ -136,5 +266,39 @@ mod tests {
             .expect("symbols");
         assert_eq!(result.data["count"], 1);
         assert!(result.content.contains("Rottweiler"));
+    }
+
+    #[tokio::test]
+    async fn aggregates_duplicate_symbols_with_stable_virtual_root_paths() {
+        let primary = tempdir().expect("primary");
+        let added = tempdir().expect("added");
+        let index = Arc::new(
+            WorkspaceSymbolIndex::new([primary.path(), added.path()]).expect("multi-root index"),
+        );
+        index
+            .update_source("same.rs", "pub struct Shared;")
+            .expect("primary source");
+        index
+            .update_source("@root/1/same.rs", "pub struct Shared;")
+            .expect("added source");
+        let context =
+            ToolContext::from_workspace_roots([primary.path(), added.path()]).expect("context");
+        let result = SymbolsTool::new(index.clone(), ToolLimits::default())
+            .execute(&context, serde_json::json!({"pattern":"Shared"}))
+            .await
+            .expect("symbols");
+        assert_eq!(result.data["count"], 2);
+        assert!(result.content.contains("same.rs"));
+        assert!(result.content.contains("@root/1/same.rs"));
+
+        index
+            .update_source("@root/1/same.rs", "pub struct AddedOnly;")
+            .expect("added update");
+        let result = SymbolsTool::new(index, ToolLimits::default())
+            .execute(&context, serde_json::json!({"pattern":"AddedOnly"}))
+            .await
+            .expect("updated symbols");
+        assert_eq!(result.data["count"], 1);
+        assert!(result.content.contains("@root/1/same.rs"));
     }
 }

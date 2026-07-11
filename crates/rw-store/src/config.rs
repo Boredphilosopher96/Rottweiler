@@ -1360,6 +1360,19 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
             )));
         }
     }
+    for pattern in &config.sandbox.safe_list {
+        if pattern.trim().is_empty()
+            || globset::GlobBuilder::new(pattern)
+                .literal_separator(true)
+                .backslash_escape(true)
+                .build()
+                .is_err()
+        {
+            return Err(ConfigError::Validation(format!(
+                "sandbox.safe_list contains invalid command glob {pattern:?}"
+            )));
+        }
+    }
     if let Some(proxy) = &config.network.proxy {
         validate_proxy("network.proxy", proxy)?;
     }
@@ -1744,6 +1757,12 @@ action = "deny"
             loaded.config.permissions.rules[0].pattern,
             "bash(git status*)"
         );
+
+        fs::write(&user, "[sandbox]\nsafe_list = [\"[\"]\n").expect("invalid sandbox safe-list");
+        assert!(matches!(
+            ConfigLoader::new(user.clone(), project.clone()).load(),
+            Err(ConfigError::Validation(message)) if message.contains("sandbox.safe_list")
+        ));
 
         fs::write(
             &user,

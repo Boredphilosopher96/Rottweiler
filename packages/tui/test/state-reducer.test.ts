@@ -30,6 +30,24 @@ function reduce(state: RottweilerState, event: WireEngineEvent): RottweilerState
 }
 
 describe("pure TUI state reducer", () => {
+  test("projects live workspace-root generations using only virtual paths", () => {
+    const state = reduce(createInitialState(), {
+      type: "workspace_roots_changed",
+      meta: meta("1"),
+      generation: "1",
+      effective_from_turn: "4",
+      roots: [
+        { index: 0, path: "@root/0", machine_local: false },
+        { index: 1, path: "@root/1", machine_local: false },
+      ],
+    })
+    expect(state.workspaceRoots).toEqual({
+      generation: "1",
+      effectiveFromTurn: "4",
+      roots: ["@root/0", "@root/1"],
+    })
+  })
+
   test("gap replay converges to the same projection as an uninterrupted stream", () => {
     const events: EngineEvent[] = [
       { type: "mode_changed", meta: meta("1"), mode: "plan" },
