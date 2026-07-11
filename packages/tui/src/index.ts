@@ -74,6 +74,8 @@ async function main(): Promise<void> {
   )
 
   const configuredSession = process.env.ROTTWEILER_SESSION_ID
+  const replaySession =
+    process.env.ROTTWEILER_REPLAY_MODE === "1" ? configuredSession : undefined
   const terminalHandover = {
     suspend: () => renderer.suspend(),
     resume: () => renderer.resume(),
@@ -82,6 +84,9 @@ async function main(): Promise<void> {
     ...(configuredSession === undefined || configuredSession.length === 0
       ? {}
       : { sessionId: configuredSession }),
+    ...(replaySession === undefined || replaySession.length === 0
+      ? {}
+      : { replaySessionId: replaySession }),
     onCommand: async (command) => {
       const bootstrap = await runtimeBootstrap
       return (await bootstrap.runtime?.sendCommand(command)) ?? null

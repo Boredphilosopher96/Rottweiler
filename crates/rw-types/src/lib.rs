@@ -20,11 +20,12 @@ pub use protocol::{
     CostSnapshot, DiffArtifact, DiffArtifactRef, EngineError, EngineErrorCategory, EngineEvent,
     EventMeta, ModeId, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor,
     PlanArtifact, PlanDecision, PlanStep, PromptDump, PromptTool, Question, QuestionId,
-    QuestionOption, QuestionResponseKind, RequestId, RewindTarget, SequenceId, SessionDescriptor,
-    SessionId, SessionMode, ShellId, StoredAttachment, SubagentId, SubagentIsolation,
-    SubagentResult, SubagentStatus, ToolCapability, ToolOutputStream, TouchedFile,
-    TouchedFileStatus, TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    QuestionOption, QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus,
+    RewindTarget, SequenceId, SessionDescriptor, SessionId, SessionMode, SessionReview,
+    SessionReviewFile, ShellId, StoredAttachment, SubagentId, SubagentIsolation, SubagentResult,
+    SubagentStatus, ToolCapability, ToolOutputStream, TouchedFile, TouchedFileStatus,
+    TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 
 /// Version of the protocol emitted by these types.

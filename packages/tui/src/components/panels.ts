@@ -26,6 +26,195 @@ export interface InteractionCallbacks {
   readonly onPlanReview: (decision: PlanDecision) => void
 }
 
+export type ReviewFileDecision = "accept" | "revert"
+
+export interface ReviewPanelCallbacks {
+  readonly onDecision: (
+    file: NonNullable<RottweilerState["review"]>["files"][number],
+    decision: ReviewFileDecision,
+  ) => void
+  readonly onClose: () => void
+}
+
+/** Retained cumulative session review with exact per-file decisions. */
+export class ReviewPanelRenderable extends BoxRenderable {
+  readonly summary: TextRenderable
+  readonly files: SelectRenderable
+  readonly hint: TextRenderable
+  readonly diff: DiffRenderable
+  #review: RottweilerState["review"] = null
+  #callbacks: ReviewPanelCallbacks
+  #pendingPaths = new Set<string>()
+  #shellActive = false
+
+  constructor(
+    ctx: RenderContext,
+    theme: RottweilerTheme,
+    syntaxStyle: SyntaxStyle,
+    callbacks: ReviewPanelCallbacks,
+    treeSitterClient?: TreeSitterClient,
+  ) {
+    super(ctx, {
+      id: "session-review",
+      width: "100%",
+      height: 17,
+      flexShrink: 0,
+      flexDirection: "column",
+      border: true,
+      borderStyle: "rounded",
+      borderColor: theme.info,
+      backgroundColor: theme.panel,
+      paddingX: 1,
+      visible: false,
+      zIndex: 9,
+    })
+    this.#callbacks = callbacks
+    this.summary = new TextRenderable(ctx, {
+      content: "",
+      fg: theme.foreground,
+      height: 1,
+      truncate: true,
+    })
+    this.diff = new DiffRenderable(ctx, {
+      id: "session-review-diff",
+      width: "100%",
+      height: 8,
+      diff: "",
+      ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
+      syntaxStyle,
+      view: "unified",
+      wrapMode: "none",
+      showLineNumbers: true,
+      addedBg: theme.added,
+      removedBg: theme.removed,
+      contextBg: theme.panel,
+    })
+    this.files = new SelectRenderable(ctx, {
+      id: "session-review-files",
+      width: "100%",
+      height: 5,
+      options: [],
+      backgroundColor: theme.panel,
+      textColor: theme.foreground,
+      selectedBackgroundColor: theme.selection,
+      selectedTextColor: theme.accentStrong,
+      descriptionColor: theme.muted,
+      showScrollIndicator: true,
+    })
+    this.hint = new TextRenderable(ctx, {
+      content: "A accept · R revert",
+      fg: theme.muted,
+      height: 1,
+    })
+    this.files.on(SelectRenderableEvents.SELECTION_CHANGED, () => this.#showSelected())
+    this.files.onKeyDown = (key) => {
+      if (key.name === "escape" || key.name === "esc") {
+        key.preventDefault()
+        this.#callbacks.onClose()
+        return
+      }
+      if (key.name !== "a" && key.name !== "r") return
+      key.preventDefault()
+      const file = this.#review?.files[this.files.getSelectedIndex()]
+      if (file === undefined) return
+      if (this.#shellActive || this.#pendingPaths.has(file.path)) return
+      const decision: ReviewFileDecision = key.name === "a" ? "accept" : "revert"
+      if (decision === "revert" && file.unrestorableReason !== null) {
+        return
+      }
+      this.#callbacks.onDecision(file, decision)
+    }
+    this.add(this.summary)
+    this.add(this.diff)
+    this.add(this.files)
+    this.add(this.hint)
+  }
+
+  update(state: RottweilerState): void {
+    const review = state.replay.active ? null : state.review
+    this.#review = review
+    this.#shellActive = state.shell.active
+    if (review === null) {
+      this.visible = false
+      return
+    }
+    const selectedPath = review.files[this.files.getSelectedIndex()]?.path
+    const pending = review.files.filter((file) => file.status === "pending").length
+    const accepted = review.files.filter((file) => file.status === "accepted").length
+    const reverted = review.files.filter((file) => file.status === "reverted").length
+    this.title = ` Session review · ${review.files.length} files `
+    this.summary.content = state.shell.active
+      ? "Foreground shell active · review decisions disabled"
+      : `${pending} pending · ${accepted} accepted · ${reverted} reverted`
+    this.files.options = review.files.map((file) => ({
+      name: `${reviewGlyph(file.status)} ${file.path}`,
+      description:
+        (this.#pendingPaths.has(file.path)
+          ? "decision pending"
+          : file.unrestorableReason ??
+            (file.truncated ? "diff truncated · checkpoint revert available" : file.status)),
+      value: file.path,
+    }))
+    const nextIndex = Math.max(
+      0,
+      review.files.findIndex((file) => file.path === selectedPath),
+    )
+    this.files.setSelectedIndex(nextIndex)
+    this.visible = true
+    this.#showSelected()
+    this.files.focus()
+  }
+
+  setDecisionPending(path: string, pending: boolean): void {
+    if (pending) this.#pendingPaths.add(path)
+    else this.#pendingPaths.delete(path)
+    this.#showSelected()
+    const index = this.#review?.files.findIndex((file) => file.path === path) ?? -1
+    if (index >= 0) {
+      const option = this.files.options[index]
+      if (option !== undefined) {
+        option.description = pending ? "decision pending" : this.#fileDescription(index)
+        this.files.options = [...this.files.options]
+      }
+    }
+  }
+
+  #showSelected(): void {
+    const file = this.#review?.files[this.files.getSelectedIndex()]
+    this.diff.diff = file?.unifiedDiff ?? ""
+    this.diff.filetype = file === undefined ? undefined : extension(file.path)
+    const revertUnavailable = file !== undefined && file.unrestorableReason !== null
+    this.hint.content =
+      file === undefined
+        ? "No files changed in this session"
+        : this.#shellActive
+          ? "Exit the foreground shell before reviewing files"
+          : this.#pendingPaths.has(file.path)
+            ? "Decision pending…"
+            : `A accept · ${revertUnavailable ? "R revert unavailable" : "R revert"}`
+  }
+
+  #fileDescription(index: number): string {
+    const file = this.#review?.files[index]
+    if (file === undefined) return ""
+    return (
+      file.unrestorableReason ??
+      (file.truncated ? "diff truncated · checkpoint revert available" : file.status)
+    )
+  }
+}
+
+function reviewGlyph(status: "pending" | "accepted" | "reverted"): string {
+  switch (status) {
+    case "pending":
+      return "◆"
+    case "accepted":
+      return "✓"
+    case "reverted":
+      return "↶"
+  }
+}
+
 export class InteractionPanelRenderable extends BoxRenderable {
   readonly prompt: TextRenderable
   readonly select: SelectRenderable
@@ -87,6 +276,14 @@ export class InteractionPanelRenderable extends BoxRenderable {
   }
 
   update(state: RottweilerState): void {
+    if (state.replay.active) {
+      this.#activeTool = null
+      this.#activeQuestion = null
+      this.#activePlan = null
+      this.#removeDiff()
+      this.visible = false
+      return
+    }
     const tool = Object.values(state.tools).find((candidate) => candidate.status === "awaiting_approval")
     const question = Object.values(state.questions).find((candidate) => !candidate.answered)
     const turnRunning = Object.values(state.turns).some((turn) => turn.status === "running")
@@ -341,7 +538,8 @@ export class StatusLineRenderable extends TextRenderable {
       state.cost === null ? "cache —" : `cache ${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
     const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
     this.content = [
-      `◉ ${state.mode ?? "execute"}`,
+      ...(state.replay.active ? ["◉ replay"] : []),
+      ...(state.replay.active ? [] : [`◉ ${state.mode ?? "execute"}`]),
       `model ${state.model ?? "fast"}`,
       context,
       formatSessionCost(state.cost),
@@ -381,6 +579,14 @@ export class StateBannerRenderable extends TextRenderable {
       this.visible = true
       this.fg = this.#theme.danger
       this.content = `Budget hard cap · ${latestBudget.scope} ${latestBudget.current}/${latestBudget.limit}`
+    } else if (state.replay.active) {
+      this.visible = true
+      this.fg = this.#theme.info
+      const progress =
+        state.replay.completedThrough === null
+          ? "loading historical events…"
+          : `complete through event ${state.replay.completedThrough}`
+      this.content = `Replay · ${state.replay.sessionId ?? "historical session"} · read-only · ${progress}`
     } else if (state.compaction.active) {
       this.visible = true
       this.fg = this.#theme.info

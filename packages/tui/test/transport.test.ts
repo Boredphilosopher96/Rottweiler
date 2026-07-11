@@ -34,6 +34,19 @@ function durableMeta(sequence: string) {
   }
 }
 
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = performance.now() + timeoutMs
+  while (!predicate()) {
+    if (performance.now() >= deadline) {
+      throw new Error("timed out waiting for observable transport teardown")
+    }
+    await Bun.sleep(5)
+  }
+}
+
 describe("authenticated UDS engine transport", () => {
   let engine: AuthenticatedMockEngine | undefined
 
@@ -279,7 +292,7 @@ describe("authenticated UDS engine transport", () => {
 
     await done
     expect(connected).toBe(true)
-    await Bun.sleep(0)
+    await waitFor(() => engine?.cancelledStreams === 1)
     expect(engine.cancelledStreams).toBe(1)
   })
 })

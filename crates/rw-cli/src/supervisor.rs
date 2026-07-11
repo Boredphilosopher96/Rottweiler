@@ -20,6 +20,7 @@ const TOKEN_FILE_ENV: &str = "ROTTWEILER_ENGINE_TOKEN_FILE";
 const SESSION_ENV: &str = "ROTTWEILER_SESSION_ID";
 const LAST_SEEN_ENV: &str = "ROTTWEILER_LAST_SEEN_SEQUENCE";
 const LAST_SEEN_FILE_ENV: &str = "ROTTWEILER_LAST_SEEN_FILE";
+const FORK_OPERATION_DIRECTORY_ENV: &str = "ROTTWEILER_FORK_OPERATION_DIRECTORY";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StdioMode {
@@ -43,6 +44,7 @@ pub struct SupervisorConfig {
     pub socket: PathBuf,
     pub token_file: PathBuf,
     pub last_seen_file: PathBuf,
+    pub fork_operation_directory: PathBuf,
     pub session_id: String,
     pub permission_mode: Option<crate::PermissionMode>,
     pub max_turns: usize,
@@ -542,6 +544,10 @@ fn connection_env(
             OsString::from(LAST_SEEN_FILE_ENV),
             config.last_seen_file.as_os_str().to_owned(),
         ),
+        (
+            OsString::from(FORK_OPERATION_DIRECTORY_ENV),
+            config.fork_operation_directory.as_os_str().to_owned(),
+        ),
     ]);
     if let Some(last_seen) = last_seen {
         env.insert(
@@ -602,6 +608,7 @@ mod tests {
             socket: PathBuf::from("/private/run/engine.sock"),
             token_file: PathBuf::from("/private/run/auth.token"),
             last_seen_file: PathBuf::from("/private/run/last-seen"),
+            fork_operation_directory: PathBuf::from("/private/control/pending-forks"),
             session_id: "session-1".to_owned(),
             permission_mode: Some(crate::PermissionMode::Strict),
             max_turns: 32,
@@ -637,6 +644,10 @@ mod tests {
         assert_eq!(
             tui.env.get(&OsString::from(LAST_SEEN_FILE_ENV)),
             Some(&OsString::from("/private/run/last-seen"))
+        );
+        assert_eq!(
+            tui.env.get(&OsString::from(FORK_OPERATION_DIRECTORY_ENV)),
+            Some(&OsString::from("/private/control/pending-forks"))
         );
         assert_eq!(
             engine_spec(&config).args,

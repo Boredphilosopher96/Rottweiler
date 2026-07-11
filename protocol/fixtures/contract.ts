@@ -236,7 +236,8 @@ export const contractFixture = {
         "request_id": "request-fixture"
       },
       "session_id": "session-fixture",
-      "at_turn": null
+      "at_turn": null,
+      "operation_id": "fork-operation-fixture"
     },
     {
       "type": "rewind",
@@ -332,6 +333,37 @@ export const contractFixture = {
         "request_id": "request-fixture"
       },
       "session_id": "session-fixture"
+    },
+    {
+      "type": "get_session_review",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture"
+    },
+    {
+      "type": "review_file",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture",
+      "path": "src/main.rs",
+      "decision": "revert",
+      "current_hash": "current-hash"
+    },
+    {
+      "type": "search_sessions",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "query": "protocol",
+      "limit": 25
     },
     {
       "type": "dump_prompt",
@@ -839,6 +871,105 @@ export const contractFixture = {
       },
       "decision": "approve",
       "revisions": null
+    },
+    {
+      "type": "session_review_ready",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "review-ready",
+        "emitted_at": "2026-01-01T00:00:00Z"
+      },
+      "session_id": "session-fixture",
+      "review": {
+        "session_id": "session-fixture",
+        "files": [
+          {
+            "path": "src/main.rs",
+            "unified_diff": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            "status": "pending",
+            "truncated": false,
+            "unrestorable_reason": null,
+            "original_hash": "original-hash",
+            "current_hash": "current-hash"
+          }
+        ]
+      }
+    },
+    {
+      "type": "session_review_updated",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "review-updated",
+        "emitted_at": "2026-01-01T00:00:00Z"
+      },
+      "session_id": "session-fixture",
+      "path": "src/main.rs",
+      "decision": "revert",
+      "review": {
+        "session_id": "session-fixture",
+        "files": [
+          {
+            "path": "src/main.rs",
+            "unified_diff": "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            "status": "pending",
+            "truncated": false,
+            "unrestorable_reason": null,
+            "original_hash": "original-hash",
+            "current_hash": "current-hash"
+          }
+        ]
+      }
+    },
+    {
+      "type": "session_replay_completed",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "replay-complete",
+        "emitted_at": "2026-01-01T00:00:00Z"
+      },
+      "session_id": "session-fixture",
+      "through_sequence": "25"
+    },
+    {
+      "type": "session_forked",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "fork-complete",
+        "emitted_at": "2026-01-01T00:00:00Z"
+      },
+      "parent_session_id": "session-fixture",
+      "child": {
+        "session_id": "session-fork",
+        "workspace_name": "workspace",
+        "model": "fast",
+        "driver_client_id": "client-fixture",
+        "shell_active": false
+      },
+      "at_turn": "turn-fixture"
+    },
+    {
+      "type": "sessions_search_ready",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "search-complete",
+        "emitted_at": "2026-01-01T00:00:00Z"
+      },
+      "query": "protocol",
+      "sessions": [
+        {
+          "session_id": "session-fork",
+          "workspace_name": "workspace",
+          "model": "fast",
+          "driver_client_id": "client-fixture",
+          "shell_active": false
+        }
+      ],
+      "truncated": false
     }
   ]
 } satisfies {

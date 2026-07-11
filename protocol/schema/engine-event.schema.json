@@ -90,6 +90,62 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "review": {
+          "$ref": "#/$defs/SessionReview"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_review_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "review"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/ReviewFileDecision"
+        },
+        "review": {
+          "$ref": "#/$defs/SessionReview"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_review_updated"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "path",
+        "decision",
+        "review"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "dump": {
           "$ref": "#/$defs/PromptDump"
         },
@@ -141,6 +197,34 @@
         "meta": {
           "$ref": "#/$defs/CommandAckMeta"
         },
+        "parent_session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "child": {
+          "$ref": "#/$defs/SessionDescriptor"
+        },
+        "at_turn": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_forked"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "parent_session_id",
+        "child",
+        "at_turn"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
         "sessions": {
           "type": "array",
           "items": {
@@ -156,6 +240,37 @@
         "type",
         "meta",
         "sessions"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "query": {
+          "type": "string"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionDescriptor"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "sessions_search_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "query",
+        "sessions",
+        "truncated"
       ]
     },
     {
@@ -2064,6 +2179,80 @@
             "reason"
           ]
         }
+      ]
+    },
+    "SessionReview": {
+      "description": "Complete replacement snapshot for the cumulative session review reducer.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SessionReviewFile"
+          }
+        }
+      },
+      "required": [
+        "session_id",
+        "files"
+      ]
+    },
+    "SessionReviewFile": {
+      "description": "One deterministic workspace-relative entry in a cumulative session review.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "unified_diff": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/ReviewFileStatus"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "unrestorable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "original_hash": {
+          "type": "string"
+        },
+        "current_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "unified_diff",
+        "status",
+        "truncated",
+        "original_hash",
+        "current_hash"
+      ]
+    },
+    "ReviewFileStatus": {
+      "description": "Durable disposition of one file in the cumulative session review.",
+      "type": "string",
+      "enum": [
+        "pending",
+        "accepted",
+        "reverted"
+      ]
+    },
+    "ReviewFileDecision": {
+      "description": "Driver decision for one file in the cumulative session review.",
+      "type": "string",
+      "enum": [
+        "accept",
+        "revert"
       ]
     },
     "PromptDump": {

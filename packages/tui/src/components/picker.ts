@@ -23,8 +23,13 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   #items: readonly PickerItem<T>[] = []
   #filtered: readonly PickerItem<T>[] = []
   #onSelect: ((item: PickerItem<T>) => void) | undefined
+  #onQuery: ((query: string) => void) | undefined
 
-  constructor(ctx: RenderContext, theme: RottweilerTheme) {
+  constructor(
+    ctx: RenderContext,
+    theme: RottweilerTheme,
+    onQuery?: (query: string) => void,
+  ) {
     super(ctx, {
       id: "fuzzy-picker",
       width: "100%",
@@ -40,6 +45,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       visible: false,
       zIndex: 20,
     })
+    this.#onQuery = onQuery
     this.input = new InputRenderable(ctx, {
       id: "picker-query",
       width: "100%",
@@ -64,7 +70,10 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     })
     this.add(this.input)
     this.add(this.select)
-    this.input.on(InputRenderableEvents.INPUT, (query: string) => this.#filter(query))
+    this.input.on(InputRenderableEvents.INPUT, (query: string) => {
+      this.#filter(query)
+      this.#onQuery?.(query)
+    })
     this.input.on(InputRenderableEvents.ENTER, () => this.select.selectCurrent())
     this.select.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) => {
       const item = this.#filtered[index]
@@ -86,6 +95,22 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#filter("")
     this.visible = true
     this.input.focus()
+  }
+
+  /** Replace remote results without clearing the query or moving focus. */
+  refresh(
+    title: string,
+    items: readonly PickerItem<T>[],
+    onSelect: (item: PickerItem<T>) => void,
+  ): void {
+    if (!this.visible) {
+      this.open(title, items, onSelect)
+      return
+    }
+    this.title = ` ${title} `
+    this.#items = items
+    this.#onSelect = onSelect
+    this.#filter(this.input.value)
   }
 
   close(): void {

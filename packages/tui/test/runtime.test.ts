@@ -15,7 +15,11 @@ import {
   type RuntimeFileSystem,
 } from "../src/runtime"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
-import type { EngineSubscriptionOptions, WireEngineEvent } from "../src/transport"
+import {
+  isSessionForkedEvent,
+  type EngineSubscriptionOptions,
+  type WireEngineEvent,
+} from "../src/transport"
 
 class MemoryFiles implements RuntimeFileSystem {
   readonly reads = new Map<string, string>()
@@ -169,6 +173,60 @@ class SwitchingClient implements RuntimeEngineClient {
   }
 }
 
+class CorrelatedForkClient implements RuntimeEngineClient {
+  readonly commands: ClientCommand[] = []
+  readonly subscriptions: EngineSubscriptionOptions[] = []
+  forkSignalAborted = false
+
+  async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
+    this.commands.push(command)
+    if (command.type === "fork") {
+      const current = this.subscriptions.at(-1)
+      await current?.onEvent({
+        type: "session_forked",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          client_id: "bound-client",
+          request_id: command.meta.request_id,
+          emitted_at: "2026-07-11T00:00:00Z",
+        },
+        parent_session_id: command.session_id,
+        child: {
+          session_id: "fork-child",
+          workspace_name: "workspace",
+          model: "fast",
+          driver_client_id: "bound-client",
+          shell_active: false,
+        },
+        at_turn: command.at_turn ?? "0",
+      })
+      await Bun.sleep(0)
+      this.forkSignalAborted = signal?.aborted ?? false
+    }
+    return { type: "accepted" }
+  }
+
+  async subscribe(options: EngineSubscriptionOptions): Promise<void> {
+    this.subscriptions.push(options)
+    options.onConnection?.({ phase: "connected", attempt: 0 })
+    await new Promise<void>((resolve) => {
+      if (options.signal.aborted) resolve()
+      else options.signal.addEventListener("abort", () => resolve(), { once: true })
+    })
+  }
+}
+
+class ForkSwitchingApp extends TestApp {
+  runtime: TuiEngineRuntime | null = null
+
+  override handleEvent(event: WireEngineEvent): void {
+    super.handleEvent(event)
+    if (isSessionForkedEvent(event)) {
+      void this.runtime?.switchSession(event.child.session_id)
+    }
+  }
+}
+
 describe("OpenTUI engine runtime", () => {
   let temporaryDirectory: string | null = null
 
@@ -208,6 +266,8 @@ describe("OpenTUI engine runtime", () => {
       sessionId: "session-runtime",
       lastSeenSequence: "12",
       lastSeenFile: "/private/cursor",
+      replayMode: false,
+      forkOperationDirectory: null,
     })
   })
 
@@ -266,6 +326,7 @@ describe("OpenTUI engine runtime", () => {
         sessionId: "session-runtime",
         lastSeenSequence: "4",
         lastSeenFile: "/private/cursor",
+        replayMode: false,
       },
       client,
       files,
@@ -314,6 +375,244 @@ describe("OpenTUI engine runtime", () => {
     expect(client.commands.at(-1)?.type).toBe("get_context")
   })
 
+  test("replay attaches as an observer without recovery, takeover, or projection writes", async () => {
+    const files = new MemoryFiles()
+    const client = new ScriptedClient()
+    const app = new TestApp()
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "session-replay",
+        lastSeenSequence: null,
+        lastSeenFile: "/private/replay-cursor",
+        replayMode: true,
+      },
+      client,
+      files,
+    )
+    runtime.bind(app)
+    await runtime.start()
+
+    expect(client.commands).toEqual([])
+    expect(client.subscription?.attach).toMatchObject({
+      type: "attach_session",
+      session_id: "session-replay",
+      role: "observer",
+      last_seen_sequence: null,
+    })
+    expect(files.writes).toEqual([])
+
+    expect(
+      await runtime.sendCommand({
+        type: "send_message",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          client_id: "replay-client",
+          request_id: "forbidden",
+        },
+        session_id: "session-replay",
+        content: "do not mutate replay",
+        attachments: [],
+      }),
+    ).toBeNull()
+    expect(client.commands).toEqual([])
+
+    expect(await runtime.switchSession("session-replay-two")).toBeTrue()
+    expect(client.commands).toEqual([])
+    expect(client.subscription?.attach).toMatchObject({
+      session_id: "session-replay-two",
+      role: "observer",
+    })
+    expect(app.state.replay).toEqual({
+      active: true,
+      sessionId: "session-replay-two",
+      completedThrough: null,
+    })
+    expect(files.writes).toEqual([])
+  })
+
+  test("persists one fork operation across a TUI restart and clears it only on completion", async () => {
+    const files = new MemoryFiles()
+    const config = {
+      socketPath: "/private/engine.sock",
+      bootstrapToken: "secret",
+      sessionId: "fork-parent",
+      lastSeenSequence: null,
+      lastSeenFile: null,
+      replayMode: false,
+      forkOperationDirectory: "/private/pending-forks",
+    } as const
+    const firstClient = new ScriptedClient()
+    const first = new TuiEngineRuntime(config, firstClient, files)
+    first.bind(new TestApp())
+    await first.start()
+    expect(
+      await first.sendCommand({
+        type: "fork",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          client_id: "first-client",
+          request_id: "first-request",
+        },
+        session_id: "fork-parent",
+        at_turn: "7",
+      }),
+    ).toEqual({ type: "accepted" })
+    const firstFork = firstClient.commands.find((command) => command.type === "fork")
+    expect(firstFork?.type).toBe("fork")
+    if (firstFork?.type !== "fork") throw new Error("first fork command missing")
+    expect(firstFork.operation_id).toBeString()
+    await first.stop()
+
+    const secondClient = new ScriptedClient()
+    const second = new TuiEngineRuntime(config, secondClient, files)
+    second.bind(new TestApp())
+    await second.start()
+    expect(
+      await second.sendCommand({
+        type: "fork",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          client_id: "second-client",
+          request_id: "different-boundary-request",
+        },
+        session_id: "fork-parent",
+        at_turn: "8",
+      }),
+    ).toBeNull()
+    expect(secondClient.commands.some((command) => command.type === "fork")).toBeFalse()
+    expect(
+      await second.sendCommand({
+        type: "fork",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          client_id: "second-client",
+          request_id: "second-request",
+        },
+        session_id: "fork-parent",
+        at_turn: "7",
+      }),
+    ).toEqual({ type: "accepted" })
+    const secondFork = secondClient.commands.find((command) => command.type === "fork")
+    expect(secondFork?.type).toBe("fork")
+    if (secondFork?.type !== "fork") throw new Error("second fork command missing")
+    expect(secondFork.operation_id).toBe(firstFork.operation_id)
+    await secondClient.subscription?.onEvent({
+      type: "session_forked",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "bound-client",
+        request_id: "second-request",
+        emitted_at: "2026-07-11T00:00:00Z",
+      },
+      parent_session_id: "fork-parent",
+      child: {
+        session_id: "fork-child",
+        workspace_name: "workspace",
+        model: "fast",
+        driver_client_id: "bound-client",
+        shell_active: false,
+      },
+      at_turn: "7",
+    })
+    await Bun.sleep(0)
+    expect(files.reads.get("/private/pending-forks/fork-parent.json")).toBe("")
+    await second.stop()
+  })
+
+  test("keeps a correlated fork POST alive while its own event switches sessions", async () => {
+    const files = new MemoryFiles()
+    const client = new CorrelatedForkClient()
+    const app = new ForkSwitchingApp()
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "fork-parent",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+        forkOperationDirectory: "/private/pending-forks",
+      },
+      client,
+      files,
+    )
+    app.runtime = runtime
+    runtime.bind(app)
+    const running = runtime.start()
+    while (client.subscriptions.length === 0) await Bun.sleep(1)
+
+    const outcome = await runtime.sendCommand({
+      type: "fork",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "ui-client",
+        request_id: "fork-request",
+      },
+      session_id: "fork-parent",
+      at_turn: null,
+    })
+    expect(outcome).toEqual({ type: "accepted" })
+    expect(client.forkSignalAborted).toBeFalse()
+    while (app.sessionId !== "fork-child") await Bun.sleep(1)
+    expect(files.reads.get("/private/pending-forks/fork-parent.json")).toBe("")
+    await runtime.stop()
+    await running
+  })
+
+  test("retains the stable fork identity across capacity rejection", async () => {
+    const files = new MemoryFiles()
+    const client = new ScriptedClient()
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "fork-parent",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+        forkOperationDirectory: "/private/pending-forks",
+      },
+      client,
+      files,
+    )
+    runtime.bind(new TestApp())
+    await runtime.start()
+    client.outcomes.push({
+      type: "rejected",
+      error: {
+        category: "protocol",
+        code: "session_capacity",
+        message: "retry after another session closes",
+        retryable: false,
+      },
+    })
+    const command = (requestId: string): ClientCommand => ({
+      type: "fork",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "ui-client",
+        request_id: requestId,
+      },
+      session_id: "fork-parent",
+      at_turn: "3",
+    })
+    expect(await runtime.sendCommand(command("capacity-request"))).toMatchObject({
+      type: "rejected",
+      error: { code: "session_capacity" },
+    })
+    const firstFork = client.commands.find((candidate) => candidate.type === "fork")
+    if (firstFork?.type !== "fork") throw new Error("capacity fork command missing")
+    expect(files.reads.get("/private/pending-forks/fork-parent.json")).not.toBe("")
+
+    expect(await runtime.sendCommand(command("capacity-retry"))).toEqual({ type: "accepted" })
+    const forks = client.commands.filter((candidate) => candidate.type === "fork")
+    expect(forks).toHaveLength(2)
+    expect(forks[1]?.type === "fork" ? forks[1].operation_id : null).toBe(firstFork.operation_id)
+    await runtime.stop()
+  })
+
   test("retries bounded session preparation before taking the driver lease", async () => {
     const files = new MemoryFiles()
     const client = new ScriptedClient([
@@ -337,6 +636,7 @@ describe("OpenTUI engine runtime", () => {
         sessionId: "session-preparing",
         lastSeenSequence: null,
         lastSeenFile: null,
+        replayMode: false,
       },
       client,
       files,
@@ -372,6 +672,7 @@ describe("OpenTUI engine runtime", () => {
         sessionId: "session-startup-race",
         lastSeenSequence: null,
         lastSeenFile: null,
+        replayMode: false,
       },
       client,
       new MemoryFiles(),
@@ -418,6 +719,7 @@ describe("OpenTUI engine runtime", () => {
         sessionId: "session-old",
         lastSeenSequence: null,
         lastSeenFile: null,
+        replayMode: false,
       },
       client,
       new MemoryFiles(),
@@ -522,6 +824,7 @@ describe("OpenTUI engine runtime", () => {
         sessionId: "session-old",
         lastSeenSequence: null,
         lastSeenFile: null,
+        replayMode: false,
       },
       client,
       new MemoryFiles(),

@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "session_id": "golden",
+  "events": [
+    {
+      "schema_version": 1,
+      "sequence": "0",
+      "event": {
+        "type": "ui_notification",
+        "meta": {
+          "protocol_version": 1,
+          "session_id": "golden",
+          "sequence_id": "0",
+          "emitted_at": "2026-01-01T00:00:00Z",
+          "caused_by": null
+        },
+        "plugin_id": "fixture",
+        "title": "<script>alert(1)</script>",
+        "message": "key [REDACTED] at [REDACTED_PATH]"
+      }
+    }
+  ]
+}

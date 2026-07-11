@@ -304,6 +304,7 @@ export class TranscriptRenderable extends BoxRenderable {
   #state: RottweilerState | null = null
   #transcript: readonly TranscriptEntry[] | null = null
   #tools: RottweilerState["tools"] | null = null
+  #turns: RottweilerState["turns"] | null = null
   #subagents: RottweilerState["subagents"] | null = null
   #virtualizedTranscript: readonly TranscriptEntry[] | null = null
   #virtualizedTools: RottweilerState["tools"] | null = null
@@ -412,11 +413,17 @@ export class TranscriptRenderable extends BoxRenderable {
     this.#state = state
     const transcriptChanged = this.#transcript !== state.transcript
     const cardProjectionChanged = this.#tools !== state.tools || this.#subagents !== state.subagents
+    const turnProjectionChanged = this.#turns !== state.turns
     this.#transcript = state.transcript
     this.#tools = state.tools
+    this.#turns = state.turns
     this.#subagents = state.subagents
     this.#updateTail(state)
-    this.#reconcile(transcriptChanged || (state.streamingTail === null && cardProjectionChanged))
+    this.#reconcile(
+      transcriptChanged ||
+        turnProjectionChanged ||
+        (state.streamingTail === null && cardProjectionChanged),
+    )
   }
 
   setScrollOffset(scrollTop: number): void {

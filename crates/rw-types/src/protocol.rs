@@ -327,6 +327,45 @@ pub enum RewindTarget {
     Checkpoint { checkpoint_id: String },
 }
 
+/// Driver decision for one file in the cumulative session review.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ReviewFileDecision {
+    Accept,
+    Revert,
+}
+
+/// Durable disposition of one file in the cumulative session review.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ReviewFileStatus {
+    Pending,
+    Accepted,
+    Reverted,
+}
+
+/// One deterministic workspace-relative entry in a cumulative session review.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[ts(optional_fields = nullable)]
+pub struct SessionReviewFile {
+    pub path: String,
+    pub unified_diff: String,
+    pub status: ReviewFileStatus,
+    pub truncated: bool,
+    pub unrestorable_reason: Option<String>,
+    pub original_hash: String,
+    pub current_hash: String,
+}
+
+/// Complete replacement snapshot for the cumulative session review reducer.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct SessionReview {
+    pub session_id: SessionId,
+    pub files: Vec<SessionReviewFile>,
+}
+
 /// Shape of a response accepted for an interactive question.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -627,6 +666,9 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
         at_turn: Option<TurnId>,
+        /// Stable client-generated identity retained until the correlated fork completes.
+        #[serde(default)]
+        operation_id: Option<String>,
     },
     Rewind {
         meta: CommandMeta,
@@ -667,6 +709,17 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
+    GetSessionReview {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    ReviewFile {
+        meta: CommandMeta,
+        session_id: SessionId,
+        path: String,
+        decision: ReviewFileDecision,
+        current_hash: String,
+    },
     DumpPrompt {
         meta: CommandMeta,
         session_id: SessionId,
@@ -674,6 +727,11 @@ pub enum ClientCommand {
     },
     ListSessions {
         meta: CommandMeta,
+    },
+    SearchSessions {
+        meta: CommandMeta,
+        query: String,
+        limit: u32,
     },
     ListCommands {
         meta: CommandMeta,
@@ -729,8 +787,11 @@ impl ClientCommand {
             | Self::EvictContext { meta, .. }
             | Self::GetContext { meta, .. }
             | Self::GetCost { meta, .. }
+            | Self::GetSessionReview { meta, .. }
+            | Self::ReviewFile { meta, .. }
             | Self::DumpPrompt { meta, .. }
             | Self::ListSessions { meta, .. }
+            | Self::SearchSessions { meta, .. }
             | Self::ListCommands { meta, .. }
             | Self::ListModels { meta, .. }
             | Self::SearchWorkspaceFiles { meta, .. }
@@ -765,8 +826,11 @@ impl ClientCommand {
             | Self::EvictContext { meta, .. }
             | Self::GetContext { meta, .. }
             | Self::GetCost { meta, .. }
+            | Self::GetSessionReview { meta, .. }
+            | Self::ReviewFile { meta, .. }
             | Self::DumpPrompt { meta, .. }
             | Self::ListSessions { meta, .. }
+            | Self::SearchSessions { meta, .. }
             | Self::ListCommands { meta, .. }
             | Self::ListModels { meta, .. }
             | Self::SearchWorkspaceFiles { meta, .. }
@@ -1055,6 +1119,18 @@ pub enum EngineEvent {
         session_id: SessionId,
         snapshot: CostSnapshot,
     },
+    SessionReviewReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        review: SessionReview,
+    },
+    SessionReviewUpdated {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        path: String,
+        decision: ReviewFileDecision,
+        review: SessionReview,
+    },
     PromptDumpReady {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -1065,9 +1141,21 @@ pub enum EngineEvent {
         session_id: SessionId,
         through_sequence: Option<SequenceId>,
     },
+    SessionForked {
+        meta: CommandAckMeta,
+        parent_session_id: SessionId,
+        child: SessionDescriptor,
+        at_turn: TurnId,
+    },
     SessionsListed {
         meta: CommandAckMeta,
         sessions: Vec<SessionDescriptor>,
+    },
+    SessionsSearchReady {
+        meta: CommandAckMeta,
+        query: String,
+        sessions: Vec<SessionDescriptor>,
+        truncated: bool,
     },
     CommandDescriptorsListed {
         meta: CommandAckMeta,
@@ -1419,9 +1507,13 @@ impl EngineEvent {
             Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }
+            | Self::SessionReviewReady { .. }
+            | Self::SessionReviewUpdated { .. }
             | Self::PromptDumpReady { .. }
             | Self::SessionReplayCompleted { .. }
+            | Self::SessionForked { .. }
             | Self::SessionsListed { .. }
+            | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
             | Self::ModelsListed { .. }
             | Self::WorkspaceFilesFound { .. }
@@ -1480,9 +1572,13 @@ impl EngineEvent {
             Self::CommandAcknowledged { .. }
             | Self::ContextSnapshotReady { .. }
             | Self::CostSnapshotReady { .. }
+            | Self::SessionReviewReady { .. }
+            | Self::SessionReviewUpdated { .. }
             | Self::PromptDumpReady { .. }
             | Self::SessionReplayCompleted { .. }
+            | Self::SessionForked { .. }
             | Self::SessionsListed { .. }
+            | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
             | Self::ModelsListed { .. }
             | Self::WorkspaceFilesFound { .. }

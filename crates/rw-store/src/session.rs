@@ -14,12 +14,15 @@ use std::{
     io::{Read as _, Seek as _, SeekFrom},
 };
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use rw_types::{AccountingAttribution, Cost, SequenceId, TurnId, Usage};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tempfile::TempDir;
 use thiserror::Error;
 
 const EVENT_SCHEMA_VERSION: u16 = 1;
+const MAX_SEARCH_INDEX_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SEARCH_INDEX_WAL_BYTES: u64 = 64 * 1024 * 1024;
 static INDEX_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// One versioned event in a session's public JSONL transcript.
@@ -214,6 +217,185 @@ impl SessionEventLog {
         let file = open_existing_session_file_portable(root, session_id)?;
         ensure_regular_file(&file)?;
         load_events(&file)
+    }
+
+    /// Loads a read-only log under explicit byte and event-count limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe id or path, missing log, concurrent
+    /// mutation, malformed record, schema mismatch, non-contiguous sequence,
+    /// or either configured limit being exceeded.
+    pub fn load_existing_bounded<T: DeserializeOwned>(
+        root: &Path,
+        session_id: &str,
+        max_bytes: u64,
+        max_events: usize,
+    ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+        validate_session_id(session_id)?;
+        #[cfg(unix)]
+        let file = open_existing_session_file(root, session_id)?;
+        #[cfg(not(unix))]
+        let file = open_existing_session_file_portable(root, session_id)?;
+        ensure_regular_file(&file)?;
+        load_events_bounded(&file, max_bytes, max_events)
+    }
+
+    /// Creates or idempotently completes a child log from an exact parent
+    /// prefix. The parent is opened read-only and never modified.
+    ///
+    /// An existing child is accepted only when it is an exact prefix of the
+    /// requested fork, which makes recovery after a killed append safe while
+    /// rejecting identity reuse or post-fork divergence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for identical identities, a missing parent cursor, a
+    /// conflicting child prefix, concurrent parent mutation, or durable I/O.
+    pub fn fork(
+        root: &Path,
+        parent_session_id: &str,
+        child_session_id: &str,
+        through_sequence: Option<SequenceId>,
+    ) -> Result<Self, SessionStoreError> {
+        validate_session_id(parent_session_id)?;
+        validate_session_id(child_session_id)?;
+        if parent_session_id == child_session_id {
+            return Err(SessionStoreError::ForkIdentityConflict);
+        }
+        #[cfg(unix)]
+        let parent_file = open_existing_session_file(root, parent_session_id)?;
+        #[cfg(not(unix))]
+        let parent_file = open_existing_session_file_portable(root, parent_session_id)?;
+        ensure_regular_file(&parent_file)?;
+        let parent_bytes = read_opened_file(&parent_file)?;
+        let parent_events = parse_events::<serde_json::Value>(&parent_bytes)?;
+        let event_count = through_sequence.map_or(Ok(0), |through| {
+            let index = usize::try_from(through.0).map_err(|_| SessionStoreError::LimitOverflow)?;
+            if parent_events.get(index).map(|event| event.sequence) != Some(through) {
+                return Err(SessionStoreError::ForkSourceCursorMissing);
+            }
+            index.checked_add(1).ok_or(SessionStoreError::LimitOverflow)
+        })?;
+        let target_len = parent_bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .take(event_count)
+            .try_fold(0_usize, |total, line| {
+                total
+                    .checked_add(line.len())
+                    .ok_or(SessionStoreError::LimitOverflow)
+            })?;
+        let target = &parent_bytes[..target_len];
+        let mut child = Self::open(root, child_session_id)?;
+        let existing = read_opened_file(&child.file)?;
+        if existing.len() > target.len() || !target.starts_with(&existing) {
+            return Err(SessionStoreError::ForkTargetConflict);
+        }
+        child.file.write_all(&target[existing.len()..])?;
+        child.file.flush()?;
+        sync_event_file(&child.file)?;
+        child.next_sequence =
+            u64::try_from(event_count).map_err(|_| SessionStoreError::SequenceOverflow)?;
+        Ok(child)
+    }
+
+    /// Typed fork primitive which can rewrite payload-owned session identity
+    /// while preserving envelope sequence and an exact durable prefix.
+    ///
+    /// `None` means the explicit empty prefix. Callers for a non-empty fork
+    /// must resolve and pass the exact durable boundary sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid identities, a missing source boundary,
+    /// conflicting child history, mapping failure, or durable storage I/O.
+    pub fn fork_mapped<T, Map>(
+        root: &Path,
+        parent_session_id: &str,
+        child_session_id: &str,
+        through_sequence: Option<SequenceId>,
+        map: Map,
+    ) -> Result<Self, SessionStoreError>
+    where
+        T: DeserializeOwned + PartialEq + Serialize,
+        Map: FnMut(T) -> Result<T, SessionStoreError>,
+    {
+        let parent = Self::load_existing::<T>(root, parent_session_id)?;
+        Self::fork_mapped_loaded(
+            root,
+            parent_session_id,
+            child_session_id,
+            parent,
+            through_sequence,
+            map,
+        )
+    }
+
+    /// Forks an already validated event vector without rereading the source log.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid identities or cursors, mapper failures, an
+    /// incompatible existing target prefix, or durable write failures.
+    pub fn fork_mapped_loaded<T, Map>(
+        root: &Path,
+        parent_session_id: &str,
+        child_session_id: &str,
+        mut parent: Vec<EventEnvelope<T>>,
+        through_sequence: Option<SequenceId>,
+        mut map: Map,
+    ) -> Result<Self, SessionStoreError>
+    where
+        T: DeserializeOwned + PartialEq + Serialize,
+        Map: FnMut(T) -> Result<T, SessionStoreError>,
+    {
+        validate_session_id(parent_session_id)?;
+        validate_session_id(child_session_id)?;
+        if parent_session_id == child_session_id {
+            return Err(SessionStoreError::ForkIdentityConflict);
+        }
+        if let Some(through_sequence) = through_sequence {
+            let through_index = usize::try_from(through_sequence.0)
+                .map_err(|_| SessionStoreError::LimitOverflow)?;
+            if parent.get(through_index).map(|event| event.sequence) != Some(through_sequence) {
+                return Err(SessionStoreError::ForkSourceCursorMissing);
+            }
+            parent.truncate(
+                through_index
+                    .checked_add(1)
+                    .ok_or(SessionStoreError::LimitOverflow)?,
+            );
+        } else {
+            parent.clear();
+        }
+        let parent = parent
+            .into_iter()
+            .map(|envelope| {
+                Ok(EventEnvelope {
+                    schema_version: envelope.schema_version,
+                    sequence: envelope.sequence,
+                    event: map(envelope.event)?,
+                })
+            })
+            .collect::<Result<Vec<_>, SessionStoreError>>()?;
+
+        let mut child = Self::open(root, child_session_id)?;
+        let existing = child.load::<T>()?;
+        if existing.len() > parent.len()
+            || existing
+                .iter()
+                .zip(&parent)
+                .any(|(child, parent)| child != parent)
+        {
+            return Err(SessionStoreError::ForkTargetConflict);
+        }
+        child.append_batch(
+            parent
+                .into_iter()
+                .skip(existing.len())
+                .map(|envelope| envelope.event),
+        )?;
+        Ok(child)
     }
 }
 
@@ -1232,6 +1414,58 @@ impl SessionIndex {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Searches an existing index through a `SQLite` read-only connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the query or result limit is too large, the index
+    /// path is unsafe or changes during the read, or the database cannot be
+    /// queried through its read-only connection.
+    pub fn search_read_only(
+        root: &Path,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SessionSummary>, SessionStoreError> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        if query.len() > 512 {
+            return Err(SessionStoreError::SearchQueryTooLarge);
+        }
+        if limit > 1_001 {
+            return Err(SessionStoreError::SearchLimitTooLarge);
+        }
+        let query = plain_fts_query(query);
+        let limit = i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?;
+        let path = root.join("index.sqlite");
+        let before = validate_read_only_index(&path)?;
+        let canonical_root = fs::canonicalize(root)?;
+        let canonical_path = fs::canonicalize(&path)?;
+        if canonical_path.parent() != Some(canonical_root.as_path()) {
+            return Err(SessionStoreError::UnsafeSessionIndex);
+        }
+        let snapshot = read_only_index_snapshot(&canonical_root, &before)?;
+        let snapshot_path = fs::canonicalize(snapshot.path().join("index.sqlite"))?;
+        let connection = Connection::open_with_flags(
+            snapshot_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        let after = validate_read_only_index(&path)?;
+        if !same_file_identity(&before, &after) {
+            return Err(SessionStoreError::UnsafeSessionIndex);
+        }
+        let mut statement = connection.prepare(
+            "SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros \
+             FROM sessions_fts f JOIN sessions s ON s.rowid=f.rowid \
+             WHERE sessions_fts MATCH ?1 \
+             ORDER BY bm25(sessions_fts),s.updated_unix_ms DESC,s.id ASC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![query, limit], summary_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Returns one projection by id.
     ///
     /// # Errors
@@ -1249,6 +1483,292 @@ impl SessionIndex {
             .optional()
             .map_err(Into::into)
     }
+}
+
+fn validate_read_only_index(path: &Path) -> Result<fs::Metadata, SessionStoreError> {
+    let link = fs::symlink_metadata(path)?;
+    if link.file_type().is_symlink() || !link.is_file() {
+        return Err(SessionStoreError::UnsafeSessionIndex);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if link.nlink() != 1 {
+            return Err(SessionStoreError::UnsafeSessionIndex);
+        }
+    }
+    Ok(link)
+}
+
+/// Copies the `SQLite` database and any committed WAL into a private snapshot.
+///
+/// `SQLite` WAL readers may create an empty `-wal` file or update read marks in
+/// `-shm`, even when the database handle itself is opened read-only. Querying a
+/// private snapshot keeps the live derived index byte-for-byte unchanged while
+/// still including committed frames which have not yet been checkpointed.
+#[cfg(unix)]
+fn read_only_index_snapshot(
+    root: &Path,
+    expected: &fs::Metadata,
+) -> Result<TempDir, SessionStoreError> {
+    use rustix::{
+        fs::{FileType, Mode, OFlags},
+        io::Errno,
+    };
+
+    let directory = File::from(
+        rustix::fs::open(
+            root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(std::io::Error::from)?,
+    );
+    let main = open_snapshot_source(&directory, "index.sqlite")?
+        .ok_or(SessionStoreError::UnsafeSessionIndex)?;
+    let main_before = main.metadata()?;
+    if !same_file_identity(expected, &main_before) {
+        return Err(SessionStoreError::UnsafeSessionIndex);
+    }
+    validate_snapshot_source_size(&main_before, "index.sqlite", MAX_SEARCH_INDEX_BYTES)?;
+
+    let wal = open_snapshot_source(&directory, "index.sqlite-wal")?;
+    let wal_before = wal.as_ref().map(File::metadata).transpose()?;
+    if let Some(metadata) = wal_before.as_ref() {
+        validate_snapshot_source_size(metadata, "index.sqlite-wal", MAX_SEARCH_INDEX_WAL_BYTES)?;
+    }
+    let snapshot = tempfile::tempdir()?;
+    copy_snapshot_source(
+        &main,
+        &snapshot.path().join("index.sqlite"),
+        "index.sqlite",
+        MAX_SEARCH_INDEX_BYTES,
+    )?;
+    if let Some(wal) = wal.as_ref() {
+        copy_snapshot_source(
+            wal,
+            &snapshot.path().join("index.sqlite-wal"),
+            "index.sqlite-wal",
+            MAX_SEARCH_INDEX_WAL_BYTES,
+        )?;
+    }
+
+    let main_after = main.metadata()?;
+    if !same_snapshot_version(&main_before, &main_after)
+        || !snapshot_name_still_refers_to(&directory, "index.sqlite", &main_before)?
+    {
+        return Err(SessionStoreError::UnsafeSessionIndex);
+    }
+    match (wal_before.as_ref(), wal.as_ref()) {
+        (Some(before), Some(wal)) => {
+            if !same_snapshot_version(before, &wal.metadata()?)
+                || !snapshot_name_still_refers_to(&directory, "index.sqlite-wal", before)?
+            {
+                return Err(SessionStoreError::UnsafeSessionIndex);
+            }
+        }
+        (None, None) => match rustix::fs::openat(
+            &directory,
+            "index.sqlite-wal",
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        ) {
+            Err(Errno::NOENT) => {}
+            Ok(_) | Err(_) => return Err(SessionStoreError::UnsafeSessionIndex),
+        },
+        _ => return Err(SessionStoreError::UnsafeSessionIndex),
+    }
+
+    let stat = rustix::fs::fstat(&main).map_err(std::io::Error::from)?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file() || stat.st_nlink != 1 {
+        return Err(SessionStoreError::UnsafeSessionIndex);
+    }
+    Ok(snapshot)
+}
+
+#[cfg(unix)]
+fn open_snapshot_source(parent: &File, name: &str) -> Result<Option<File>, SessionStoreError> {
+    use rustix::{
+        fs::{FileType, Mode, OFlags},
+        io::Errno,
+    };
+
+    match rustix::fs::openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => {
+            let stat = rustix::fs::fstat(&descriptor).map_err(std::io::Error::from)?;
+            if !FileType::from_raw_mode(stat.st_mode).is_file() || stat.st_nlink != 1 {
+                return Err(SessionStoreError::UnsafeSessionIndex);
+            }
+            Ok(Some(File::from(descriptor)))
+        }
+        Err(Errno::NOENT) => Ok(None),
+        Err(error) => Err(std::io::Error::from(error).into()),
+    }
+}
+
+#[cfg(unix)]
+fn copy_snapshot_source(
+    source: &File,
+    destination: &Path,
+    component: &'static str,
+    max_bytes: u64,
+) -> Result<(), SessionStoreError> {
+    let metadata = source.metadata()?;
+    validate_snapshot_source_size(&metadata, component, max_bytes)?;
+    let length = usize::try_from(metadata.len()).map_err(|_| SessionStoreError::LimitOverflow)?;
+    let mut output = File::create(destination)?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut offset = 0_usize;
+    while offset < length {
+        let remaining = buffer.len().min(length.saturating_sub(offset));
+        let count = source.read_at(
+            &mut buffer[..remaining],
+            u64::try_from(offset).map_err(|_| SessionStoreError::LimitOverflow)?,
+        )?;
+        if count == 0 {
+            return Err(SessionStoreError::UnsafeSessionIndex);
+        }
+        output.write_all(&buffer[..count])?;
+        offset = offset
+            .checked_add(count)
+            .ok_or(SessionStoreError::LimitOverflow)?;
+    }
+    output.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn snapshot_name_still_refers_to(
+    parent: &File,
+    name: &str,
+    expected: &fs::Metadata,
+) -> Result<bool, SessionStoreError> {
+    let Some(current) = open_snapshot_source(parent, name)? else {
+        return Ok(false);
+    };
+    Ok(same_file_identity(expected, &current.metadata()?))
+}
+
+fn same_snapshot_version(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    same_file_identity(left, right) && left.modified().ok() == right.modified().ok()
+}
+
+fn validate_snapshot_source_size(
+    metadata: &fs::Metadata,
+    component: &'static str,
+    max_bytes: u64,
+) -> Result<(), SessionStoreError> {
+    if metadata.len() > max_bytes {
+        return Err(SessionStoreError::SessionIndexSnapshotTooLarge {
+            component,
+            max_bytes,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn read_only_index_snapshot(
+    root: &Path,
+    expected: &fs::Metadata,
+) -> Result<TempDir, SessionStoreError> {
+    let main_path = root.join("index.sqlite");
+    let main_link = fs::symlink_metadata(&main_path)?;
+    if main_link.file_type().is_symlink() || !same_file_identity(expected, &main_link) {
+        return Err(SessionStoreError::UnsafeSessionIndex);
+    }
+    validate_snapshot_source_size(&main_link, "index.sqlite", MAX_SEARCH_INDEX_BYTES)?;
+    let wal_path = root.join("index.sqlite-wal");
+    let wal_link = match fs::symlink_metadata(&wal_path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(SessionStoreError::UnsafeSessionIndex);
+            }
+            validate_snapshot_source_size(
+                &metadata,
+                "index.sqlite-wal",
+                MAX_SEARCH_INDEX_WAL_BYTES,
+            )?;
+            Some(metadata)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let snapshot = tempfile::tempdir()?;
+    copy_snapshot_path(
+        &main_path,
+        &snapshot.path().join("index.sqlite"),
+        &main_link,
+        "index.sqlite",
+        MAX_SEARCH_INDEX_BYTES,
+    )?;
+    if let Some(wal_link) = wal_link.as_ref() {
+        copy_snapshot_path(
+            &wal_path,
+            &snapshot.path().join("index.sqlite-wal"),
+            wal_link,
+            "index.sqlite-wal",
+            MAX_SEARCH_INDEX_WAL_BYTES,
+        )?;
+        if !same_snapshot_version(&wal_link, &fs::symlink_metadata(&wal_path)?) {
+            return Err(SessionStoreError::UnsafeSessionIndex);
+        }
+    }
+    if !same_snapshot_version(&main_link, &fs::symlink_metadata(&main_path)?) {
+        return Err(SessionStoreError::UnsafeSessionIndex);
+    }
+    Ok(snapshot)
+}
+
+#[cfg(not(unix))]
+fn copy_snapshot_path(
+    source_path: &Path,
+    destination: &Path,
+    expected: &fs::Metadata,
+    component: &'static str,
+    max_bytes: u64,
+) -> Result<(), SessionStoreError> {
+    let source = File::open(source_path)?;
+    let metadata = source.metadata()?;
+    if !same_file_identity(expected, &metadata) {
+        return Err(SessionStoreError::UnsafeSessionIndex);
+    }
+    validate_snapshot_source_size(&metadata, component, max_bytes)?;
+    let mut bounded = source.take(max_bytes.saturating_add(1));
+    let mut output = File::create(destination)?;
+    let copied = std::io::copy(&mut bounded, &mut output)?;
+    if copied > max_bytes {
+        return Err(SessionStoreError::SessionIndexSnapshotTooLarge {
+            component,
+            max_bytes,
+        });
+    }
+    output.sync_all()?;
+    Ok(())
+}
+
+fn plain_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    left.dev() == right.dev() && left.ino() == right.ino() && left.len() == right.len()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
 }
 
 fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary> {
@@ -1336,14 +1856,33 @@ fn load_events<T: DeserializeOwned>(
     file: &File,
 ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
     let bytes = read_opened_file(file)?;
-    parse_events(&bytes)
+    parse_events_bounded(&bytes, usize::MAX)
+}
+
+fn load_events_bounded<T: DeserializeOwned>(
+    file: &File,
+    max_bytes: u64,
+    max_events: usize,
+) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+    let bytes = read_opened_file_bounded(file, max_bytes)?;
+    parse_events_bounded(&bytes, max_events)
 }
 
 fn parse_events<T: DeserializeOwned>(
     bytes: &[u8],
 ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+    parse_events_bounded(bytes, usize::MAX)
+}
+
+fn parse_events_bounded<T: DeserializeOwned>(
+    bytes: &[u8],
+    max_events: usize,
+) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
     let mut events = Vec::new();
     for line in BufReader::new(bytes).lines() {
+        if events.len() >= max_events {
+            return Err(SessionStoreError::EventCountTooLarge { max_events });
+        }
         let line = line?;
         if line.is_empty() {
             return Err(SessionStoreError::CorruptEvent("blank JSONL record"));
@@ -1368,11 +1907,20 @@ fn parse_events<T: DeserializeOwned>(
 
 #[cfg(unix)]
 fn read_opened_file(file: &File) -> Result<Vec<u8>, SessionStoreError> {
+    read_opened_file_bounded(file, u64::MAX)
+}
+
+#[cfg(unix)]
+fn read_opened_file_bounded(file: &File, max_bytes: u64) -> Result<Vec<u8>, SessionStoreError> {
     let stat = rustix::fs::fstat(file).map_err(std::io::Error::from)?;
     if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
         return Err(SessionStoreError::UnsafeEventFileType);
     }
-    let length = usize::try_from(stat.st_size).map_err(|_| SessionStoreError::LimitOverflow)?;
+    let file_bytes = u64::try_from(stat.st_size).map_err(|_| SessionStoreError::LimitOverflow)?;
+    if file_bytes > max_bytes {
+        return Err(SessionStoreError::EventLogTooLarge { max_bytes });
+    }
+    let length = usize::try_from(file_bytes).map_err(|_| SessionStoreError::LimitOverflow)?;
     let mut bytes = vec![0_u8; length];
     let mut offset = 0_usize;
     while offset < bytes.len() {
@@ -1395,10 +1943,22 @@ fn read_opened_file(file: &File) -> Result<Vec<u8>, SessionStoreError> {
 
 #[cfg(not(unix))]
 fn read_opened_file(file: &File) -> Result<Vec<u8>, SessionStoreError> {
+    read_opened_file_bounded(file, u64::MAX)
+}
+
+#[cfg(not(unix))]
+fn read_opened_file_bounded(file: &File, max_bytes: u64) -> Result<Vec<u8>, SessionStoreError> {
     let mut file = file.try_clone()?;
+    if file.metadata()?.len() > max_bytes {
+        return Err(SessionStoreError::EventLogTooLarge { max_bytes });
+    }
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    file.take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_err(|_| SessionStoreError::LimitOverflow)? > max_bytes {
+        return Err(SessionStoreError::EventLogTooLarge { max_bytes });
+    }
     Ok(bytes)
 }
 
@@ -1640,6 +2200,32 @@ pub enum SessionStoreError {
     /// An unlocked external writer changed the log during a descriptor-stable read.
     #[error("session event log changed while it was being read")]
     EventFileChangedDuringRead,
+    /// Parent and child identities in a fork must differ.
+    #[error("session fork identities conflict")]
+    ForkIdentityConflict,
+    /// The requested parent event cursor does not exist.
+    #[error("session fork source cursor does not exist")]
+    ForkSourceCursorMissing,
+    /// An existing child log is not the requested parent prefix.
+    #[error("session fork target contains conflicting events")]
+    ForkTargetConflict,
+    #[error("session event log exceeds the {max_bytes}-byte read limit")]
+    EventLogTooLarge { max_bytes: u64 },
+    #[error("session event log exceeds the {max_events}-event read limit")]
+    EventCountTooLarge { max_events: usize },
+    #[error("session search query exceeds 512 bytes")]
+    SearchQueryTooLarge,
+    #[error("session search internal limit exceeds 1001")]
+    SearchLimitTooLarge,
+    #[error("session search index is missing or has an unsafe file identity")]
+    UnsafeSessionIndex,
+    #[error("session search {component} exceeds the {max_bytes}-byte snapshot limit")]
+    SessionIndexSnapshotTooLarge {
+        /// Derived index component which exceeded its independent ceiling.
+        component: &'static str,
+        /// Maximum bytes the read-only search snapshot accepts for this component.
+        max_bytes: u64,
+    },
     /// A complete JSONL record was structurally corrupt.
     #[error("session event log is corrupt: {0}")]
     CorruptEvent(&'static str),
@@ -1694,15 +2280,125 @@ mod tests {
     use rw_types::{AccountingAttribution, Cost, SequenceId, TurnId, Usage};
 
     use super::{
-        AccountingLedger, EventEnvelope, ProjectionStatus, SessionEventLog, SessionIndex,
-        SessionProjection, SessionStoreError, SessionSummary, TurnAccountingEntry, UtcDayKey,
-        UtcTimestamp,
+        AccountingLedger, EventEnvelope, MAX_SEARCH_INDEX_BYTES, MAX_SEARCH_INDEX_WAL_BYTES,
+        ProjectionStatus, SessionEventLog, SessionIndex, SessionProjection, SessionStoreError,
+        SessionSummary, TurnAccountingEntry, UtcDayKey, UtcTimestamp, upsert_projection,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
     struct FixtureEvent {
         kind: String,
         text: String,
+    }
+
+    #[test]
+    fn fork_copies_exact_prefix_and_parent_and_child_diverge_independently() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let mut parent = SessionEventLog::open(root.path(), "parent")
+            .unwrap_or_else(|error| panic!("parent must open: {error}"));
+        let events = (0..3)
+            .map(|index| FixtureEvent {
+                kind: "parent".to_owned(),
+                text: format!("event-{index}"),
+            })
+            .collect::<Vec<_>>();
+        parent
+            .append_batch(events.clone())
+            .unwrap_or_else(|error| panic!("parent events must append: {error}"));
+        drop(parent);
+
+        let mut child = SessionEventLog::fork(root.path(), "parent", "child", Some(SequenceId(1)))
+            .unwrap_or_else(|error| panic!("child fork must succeed: {error}"));
+        assert_eq!(
+            child
+                .load::<FixtureEvent>()
+                .unwrap_or_else(|error| panic!("child prefix must load: {error}"))
+                .into_iter()
+                .map(|event| event.event)
+                .collect::<Vec<_>>(),
+            events[..2]
+        );
+        let parent_bytes = std::fs::read(root.path().join("sessions/parent/events.jsonl"))
+            .unwrap_or_else(|error| panic!("parent bytes must read: {error}"));
+        let child_bytes = std::fs::read(child.path())
+            .unwrap_or_else(|error| panic!("child bytes must read: {error}"));
+        let expected_prefix_len = parent_bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .take(2)
+            .map(<[u8]>::len)
+            .sum::<usize>();
+        assert_eq!(child_bytes, parent_bytes[..expected_prefix_len]);
+        child
+            .append(FixtureEvent {
+                kind: "child".to_owned(),
+                text: "diverged".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("child divergence must append: {error}"));
+        drop(child);
+
+        let mut parent = SessionEventLog::open(root.path(), "parent")
+            .unwrap_or_else(|error| panic!("parent must reopen: {error}"));
+        parent
+            .append(FixtureEvent {
+                kind: "parent".to_owned(),
+                text: "continued".to_owned(),
+            })
+            .unwrap_or_else(|error| panic!("parent continuation must append: {error}"));
+        drop(parent);
+
+        let parent = SessionEventLog::load_existing::<FixtureEvent>(root.path(), "parent")
+            .unwrap_or_else(|error| panic!("parent must load: {error}"));
+        let child = SessionEventLog::load_existing::<FixtureEvent>(root.path(), "child")
+            .unwrap_or_else(|error| panic!("child must load: {error}"));
+        assert_eq!(parent.len(), 4);
+        assert_eq!(child.len(), 3);
+        assert_eq!(parent[2].event, events[2]);
+        assert_eq!(parent[3].event.text, "continued");
+        assert_eq!(child[2].event.kind, "child");
+        assert!(matches!(
+            SessionEventLog::fork(root.path(), "parent", "child", Some(SequenceId(1))),
+            Err(SessionStoreError::ForkTargetConflict)
+        ));
+        assert!(matches!(
+            SessionEventLog::fork(root.path(), "parent", "parent", None),
+            Err(SessionStoreError::ForkIdentityConflict)
+        ));
+    }
+
+    #[test]
+    fn fork_resumes_an_exact_partial_child_prefix_idempotently() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let events = (0..3)
+            .map(|index| FixtureEvent {
+                kind: "fixture".to_owned(),
+                text: format!("event-{index}"),
+            })
+            .collect::<Vec<_>>();
+        let mut parent = SessionEventLog::open(root.path(), "parent")
+            .unwrap_or_else(|error| panic!("parent must open: {error}"));
+        parent
+            .append_batch(events.clone())
+            .unwrap_or_else(|error| panic!("parent must append: {error}"));
+        drop(parent);
+        let mut partial = SessionEventLog::open(root.path(), "partial")
+            .unwrap_or_else(|error| panic!("partial child must open: {error}"));
+        partial
+            .append(events[0].clone())
+            .unwrap_or_else(|error| panic!("partial child must append: {error}"));
+        drop(partial);
+
+        let completed =
+            SessionEventLog::fork(root.path(), "parent", "partial", Some(SequenceId(2)))
+                .unwrap_or_else(|error| panic!("partial fork must recover: {error}"));
+        assert_eq!(
+            completed
+                .load::<FixtureEvent>()
+                .unwrap_or_else(|error| panic!("completed child must load: {error}"))
+                .into_iter()
+                .map(|event| event.event)
+                .collect::<Vec<_>>(),
+            events
+        );
     }
 
     fn accounting_entry(
@@ -2624,6 +3320,194 @@ mod tests {
                 .unwrap_or_else(|error| panic!("rebuilt accounting must query: {error}")),
             vec![accounting]
         );
+    }
+
+    #[test]
+    fn read_only_search_never_creates_or_mutates_index_artifacts() {
+        let absent = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        assert!(SessionIndex::search_read_only(absent.path(), "needle", 10).is_err());
+        assert!(
+            std::fs::read_dir(absent.path())
+                .unwrap_or_else(|error| panic!("list absent root: {error}"))
+                .next()
+                .is_none()
+        );
+
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let projection = SessionProjection {
+            summary: SessionSummary {
+                id: "searchable".to_owned(),
+                title: "Needle session".to_owned(),
+                updated_unix_ms: 7,
+                cost_micros: 0,
+            },
+            transcript: "deterministic needle transcript".to_owned(),
+            projected_through: Some(SequenceId(0)),
+        };
+        SessionIndex::open(root.path())
+            .and_then(|index| index.upsert(&projection))
+            .unwrap_or_else(|error| panic!("seed index: {error}"));
+        let index_path = root.path().join("index.sqlite");
+        let before =
+            std::fs::read(&index_path).unwrap_or_else(|error| panic!("read index: {error}"));
+        let wal_path = root.path().join("index.sqlite-wal");
+        let shm_path = root.path().join("index.sqlite-shm");
+        let wal_before = std::fs::read(&wal_path).ok();
+        let shm_before = std::fs::read(&shm_path).ok();
+        let found = SessionIndex::search_read_only(root.path(), "needle", 10)
+            .unwrap_or_else(|error| panic!("read-only search: {error}"));
+        assert_eq!(found, vec![projection.summary]);
+        assert!(
+            SessionIndex::search_read_only(root.path(), "\" OR ( needle", 10)
+                .unwrap_or_else(|error| panic!("punctuation search: {error}"))
+                .is_empty()
+        );
+        assert_eq!(
+            std::fs::read(&index_path).unwrap_or_else(|error| panic!("reread index: {error}")),
+            before
+        );
+        assert_eq!(std::fs::read(&wal_path).ok(), wal_before);
+        assert_eq!(std::fs::read(&shm_path).ok(), shm_before);
+    }
+
+    #[test]
+    fn read_only_search_sees_committed_wal_rows_without_mutating_artifacts() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let index =
+            SessionIndex::open(root.path()).unwrap_or_else(|error| panic!("seed index: {error}"));
+        let writer = index
+            .connection()
+            .unwrap_or_else(|error| panic!("held writer: {error}"));
+        writer
+            .execute_batch("PRAGMA wal_autocheckpoint=0;")
+            .unwrap_or_else(|error| panic!("disable autocheckpoint: {error}"));
+        let projection = SessionProjection {
+            summary: SessionSummary {
+                id: "wal-fresh".to_owned(),
+                title: "Fresh WAL needle".to_owned(),
+                updated_unix_ms: 11,
+                cost_micros: 0,
+            },
+            transcript: "committed only in the held writer WAL".to_owned(),
+            projected_through: Some(SequenceId(4)),
+        };
+        upsert_projection(&writer, &projection)
+            .unwrap_or_else(|error| panic!("WAL projection: {error}"));
+
+        let index_path = root.path().join("index.sqlite");
+        let wal_path = root.path().join("index.sqlite-wal");
+        let shm_path = root.path().join("index.sqlite-shm");
+        let before = [
+            std::fs::read(&index_path).unwrap_or_else(|error| panic!("main db: {error}")),
+            std::fs::read(&wal_path).unwrap_or_else(|error| panic!("WAL: {error}")),
+            std::fs::read(&shm_path).unwrap_or_else(|error| panic!("SHM: {error}")),
+        ];
+        assert!(
+            !before[1].is_empty(),
+            "fixture must retain committed WAL bytes"
+        );
+
+        let found = SessionIndex::search_read_only(root.path(), "needle", 10)
+            .unwrap_or_else(|error| panic!("fresh read-only search: {error}"));
+        assert_eq!(found, vec![projection.summary]);
+        assert_eq!(
+            [
+                std::fs::read(&index_path).unwrap_or_else(|error| panic!("main db after: {error}")),
+                std::fs::read(&wal_path).unwrap_or_else(|error| panic!("WAL after: {error}")),
+                std::fs::read(&shm_path).unwrap_or_else(|error| panic!("SHM after: {error}")),
+            ],
+            before
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn read_only_search_rejects_an_oversized_sparse_main_index_before_copying() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        SessionIndex::open(root.path()).unwrap_or_else(|error| panic!("seed index: {error}"));
+        let index_path = root.path().join("index.sqlite");
+        OpenOptions::new()
+            .write(true)
+            .open(&index_path)
+            .and_then(|file| file.set_len(MAX_SEARCH_INDEX_BYTES + 1))
+            .unwrap_or_else(|error| panic!("make sparse oversized index: {error}"));
+
+        assert!(matches!(
+            SessionIndex::search_read_only(root.path(), "needle", 10),
+            Err(SessionStoreError::SessionIndexSnapshotTooLarge {
+                component: "index.sqlite",
+                max_bytes: MAX_SEARCH_INDEX_BYTES,
+            })
+        ));
+    }
+
+    #[test]
+    fn read_only_search_rejects_an_oversized_sparse_wal_before_copying() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        SessionIndex::open(root.path()).unwrap_or_else(|error| panic!("seed index: {error}"));
+        let wal_path = root.path().join("index.sqlite-wal");
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&wal_path)
+            .and_then(|file| file.set_len(MAX_SEARCH_INDEX_WAL_BYTES + 1))
+            .unwrap_or_else(|error| panic!("make sparse oversized WAL: {error}"));
+
+        assert!(matches!(
+            SessionIndex::search_read_only(root.path(), "needle", 10),
+            Err(SessionStoreError::SessionIndexSnapshotTooLarge {
+                component: "index.sqlite-wal",
+                max_bytes: MAX_SEARCH_INDEX_WAL_BYTES,
+            })
+        ));
+    }
+
+    #[test]
+    fn bounded_history_read_rejects_bytes_and_event_count_before_returning_data() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "bounded")
+            .unwrap_or_else(|error| panic!("open log: {error}"));
+        log.append(FixtureEvent {
+            kind: "fixture".to_owned(),
+            text: "bounded payload".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("append event: {error}"));
+        drop(log);
+        assert!(matches!(
+            SessionEventLog::load_existing_bounded::<FixtureEvent>(root.path(), "bounded", 1, 10),
+            Err(SessionStoreError::EventLogTooLarge { .. })
+        ));
+        assert!(matches!(
+            SessionEventLog::load_existing_bounded::<FixtureEvent>(
+                root.path(),
+                "bounded",
+                1024 * 1024,
+                0,
+            ),
+            Err(SessionStoreError::EventCountTooLarge { max_events: 0 })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_only_search_rejects_symlink_and_hardlink_indexes() {
+        use std::os::unix::fs::symlink;
+
+        let target = tempdir().unwrap_or_else(|error| panic!("target tempdir: {error}"));
+        SessionIndex::open(target.path())
+            .unwrap_or_else(|error| panic!("seed target index: {error}"));
+        let target_index = target.path().join("index.sqlite");
+
+        let linked = tempdir().unwrap_or_else(|error| panic!("linked tempdir: {error}"));
+        symlink(&target_index, linked.path().join("index.sqlite"))
+            .unwrap_or_else(|error| panic!("index symlink: {error}"));
+        assert!(SessionIndex::search_read_only(linked.path(), "needle", 10).is_err());
+
+        let hard = tempdir().unwrap_or_else(|error| panic!("hardlink tempdir: {error}"));
+        std::fs::hard_link(&target_index, hard.path().join("index.sqlite"))
+            .unwrap_or_else(|error| panic!("index hardlink: {error}"));
+        assert!(SessionIndex::search_read_only(hard.path(), "needle", 10).is_err());
     }
 
     use std::{fs::OpenOptions, io::Write};

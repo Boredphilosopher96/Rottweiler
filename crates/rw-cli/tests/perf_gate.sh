@@ -31,6 +31,7 @@ script = repo / "crates/rw-cli/tests/fixtures/perf-script.json"
 def one(index):
     home = root / f"home-{index}"
     home.mkdir()
+    home.chmod(0o700)
     env = {
         "HOME": str(home),
         "ROTTWEILER_HOME": str(home),

@@ -9,7 +9,12 @@ import {
 
 import { createRottweilerApp } from "../src/app"
 import { ImageAttachmentRenderable, fuzzyScore } from "../src/components"
-import { PROTOCOL_VERSION, type ClientCommand, type EngineEvent } from "../src/protocol"
+import {
+  PROTOCOL_VERSION,
+  type ClientCommand,
+  type CommandOutcome,
+  type EngineEvent,
+} from "../src/protocol"
 import { createInitialState, type RottweilerState } from "../src/state"
 import { kennelTheme } from "../src/theme"
 
@@ -19,6 +24,14 @@ function meta(sequence: string) {
     session_id: "session-components",
     sequence_id: sequence,
     emitted_at: "2026-01-01T00:00:00Z",
+  }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = performance.now() + timeoutMs
+  while (!predicate()) {
+    if (performance.now() >= deadline) throw new Error("timed out waiting for component state")
+    await Bun.sleep(5)
   }
 }
 
@@ -431,6 +444,169 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
     expect(app.transcript.subagentPanel.rows.size).toBe(8)
     expect(app.transcript.subagentPanel.header.plainText).toContain("20 total")
+  })
+
+  test("renders cumulative review and routes exact per-file accept or revert commands", async () => {
+    const setup = await createTestRenderer({ width: 112, height: 32, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const review = {
+      sessionId: "session-review",
+      files: [
+        {
+          path: "src/lib.rs",
+          unifiedDiff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+          status: "pending" as const,
+          truncated: true,
+          unrestorableReason: null,
+          originalHash: "old",
+          currentHash: "new",
+        },
+        {
+          path: "generated.bin",
+          unifiedDiff: "Binary files differ",
+          status: "pending" as const,
+          truncated: false,
+          unrestorableReason: "original bytes were not checkpointed",
+          originalHash: "absent",
+          currentHash: "generated",
+        },
+      ],
+    }
+    const app = createRottweilerApp(renderer, {
+      initialState: { ...createInitialState(), review },
+      sessionId: "session-review",
+      clientId: "review-client",
+      requestId: () => "review-request",
+      onCommand(command) {
+        commands.push(command)
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.reviewPanel.visible).toBeTrue()
+    expect(app.reviewPanel.summary.plainText).toContain("2 pending")
+    expect(app.reviewPanel.diff.diff).toContain("+new")
+    setup.mockInput.pressKey("r")
+    expect(commands).toContainEqual({
+      type: "review_file",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "review-client",
+        request_id: "review-request",
+      },
+      session_id: "session-review",
+      path: "src/lib.rs",
+      decision: "revert",
+      current_hash: "new",
+    })
+
+    commands.length = 0
+    app.reviewPanel.files.setSelectedIndex(1)
+    setup.mockInput.pressKey("r")
+    expect(commands).toEqual([])
+    expect(app.reviewPanel.hint.plainText).toContain("revert unavailable")
+    setup.mockInput.pressKey("a")
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "review_file",
+      path: "generated.bin",
+      decision: "accept",
+      current_hash: "generated",
+    }))
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.reviewPanel.visible).toBeFalse()
+    expect(app.composer.visible).toBeTrue()
+    expect(app.state.review).toBeNull()
+  })
+
+  test("keeps one review decision in flight and surfaces a stale fingerprint rejection", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    let resolveDecision!: (outcome: CommandOutcome) => void
+    const decision = new Promise<CommandOutcome>((resolve) => {
+      resolveDecision = resolve
+    })
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        review: {
+          sessionId: "session-stale-review",
+          files: [
+            {
+              path: "src/stale.rs",
+              unifiedDiff: "--- a/src/stale.rs\n+++ b/src/stale.rs\n@@ -1 +1 @@\n-old\n+new\n",
+              status: "pending",
+              truncated: false,
+              unrestorableReason: null,
+              originalHash: "original-state",
+              currentHash: "displayed-state",
+            },
+          ],
+        },
+      },
+      sessionId: "session-stale-review",
+      onCommand(command) {
+        commands.push(command)
+        return command.type === "review_file" ? decision : { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    setup.mockInput.pressKey("r")
+    setup.mockInput.pressKey("r")
+    expect(commands.filter((command) => command.type === "review_file")).toHaveLength(1)
+    expect(app.reviewPanel.hint.plainText).toContain("Decision pending")
+
+    resolveDecision({
+      type: "rejected",
+      error: {
+        category: "protocol",
+        code: "stale_review_fingerprint",
+        message: "the file changed since this review was displayed",
+        retryable: true,
+      },
+    })
+    await waitFor(() => app.state.errors.at(-1)?.code === "stale_review_fingerprint")
+    expect(app.state.errors.at(-1)?.code).toBe("stale_review_fingerprint")
+    expect(app.banner.plainText).toContain("file changed since this review")
+    expect(app.reviewPanel.hint.plainText).not.toContain("pending")
+  })
+
+  test("searches sessions remotely while preserving instant local fuzzy filtering", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        sessions: [
+          {
+            sessionId: "session-rottweiler",
+            workspaceName: "Rottweiler",
+            model: "fast",
+            driverClientId: null,
+            shellActive: false,
+          },
+        ],
+      },
+      onCommand(command) {
+        commands.push(command)
+      },
+    })
+    renderer.root.add(app)
+    app.openSessionPicker()
+    setup.mockInput.typeText("rott")
+    await Bun.sleep(100)
+
+    expect(commands[0]).toMatchObject({ type: "list_sessions" })
+    expect(commands.at(-1)).toMatchObject({ type: "search_sessions", query: "rott", limit: 100 })
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "session-rottweiler",
+    ])
   })
 
   test("fuzzy matching is ordered and image fallback is capability gated", async () => {

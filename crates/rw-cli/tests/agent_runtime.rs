@@ -24,6 +24,74 @@ use tempfile::{TempDir, tempdir};
 const PROMPT: &str = "create hello.py that prints hi, run it";
 const STEERING: &str = "STEER_TOKEN_M2_CLI";
 
+#[cfg(unix)]
+#[test]
+fn m9_rw_replay_renders_a_persisted_envelope_log_through_production_tui() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::Builder::new()
+        .prefix("rw-m9-")
+        .tempdir_in("/tmp")
+        .expect("short root");
+    let home = private_test_directory(&root.path().join("home"));
+    let workspace = private_test_directory(&root.path().join("workspace"));
+    let session_id = "session-m9-replay-golden";
+    let session = home.join("sessions").join(session_id);
+    fs::create_dir_all(&session).expect("session directory");
+    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/tui/test/fixtures/m9-replay-events.jsonl");
+    let mut persisted = fs::File::create(session.join("events.jsonl")).expect("event log");
+    for (sequence, line) in fs::read_to_string(source)
+        .expect("replay fixture")
+        .lines()
+        .enumerate()
+    {
+        let mut event: serde_json::Value = serde_json::from_str(line).expect("fixture event");
+        event["meta"]["sequence_id"] = json!(sequence.to_string());
+        serde_json::to_writer(
+            &mut persisted,
+            &json!({
+                "schema_version": 1,
+                "sequence": sequence.to_string(),
+                "event": event,
+            }),
+        )
+        .expect("persisted envelope");
+        persisted.write_all(b"\n").expect("event newline");
+    }
+    persisted.sync_all().expect("durable event fixture");
+
+    let worker = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/tui/test/goldens/replay-cli-worker.ts")
+        .canonicalize()
+        .expect("replay worker");
+    let wrapper = root.path().join("replay-tui");
+    fs::write(
+        &wrapper,
+        format!("#!/bin/sh\nexec bun '{}'\n", worker.display()),
+    )
+    .expect("TUI wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("wrapper mode");
+    let report = root.path().join("replay-report.json");
+    let output = base_command(&workspace, &home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ROTTWEILER_TUI_BIN", &wrapper)
+        .env("ROTTWEILER_TEST_REPORT_FILE", &report)
+        .args(["replay", session_id])
+        .output()
+        .expect("rw replay process");
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let actual = fs::read_to_string(report).expect("replay report");
+    let expected =
+        include_str!("../../../packages/tui/test/goldens/fixtures/m9-replay-cli.golden.json");
+    assert_eq!(actual, expected);
+}
+
 #[test]
 fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
     let root = tempdir().expect("root");

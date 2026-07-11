@@ -140,7 +140,7 @@ Interrupt = cooperative cancellation token checked at every await point; partial
 
 ### Subagent orchestrator (`rw-core`)
 
-Subagent = a full child session with its own event log, restricted tool registry, its own context budget. Parent holds a handle; child events are re-broadcast to the parent's *client* tagged with the child id (TUI shows nested progress) — **display-only, never persisted in the parent's log**. The parent log contains exactly: the `spawn_agent` tool call, `SubagentSpawned`, and `SubagentFinished` + tool result, all in tool-call index order per the determinism rule — parallel children completing in any order cannot perturb it. `rw replay` re-derives nested progress from the child logs by id. Worktree isolation delegates to `git worktree` via `rw-sandbox` path rules.
+Subagent = a full child session with its own event log, restricted tool registry, its own context budget. Parent holds a handle; child events are re-broadcast to the parent's *client* tagged with the child id (TUI shows nested progress) — **display-only, never persisted in the parent's log**. The parent log contains exactly: the `spawn_agent` tool call, `SubagentSpawned`, and `SubagentFinished` + tool result, all in tool-call index order per the determinism rule — parallel children completing in any order cannot perturb it. `rw replay` re-derives nested progress only from child ids authenticated by those durable spawn events; child logs use the same no-symlink event-log boundary and replay has explicit depth, session-count, event-count, per-event, and aggregate-byte ceilings. Worktree isolation delegates to `git worktree` via `rw-sandbox` path rules.
 
 ### Router (`rw-providers`)
 
@@ -172,6 +172,25 @@ resolve(alias) → [candidate models] → adapter → provider
 - `index.sqlite` — session list, titles, costs, full-text search over transcripts.
 - `checkpoints/` — content-addressed blobs (BLAKE3) + per-turn manifests of touched files. Rewind = restore manifest.
 - Config precedence: built-in defaults ← `~/.rottweiler/config.toml` ← `.rottweiler/config.toml` ← env ← CLI flags. **Exception**: security-sensitive keys (`[permissions]`, safe-list, `[network]`/proxy, telemetry opt-in, update channel) are ignored at project level with a warning (05 Layer 0). Schema in `rw-types`, `rw config check` validates and prints effective config with provenance per key.
+
+Forking is a conversation operation, not a working-tree clone. The child copies
+the exact durable event prefix and historical workspace-root generation, but it
+uses the current shared workspace under the same execution lease as its parent.
+Its checkpoint namespace starts empty, so review, rewind ownership, and spend
+attribution cover only child work. A bounded private fork-operation journal is
+fsynced before child materialization; child metadata is the storage commit
+marker, and a completed record retains the exact authenticated request/result.
+Startup recovery removes incomplete child trees or promotes committed records,
+so a lost response or process death can be retried without creating a second
+child. Fork idempotency is keyed by a bounded client-generated operation id,
+not the connection-scoped client/request pair. The local TUI writes that pending
+identity to a private per-session handoff before POST and retains it across
+process restarts until the correlated typed completion arrives; retries may use
+new transport credentials while the engine re-correlates the original child to
+the new request metadata. The prepared journal also authenticates the exact
+historical model, workspace-root generation, and root digest, so completed
+operation recovery remains constant-cost and never rescans a child log or root
+journal that may have grown substantially after the fork.
 
 **M0 path and merge contract.** `ROTTWEILER_HOME/config.toml` is the explicit
 user-path override; otherwise an explicitly set

@@ -9,14 +9,21 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use rw_types::{ReviewFileDecision, ReviewFileStatus, SessionId, SessionReview, SessionReviewFile};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const MANIFEST_VERSION: u16 = 1;
 const OPAQUE_PENDING_VERSION: u16 = 1;
 const REWIND_TRANSACTION_VERSION: u16 = 1;
+const REVIEW_LEDGER_VERSION: u16 = 1;
+const MAX_REVIEW_FILES: usize = 1_024;
+const MAX_REVIEW_FILE_BYTES: usize = 256 * 1024;
+const MAX_REVIEW_IDENTITY_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_REVIEW_TOTAL_DIFF_BYTES: usize = 2 * 1024 * 1024;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 type CapturedRegular = (Vec<u8>, Option<u32>);
+type CapturedReview = (ReviewCurrentState, Option<Vec<u8>>);
 
 /// Pre-mutation state for one workspace-relative path.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -158,6 +165,35 @@ struct RewindTransaction {
     phase: RewindPhase,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum ReviewCurrentState {
+    Present {
+        content_blake3: String,
+        bytes: u64,
+        unix_mode: Option<u32>,
+    },
+    Absent,
+    Unsupported {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewDecisionRecord {
+    decision: ReviewFileDecision,
+    current: ReviewCurrentState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewLedger {
+    version: u16,
+    session_id: String,
+    files: BTreeMap<String, ReviewDecisionRecord>,
+}
+
 /// Checkpoint storage bound to one canonical workspace root.
 #[derive(Clone, Debug)]
 pub struct CheckpointStore {
@@ -190,6 +226,7 @@ impl CheckpointStore {
         fs::create_dir_all(root.join("manifests"))?;
         fs::create_dir_all(root.join("pending"))?;
         fs::create_dir_all(root.join("rewinds"))?;
+        fs::create_dir_all(root.join("reviews"))?;
         let root = fs::canonicalize(root)?;
         let storage_relative = root
             .strip_prefix(&workspace)
@@ -519,6 +556,325 @@ impl CheckpointStore {
             return Err(CheckpointError::RewindNotCommitted);
         }
         remove_durable(&self.rewind_path(&handle.session_id))
+    }
+
+    /// Computes the cumulative session diff from each path's earliest captured
+    /// preimage to its current confined workspace state.
+    ///
+    /// Accepted and reverted decisions are fingerprint-bound. A later edit
+    /// automatically returns that path to `pending` without mutating history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for corrupt manifests/blobs, unsafe paths, an excessive
+    /// file count, or an unreadable workspace state.
+    pub fn session_review(&self, session_id: &str) -> Result<SessionReview, CheckpointError> {
+        validate_session_id(session_id)?;
+        let baselines = self.cumulative_baselines(session_id)?;
+        if baselines.len() > MAX_REVIEW_FILES {
+            return Err(CheckpointError::ReviewFileLimit);
+        }
+        let ledger = self.load_review_ledger(session_id)?;
+        let mut remaining_diff_bytes = MAX_REVIEW_TOTAL_DIFF_BYTES;
+        let mut files = Vec::with_capacity(baselines.len());
+        for (path, baseline) in baselines {
+            let (current, current_content) = self.capture_review_current(&path)?;
+            let matching_decision = ledger
+                .files
+                .get(&path)
+                .filter(|record| record.current == current);
+            let unchanged = baseline_matches_current(&baseline, &current);
+            if unchanged && matching_decision.is_none() {
+                continue;
+            }
+            let status = matching_decision.map_or(ReviewFileStatus::Pending, |record| match record
+                .decision
+            {
+                ReviewFileDecision::Accept => ReviewFileStatus::Accepted,
+                ReviewFileDecision::Revert => ReviewFileStatus::Reverted,
+            });
+            let (unified_diff, truncated, unrestorable_reason) = self.render_review_diff(
+                &path,
+                &baseline,
+                &current,
+                current_content.as_deref(),
+                remaining_diff_bytes,
+            )?;
+            remaining_diff_bytes = remaining_diff_bytes.saturating_sub(unified_diff.len());
+            files.push(SessionReviewFile {
+                path,
+                unified_diff,
+                status,
+                truncated,
+                unrestorable_reason,
+                original_hash: review_identity(&baseline)?,
+                current_hash: review_identity(&current)?,
+            });
+        }
+        Ok(SessionReview {
+            session_id: SessionId(session_id.to_owned()),
+            files,
+        })
+    }
+
+    /// Accepts or reverts exactly one cumulative-review path and returns a
+    /// complete refreshed review snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Decisions fail closed for unrestorable entries. All paths are normalized
+    /// and restored through the same confined filesystem boundary as rewind.
+    pub fn resolve_review_file(
+        &self,
+        session_id: &str,
+        relative_path: &Path,
+        decision: ReviewFileDecision,
+        expected_current_hash: &str,
+    ) -> Result<SessionReview, CheckpointError> {
+        validate_session_id(session_id)?;
+        let path = normalize_relative(relative_path)?;
+        let before = self.session_review(session_id)?;
+        let file = before
+            .files
+            .iter()
+            .find(|file| file.path == path)
+            .ok_or(CheckpointError::ReviewPathNotFound)?;
+        if file.current_hash != expected_current_hash {
+            return Err(CheckpointError::ReviewPathChanged);
+        }
+        if file.unrestorable_reason.is_some() {
+            return Err(CheckpointError::ReviewPathNotRevertible);
+        }
+        let baselines = self.cumulative_baselines(session_id)?;
+        let baseline = baselines
+            .get(&path)
+            .ok_or(CheckpointError::ReviewPathNotFound)?;
+        let (current_before_decision, _) = self.capture_review_current(&path)?;
+        if review_identity(&current_before_decision)? != expected_current_hash {
+            return Err(CheckpointError::ReviewPathChanged);
+        }
+        let current = if decision == ReviewFileDecision::Revert {
+            self.restore_state(&path, baseline, &mut RewindReport::default())?;
+            let (restored, _) = self.capture_review_current(&path)?;
+            if !baseline_matches_current(baseline, &restored) {
+                return Err(CheckpointError::ReviewPathChanged);
+            }
+            restored
+        } else {
+            current_before_decision
+        };
+        let mut ledger = self.load_review_ledger(session_id)?;
+        ledger
+            .files
+            .insert(path, ReviewDecisionRecord { decision, current });
+        self.write_review_ledger(&ledger)?;
+        self.session_review(session_id)
+    }
+
+    /// Copies checkpoint ownership through `through_turn` to a child session.
+    /// Immutable content-addressed blobs remain shared; parent manifests and
+    /// review decisions are never modified or inherited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid ids, a pre-existing child checkpoint
+    /// namespace, or corrupt parent manifests.
+    pub fn fork_session(
+        &self,
+        parent_session_id: &str,
+        child_session_id: &str,
+        through_turn: Option<u64>,
+    ) -> Result<(), CheckpointError> {
+        self.fork_into(self, parent_session_id, child_session_id, through_turn)
+    }
+
+    /// Copies one session's checkpoint prefix into a different session-bound
+    /// checkpoint store. Every referenced blob is revalidated and installed in
+    /// the target content-addressed store before its child manifest is exposed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for mismatched workspaces, invalid identities, corrupt
+    /// source data, or a pre-existing child namespace.
+    pub fn fork_into(
+        &self,
+        target: &CheckpointStore,
+        parent_session_id: &str,
+        child_session_id: &str,
+        through_turn: Option<u64>,
+    ) -> Result<(), CheckpointError> {
+        validate_session_id(parent_session_id)?;
+        validate_session_id(child_session_id)?;
+        if parent_session_id == child_session_id {
+            return Err(CheckpointError::ForkIdentityConflict);
+        }
+        if self.workspace != target.workspace {
+            return Err(CheckpointError::ForkWorkspaceMismatch);
+        }
+        let manifests_directory = target.root.join("manifests");
+        let child_directory = manifests_directory.join(child_session_id);
+        let mut turns = self.manifest_turns(parent_session_id)?;
+        turns.sort_unstable();
+        if let Some(through_turn) = through_turn {
+            turns.retain(|turn| *turn <= through_turn);
+        }
+        if child_directory.exists() {
+            return Err(CheckpointError::ForkTargetExists);
+        }
+        let nonce = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let staging = manifests_directory.join(format!(".rw-{}-{nonce}.tmp", std::process::id()));
+        match fs::create_dir(&staging) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(CheckpointError::ForkTargetExists);
+            }
+            Err(error) => return Err(error.into()),
+        }
+        let result = (|| {
+            for turn in turns {
+                let mut manifest = self.load_manifest(parent_session_id, turn)?;
+                for state in manifest.files.values() {
+                    if let CheckpointFileState::Present { blob, bytes, .. } = state {
+                        let content = self.read_valid_blob(blob, *bytes)?;
+                        target.write_blob(blob, &content)?;
+                    }
+                }
+                child_session_id.clone_into(&mut manifest.session_id);
+                Self::validate_manifest(&manifest, child_session_id, turn)?;
+                atomic_replace(
+                    &staging.join(format!("{turn:020}.json")),
+                    &serde_json::to_vec_pretty(&manifest)?,
+                )?;
+            }
+            File::open(&staging)?.sync_all()?;
+            fs::rename(&staging, &child_directory)?;
+            File::open(&manifests_directory)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&staging);
+        }
+        result
+    }
+
+    fn cumulative_baselines(
+        &self,
+        session_id: &str,
+    ) -> Result<BTreeMap<String, CheckpointFileState>, CheckpointError> {
+        let mut turns = self.manifest_turns(session_id)?;
+        turns.sort_unstable();
+        let mut baselines = BTreeMap::new();
+        for turn in turns {
+            for (path, state) in self.load_manifest(session_id, turn)?.files {
+                if path.chars().any(char::is_control) {
+                    return Err(CheckpointError::UnsafePath);
+                }
+                baselines.entry(path).or_insert(state);
+            }
+        }
+        Ok(baselines)
+    }
+
+    fn capture_review_current(
+        &self,
+        path: &str,
+    ) -> Result<(ReviewCurrentState, Option<Vec<u8>>), CheckpointError> {
+        match capture_review_regular_confined(&self.workspace, path) {
+            Ok(Some(captured)) => Ok(captured),
+            Ok(None) => Ok((ReviewCurrentState::Absent, None)),
+            Err(CheckpointError::UnsupportedFileKind(_)) => Ok((
+                ReviewCurrentState::Unsupported {
+                    reason: "current path is not a regular file".to_owned(),
+                },
+                None,
+            )),
+            Err(CheckpointError::ReviewIdentityLimit) => Ok((
+                ReviewCurrentState::Unsupported {
+                    reason: "current file exceeds the review identity scan limit".to_owned(),
+                },
+                None,
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn render_review_diff(
+        &self,
+        path: &str,
+        baseline: &CheckpointFileState,
+        current: &ReviewCurrentState,
+        current_content: Option<&[u8]>,
+        remaining_bytes: usize,
+    ) -> Result<(String, bool, Option<String>), CheckpointError> {
+        let unrestorable = match (baseline, current) {
+            (CheckpointFileState::Unrestorable { reason }, _)
+            | (_, ReviewCurrentState::Unsupported { reason }) => Some(reason.clone()),
+            _ => None,
+        };
+        if let Some(reason) = unrestorable {
+            return Ok((String::new(), false, Some(reason)));
+        }
+        let original = match baseline {
+            CheckpointFileState::Present { blob, bytes, .. } => {
+                if *bytes > 256 * 1024 {
+                    return Ok((String::new(), true, None));
+                }
+                Some(self.read_valid_blob(blob, *bytes)?)
+            }
+            CheckpointFileState::Absent => None,
+            CheckpointFileState::Unrestorable { .. } => unreachable!(),
+        };
+        let current_bytes = match current {
+            ReviewCurrentState::Present { bytes, .. } if *bytes > 256 * 1024 => {
+                return Ok((String::new(), true, None));
+            }
+            ReviewCurrentState::Present { .. } => current_content.map(<[u8]>::to_vec),
+            ReviewCurrentState::Absent => None,
+            ReviewCurrentState::Unsupported { .. } => unreachable!(),
+        };
+        let (diff, mut truncated) = render_whole_file_diff(
+            path,
+            original.as_deref(),
+            current_bytes.as_deref(),
+            remaining_bytes.min(MAX_REVIEW_FILE_BYTES),
+        );
+        if remaining_bytes == 0 {
+            truncated = true;
+        }
+        Ok((diff, truncated, None))
+    }
+
+    fn load_review_ledger(&self, session_id: &str) -> Result<ReviewLedger, CheckpointError> {
+        let path = self.review_path(session_id);
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ReviewLedger {
+                    version: REVIEW_LEDGER_VERSION,
+                    session_id: session_id.to_owned(),
+                    files: BTreeMap::new(),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let ledger: ReviewLedger = serde_json::from_slice(&bytes)?;
+        if ledger.version != REVIEW_LEDGER_VERSION || ledger.session_id != session_id {
+            return Err(CheckpointError::CorruptReviewLedger);
+        }
+        for (path, record) in &ledger.files {
+            if normalize_relative(Path::new(path))? != *path {
+                return Err(CheckpointError::CorruptReviewLedger);
+            }
+            validate_review_current(&record.current)?;
+        }
+        Ok(ledger)
+    }
+
+    fn write_review_ledger(&self, ledger: &ReviewLedger) -> Result<(), CheckpointError> {
+        atomic_replace(
+            &self.review_path(&ledger.session_id),
+            &serde_json::to_vec(ledger)?,
+        )
     }
 
     fn capture(&self, key: &str) -> Result<CheckpointFileState, CheckpointError> {
@@ -984,6 +1340,7 @@ impl CheckpointStore {
             self.root.join("manifests"),
             self.root.join("pending"),
             self.root.join("rewinds"),
+            self.root.join("reviews"),
         ] {
             cleanup_stale_temporaries_in(&directory)?;
             for entry in fs::read_dir(&directory)? {
@@ -1058,6 +1415,101 @@ impl CheckpointStore {
     fn rewind_path(&self, session_id: &str) -> PathBuf {
         self.root.join("rewinds").join(format!("{session_id}.json"))
     }
+
+    fn review_path(&self, session_id: &str) -> PathBuf {
+        self.root.join("reviews").join(format!("{session_id}.json"))
+    }
+}
+
+fn baseline_matches_current(baseline: &CheckpointFileState, current: &ReviewCurrentState) -> bool {
+    match (baseline, current) {
+        (
+            CheckpointFileState::Present {
+                blob,
+                bytes,
+                unix_mode,
+            },
+            ReviewCurrentState::Present {
+                content_blake3,
+                bytes: current_bytes,
+                unix_mode: current_mode,
+            },
+        ) => blob == content_blake3 && bytes == current_bytes && unix_mode == current_mode,
+        (CheckpointFileState::Absent, ReviewCurrentState::Absent) => true,
+        (
+            CheckpointFileState::Present { .. }
+            | CheckpointFileState::Absent
+            | CheckpointFileState::Unrestorable { .. },
+            ReviewCurrentState::Present { .. }
+            | ReviewCurrentState::Absent
+            | ReviewCurrentState::Unsupported { .. },
+        ) => false,
+    }
+}
+
+fn review_identity(value: &impl Serialize) -> Result<String, CheckpointError> {
+    Ok(blake3::hash(&serde_json::to_vec(value)?)
+        .to_hex()
+        .to_string())
+}
+
+fn validate_review_current(current: &ReviewCurrentState) -> Result<(), CheckpointError> {
+    match current {
+        ReviewCurrentState::Present {
+            content_blake3,
+            unix_mode,
+            ..
+        } if !is_lower_blake3(content_blake3) || unix_mode.is_some_and(|mode| mode > 0o7777) => {
+            Err(CheckpointError::CorruptReviewLedger)
+        }
+        ReviewCurrentState::Unsupported { reason }
+            if reason.is_empty()
+                || reason.len() > 1_024
+                || reason.chars().any(char::is_control) =>
+        {
+            Err(CheckpointError::CorruptReviewLedger)
+        }
+        ReviewCurrentState::Present { .. }
+        | ReviewCurrentState::Absent
+        | ReviewCurrentState::Unsupported { .. } => Ok(()),
+    }
+}
+
+fn render_whole_file_diff(
+    path: &str,
+    original: Option<&[u8]>,
+    current: Option<&[u8]>,
+    limit: usize,
+) -> (String, bool) {
+    let original_text = original.map(std::str::from_utf8).transpose();
+    let current_text = current.map(std::str::from_utf8).transpose();
+    let (Ok(original_text), Ok(current_text)) = (original_text, current_text) else {
+        let (message, _) = bounded_diff_text("Binary files differ\n", limit);
+        return (message, true);
+    };
+    let escaped_path = path.escape_default().to_string();
+    let original_header = original.map_or("/dev/null".to_owned(), |_| format!("a/{escaped_path}"));
+    let current_header = current.map_or("/dev/null".to_owned(), |_| format!("b/{escaped_path}"));
+    let mut config = similar::TextDiff::configure();
+    config.timeout(std::time::Duration::from_millis(50));
+    let diff = config.diff_lines(original_text.unwrap_or(""), current_text.unwrap_or(""));
+    let output = diff
+        .unified_diff()
+        .context_radius(3)
+        .header(&original_header, &current_header)
+        .to_string();
+    bounded_diff_text(&output, limit)
+}
+
+fn bounded_diff_text(value: &str, limit: usize) -> (String, bool) {
+    if value.len() <= limit {
+        return (value.to_owned(), false);
+    }
+    let mut boundary = limit.min(value.len());
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    (value[..boundary].to_owned(), true)
 }
 
 fn normalize_relative(path: &Path) -> Result<String, CheckpointError> {
@@ -1189,7 +1641,10 @@ fn cleanup_stale_temporaries_in(directory: &Path) -> Result<(), CheckpointError>
         let entry = entry?;
         if is_private_temporary(&entry.file_name()) {
             let metadata = fs::symlink_metadata(entry.path())?;
-            if metadata.is_file() || metadata.file_type().is_symlink() {
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                fs::remove_dir_all(entry.path())?;
+                removed = true;
+            } else if metadata.is_file() || metadata.file_type().is_symlink() {
                 fs::remove_file(entry.path())?;
                 removed = true;
             }
@@ -1320,6 +1775,111 @@ fn capture_regular_confined(
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok(Some((bytes, mode)))
+}
+
+#[cfg(unix)]
+fn capture_review_regular_confined(
+    workspace: &Path,
+    key: &str,
+) -> Result<Option<CapturedReview>, CheckpointError> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    let Some((parent, name)) = open_confined_parent(workspace, key, false)? else {
+        return Ok(None);
+    };
+    let descriptor = match rustix::fs::openat(
+        &parent,
+        name.as_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(descriptor) => descriptor,
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(rustix::io::Errno::LOOP | rustix::io::Errno::ISDIR) => {
+            return Err(CheckpointError::UnsupportedFileKind(key.to_owned()));
+        }
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    let stat = rustix::fs::fstat(&descriptor).map_err(std::io::Error::from)?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file() {
+        return Err(CheckpointError::UnsupportedFileKind(key.to_owned()));
+    }
+    #[cfg(target_os = "linux")]
+    let mode = Some(Mode::from_raw_mode(stat.st_mode).as_raw_mode() & 0o7777);
+    #[cfg(not(target_os = "linux"))]
+    let mode = Some(u32::from(
+        Mode::from_raw_mode(stat.st_mode).as_raw_mode() & 0o7777,
+    ));
+    capture_review_open_file(File::from(descriptor), mode).map(Some)
+}
+
+fn capture_review_open_file(
+    mut file: File,
+    unix_mode: Option<u32>,
+) -> Result<CapturedReview, CheckpointError> {
+    let before = file.metadata()?;
+    if before.len() > MAX_REVIEW_IDENTITY_SCAN_BYTES {
+        return Err(CheckpointError::ReviewIdentityLimit);
+    }
+    let mut hasher = blake3::Hasher::new();
+    let mut retained = Vec::new();
+    let mut retain_content = true;
+    let mut bytes = 0_u64;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        bytes = bytes
+            .checked_add(u64::try_from(count).map_err(|_| CheckpointError::CorruptManifest)?)
+            .ok_or(CheckpointError::CorruptManifest)?;
+        if bytes > MAX_REVIEW_IDENTITY_SCAN_BYTES {
+            return Err(CheckpointError::ReviewIdentityLimit);
+        }
+        hasher.update(&buffer[..count]);
+        if retain_content
+            && retained
+                .len()
+                .checked_add(count)
+                .is_some_and(|length| length <= MAX_REVIEW_FILE_BYTES)
+        {
+            retained.extend_from_slice(&buffer[..count]);
+        } else {
+            retain_content = false;
+            retained.clear();
+        }
+    }
+    let after = file.metadata()?;
+    if !same_open_file_identity(&before, &after) || bytes != after.len() {
+        return Err(CheckpointError::ReviewPathChanged);
+    }
+    Ok((
+        ReviewCurrentState::Present {
+            content_blake3: hasher.finalize().to_hex().to_string(),
+            bytes,
+            unix_mode,
+        },
+        retain_content.then_some(retained),
+    ))
+}
+
+#[cfg(unix)]
+fn same_open_file_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    before.dev() == after.dev()
+        && before.ino() == after.ino()
+        && before.size() == after.size()
+        && before.mtime() == after.mtime()
+        && before.mtime_nsec() == after.mtime_nsec()
+        && before.ctime() == after.ctime()
+        && before.ctime_nsec() == after.ctime_nsec()
+}
+
+#[cfg(not(unix))]
+fn same_open_file_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    before.len() == after.len()
+        && before.modified().ok() == after.modified().ok()
+        && before.is_file() == after.is_file()
 }
 
 #[cfg(unix)]
@@ -1487,6 +2047,20 @@ fn capture_regular_confined(
     let path = checked_workspace_path_fallback(workspace, key)?;
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.is_file() => Ok(Some((fs::read(path)?, None))),
+        Ok(_) => Err(CheckpointError::UnsupportedFileKind(key.to_owned())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn capture_review_regular_confined(
+    workspace: &Path,
+    key: &str,
+) -> Result<Option<CapturedReview>, CheckpointError> {
+    let path = checked_workspace_path_fallback(workspace, key)?;
+    match OpenOptions::new().read(true).open(path) {
+        Ok(file) if file.metadata()?.is_file() => capture_review_open_file(file, None).map(Some),
         Ok(_) => Err(CheckpointError::UnsupportedFileKind(key.to_owned())),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -1679,6 +2253,33 @@ pub enum CheckpointError {
     /// A durable rewind transaction failed validation.
     #[error("checkpoint rewind transaction is corrupt")]
     CorruptRewindTransaction,
+    /// A durable review decision ledger failed validation.
+    #[error("checkpoint review ledger is corrupt")]
+    CorruptReviewLedger,
+    /// A session touched more files than one bounded review can represent.
+    #[error("checkpoint review exceeds its file limit")]
+    ReviewFileLimit,
+    /// A requested review path was not changed by this session.
+    #[error("checkpoint review path is not available")]
+    ReviewPathNotFound,
+    /// A truncated or unrestorable review entry cannot be safely reverted.
+    #[error("checkpoint review path cannot be safely reverted")]
+    ReviewPathNotRevertible,
+    /// The path changed after the review snapshot displayed to the driver.
+    #[error("checkpoint review path changed after it was displayed")]
+    ReviewPathChanged,
+    /// A current file is too large to fingerprint within the review work bound.
+    #[error("checkpoint review identity scan limit exceeded")]
+    ReviewIdentityLimit,
+    /// Parent and child session identities must differ.
+    #[error("checkpoint fork identities conflict")]
+    ForkIdentityConflict,
+    /// Source and target checkpoint stores must bind the same workspace root.
+    #[error("checkpoint fork workspace roots do not match")]
+    ForkWorkspaceMismatch,
+    /// A child checkpoint namespace already exists.
+    #[error("checkpoint fork target already exists")]
+    ForkTargetExists,
     /// Filesystem failure.
     #[error("checkpoint storage I/O failed")]
     Io(#[from] std::io::Error),
@@ -1689,11 +2290,16 @@ pub enum CheckpointError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, process::Command};
+    use std::{
+        fs::{self, OpenOptions},
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
+    use rw_types::{ReviewFileDecision, ReviewFileStatus};
     use tempfile::tempdir;
 
-    use super::{CheckpointFileState, CheckpointStore, RewindReport};
+    use super::{CheckpointFileState, CheckpointStore, RewindReport, render_whole_file_diff};
 
     fn rewind(
         store: &CheckpointStore,
@@ -2266,5 +2872,333 @@ exec git -C "$workspace" "$@"
         assert!(reopened.finish_opaque_mutation(&second).is_err());
         assert!(path.exists());
         assert_eq!(mutation.session_id, "session");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cumulative_review_ten_edits_reverts_one_file_and_preserves_accepted_peer() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap_or_else(|error| panic!("workspace must create: {error}"));
+        fs::write(workspace.join("alpha.txt"), b"alpha original\n")
+            .unwrap_or_else(|error| panic!("alpha baseline must write: {error}"));
+        fs::write(workspace.join("beta.txt"), b"beta original\n")
+            .unwrap_or_else(|error| panic!("beta baseline must write: {error}"));
+        let store = CheckpointStore::open(&root.path().join("storage"), &workspace)
+            .unwrap_or_else(|error| panic!("store must open: {error}"));
+
+        for turn in 1..=10_u64 {
+            let (path, content) = if turn.is_multiple_of(2) {
+                ("beta.txt", format!("beta edit {turn}\n"))
+            } else {
+                ("alpha.txt", format!("alpha edit {turn}\n"))
+            };
+            store
+                .checkpoint_known("session", turn, [PathBuf::from(path)])
+                .unwrap_or_else(|error| panic!("turn {turn} must checkpoint: {error}"));
+            fs::write(workspace.join(path), content)
+                .unwrap_or_else(|error| panic!("turn {turn} must edit: {error}"));
+        }
+
+        let review = store
+            .session_review("session")
+            .unwrap_or_else(|error| panic!("review must load: {error}"));
+        assert_eq!(
+            review
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha.txt", "beta.txt"]
+        );
+        assert!(review.files[0].unified_diff.contains("-alpha original"));
+        assert!(review.files[0].unified_diff.contains("+alpha edit 9"));
+        assert!(review.files[1].unified_diff.contains("-beta original"));
+        assert!(review.files[1].unified_diff.contains("+beta edit 10"));
+        let beta_hash = review.files[1].current_hash.clone();
+
+        let accepted = store
+            .resolve_review_file(
+                "session",
+                Path::new("beta.txt"),
+                ReviewFileDecision::Accept,
+                &beta_hash,
+            )
+            .unwrap_or_else(|error| panic!("beta must accept: {error}"));
+        assert_eq!(
+            accepted
+                .files
+                .iter()
+                .find(|file| file.path == "beta.txt")
+                .map(|file| file.status),
+            Some(ReviewFileStatus::Accepted)
+        );
+        let alpha_hash = accepted
+            .files
+            .iter()
+            .find(|file| file.path == "alpha.txt")
+            .map_or_else(
+                || panic!("alpha review entry must remain"),
+                |file| file.current_hash.clone(),
+            );
+
+        let reverted = store
+            .resolve_review_file(
+                "session",
+                Path::new("alpha.txt"),
+                ReviewFileDecision::Revert,
+                &alpha_hash,
+            )
+            .unwrap_or_else(|error| panic!("alpha must revert: {error}"));
+        assert_eq!(
+            fs::read(workspace.join("alpha.txt"))
+                .unwrap_or_else(|error| panic!("alpha result must read: {error}")),
+            b"alpha original\n"
+        );
+        assert_eq!(
+            fs::read(workspace.join("beta.txt"))
+                .unwrap_or_else(|error| panic!("beta result must read: {error}")),
+            b"beta edit 10\n"
+        );
+        assert_eq!(
+            reverted
+                .files
+                .iter()
+                .map(|file| (file.path.as_str(), file.status))
+                .collect::<Vec<_>>(),
+            [
+                ("alpha.txt", ReviewFileStatus::Reverted),
+                ("beta.txt", ReviewFileStatus::Accepted),
+            ]
+        );
+
+        fs::write(
+            workspace.join("beta.txt"),
+            b"beta changed after acceptance\n",
+        )
+        .unwrap_or_else(|error| panic!("post-accept edit must write: {error}"));
+        assert!(matches!(
+            store.resolve_review_file(
+                "session",
+                Path::new("beta.txt"),
+                ReviewFileDecision::Accept,
+                &beta_hash,
+            ),
+            Err(super::CheckpointError::ReviewPathChanged)
+        ));
+        let changed = store
+            .session_review("session")
+            .unwrap_or_else(|error| panic!("changed review must load: {error}"));
+        assert_eq!(
+            changed
+                .files
+                .iter()
+                .find(|file| file.path == "beta.txt")
+                .map(|file| file.status),
+            Some(ReviewFileStatus::Pending)
+        );
+    }
+
+    #[test]
+    fn review_diff_has_minimal_context_and_handles_file_edge_cases() {
+        let original = b"one\ntwo\nthree\nfour\nfive\n";
+        let current = b"one\ntwo\nTHREE\nfour\nfive\n";
+        let (edited, truncated) =
+            render_whole_file_diff("file.txt", Some(original), Some(current), 16 * 1024);
+        assert!(!truncated);
+        assert!(edited.contains(" two\n-three\n+THREE\n four\n"));
+        assert!(!edited.contains("-one\n"));
+        assert!(!edited.contains("+one\n"));
+
+        let (deleted, truncated) =
+            render_whole_file_diff("file.txt", Some(b"gone\n"), None, 16 * 1024);
+        assert!(!truncated);
+        assert!(deleted.contains("+++ /dev/null"));
+        assert!(deleted.contains("-gone"));
+
+        let (created, truncated) =
+            render_whole_file_diff("new.txt", None, Some(b"new\n"), 16 * 1024);
+        assert!(!truncated);
+        assert!(created.contains("--- /dev/null"));
+        assert!(created.contains("+new"));
+
+        let (no_newline, truncated) =
+            render_whole_file_diff("plain.txt", Some(b"before"), Some(b"after"), 16 * 1024);
+        assert!(!truncated);
+        assert!(no_newline.contains("\\ No newline at end of file"));
+
+        let (binary, truncated) =
+            render_whole_file_diff("binary.dat", Some(&[0xff, 0]), Some(&[0xfe, 0]), 16 * 1024);
+        assert!(truncated);
+        assert_eq!(binary, "Binary files differ\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsupported_symlink_target_swaps_cannot_be_accepted_or_reverted() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap_or_else(|error| panic!("workspace must create: {error}"));
+        fs::write(workspace.join("review.txt"), b"baseline\n")
+            .unwrap_or_else(|error| panic!("baseline must write: {error}"));
+        fs::write(workspace.join("first.txt"), b"first\n")
+            .unwrap_or_else(|error| panic!("first target must write: {error}"));
+        fs::write(workspace.join("second.txt"), b"second\n")
+            .unwrap_or_else(|error| panic!("second target must write: {error}"));
+        let store = CheckpointStore::open(&root.path().join("storage"), &workspace)
+            .unwrap_or_else(|error| panic!("store must open: {error}"));
+        store
+            .checkpoint_known("symlink-session", 1, [PathBuf::from("review.txt")])
+            .unwrap_or_else(|error| panic!("baseline must checkpoint: {error}"));
+        fs::remove_file(workspace.join("review.txt"))
+            .unwrap_or_else(|error| panic!("baseline must remove: {error}"));
+        symlink("first.txt", workspace.join("review.txt"))
+            .unwrap_or_else(|error| panic!("first symlink must create: {error}"));
+        let first = store
+            .session_review("symlink-session")
+            .unwrap_or_else(|error| panic!("first review must load: {error}"));
+        assert!(first.files[0].unrestorable_reason.is_some());
+        let first_hash = first.files[0].current_hash.clone();
+        assert!(matches!(
+            store.resolve_review_file(
+                "symlink-session",
+                Path::new("review.txt"),
+                ReviewFileDecision::Accept,
+                &first_hash,
+            ),
+            Err(super::CheckpointError::ReviewPathNotRevertible)
+        ));
+        fs::remove_file(workspace.join("review.txt"))
+            .unwrap_or_else(|error| panic!("first symlink must remove: {error}"));
+        symlink("second.txt", workspace.join("review.txt"))
+            .unwrap_or_else(|error| panic!("second symlink must create: {error}"));
+        let second = store
+            .session_review("symlink-session")
+            .unwrap_or_else(|error| panic!("second review must load: {error}"));
+        assert_eq!(second.files[0].status, ReviewFileStatus::Pending);
+        assert!(matches!(
+            store.resolve_review_file(
+                "symlink-session",
+                Path::new("review.txt"),
+                ReviewFileDecision::Revert,
+                &second.files[0].current_hash,
+            ),
+            Err(super::CheckpointError::ReviewPathNotRevertible)
+        ));
+    }
+
+    #[test]
+    fn oversized_review_streams_identity_and_remains_safely_revertible() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap_or_else(|error| panic!("workspace must create: {error}"));
+        let path = workspace.join("large.bin");
+        fs::write(&path, b"small baseline\n")
+            .unwrap_or_else(|error| panic!("baseline must write: {error}"));
+        let store = CheckpointStore::open(&root.path().join("storage"), &workspace)
+            .unwrap_or_else(|error| panic!("store must open: {error}"));
+        store
+            .checkpoint_known("large-session", 1, [PathBuf::from("large.bin")])
+            .unwrap_or_else(|error| panic!("baseline must checkpoint: {error}"));
+        let file = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap_or_else(|error| panic!("large fixture must open: {error}"));
+        file.set_len(8 * 1024 * 1024)
+            .unwrap_or_else(|error| panic!("large fixture must resize: {error}"));
+
+        let review = store
+            .session_review("large-session")
+            .unwrap_or_else(|error| panic!("large review must stream: {error}"));
+        assert_eq!(review.files.len(), 1);
+        assert!(review.files[0].truncated);
+        assert!(review.files[0].unrestorable_reason.is_none());
+        let current_hash = review.files[0].current_hash.clone();
+        store
+            .resolve_review_file(
+                "large-session",
+                Path::new("large.bin"),
+                ReviewFileDecision::Revert,
+                &current_hash,
+            )
+            .unwrap_or_else(|error| panic!("truncated review must revert: {error}"));
+        assert_eq!(
+            fs::read(path).unwrap_or_else(|error| panic!("reverted file must read: {error}")),
+            b"small baseline\n"
+        );
+    }
+
+    #[test]
+    fn huge_sparse_review_is_bounded_and_marked_unreviewable() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap_or_else(|error| panic!("workspace must create: {error}"));
+        let path = workspace.join("huge.bin");
+        fs::write(&path, b"small baseline\n")
+            .unwrap_or_else(|error| panic!("baseline must write: {error}"));
+        let store = CheckpointStore::open(&root.path().join("storage"), &workspace)
+            .unwrap_or_else(|error| panic!("store must open: {error}"));
+        store
+            .checkpoint_known("huge-session", 1, [PathBuf::from("huge.bin")])
+            .unwrap_or_else(|error| panic!("baseline must checkpoint: {error}"));
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap_or_else(|error| panic!("sparse fixture must open: {error}"))
+            .set_len(128 * 1024 * 1024)
+            .unwrap_or_else(|error| panic!("sparse fixture must resize: {error}"));
+        let started = std::time::Instant::now();
+        let review = store
+            .session_review("huge-session")
+            .unwrap_or_else(|error| panic!("bounded review must load: {error}"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(review.files.len(), 1);
+        assert!(review.files[0].unrestorable_reason.is_some());
+    }
+
+    #[test]
+    fn checkpoint_fork_rebinds_child_manifests_without_changing_parent() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).unwrap_or_else(|error| panic!("workspace must create: {error}"));
+        fs::write(workspace.join("file.txt"), b"zero\n")
+            .unwrap_or_else(|error| panic!("baseline must write: {error}"));
+        let store = CheckpointStore::open(&root.path().join("storage"), &workspace)
+            .unwrap_or_else(|error| panic!("store must open: {error}"));
+        for turn in 1..=3_u64 {
+            store
+                .checkpoint_known("parent", turn, [PathBuf::from("file.txt")])
+                .unwrap_or_else(|error| panic!("parent checkpoint must write: {error}"));
+            fs::write(workspace.join("file.txt"), format!("{turn}\n"))
+                .unwrap_or_else(|error| panic!("parent edit must write: {error}"));
+        }
+        let parent_before = fs::read(store.manifest_path("parent", 1))
+            .unwrap_or_else(|error| panic!("parent manifest must read: {error}"));
+
+        let child_store = CheckpointStore::open(&root.path().join("child-storage"), &workspace)
+            .unwrap_or_else(|error| panic!("child store must open: {error}"));
+        store
+            .fork_into(&child_store, "parent", "child", Some(2))
+            .unwrap_or_else(|error| panic!("checkpoint fork must succeed: {error}"));
+        assert_eq!(
+            fs::read(store.manifest_path("parent", 1))
+                .unwrap_or_else(|error| panic!("parent manifest must reread: {error}")),
+            parent_before
+        );
+        assert_eq!(
+            child_store
+                .load_manifest("child", 1)
+                .unwrap_or_else(|error| panic!("child manifest one must load: {error}"))
+                .session_id,
+            "child"
+        );
+        assert!(child_store.load_manifest("child", 2).is_ok());
+        assert!(child_store.load_manifest("child", 3).is_err());
+        assert!(matches!(
+            store.fork_into(&child_store, "parent", "child", None),
+            Err(super::CheckpointError::ForkTargetExists)
+        ));
     }
 }

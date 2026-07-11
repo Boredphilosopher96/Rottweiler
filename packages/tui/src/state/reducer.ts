@@ -15,9 +15,13 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "command_acknowledged",
   "context_snapshot_ready",
   "cost_snapshot_ready",
+  "session_review_ready",
+  "session_review_updated",
   "prompt_dump_ready",
   "session_replay_completed",
+  "session_forked",
   "sessions_listed",
+  "sessions_search_ready",
   "command_descriptors_listed",
   "models_listed",
   "workspace_files_found",
@@ -70,9 +74,13 @@ const ACK_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "command_acknowledged",
   "context_snapshot_ready",
   "cost_snapshot_ready",
+  "session_review_ready",
+  "session_review_updated",
   "prompt_dump_ready",
   "session_replay_completed",
+  "session_forked",
   "sessions_listed",
+  "sessions_search_ready",
   "command_descriptors_listed",
   "models_listed",
   "workspace_files_found",
@@ -238,6 +246,13 @@ function applyKnownEvent(
         cost: event.snapshot,
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
       }
+    case "session_review_ready":
+    case "session_review_updated":
+      return {
+        ...state,
+        review: projectSessionReview(event.review),
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
     case "prompt_dump_ready":
       return {
         ...state,
@@ -247,12 +262,34 @@ function applyKnownEvent(
     case "session_replay_completed":
       return {
         ...state,
+        replay: state.replay.active
+          ? {
+              ...state.replay,
+              sessionId: event.session_id,
+              completedThrough: event.through_sequence ?? state.lastSequence,
+            }
+          : state.replay,
         connection: {
           ...state.connection,
           phase: state.connection.gap === null ? "connected" : "replaying",
           error: null,
         },
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "session_forked":
+      return {
+        ...state,
+        lastFork: {
+          parentSessionId: event.parent_session_id,
+          child: projectSession(event.child),
+          atTurn: event.at_turn ?? null,
+        },
+        commandAcks: responseAck(
+          state,
+          event.meta.request_id,
+          event.type,
+          event.child.session_id,
+        ),
       }
     case "sessions_listed":
       return {
@@ -264,6 +301,14 @@ function applyKnownEvent(
           driverClientId: session.driver_client_id ?? null,
           shellActive: session.shell_active,
         })),
+        sessionSearch: null,
+        commandAcks: responseAck(state, event.meta.request_id, event.type, null),
+      }
+    case "sessions_search_ready":
+      return {
+        ...state,
+        sessions: event.sessions.map(projectSession),
+        sessionSearch: { query: event.query, truncated: event.truncated },
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
       }
     case "command_descriptors_listed":
@@ -826,6 +871,48 @@ function boundedSummary(value: string): string {
   return boundedUtf8(value, 512)
 }
 
+function projectSession(session: {
+  readonly session_id: string
+  readonly workspace_name: string
+  readonly model: string
+  readonly driver_client_id?: string | null
+  readonly shell_active: boolean
+}): RottweilerState["sessions"][number] {
+  return {
+    sessionId: session.session_id,
+    workspaceName: session.workspace_name,
+    model: session.model,
+    driverClientId: session.driver_client_id ?? null,
+    shellActive: session.shell_active,
+  }
+}
+
+function projectSessionReview(review: {
+  readonly session_id: string
+  readonly files: readonly {
+    readonly path: string
+    readonly unified_diff: string
+    readonly status: "pending" | "accepted" | "reverted"
+    readonly truncated: boolean
+    readonly unrestorable_reason?: string | null
+    readonly original_hash: string
+    readonly current_hash: string
+  }[]
+}): NonNullable<RottweilerState["review"]> {
+  return {
+    sessionId: review.session_id,
+    files: review.files.map((file) => ({
+      path: file.path,
+      unifiedDiff: file.unified_diff,
+      status: file.status,
+      truncated: file.truncated,
+      unrestorableReason: file.unrestorable_reason ?? null,
+      originalHash: file.original_hash,
+      currentHash: file.current_hash,
+    })),
+  }
+}
+
 function boundedUtf8(value: string, maxBytes: number): string {
   const encoder = new TextEncoder()
   const encoded = encoder.encode(value)
@@ -881,9 +968,13 @@ function responseAck(
   responseType:
     | "context_snapshot_ready"
     | "cost_snapshot_ready"
+    | "session_review_ready"
+    | "session_review_updated"
     | "prompt_dump_ready"
     | "session_replay_completed"
+    | "session_forked"
     | "sessions_listed"
+    | "sessions_search_ready"
     | "command_descriptors_listed"
     | "models_listed"
     | "workspace_files_found"

@@ -2166,7 +2166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dropping_mcp_oauth_login_cancels_the_loopback_listener() {
+    async fn dropping_mcp_oauth_login_releases_the_loopback_listener() {
         let login = begin_mcp_oauth_login(oauth_login_config(
             Url::parse("http://127.0.0.1:1/token").expect("token URL"),
         ))
@@ -2178,7 +2178,24 @@ mod tests {
             redirect.port().expect("redirect port"),
         );
         drop(login);
-        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+        // A connect-after-drop assertion is racy under the parallel test suite:
+        // the OS may immediately recycle this ephemeral port for another OAuth
+        // fixture. Rebinding the exact address proves that this session released
+        // its listener without sending traffic to an unrelated recycled port.
+        let rebound = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match tokio::net::TcpListener::bind(address).await {
+                    Ok(listener) => break listener,
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("loopback address could not rebind: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("dropped login must release its callback address");
+        drop(rebound);
     }
 
     #[tokio::test]

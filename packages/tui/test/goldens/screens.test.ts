@@ -6,8 +6,9 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp, type RottweilerApp } from "../../src/app"
+import type { EngineEvent } from "../../src/protocol"
 import type { RottweilerState, ToolProjection } from "../../src/state"
-import { createInitialState } from "../../src/state"
+import { createInitialState, engineEvent, reduceRottweilerState } from "../../src/state"
 
 const usage = {
   input_tokens: "1200",
@@ -188,10 +189,84 @@ function pendingTool(diff: boolean): ToolProjection {
   }
 }
 
+function replayFixtureState(): RottweilerState {
+  const eventMeta = (sequence: string) => ({
+    protocol_version: 1,
+    session_id: "session-golden-replay",
+    sequence_id: sequence,
+    emitted_at: `2026-01-01T00:00:0${sequence}Z`,
+  })
+  const events: EngineEvent[] = [
+    { type: "mode_changed", meta: eventMeta("1"), mode: "execute" },
+    { type: "model_changed", meta: eventMeta("2"), model: "fast" },
+    {
+      type: "conversation_turn_committed",
+      meta: eventMeta("3"),
+      agent_turn: "1",
+      turn: {
+        role: "user",
+        blocks: [{ type: "text", text: "Replay the saved session without changing it." }],
+        meta: { synthetic: false, summary: false },
+      },
+    },
+    { type: "turn_started", meta: eventMeta("4"), turn_id: "2" },
+    {
+      type: "tool_call_started",
+      meta: eventMeta("5"),
+      turn_id: "2",
+      tool_call_id: "historical-read",
+      name: "read",
+      args: { path: "PROJECT.md" },
+      call_index: 0,
+    },
+    {
+      type: "tool_call_finished",
+      meta: eventMeta("6"),
+      turn_id: "2",
+      tool_call_id: "historical-read",
+      output: { type: "text", text: "Historical PROJECT.md contents" },
+      is_error: false,
+      call_index: 0,
+    },
+    {
+      type: "conversation_turn_committed",
+      meta: eventMeta("7"),
+      agent_turn: "2",
+      turn: {
+        role: "assistant",
+        blocks: [
+          {
+            type: "text",
+            text: "## Historical result\n\nThe saved event log rendered through the retained TUI.",
+          },
+        ],
+        meta: { synthetic: false, summary: false, model: "fixture-fast" },
+      },
+    },
+    {
+      type: "turn_finished",
+      meta: eventMeta("8"),
+      turn_id: "2",
+      status: "completed",
+      usage,
+      cost: money,
+    },
+  ]
+  const replayed = events.reduce(
+    (state, event) => reduceRottweilerState(state, engineEvent(event)),
+    createInitialState(),
+  )
+  return {
+    ...replayed,
+    connection: { phase: "connected", attempt: 0, error: null, gap: null },
+  }
+}
+
 interface ScreenScenario {
   readonly name: string
   readonly state: RottweilerState
   readonly setup?: (app: RottweilerApp) => void
+  readonly replaySessionId?: string
 }
 
 function scenarios(): ScreenScenario[] {
@@ -358,6 +433,54 @@ function scenarios(): ScreenScenario[] {
         },
       },
     },
+    {
+      name: "17-historical-session-replay",
+      state: replayFixtureState(),
+      replaySessionId: "session-golden-replay",
+      setup: (app) => {
+        app.handleEvent({
+          type: "session_replay_completed",
+          meta: {
+            protocol_version: 1,
+            client_id: "golden-client",
+            request_id: "golden-request",
+            emitted_at: "2026-01-01T00:00:00Z",
+          },
+          session_id: "session-golden-replay",
+          through_sequence: "8",
+        })
+      },
+    },
+    {
+      name: "18-cumulative-session-review",
+      state: {
+        ...base,
+        review: {
+          sessionId: "session-review-golden",
+          files: [
+            {
+              path: "packages/tui/src/app.ts",
+              unifiedDiff:
+                "--- a/packages/tui/src/app.ts\n+++ b/packages/tui/src/app.ts\n@@ -1 +1 @@\n-live();\n+replay();\n",
+              status: "pending",
+              truncated: false,
+              unrestorableReason: null,
+              originalHash: "old",
+              currentHash: "new",
+            },
+            {
+              path: "generated/output.bin",
+              unifiedDiff: "Binary files differ",
+              status: "pending",
+              truncated: false,
+              unrestorableReason: "original bytes were not checkpointed",
+              originalHash: "absent",
+              currentHash: "generated",
+            },
+          ],
+        },
+      },
+    },
   ]
 }
 
@@ -382,6 +505,9 @@ describe("M4 golden screens", () => {
         initialState: scenario.state,
         requestId: () => "golden-request",
         treeSitterClient: treeSitter,
+        ...(scenario.replaySessionId === undefined
+          ? {}
+          : { replaySessionId: scenario.replaySessionId }),
       })
       renderer.root.add(app)
       scenario.setup?.(app)

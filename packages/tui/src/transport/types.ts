@@ -7,6 +7,7 @@ export interface UnknownEngineEvent {
 }
 
 export type WireEngineEvent = EngineEvent | UnknownEngineEvent
+export type SessionForkedEvent = Extract<EngineEvent, { type: "session_forked" }>
 
 export type AttachSessionCommand = Extract<ClientCommand, { type: "attach_session" }>
 
@@ -25,6 +26,22 @@ export interface TransportConnectionUpdate {
 
 export function isWireEngineEvent(value: unknown): value is WireEngineEvent {
   return isRecord(value) && typeof value.type === "string"
+}
+
+export function isSessionForkedEvent(event: WireEngineEvent): event is SessionForkedEvent {
+  if (event.type !== "session_forked" || !isRecord(event.child)) return false
+  const child = event.child
+  return (
+    typeof event.parent_session_id === "string" &&
+    typeof child.session_id === "string" &&
+    typeof child.workspace_name === "string" &&
+    typeof child.model === "string" &&
+    (child.driver_client_id === undefined ||
+      child.driver_client_id === null ||
+      typeof child.driver_client_id === "string") &&
+    typeof child.shell_active === "boolean" &&
+    (event.at_turn === undefined || event.at_turn === null || typeof event.at_turn === "string")
+  )
 }
 
 export function durableSequenceId(event: WireEngineEvent): string | null {

@@ -7,12 +7,13 @@ import {
   rename,
   rm,
 } from "node:fs/promises"
-import { basename, dirname, join } from "node:path"
+import { basename, dirname, isAbsolute, join } from "node:path"
 
 import type { ClientCommand, CommandOutcome } from "./protocol"
 import { PROTOCOL_VERSION } from "./protocol"
 import {
   createInitialState,
+  enterReplayMode,
   reduceRottweilerState,
   transportClosed,
   transportConnected,
@@ -24,6 +25,7 @@ import {
 } from "./state"
 import {
   EngineHttpSseClient,
+  isSessionForkedEvent,
   isRecord,
   type EngineSubscriptionOptions,
   type TransportConnectionUpdate,
@@ -32,6 +34,7 @@ import {
 
 const TOKEN_FILE_LIMIT = 64 * 1024
 const CURSOR_FILE_LIMIT = 128
+const FORK_OPERATION_FILE_LIMIT = 4 * 1024
 const MAX_U64 = 18_446_744_073_709_551_615n
 const SESSION_PREPARE_ATTEMPTS = 24
 const SESSION_PREPARE_INITIAL_DELAY_MS = 10
@@ -52,6 +55,8 @@ export interface EngineRuntimeConfig {
   readonly sessionId: string
   readonly lastSeenSequence: string | null
   readonly lastSeenFile: string | null
+  readonly replayMode: boolean
+  readonly forkOperationDirectory?: string | null
 }
 
 export interface RuntimeApp {
@@ -145,6 +150,7 @@ export class TuiEngineRuntime {
   readonly #handoff: SequenceHandoff | null
   readonly #sleep: RuntimeSleep
   readonly #onDriverReady: ((sessionId: string) => void) | undefined
+  readonly #forkOperations: ForkOperationHandoff | null
   readonly #ready: Promise<void>
   readonly #resolveReady: () => void
   readonly #rejectReady: (reason: unknown) => void
@@ -156,6 +162,7 @@ export class TuiEngineRuntime {
   #transitionController: AbortController | null = null
   #subscriptionController: AbortController | null = null
   #subscription: Promise<void> | null = null
+  readonly #forkRequests = new Map<string, string>()
 
   constructor(
     config: EngineRuntimeConfig,
@@ -171,6 +178,10 @@ export class TuiEngineRuntime {
     this.#requestId = requestId
     this.#sleep = sleep
     this.#onDriverReady = onDriverReady
+    this.#forkOperations =
+      config.replayMode || config.forkOperationDirectory == null
+        ? null
+        : new ForkOperationHandoff(config.forkOperationDirectory, files)
     let resolveReady!: () => void
     let rejectReady!: (reason: unknown) => void
     this.#ready = new Promise<void>((resolve, reject) => {
@@ -185,7 +196,9 @@ export class TuiEngineRuntime {
       // readiness promise from becoming an unhandled process rejection.
     })
     this.#handoff =
-      config.lastSeenFile === null ? null : new SequenceHandoff(config.lastSeenFile, files)
+      config.replayMode || config.lastSeenFile === null
+        ? null
+        : new SequenceHandoff(config.lastSeenFile, files)
   }
 
   bind(app: RuntimeApp): void {
@@ -228,15 +241,45 @@ export class TuiEngineRuntime {
       if (!this.#driverReady || this.#subscriptionController === null) {
         return null
       }
+      if (this.#config.replayMode && !isReplayReadOnlyCommand(command)) {
+        return null
+      }
       const generation = this.#sessionGeneration
       const sessionId = commandSessionId(command)
       if (sessionId !== null && sessionId !== this.#sessionId) {
         return null
       }
+      let dispatched = command
+      const fork = command.type === "fork"
+      if (fork) {
+        const operationId =
+          command.operation_id ??
+          (await this.#forkOperations?.prepare(command.session_id, command.at_turn ?? null)) ??
+          crypto.randomUUID()
+        dispatched = { ...command, operation_id: operationId }
+        this.#forkRequests.set(command.meta.request_id, command.session_id)
+      }
       const outcome = await this.#client.postCommand(
-        command,
-        this.#subscriptionController.signal,
+        dispatched,
+        fork ? this.#controller.signal : this.#subscriptionController.signal,
       )
+      if (fork) {
+        if (
+          outcome?.type === "rejected" &&
+          [
+            "host_protocol_failure",
+            "session_not_loaded",
+            "invalid_fork_operation_id",
+          ].includes(outcome.error.code)
+        ) {
+          await this.#forkOperations?.complete(command.session_id)
+          this.#forkRequests.delete(command.meta.request_id)
+        }
+        // A correlated SessionForked may switch sessions and abort the old
+        // subscription before this POST returns. The fork transaction itself
+        // remains authoritative across that transition.
+        return outcome
+      }
       return generation === this.#sessionGeneration && this.#driverReady ? outcome : null
     } catch (error) {
       if (!this.#controller.signal.aborted) {
@@ -305,9 +348,10 @@ export class TuiEngineRuntime {
     }
 
     if (resetProjection) {
-      this.#requiredApp().setState(
-        reduceRottweilerState(createInitialState(), transportConnecting(0)),
-      )
+      const initial = this.#config.replayMode
+        ? enterReplayMode(createInitialState(), sessionId)
+        : createInitialState()
+      this.#requiredApp().setState(reduceRottweilerState(initial, transportConnecting(0)))
     }
 
     const transition = new AbortController()
@@ -315,7 +359,12 @@ export class TuiEngineRuntime {
     const abortTransition = () => transition.abort(this.#controller.signal.reason)
     this.#controller.signal.addEventListener("abort", abortTransition, { once: true })
     try {
-      await this.#resumeAndTakeDriver(sessionId, transition.signal)
+      // Historical replay must never run recovery or take a driver lease: both
+      // can append events or update session/index state. The observer attach
+      // below is the only session operation in replay mode.
+      if (!this.#config.replayMode) {
+        await this.#prepareSession(sessionId, transition.signal)
+      }
       if (generation !== this.#sessionGeneration || transition.signal.aborted) {
         throw transition.signal.reason ?? new DOMException("session transition superseded", "AbortError")
       }
@@ -334,12 +383,15 @@ export class TuiEngineRuntime {
             meta: this.#meta(),
             session_id: sessionId,
             last_seen_sequence: null,
-            role: "driver",
+            role: this.#config.replayMode ? "observer" : "driver",
           },
           signal: subscriptionController.signal,
           getLastSeenSequence: () => this.#requiredApp().state.lastSequence,
           requestId: this.#requestId,
           onReconnect: async () => {
+            if (this.#config.replayMode) {
+              return
+            }
             const takeover = await this.#client.postCommand(
               {
                 type: "take_driver",
@@ -367,6 +419,16 @@ export class TuiEngineRuntime {
               return
             }
             const bound = this.#requiredApp()
+            if (
+              isSessionForkedEvent(event) &&
+              this.#forkRequests.get(event.meta.request_id) === event.parent_session_id
+            ) {
+              this.#forkRequests.delete(event.meta.request_id)
+              void this.#forkOperations?.complete(event.parent_session_id).catch(() => {
+                // Leaving the stable handoff in place is fail-safe: a later
+                // retry replays the same durable child instead of duplicating it.
+              })
+            }
             bound.handleEvent(event)
             if (bound.state.lastSequence !== null) {
               this.#handoff?.record(bound.state.lastSequence)
@@ -393,7 +455,9 @@ export class TuiEngineRuntime {
       this.#requiredApp().setSessionId(sessionId)
       this.#driverReady = true
       this.#onDriverReady?.(sessionId)
-      await this.#requestInitialProjections(sessionId, subscriptionController.signal)
+      if (!this.#config.replayMode) {
+        await this.#requestInitialProjections(sessionId, subscriptionController.signal)
+      }
     } finally {
       this.#controller.signal.removeEventListener("abort", abortTransition)
       if (this.#transitionController === transition) {
@@ -402,7 +466,7 @@ export class TuiEngineRuntime {
     }
   }
 
-  async #resumeAndTakeDriver(sessionId: string, signal: AbortSignal): Promise<void> {
+  async #prepareSession(sessionId: string, signal: AbortSignal): Promise<void> {
     let delay = SESSION_PREPARE_INITIAL_DELAY_MS
     for (let attempt = 0; attempt < SESSION_PREPARE_ATTEMPTS; attempt += 1) {
       const resume = await this.#client.postCommand(
@@ -416,6 +480,9 @@ export class TuiEngineRuntime {
         signal,
       )
       if (resume?.type === "accepted" || resume === null) {
+        if (this.#config.replayMode) {
+          return
+        }
         const takeover = await this.#client.postCommand(
           {
             type: "take_driver",
@@ -610,6 +677,8 @@ export async function loadEngineRuntimeConfig(
   const tokenFile = nonEmpty(environment.ROTTWEILER_ENGINE_TOKEN_FILE)
   const sessionId = nonEmpty(environment.ROTTWEILER_SESSION_ID)
   const lastSeenFile = nonEmpty(environment.ROTTWEILER_LAST_SEEN_FILE)
+  const forkOperationDirectory = nonEmpty(environment.ROTTWEILER_FORK_OPERATION_DIRECTORY)
+  const replayMode = replayModeFromEnvironment(environment.ROTTWEILER_REPLAY_MODE)
   const lastSeenFromEnvironment = optionalSequence(
     environment.ROTTWEILER_LAST_SEEN_SEQUENCE,
     "ROTTWEILER_LAST_SEEN_SEQUENCE",
@@ -625,6 +694,9 @@ export async function loadEngineRuntimeConfig(
     throw new EngineRuntimeError(
       "engine runtime requires ROTTWEILER_ENGINE_SOCKET, ROTTWEILER_ENGINE_TOKEN_FILE, and ROTTWEILER_SESSION_ID",
     )
+  }
+  if (forkOperationDirectory !== null && !isAbsolute(forkOperationDirectory)) {
+    throw new EngineRuntimeError("ROTTWEILER_FORK_OPERATION_DIRECTORY must be absolute")
   }
 
   const token = await readBootstrapToken(tokenFile, files)
@@ -643,7 +715,19 @@ export async function loadEngineRuntimeConfig(
     sessionId,
     lastSeenSequence: newestSequence(lastSeenFromEnvironment, lastSeenFromFile),
     lastSeenFile,
+    replayMode,
+    forkOperationDirectory,
   }
+}
+
+function replayModeFromEnvironment(value: string | undefined): boolean {
+  if (value === undefined || value === "" || value === "0") {
+    return false
+  }
+  if (value === "1") {
+    return true
+  }
+  throw new EngineRuntimeError("ROTTWEILER_REPLAY_MODE must be 0 or 1")
 }
 
 async function readBootstrapToken(
@@ -711,6 +795,82 @@ class SequenceHandoff {
   }
 }
 
+interface PersistedForkOperation {
+  readonly version: 1
+  readonly session_id: string
+  readonly at_turn: string | null
+  readonly operation_id: string
+}
+
+class ForkOperationHandoff {
+  readonly #directory: string
+  readonly #files: RuntimeFileSystem
+
+  constructor(directory: string, files: RuntimeFileSystem) {
+    this.#directory = directory
+    this.#files = files
+  }
+
+  async prepare(sessionId: string, atTurn: string | null): Promise<string> {
+    const path = this.#path(sessionId)
+    const existing = (await this.#files.readText(path, FORK_OPERATION_FILE_LIMIT))?.trim()
+    if (existing !== undefined && existing !== null && existing.length > 0) {
+      const operation = parseForkOperation(existing)
+      if (operation.session_id !== sessionId || operation.at_turn !== atTurn) {
+        throw new EngineRuntimeError(
+          "another fork operation is pending for this session; retry its original boundary",
+        )
+      }
+      return operation.operation_id
+    }
+    const operation: PersistedForkOperation = {
+      version: 1,
+      session_id: sessionId,
+      at_turn: atTurn,
+      operation_id: crypto.randomUUID(),
+    }
+    await this.#files.writePrivateTextAtomic(path, `${JSON.stringify(operation)}\n`)
+    return operation.operation_id
+  }
+
+  async complete(sessionId: string): Promise<void> {
+    await this.#files.writePrivateTextAtomic(this.#path(sessionId), "")
+  }
+
+  #path(sessionId: string): string {
+    if (
+      sessionId.length === 0 ||
+      sessionId.length > 128 ||
+      !/^[A-Za-z0-9._-]+$/.test(sessionId)
+    ) {
+      throw new EngineRuntimeError("fork session id is unsafe for durable handoff")
+    }
+    return join(this.#directory, `${sessionId}.json`)
+  }
+}
+
+function parseForkOperation(value: string): PersistedForkOperation {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new EngineRuntimeError("pending fork operation handoff is corrupt")
+  }
+  if (
+    !isRecord(parsed) ||
+    parsed.version !== 1 ||
+    typeof parsed.session_id !== "string" ||
+    !(parsed.at_turn === null || typeof parsed.at_turn === "string") ||
+    typeof parsed.operation_id !== "string" ||
+    parsed.operation_id.length === 0 ||
+    parsed.operation_id.length > 128 ||
+    !/^[A-Za-z0-9._-]+$/.test(parsed.operation_id)
+  ) {
+    throw new EngineRuntimeError("pending fork operation handoff is corrupt")
+  }
+  return parsed as unknown as PersistedForkOperation
+}
+
 function optionalSequence(value: string | undefined, source: string): string | null {
   const normalized = nonEmpty(value)
   if (normalized === null) {
@@ -755,6 +915,11 @@ function safeErrorMessage(error: unknown): string {
 
 function commandSessionId(command: ClientCommand): string | null {
   return "session_id" in command ? command.session_id : null
+}
+
+function isReplayReadOnlyCommand(command: ClientCommand): boolean {
+  const type: string = command.type
+  return type === "list_sessions" || type === "search_sessions"
 }
 
 function eventBelongsToSession(event: WireEngineEvent, sessionId: string): boolean {

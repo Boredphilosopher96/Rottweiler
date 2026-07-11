@@ -43,10 +43,10 @@ use rw_types::{
     ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModeId, ModelAlias,
     PROTOCOL_VERSION, PlanArtifact, PlanDecision, PromptDump, PromptTool, Question, QuestionId,
-    QuestionOption, QuestionResponseKind, RequestId, RewindTarget, Role, SequenceId, SessionId,
-    SessionMode, ShellId, StoredAttachment, SubagentId, ToolCallId, ToolOutput, ToolOutputPart,
-    ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
-    UnrestorablePath, Usage,
+    QuestionOption, QuestionResponseKind, RequestId, ReviewFileDecision, RewindTarget, Role,
+    SequenceId, SessionId, SessionMode, SessionReview, ShellId, StoredAttachment, SubagentId,
+    ToolCallId, ToolOutput, ToolOutputPart, ToolOutputStream, Turn, TurnAccounting, TurnId,
+    TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1209,6 +1209,7 @@ pub struct SessionSnapshot {
     pub active_shell: Option<RecoveredUserShell>,
     pub workspace_generation: u64,
     pub workspace_roots: Vec<rw_types::WorkspaceRootDescriptor>,
+    pub driver_client_id: Option<ClientId>,
 }
 
 /// Persisted actor state supplied when resuming a session from its event log.
@@ -1302,6 +1303,23 @@ fn parse_turn_id(turn_id: &TurnId) -> Result<u64, SessionProjectionError> {
         .map_err(|_| SessionProjectionError::InvalidTurnId(turn_id.0.clone()))
 }
 
+fn review_hash_is_valid(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn review_path_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4_096
+        && !value.contains('\\')
+        && !value.chars().any(char::is_control)
+        && Path::new(value)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
 #[allow(clippy::match_same_arms, clippy::too_many_lines)]
 fn recovered_pending_event(
     event: &EngineEvent,
@@ -1314,7 +1332,11 @@ fn recovered_pending_event(
         | EngineEvent::CostSnapshotReady { .. }
         | EngineEvent::PromptDumpReady { .. }
         | EngineEvent::SessionReplayCompleted { .. }
+        | EngineEvent::SessionForked { .. }
         | EngineEvent::SessionsListed { .. }
+        | EngineEvent::SessionsSearchReady { .. }
+        | EngineEvent::SessionReviewReady { .. }
+        | EngineEvent::SessionReviewUpdated { .. }
         | EngineEvent::CommandDescriptorsListed { .. }
         | EngineEvent::ModelsListed { .. }
         | EngineEvent::WorkspaceFilesFound { .. }
@@ -2548,6 +2570,29 @@ pub trait MutationCheckpointCoordinator: Send + Sync {
 
     async fn acknowledge_rewind(&self, checkpoint: &RewindCheckpoint)
     -> Result<(), AgentLoopError>;
+
+    /// Returns a complete cumulative review snapshot for one session.
+    async fn session_review(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<SessionReview, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "session review is not configured".to_owned(),
+        ))
+    }
+
+    /// Resolves one fingerprint-bound review entry and returns a full snapshot.
+    async fn resolve_review_file(
+        &self,
+        _session_id: &SessionId,
+        _path: &Path,
+        _decision: ReviewFileDecision,
+        _current_hash: &str,
+    ) -> Result<SessionReview, AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(
+            "session review is not configured".to_owned(),
+        ))
+    }
 }
 
 /// Checkpoint coordinator for read-only or ephemeral sessions.
@@ -2591,6 +2636,26 @@ impl MutationCheckpointCoordinator for NoopMutationCheckpointCoordinator {
         _checkpoint: &RewindCheckpoint,
     ) -> Result<(), AgentLoopError> {
         Ok(())
+    }
+
+    async fn session_review(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<SessionReview, AgentLoopError> {
+        Ok(SessionReview {
+            session_id: session_id.clone(),
+            files: Vec::new(),
+        })
+    }
+
+    async fn resolve_review_file(
+        &self,
+        session_id: &SessionId,
+        _path: &Path,
+        _decision: ReviewFileDecision,
+        _current_hash: &str,
+    ) -> Result<SessionReview, AgentLoopError> {
+        self.session_review(session_id).await
     }
 }
 
@@ -2657,6 +2722,7 @@ pub enum SessionCommandAction {
     Rewind {
         to_turn: u64,
     },
+    Review,
     Context,
     PinContext {
         item_id: ContextItemId,
@@ -3118,6 +3184,63 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for CompactComm
 
 struct RewindCommand;
 
+struct ForkCommand;
+
+struct ReviewCommand;
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ForkCommand {
+    async fn execute(
+        &self,
+        context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        if context.running() {
+            return Err(CommandExecutionError::new(
+                "turn_running",
+                "forking requires an idle session",
+            ));
+        }
+        let turn = invocation.arguments().trim();
+        if !turn.is_empty() && turn.parse::<u64>().is_err() {
+            return Err(CommandExecutionError::new(
+                "invalid_turn",
+                "usage: /fork [turn]",
+            ));
+        }
+        Err(CommandExecutionError::new(
+            "host_dispatch_required",
+            "fork is handled by the authenticated session host",
+        ))
+    }
+}
+
+#[async_trait]
+impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ReviewCommand {
+    async fn execute(
+        &self,
+        context: &mut SessionCommandContext,
+        invocation: CommandInvocation,
+    ) -> Result<SessionCommandOutput, CommandExecutionError> {
+        if context.running() {
+            return Err(CommandExecutionError::new(
+                "turn_running",
+                "session review requires an idle session",
+            ));
+        }
+        if !invocation.arguments().trim().is_empty() {
+            return Err(CommandExecutionError::new(
+                "invalid_review_command",
+                "usage: /review",
+            ));
+        }
+        Ok(SessionCommandOutput {
+            message: String::new(),
+            action: SessionCommandAction::Review,
+        })
+    }
+}
+
 struct TrustCommand;
 
 #[async_trait]
@@ -3257,6 +3380,19 @@ pub fn builtin_command_registry()
             CommandDescriptor::new("rewind", "Restore a completed turn checkpoint")
                 .with_argument_hint("<turn>"),
             RewindCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
+            CommandDescriptor::new("fork", "Fork this session at a completed turn")
+                .with_argument_hint("[turn]"),
+            ForkCommand,
+        )
+        .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
+    registry
+        .register(
+            CommandDescriptor::new("review", "Review the cumulative session diff"),
+            ReviewCommand,
         )
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;
     registry
@@ -4660,7 +4796,10 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::GetContext { meta, .. }
         | ClientCommand::GetCost { meta, .. }
         | ClientCommand::DumpPrompt { meta, .. }
+        | ClientCommand::GetSessionReview { meta, .. }
+        | ClientCommand::ReviewFile { meta, .. }
         | ClientCommand::ListSessions { meta, .. }
+        | ClientCommand::SearchSessions { meta, .. }
         | ClientCommand::ListCommands { meta, .. }
         | ClientCommand::ListModels { meta, .. }
         | ClientCommand::SearchWorkspaceFiles { meta, .. }
@@ -4674,6 +4813,7 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
     match command {
         ClientCommand::CreateSession { .. }
         | ClientCommand::ListSessions { .. }
+        | ClientCommand::SearchSessions { .. }
         | ClientCommand::ListCommands { .. }
         | ClientCommand::ListModels { .. }
         | ClientCommand::ShutdownHost { .. } => None,
@@ -4697,6 +4837,8 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::GetContext { session_id, .. }
         | ClientCommand::GetCost { session_id, .. }
         | ClientCommand::DumpPrompt { session_id, .. }
+        | ClientCommand::GetSessionReview { session_id, .. }
+        | ClientCommand::ReviewFile { session_id, .. }
         | ClientCommand::SearchWorkspaceFiles { session_id, .. }
         | ClientCommand::PreviewWorkspaceFile { session_id, .. }
         | ClientCommand::GetWorkspaceStatus { session_id, .. } => Some(session_id),
@@ -5553,6 +5695,7 @@ fn requires_driver(command: &ClientCommand) -> bool {
             | ClientCommand::TakeDriver { .. }
             | ClientCommand::GetContext { .. }
             | ClientCommand::GetCost { .. }
+            | ClientCommand::GetSessionReview { .. }
             | ClientCommand::DumpPrompt { .. }
     )
 }
@@ -6055,6 +6198,32 @@ async fn handle_actor_command(
                     let _ = respond.send(outcome);
                     return;
                 }
+                ClientCommand::GetSessionReview { .. }
+                    if state.running.is_some() || state.active_shell.is_some() =>
+                {
+                    let outcome = protocol_rejection(
+                        "session_not_idle",
+                        "session review requires an idle session",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::ReviewFile {
+                    path, current_hash, ..
+                } if state.running.is_some()
+                    || state.active_shell.is_some()
+                    || !review_path_is_valid(path)
+                    || !review_hash_is_valid(current_hash) =>
+                {
+                    let outcome = protocol_rejection(
+                        "invalid_review_file",
+                        "review decisions require an idle session, a safe relative path, and the displayed current hash",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
                 ClientCommand::ApproveTool { tool_call_id, .. }
                     if !state.pending_approvals.contains_key(&tool_call_id.0) =>
                 {
@@ -6425,6 +6594,68 @@ async fn handle_actor_command(
                     return;
                 }
                 precommitted_answer = Some((pending, answer));
+            }
+            if matches!(
+                command,
+                ClientCommand::GetSessionReview { .. } | ClientCommand::ReviewFile { .. }
+            ) {
+                let result = match &command {
+                    ClientCommand::GetSessionReview { .. } => config
+                        .checkpoints
+                        .session_review(&state.session_id)
+                        .await
+                        .map(|review| EngineEvent::SessionReviewReady {
+                            meta: query_meta(state, &meta),
+                            session_id: state.session_id.clone(),
+                            review,
+                        }),
+                    ClientCommand::ReviewFile {
+                        path,
+                        decision,
+                        current_hash,
+                        ..
+                    } => config
+                        .checkpoints
+                        .resolve_review_file(
+                            &state.session_id,
+                            Path::new(path),
+                            *decision,
+                            current_hash,
+                        )
+                        .await
+                        .map(|review| EngineEvent::SessionReviewUpdated {
+                            meta: query_meta(state, &meta),
+                            session_id: state.session_id.clone(),
+                            path: path.clone(),
+                            decision: *decision,
+                            review,
+                        }),
+                    _ => unreachable!("review command guard narrows the command"),
+                };
+                state.transient_cause = None;
+                match result {
+                    Ok(event) => {
+                        let accepted = CommandOutcome::Accepted;
+                        send_ack(state, events, &meta, session, accepted.clone());
+                        send_connection_event(events, &meta.client_id, event);
+                        let _ = respond.send(accepted);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Ok(ProtocolCompletion::Unit));
+                        }
+                    }
+                    Err(error) => {
+                        let outcome = protocol_rejection(
+                            "session_review_failed",
+                            "session review could not be completed; refresh and retry",
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Err(error));
+                        }
+                    }
+                }
+                return;
             }
             let accepted = CommandOutcome::Accepted;
             send_ack(state, events, &meta, session, accepted.clone());
@@ -6839,7 +7070,10 @@ async fn handle_actor_command(
                 ClientCommand::CreateSession { .. }
                 | ClientCommand::ResumeSession { .. }
                 | ClientCommand::Fork { .. }
+                | ClientCommand::GetSessionReview { .. }
+                | ClientCommand::ReviewFile { .. }
                 | ClientCommand::ListSessions { .. }
+                | ClientCommand::SearchSessions { .. }
                 | ClientCommand::ListCommands { .. }
                 | ClientCommand::ListModels { .. }
                 | ClientCommand::SearchWorkspaceFiles { .. }
@@ -7018,6 +7252,25 @@ async fn handle_actor_command(
                                                     .to_owned(),
                                             ),
                                         ));
+                                        return;
+                                    }
+                                }
+                            }
+                            SessionCommandAction::Review => {
+                                match config.checkpoints.session_review(&state.session_id).await {
+                                    Ok(review) => match serde_json::to_string_pretty(&review) {
+                                        Ok(message) => output.message = message,
+                                        Err(error) => {
+                                            let _ = respond.send(Err(
+                                                AgentLoopError::InvalidConfiguration(
+                                                    error.to_string(),
+                                                ),
+                                            ));
+                                            return;
+                                        }
+                                    },
+                                    Err(error) => {
+                                        let _ = respond.send(Err(error));
                                         return;
                                     }
                                 }
@@ -7549,6 +7802,7 @@ async fn handle_actor_command(
                         machine_local: false,
                     })
                     .collect(),
+                driver_client_id: state.driver_client_id.clone(),
             });
         }
     }

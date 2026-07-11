@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
@@ -20,6 +21,7 @@ use rw_core::{
 };
 use tracing_subscriber::EnvFilter;
 
+mod history;
 #[allow(dead_code)]
 mod host_runtime;
 #[allow(dead_code)]
@@ -203,6 +205,58 @@ enum Command {
     Mcp {
         #[command(subcommand)]
         command: McpCommand,
+    },
+    /// Replay a persisted event stream without opening an engine or provider.
+    Replay {
+        #[arg(value_name = "SESSION")]
+        session: String,
+        /// Emit machine-readable `EngineEvent` JSONL instead of launching the TUI.
+        #[arg(long)]
+        jsonl: bool,
+    },
+    /// Export one persisted transcript without opening credentials or providers.
+    Export {
+        #[arg(value_name = "SESSION")]
+        session: String,
+        #[arg(long, value_enum, default_value_t = HistoryExportFormat::Markdown)]
+        format: HistoryExportFormat,
+        #[arg(short, long, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Atomically replace an existing regular, single-link output file.
+        #[arg(long, requires = "output")]
+        force: bool,
+    },
+    /// Search durable session titles and transcripts.
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum HistoryExportFormat {
+    Markdown,
+    Html,
+    Json,
+}
+
+impl From<HistoryExportFormat> for history::TranscriptFormat {
+    fn from(value: HistoryExportFormat) -> Self {
+        match value {
+            HistoryExportFormat::Markdown => Self::Markdown,
+            HistoryExportFormat::Html => Self::Html,
+            HistoryExportFormat::Json => Self::Json,
+        }
+    }
+}
+
+#[derive(Debug, Subcommand)]
+enum SessionsCommand {
+    Search {
+        #[arg(value_name = "QUERY")]
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
     },
 }
 
@@ -494,6 +548,40 @@ async fn main() -> Result<()> {
         Some(Command::Mcp {
             command: McpCommand::Login { server },
         }) => mcp_cli::login(&server, cli.dangerously_trust).await?,
+        Some(Command::Replay { session, jsonl }) => {
+            let storage_root = configuration_root_path()?;
+            let events = history::load_events(&storage_root, &session)?;
+            if jsonl {
+                io::stdout()
+                    .write_all(&history::replay_jsonl(&events)?)
+                    .into_diagnostic()?;
+            } else {
+                run_history_replay(&storage_root, &session, events).await?;
+            }
+        }
+        Some(Command::Export {
+            session,
+            format,
+            output,
+            force,
+        }) => {
+            let storage_root = configuration_root_path()?;
+            let events = history::load_events(&storage_root, &session)?;
+            let redactor = rw_core::runtime_support::FixtureRedactor::default();
+            runtime::register_credential_environment(&redactor);
+            let exported = history::export_transcript(&session, &events, format.into(), &redactor)?;
+            if let Some(path) = output {
+                write_history_export(&storage_root, &path, &exported, force)?;
+            } else {
+                io::stdout().write_all(&exported).into_diagnostic()?;
+            }
+        }
+        Some(Command::Sessions {
+            command: SessionsCommand::Search { query, limit },
+        }) => {
+            let sessions = history::search_sessions(&configuration_root_path()?, &query, limit)?;
+            render_session_search(&sessions, cli.output_format)?;
+        }
         None => {
             let headless_or_line = cli.prompt.is_some()
                 || cli.line
@@ -531,6 +619,209 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn write_history_export(
+    storage_root: &Path,
+    output: &Path,
+    bytes: &[u8],
+    force: bool,
+) -> Result<()> {
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = fs::canonicalize(parent).into_diagnostic()?;
+    let filename = output
+        .file_name()
+        .ok_or_else(|| miette!("export output must name a file"))?;
+    if let Ok(canonical_storage) = fs::canonicalize(storage_root)
+        && parent.starts_with(canonical_storage)
+    {
+        return Err(miette!("export output cannot modify Rottweiler storage"));
+    }
+
+    #[cfg(unix)]
+    return write_history_export_unix(&parent, filename, bytes, force, || Ok(()));
+
+    #[cfg(not(unix))]
+    write_history_export_portable(storage_root, &parent, filename, bytes, force)
+}
+
+#[cfg(unix)]
+fn write_history_export_unix(
+    parent: &Path,
+    filename: &std::ffi::OsStr,
+    bytes: &[u8],
+    force: bool,
+    before_commit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
+
+    let expected = fs::metadata(parent).into_diagnostic()?;
+    let directory = rustix::fs::open(
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .into_diagnostic()?;
+    let opened = rustix::fs::fstat(&directory)
+        .map_err(std::io::Error::from)
+        .into_diagnostic()?;
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if expected.dev() != u64::try_from(opened.st_dev).unwrap_or(u64::MAX)
+            || expected.ino() != opened.st_ino
+        {
+            return Err(miette!(
+                "export output directory changed while it was opened"
+            ));
+        }
+    }
+    match rustix::fs::statat(&directory, filename, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => {
+            if !force {
+                return Err(miette!(
+                    "export output already exists; pass --force to replace it"
+                ));
+            }
+            if !FileType::from_raw_mode(stat.st_mode).is_file() {
+                return Err(miette!("export output is not a regular file"));
+            }
+            if stat.st_nlink != 1 {
+                return Err(miette!("export output has multiple hard links"));
+            }
+        }
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(std::io::Error::from(error)).into_diagnostic(),
+    }
+    let mut random = [0_u8; 8];
+    getrandom::fill(&mut random).into_diagnostic()?;
+    let temporary = format!(
+        ".rottweiler-export-{}-{}",
+        std::process::id(),
+        u64::from_ne_bytes(random)
+    );
+    let descriptor = rustix::fs::openat(
+        &directory,
+        temporary.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(std::io::Error::from)
+    .into_diagnostic()?;
+    let result = (|| -> Result<()> {
+        let mut file = fs::File::from(descriptor);
+        file.write_all(bytes).into_diagnostic()?;
+        file.sync_all().into_diagnostic()?;
+        before_commit()?;
+        if force {
+            rustix::fs::renameat(&directory, temporary.as_str(), &directory, filename)
+        } else {
+            rustix::fs::renameat_with(
+                &directory,
+                temporary.as_str(),
+                &directory,
+                filename,
+                RenameFlags::NOREPLACE,
+            )
+        }
+        .map_err(std::io::Error::from)
+        .into_diagnostic()?;
+        rustix::fs::fsync(&directory)
+            .map_err(std::io::Error::from)
+            .into_diagnostic()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = rustix::fs::unlinkat(&directory, temporary.as_str(), AtFlags::empty());
+    }
+    result
+}
+
+#[cfg(not(unix))]
+fn write_history_export_portable(
+    storage_root: &Path,
+    parent: &Path,
+    filename: &std::ffi::OsStr,
+    bytes: &[u8],
+    force: bool,
+) -> Result<()> {
+    let destination = parent.join(filename);
+    if destination.exists() {
+        let message = if force {
+            "safe --force replacement is unavailable on this platform"
+        } else {
+            "export output already exists; pass --force to replace it"
+        };
+        return Err(miette!(message));
+    }
+    let parent = fs::canonicalize(parent).into_diagnostic()?;
+    if let Ok(canonical_storage) = fs::canonicalize(storage_root)
+        && parent.starts_with(canonical_storage)
+    {
+        return Err(miette!("export output cannot modify Rottweiler storage"));
+    }
+    let destination = parent.join(filename);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .into_diagnostic()?;
+    file.write_all(bytes).into_diagnostic()?;
+    file.sync_all().into_diagnostic()
+}
+
+fn render_session_search(
+    sessions: &[rw_store::session::SessionSummary],
+    format: OutputFormat,
+) -> Result<()> {
+    match format {
+        OutputFormat::Text => {
+            for session in sessions {
+                let title = session
+                    .title
+                    .chars()
+                    .map(|character| {
+                        if character.is_control() {
+                            ' '
+                        } else {
+                            character
+                        }
+                    })
+                    .collect::<String>();
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    session.id, session.updated_unix_ms, session.cost_micros, title
+                );
+            }
+        }
+        OutputFormat::Json => {
+            let values = sessions
+                .iter()
+                .map(|session| {
+                    serde_json::json!({
+                        "id":session.id,"title":session.title,
+                        "updated_unix_ms":session.updated_unix_ms,"cost_micros":session.cost_micros,
+                    })
+                })
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string(&values).into_diagnostic()?);
+        }
+        OutputFormat::StreamJson => {
+            for session in sessions {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "id":session.id,"title":session.title,
+                        "updated_unix_ms":session.updated_unix_ms,"cost_micros":session.cost_micros,
+                    })
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_local_tui(cli: &Cli) -> Result<()> {
     let workspace =
         fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
@@ -556,6 +847,7 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
             socket: paths.socket,
             token_file: paths.token,
             last_seen_file: paths.directory.join("last-seen"),
+            fork_operation_directory: storage_root.join("control/pending-forks"),
             session_id,
             permission_mode: cli.permission_mode,
             max_turns: cli.max_turns,
@@ -594,6 +886,690 @@ impl DeferredHostedEngine {
             .await
             .clone()
             .ok_or_else(|| "engine session runtime is still starting".to_owned())
+    }
+}
+
+#[derive(Clone)]
+struct HistoricalReplayEngine {
+    session_id: SessionId,
+    events: Arc<Vec<HistoricalReplayItem>>,
+    through_sequence: Option<SequenceId>,
+}
+
+#[derive(Clone, Debug)]
+enum HistoricalReplayItem {
+    Durable(rw_store::session::EventEnvelope<EngineEvent>),
+    Progress {
+        parent_cursor: SequenceId,
+        event: EngineEvent,
+    },
+}
+
+const MAX_REPLAY_CHILD_DEPTH: usize = 8;
+const MAX_REPLAY_CHILD_SESSIONS: usize = 1_024;
+const MAX_REPLAY_PROGRESS_BYTES: usize = 256 * 1024;
+
+struct HistoricalReplayBudget {
+    bytes: u64,
+    events: usize,
+    sessions: usize,
+}
+
+impl HistoricalReplayBudget {
+    fn consume(&mut self, value: &serde_json::Value) -> Result<()> {
+        let bytes = serde_json::to_vec(value).into_diagnostic()?;
+        if bytes.len() > MAX_REPLAY_PROGRESS_BYTES {
+            return Err(miette!("historical child progress exceeds its size limit"));
+        }
+        let length = u64::try_from(bytes.len()).into_diagnostic()?;
+        self.bytes = self
+            .bytes
+            .checked_sub(length)
+            .ok_or_else(|| miette!("historical child replay exceeds its byte limit"))?;
+        self.events = self
+            .events
+            .checked_sub(1)
+            .ok_or_else(|| miette!("historical child replay exceeds its event limit"))?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl server::ServerEngine for HistoricalReplayEngine {
+    async fn dispatch(
+        &self,
+        _bound_client: ClientId,
+        command: ClientCommand,
+    ) -> std::result::Result<CommandOutcome, String> {
+        match command {
+            ClientCommand::AttachSession {
+                session_id,
+                role: rw_core::ClientRole::Observer,
+                ..
+            } if session_id == self.session_id => Ok(CommandOutcome::Accepted),
+            _ => Ok(CommandOutcome::Rejected {
+                error: rw_core::EngineError {
+                    category: rw_core::EngineErrorCategory::Protocol,
+                    code: "historical_replay_read_only".to_owned(),
+                    message: "historical replay accepts only observer attachment".to_owned(),
+                    retryable: false,
+                    details: None,
+                },
+            }),
+        }
+    }
+
+    async fn subscribe(
+        &self,
+        bound_client: ClientId,
+        session_id: Option<SessionId>,
+        last_seen: Option<SequenceId>,
+    ) -> std::result::Result<
+        tokio::sync::mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+        String,
+    > {
+        if session_id.as_ref() != Some(&self.session_id) {
+            return Err("historical replay session mismatch".to_owned());
+        }
+        let events = Arc::clone(&self.events);
+        let replay_session = self.session_id.clone();
+        let through_sequence = self.through_sequence;
+        let (sender, receiver) = tokio::sync::mpsc::channel(256);
+        tokio::spawn(async move {
+            for item in events.iter() {
+                let event = match item {
+                    HistoricalReplayItem::Durable(envelope)
+                        if last_seen.is_none_or(|sequence| envelope.sequence.0 > sequence.0) =>
+                    {
+                        &envelope.event
+                    }
+                    HistoricalReplayItem::Progress {
+                        parent_cursor,
+                        event,
+                    } if last_seen.is_none_or(|sequence| parent_cursor.0 > sequence.0) => event,
+                    _ => continue,
+                };
+                if sender.send(Ok(event.clone())).await.is_err() {
+                    return;
+                }
+            }
+            let _ = sender
+                .send(Ok(EngineEvent::SessionReplayCompleted {
+                    meta: rw_core::CommandAckMeta {
+                        protocol_version: rw_core::PROTOCOL_VERSION,
+                        client_id: bound_client,
+                        request_id: rw_core::RequestId("historical-replay".to_owned()),
+                        emitted_at: "1970-01-01T00:00:00Z".to_owned(),
+                    },
+                    session_id: replay_session,
+                    through_sequence,
+                }))
+                .await;
+        });
+        Ok(receiver)
+    }
+
+    async fn complete_shell(
+        &self,
+        _session_id: SessionId,
+        _shell_id: rw_core::ShellId,
+        _status: i32,
+        _captured_output: Option<String>,
+    ) -> std::result::Result<(), String> {
+        Err("historical replay is read-only".to_owned())
+    }
+}
+
+async fn run_history_replay(
+    storage_root: &Path,
+    session: &str,
+    events: Vec<rw_store::session::EventEnvelope<EngineEvent>>,
+) -> Result<()> {
+    let tui = locate_tui_executable()?;
+    run_history_replay_with_tui(storage_root, session, events, &tui).await
+}
+
+async fn run_history_replay_with_tui(
+    storage_root: &Path,
+    session: &str,
+    events: Vec<rw_store::session::EventEnvelope<EngineEvent>>,
+    tui: &Path,
+) -> Result<()> {
+    let through_sequence = events.last().map(|envelope| envelope.sequence);
+    let events = historical_replay_items(storage_root, session, events)?;
+    let paths = allocate_runtime_paths(&storage_root.join("run"))?;
+    let runtime_directory = paths.directory.clone();
+    let (runtime, listener) = server::ServerRuntime::create_for_session(paths, Some(session))?;
+    let state = server::ServerState::new(
+        Arc::new(HistoricalReplayEngine {
+            session_id: SessionId(session.to_owned()),
+            events: Arc::new(events),
+            through_sequence,
+        }),
+        &runtime,
+    );
+    let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+    let server_task = tokio::spawn(server::serve(listener, state, shutdown_rx));
+    let status = tokio::process::Command::new(tui)
+        .env("ROTTWEILER_ENGINE_SOCKET", &runtime.paths.socket)
+        .env("ROTTWEILER_ENGINE_TOKEN_FILE", &runtime.paths.token)
+        .env("ROTTWEILER_SESSION_ID", session)
+        .env("ROTTWEILER_REPLAY_MODE", "1")
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .await;
+    let _ = shutdown.send(true);
+    server_task.await.into_diagnostic()??;
+    drop(runtime);
+    let _ = fs::remove_dir_all(runtime_directory);
+    let status = status.into_diagnostic()?;
+    if !status.success() {
+        return Err(miette!("historical replay TUI exited with status {status}"));
+    }
+    Ok(())
+}
+
+fn historical_replay_items(
+    storage_root: &Path,
+    session: &str,
+    events: Vec<rw_store::session::EventEnvelope<EngineEvent>>,
+) -> Result<Vec<HistoricalReplayItem>> {
+    let mut output = Vec::new();
+    let mut budget = HistoricalReplayBudget {
+        bytes: history::MAX_HISTORY_BYTES,
+        events: history::MAX_HISTORY_EVENTS,
+        sessions: MAX_REPLAY_CHILD_SESSIONS,
+    };
+    let root_session = SessionId(session.to_owned());
+    let mut ancestors = HashSet::from([root_session.clone()]);
+    for envelope in events {
+        let cursor = envelope.sequence;
+        let spawned = match &envelope.event {
+            EngineEvent::SubagentSpawned {
+                subagent_id,
+                child_session_id,
+                ..
+            } => Some((subagent_id.clone(), child_session_id.clone())),
+            _ => None,
+        };
+        output.push(HistoricalReplayItem::Durable(envelope));
+        if let Some((subagent_id, child_session_id)) = spawned {
+            let child = historical_child_stream(
+                storage_root,
+                &child_session_id,
+                &mut budget,
+                &mut ancestors,
+                1,
+            )?;
+            for (child_sequence, event) in child {
+                let event = EngineEvent::SubagentProgress {
+                    parent_session_id: root_session.clone(),
+                    subagent_id: subagent_id.clone(),
+                    child_session_id: child_session_id.clone(),
+                    child_sequence,
+                    event,
+                };
+                budget.consume(&serde_json::to_value(&event).into_diagnostic()?)?;
+                output.push(HistoricalReplayItem::Progress {
+                    parent_cursor: cursor,
+                    event,
+                });
+            }
+        }
+    }
+    Ok(output)
+}
+
+fn historical_child_stream(
+    storage_root: &Path,
+    session: &SessionId,
+    budget: &mut HistoricalReplayBudget,
+    ancestors: &mut HashSet<SessionId>,
+    depth: usize,
+) -> Result<Vec<(Option<SequenceId>, serde_json::Value)>> {
+    if depth > MAX_REPLAY_CHILD_DEPTH {
+        return Err(miette!("historical child replay exceeds its nesting limit"));
+    }
+    budget.sessions = budget
+        .sessions
+        .checked_sub(1)
+        .ok_or_else(|| miette!("historical child replay exceeds its session limit"))?;
+    if !ancestors.insert(session.clone()) {
+        return Err(miette!("historical child replay contains a session cycle"));
+    }
+    let result = (|| {
+        let events = rw_store::session::SessionEventLog::load_existing_bounded::<EngineEvent>(
+            storage_root,
+            &session.0,
+            budget.bytes,
+            budget.events,
+        )
+        .map_err(|error| miette!("historical child session could not be read: {error}"))?;
+        let mut output = Vec::new();
+        for envelope in events {
+            let meta = envelope
+                .event
+                .meta()
+                .ok_or_else(|| miette!("historical child log contains a non-durable event"))?;
+            if meta.session_id != *session || meta.sequence_id != envelope.sequence {
+                return Err(miette!(
+                    "historical child event identity does not match its durable envelope"
+                ));
+            }
+            let spawned = match &envelope.event {
+                EngineEvent::SubagentSpawned {
+                    subagent_id,
+                    child_session_id,
+                    ..
+                } => Some((subagent_id.clone(), child_session_id.clone())),
+                _ => None,
+            };
+            let value = serde_json::to_value(&envelope.event).into_diagnostic()?;
+            budget.consume(&value)?;
+            output.push((Some(envelope.sequence), value));
+            if let Some((subagent_id, child_session_id)) = spawned {
+                for (child_sequence, event) in historical_child_stream(
+                    storage_root,
+                    &child_session_id,
+                    budget,
+                    ancestors,
+                    depth + 1,
+                )? {
+                    let progress = EngineEvent::SubagentProgress {
+                        parent_session_id: session.clone(),
+                        subagent_id: subagent_id.clone(),
+                        child_session_id: child_session_id.clone(),
+                        child_sequence,
+                        event,
+                    };
+                    let value = serde_json::to_value(progress).into_diagnostic()?;
+                    budget.consume(&value)?;
+                    output.push((None, value));
+                }
+            }
+        }
+        Ok(output)
+    })();
+    ancestors.remove(session);
+    result
+}
+
+#[cfg(test)]
+mod historical_replay_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+    use rw_core::runtime_support::SubagentId;
+    use rw_core::{ClientRole, CommandMeta, EventMeta, RequestId};
+    use rw_store::session::SessionEventLog;
+
+    fn meta() -> CommandMeta {
+        CommandMeta {
+            protocol_version: rw_core::PROTOCOL_VERSION,
+            client_id: ClientId("client".to_owned()),
+            request_id: RequestId("request".to_owned()),
+        }
+    }
+
+    fn event_meta(session: &str, sequence: u64) -> EventMeta {
+        EventMeta {
+            protocol_version: rw_core::PROTOCOL_VERSION,
+            session_id: SessionId(session.to_owned()),
+            sequence_id: SequenceId(sequence),
+            emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+            caused_by: None,
+        }
+    }
+
+    fn engine() -> HistoricalReplayEngine {
+        let session_id = SessionId("history".to_owned());
+        HistoricalReplayEngine {
+            session_id: session_id.clone(),
+            events: Arc::new(vec![HistoricalReplayItem::Durable(
+                rw_store::session::EventEnvelope {
+                    schema_version: 1,
+                    sequence: SequenceId(0),
+                    event: EngineEvent::UiNotification {
+                        meta: EventMeta {
+                            protocol_version: rw_core::PROTOCOL_VERSION,
+                            session_id,
+                            sequence_id: SequenceId(0),
+                            emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                            caused_by: None,
+                        },
+                        plugin_id: "fixture".to_owned(),
+                        title: "title".to_owned(),
+                        message: "message".to_owned(),
+                    },
+                },
+            )]),
+            through_sequence: Some(SequenceId(0)),
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_replay_is_ordered_and_strictly_read_only() {
+        let engine = engine();
+        let observer = ClientCommand::AttachSession {
+            meta: meta(),
+            session_id: SessionId("history".to_owned()),
+            last_seen_sequence: None,
+            role: ClientRole::Observer,
+        };
+        assert_eq!(
+            server::ServerEngine::dispatch(&engine, ClientId("bound".to_owned()), observer).await,
+            Ok(CommandOutcome::Accepted)
+        );
+        let driver = ClientCommand::AttachSession {
+            meta: meta(),
+            session_id: SessionId("history".to_owned()),
+            last_seen_sequence: None,
+            role: ClientRole::Driver,
+        };
+        assert!(matches!(
+            server::ServerEngine::dispatch(&engine, ClientId("bound".to_owned()), driver).await,
+            Ok(CommandOutcome::Rejected { .. })
+        ));
+        assert!(matches!(
+            server::ServerEngine::dispatch(
+                &engine,
+                ClientId("bound".to_owned()),
+                ClientCommand::Interrupt {
+                    meta: meta(),
+                    session_id: SessionId("history".to_owned()),
+                },
+            )
+            .await,
+            Ok(CommandOutcome::Rejected { .. })
+        ));
+        assert!(
+            server::ServerEngine::subscribe(
+                &engine,
+                ClientId("bound".to_owned()),
+                Some(SessionId("wrong".to_owned())),
+                None,
+            )
+            .await
+            .is_err()
+        );
+        let mut replay = server::ServerEngine::subscribe(
+            &engine,
+            ClientId("bound".to_owned()),
+            Some(SessionId("history".to_owned())),
+            None,
+        )
+        .await
+        .expect("subscribe");
+        assert!(matches!(
+            replay.recv().await,
+            Some(Ok(EngineEvent::UiNotification { .. }))
+        ));
+        assert!(matches!(
+            replay.recv().await,
+            Some(Ok(EngineEvent::SessionReplayCompleted {
+                through_sequence: Some(SequenceId(0)),
+                ..
+            }))
+        ));
+        assert!(replay.recv().await.is_none());
+    }
+
+    #[test]
+    fn historical_replay_rederives_bounded_nested_child_progress() {
+        let storage = tempfile::tempdir().expect("storage");
+        let mut grandchild =
+            SessionEventLog::open(storage.path(), "grandchild").expect("grandchild log");
+        grandchild
+            .append(EngineEvent::UiNotification {
+                meta: event_meta("grandchild", 0),
+                plugin_id: "fixture".to_owned(),
+                title: "grandchild".to_owned(),
+                message: "working".to_owned(),
+            })
+            .expect("grandchild event");
+        let mut child = SessionEventLog::open(storage.path(), "child").expect("child log");
+        child
+            .append_batch([
+                EngineEvent::UiNotification {
+                    meta: event_meta("child", 0),
+                    plugin_id: "fixture".to_owned(),
+                    title: "child".to_owned(),
+                    message: "working".to_owned(),
+                },
+                EngineEvent::SubagentSpawned {
+                    meta: event_meta("child", 1),
+                    subagent_id: SubagentId("nested".to_owned()),
+                    child_session_id: SessionId("grandchild".to_owned()),
+                    task: "nested task".to_owned(),
+                },
+            ])
+            .expect("child events");
+        let root = rw_store::session::EventEnvelope {
+            schema_version: 1,
+            sequence: SequenceId(0),
+            event: EngineEvent::SubagentSpawned {
+                meta: event_meta("root", 0),
+                subagent_id: SubagentId("direct".to_owned()),
+                child_session_id: SessionId("child".to_owned()),
+                task: "direct task".to_owned(),
+            },
+        };
+
+        let replay = historical_replay_items(storage.path(), "root", vec![root])
+            .expect("derived historical replay");
+        assert_eq!(replay.len(), 4);
+        let HistoricalReplayItem::Progress { event, .. } = &replay[3] else {
+            panic!("nested progress wrapper");
+        };
+        let EngineEvent::SubagentProgress { event, .. } = event else {
+            panic!("direct progress wrapper");
+        };
+        assert_eq!(event["type"], "subagent_progress");
+        assert_eq!(event["event"]["type"], "ui_notification");
+        assert_eq!(event["event"]["title"], "grandchild");
+    }
+
+    #[test]
+    fn historical_replay_charges_root_progress_wrapper_amplification() {
+        let storage = tempfile::tempdir().expect("storage");
+        let mut child = SessionEventLog::open(storage.path(), "child").expect("child log");
+        child
+            .append(EngineEvent::UiNotification {
+                meta: event_meta("child", 0),
+                plugin_id: "fixture".to_owned(),
+                title: "child".to_owned(),
+                message: "small event".to_owned(),
+            })
+            .expect("child event");
+        let root = rw_store::session::EventEnvelope {
+            schema_version: 1,
+            sequence: SequenceId(0),
+            event: EngineEvent::SubagentSpawned {
+                meta: event_meta("root", 0),
+                subagent_id: SubagentId("x".repeat(MAX_REPLAY_PROGRESS_BYTES)),
+                child_session_id: SessionId("child".to_owned()),
+                task: "direct task".to_owned(),
+            },
+        };
+
+        let error = historical_replay_items(storage.path(), "root", vec![root])
+            .expect_err("amplified root wrapper must be bounded");
+        assert!(error.to_string().contains("progress exceeds"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn historical_replay_rejects_symlinked_child_logs() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::tempdir().expect("storage");
+        let outside = tempfile::tempdir().expect("outside");
+        let mut foreign =
+            SessionEventLog::open(outside.path(), "foreign").expect("foreign child log");
+        foreign
+            .append(EngineEvent::UiNotification {
+                meta: event_meta("foreign", 0),
+                plugin_id: "fixture".to_owned(),
+                title: "foreign".to_owned(),
+                message: "must not load".to_owned(),
+            })
+            .expect("foreign event");
+        fs::create_dir_all(storage.path().join("sessions")).expect("session root");
+        symlink(
+            outside.path().join("sessions/foreign"),
+            storage.path().join("sessions/child"),
+        )
+        .expect("child symlink");
+        let root = rw_store::session::EventEnvelope {
+            schema_version: 1,
+            sequence: SequenceId(0),
+            event: EngineEvent::SubagentSpawned {
+                meta: event_meta("root", 0),
+                subagent_id: SubagentId("direct".to_owned()),
+                child_session_id: SessionId("child".to_owned()),
+                task: "direct task".to_owned(),
+            },
+        };
+
+        let error = historical_replay_items(storage.path(), "root", vec![root])
+            .expect_err("symlinked child must fail closed");
+        assert!(error.to_string().contains("historical child session"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn historical_replay_process_gets_read_only_runtime_and_leaves_no_build_junk() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let storage = tempfile::tempdir().expect("storage");
+        let fixture = storage.path().join("fixture-tui");
+        fs::write(
+            &fixture,
+            b"#!/bin/sh\n\
+              test \"$ROTTWEILER_REPLAY_MODE\" = \"1\" || exit 11\n\
+              test \"$ROTTWEILER_SESSION_ID\" = \"history\" || exit 12\n\
+              test -S \"$ROTTWEILER_ENGINE_SOCKET\" || exit 13\n\
+              test -f \"$ROTTWEILER_ENGINE_TOKEN_FILE\" || exit 14\n",
+        )
+        .expect("fixture script");
+        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o700))
+            .expect("fixture permissions");
+
+        run_history_replay_with_tui(
+            storage.path(),
+            "history",
+            engine()
+                .events
+                .iter()
+                .filter_map(|item| match item {
+                    HistoricalReplayItem::Durable(envelope) => Some(envelope.clone()),
+                    HistoricalReplayItem::Progress { .. } => None,
+                })
+                .collect(),
+            &fixture,
+        )
+        .await
+        .expect("process replay");
+
+        let mut runtime_entries = fs::read_dir(storage.path().join("run")).expect("runtime root");
+        assert!(runtime_entries.next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_refuses_symlink_or_storage_targets_without_mutating_events() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::tempdir().expect("storage");
+        let session = storage.path().join("sessions/history");
+        fs::create_dir_all(&session).expect("session directory");
+        let events = session.join("events.jsonl");
+        fs::write(&events, b"canary").expect("events");
+        let output = tempfile::tempdir().expect("output");
+        let planted = output.path().join("transcript.md");
+        symlink(&events, &planted).expect("planted symlink");
+        assert!(write_history_export(storage.path(), &planted, b"replacement", true).is_err());
+        assert_eq!(fs::read(&events).expect("events unchanged"), b"canary");
+        assert!(
+            write_history_export(storage.path(), &session.join("export.md"), b"x", false).is_err()
+        );
+        assert_eq!(
+            fs::read(&events).expect("events still unchanged"),
+            b"canary"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_parent_swap_stays_bound_to_the_opened_directory_descriptor() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::tempdir().expect("storage");
+        let session = storage.path().join("sessions/history");
+        fs::create_dir_all(&session).expect("session directory");
+        let events = session.join("events.jsonl");
+        fs::write(&events, b"event-canary").expect("events");
+
+        let output = tempfile::tempdir().expect("output");
+        let parent = output.path().join("safe");
+        let moved = output.path().join("moved");
+        fs::create_dir(&parent).expect("safe parent");
+        let canonical_parent = fs::canonicalize(&parent).expect("canonical parent");
+        let parent_for_swap = parent.clone();
+        let moved_for_swap = moved.clone();
+        let session_for_swap = session.clone();
+        write_history_export_unix(
+            &canonical_parent,
+            std::ffi::OsStr::new("transcript.md"),
+            b"safe export",
+            false,
+            move || {
+                fs::rename(&parent_for_swap, &moved_for_swap).into_diagnostic()?;
+                symlink(&session_for_swap, &parent_for_swap).into_diagnostic()?;
+                Ok(())
+            },
+        )
+        .expect("descriptor-bound export");
+
+        assert_eq!(
+            fs::read(moved.join("transcript.md")).expect("export"),
+            b"safe export"
+        );
+        assert_eq!(
+            fs::read(&events).expect("events unchanged"),
+            b"event-canary"
+        );
+        assert!(!session.join("transcript.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_no_clobber_is_atomic_against_a_destination_creation_race() {
+        let output = tempfile::tempdir().expect("output");
+        let parent = fs::canonicalize(output.path()).expect("canonical output");
+        let destination = parent.join("transcript.md");
+        let destination_for_race = destination.clone();
+        let result = write_history_export_unix(
+            &parent,
+            std::ffi::OsStr::new("transcript.md"),
+            b"replacement",
+            false,
+            move || {
+                fs::write(&destination_for_race, b"planted").into_diagnostic()?;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(destination).expect("planted output"), b"planted");
+        assert!(fs::read_dir(&parent).expect("output entries").all(|entry| {
+            !entry
+                .expect("output entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rottweiler-export-")
+        }));
     }
 }
 
@@ -1279,7 +2255,14 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         let _ = watchdog.await;
         return Err(error);
     }
-    let tui = run_remote_tui_process(tui_executable, &local_paths, &session_id, cli.detach);
+    let fork_operation_directory = storage_root.join("control/pending-forks");
+    let tui = run_remote_tui_process(
+        tui_executable,
+        &local_paths,
+        &fork_operation_directory,
+        &session_id,
+        cli.detach,
+    );
     tokio::pin!(tui);
     let result = tokio::select! {
         result = &mut tui => result,
@@ -1566,6 +2549,7 @@ async fn wait_for_socket_or_child(socket: &Path, child: &mut tokio::process::Chi
 async fn run_remote_tui_process(
     tui: PathBuf,
     paths: &server::ServerRuntimePaths,
+    fork_operation_directory: &Path,
     session_id: &str,
     _detach: bool,
 ) -> Result<()> {
@@ -1578,6 +2562,10 @@ async fn run_remote_tui_process(
             .env("ROTTWEILER_ENGINE_TOKEN_FILE", &paths.token)
             .env("ROTTWEILER_SESSION_ID", session_id)
             .env("ROTTWEILER_LAST_SEEN_FILE", &cursor)
+            .env(
+                "ROTTWEILER_FORK_OPERATION_DIRECTORY",
+                fork_operation_directory,
+            )
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())

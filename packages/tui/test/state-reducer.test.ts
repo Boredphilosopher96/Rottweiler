@@ -505,6 +505,89 @@ describe("pure TUI state reducer", () => {
     })
   })
 
+  test("projects cumulative review replacements and bounded session search replies", () => {
+    const replyMeta = (requestId: string) => ({
+      protocol_version: PROTOCOL_VERSION,
+      client_id: "client",
+      request_id: requestId,
+      emitted_at: "2026-01-01T00:00:00Z",
+    })
+    let state = reduce(createInitialState(), {
+      type: "session_review_ready",
+      meta: replyMeta("review-1"),
+      session_id: "session-state",
+      review: {
+        session_id: "session-state",
+        files: [
+          {
+            path: "src/lib.rs",
+            unified_diff: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            status: "pending",
+            truncated: false,
+            unrestorable_reason: null,
+            original_hash: "old-hash",
+            current_hash: "new-hash",
+          },
+        ],
+      },
+    })
+    expect(state.review?.files[0]).toMatchObject({
+      path: "src/lib.rs",
+      status: "pending",
+      originalHash: "old-hash",
+      currentHash: "new-hash",
+    })
+    state = reduce(state, {
+      type: "session_review_updated",
+      meta: replyMeta("review-2"),
+      session_id: "session-state",
+      path: "src/lib.rs",
+      decision: "revert",
+      review: {
+        session_id: "session-state",
+        files: [
+          {
+            path: "src/lib.rs",
+            unified_diff: "",
+            status: "reverted",
+            truncated: false,
+            unrestorable_reason: null,
+            original_hash: "old-hash",
+            current_hash: "old-hash",
+          },
+        ],
+      },
+    })
+    expect(state.review?.files[0]?.status).toBe("reverted")
+
+    state = reduce(state, {
+      type: "sessions_search_ready",
+      meta: replyMeta("search-1"),
+      query: "rott",
+      sessions: [
+        {
+          session_id: "session-state",
+          workspace_name: "Rottweiler",
+          model: "fast",
+          driver_client_id: null,
+          shell_active: false,
+        },
+      ],
+      truncated: true,
+    })
+    expect(state.sessions).toEqual([
+      {
+        sessionId: "session-state",
+        workspaceName: "Rottweiler",
+        model: "fast",
+        driverClientId: null,
+        shellActive: false,
+      },
+    ])
+    expect(state.sessionSearch).toEqual({ query: "rott", truncated: true })
+    expect(state.lastSequence).toBeNull()
+  })
+
   test("projects turns, tools, questions, snapshots, mode, model, and shell state", () => {
     const context = {
       turn_id: "4",

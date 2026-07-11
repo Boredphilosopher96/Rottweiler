@@ -43,6 +43,13 @@ export interface ConnectionProjection {
   readonly gap: SequenceGap | null
 }
 
+/** Presentation-only replay state; durable transcript data still comes from EngineEvent. */
+export interface ReplayProjection {
+  readonly active: boolean
+  readonly sessionId: string | null
+  readonly completedThrough: string | null
+}
+
 export interface TranscriptEntry {
   readonly sequenceId: string
   readonly agentTurn: string
@@ -126,9 +133,13 @@ export interface CommandAcknowledgement {
     | "command_acknowledged"
     | "context_snapshot_ready"
     | "cost_snapshot_ready"
+    | "session_review_ready"
+    | "session_review_updated"
     | "prompt_dump_ready"
     | "session_replay_completed"
+    | "session_forked"
     | "sessions_listed"
+    | "sessions_search_ready"
     | "command_descriptors_listed"
     | "models_listed"
     | "workspace_files_found"
@@ -182,6 +193,34 @@ export interface SessionChoice {
   readonly shellActive: boolean
 }
 
+export type ReviewFileStatus = "pending" | "accepted" | "reverted"
+
+export interface SessionReviewFileProjection {
+  readonly path: string
+  readonly unifiedDiff: string
+  readonly status: ReviewFileStatus
+  readonly truncated: boolean
+  readonly unrestorableReason: string | null
+  readonly originalHash: string
+  readonly currentHash: string
+}
+
+export interface SessionReviewProjection {
+  readonly sessionId: string
+  readonly files: readonly SessionReviewFileProjection[]
+}
+
+export interface SessionSearchProjection {
+  readonly query: string
+  readonly truncated: boolean
+}
+
+export interface SessionForkProjection {
+  readonly parentSessionId: string
+  readonly child: SessionChoice
+  readonly atTurn: string | null
+}
+
 export interface CommandChoice {
   readonly name: string
   readonly description: string
@@ -229,6 +268,7 @@ export interface PluginNotificationProjection {
 
 export interface RottweilerState {
   readonly connection: ConnectionProjection
+  readonly replay: ReplayProjection
   readonly lastSequence: string | null
   readonly transcript: readonly TranscriptEntry[]
   /** Kept separate so streaming deltas never replace or re-layout transcript history. */
@@ -257,6 +297,9 @@ export interface RottweilerState {
   readonly errors: readonly EngineError[]
   readonly protocol: ProtocolProjection
   readonly sessions: readonly SessionChoice[]
+  readonly sessionSearch: SessionSearchProjection | null
+  readonly review: SessionReviewProjection | null
+  readonly lastFork: SessionForkProjection | null
   readonly commands: readonly CommandChoice[]
   readonly models: readonly ModelChoice[]
   readonly workspaceFiles: readonly WorkspaceFileChoice[]
@@ -273,6 +316,7 @@ export function createInitialState(): RottweilerState {
       error: null,
       gap: null,
     },
+    replay: { active: false, sessionId: null, completedThrough: null },
     lastSequence: null,
     transcript: [],
     streamingTail: null,
@@ -309,11 +353,26 @@ export function createInitialState(): RottweilerState {
       lastUnknownType: null,
     },
     sessions: [],
+    sessionSearch: null,
+    review: null,
+    lastFork: null,
     commands: [],
     models: [],
     workspaceFiles: [],
     workspacePreview: null,
     workspaceStatus: null,
     workspaceRoots: null,
+  }
+}
+
+/** Enter immutable historical presentation without changing reducer semantics. */
+export function enterReplayMode(
+  state: RottweilerState,
+  sessionId: string,
+): RottweilerState {
+  return {
+    ...state,
+    replay: { active: true, sessionId, completedThrough: null },
+    streamingTail: null,
   }
 }

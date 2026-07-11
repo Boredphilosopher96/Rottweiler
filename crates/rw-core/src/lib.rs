@@ -16,7 +16,9 @@ pub use rw_types::config::{BudgetConfig, CompactionConfig, Config, PermissionCon
 pub use rw_types::{
     AccountingAttribution, AttachmentData, CommandDescriptor, ContextItemId, ContextSnapshot,
     CostSnapshot, ModeId, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor,
-    PlanDecision, PromptDump, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    PlanDecision, PromptDump, ReviewFileDecision, ReviewFileStatus, SessionReview,
+    SessionReviewFile, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
+    WorkspaceStatus,
 };
 
 pub use admin::{
@@ -41,8 +43,9 @@ pub use engine::{
     builtin_hook_dispatcher, project_session_events,
 };
 pub use host::{
-    BoundClient, CreateSessionRequest, EngineHost, EngineHostConfig, HostError, HostQueryService,
-    HostedSession, SessionFactory,
+    BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
+    ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostQueryService,
+    HostedSession, PreparedForkOperation, SessionFactory,
 };
 pub use init::{
     DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,
@@ -85,7 +88,7 @@ pub use rw_providers::{
 };
 pub use rw_types::PROTOCOL_VERSION;
 pub use rw_types::{
-    Answer, ClientCommand, ClientId, CommandAckMeta, CommandMeta, CommandOutcome, Cost,
+    Answer, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, Cost,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, RequestId, SequenceId,
     SessionDescriptor, SessionId, ShellId, SubagentIsolation, ToolOutputStream, TurnId, TurnStatus,
     UnrestorablePath, Usage,

@@ -43,24 +43,25 @@ use rw_core::runtime_support::{
 };
 use rw_core::{
     AccountingAttribution, ActorSubagentSessionFactory, AgentLoopError, BudgetLedgerQuery,
-    BudgetLedgerTotals, Config, EngineEvent, EventClock, EventMeta, FolderTrustController,
-    FolderTrustOperation, MessageDisposition, ModelDriver, MutationCheckpoint,
-    MutationCheckpointCoordinator, MutationCheckpointOutcome, PermissionGate, ProviderFactory,
-    ProviderNativeWebSearcher, QuestionId, RewindCheckpoint, SESSION_EVENT_VERSION, SequenceId,
-    SessionActor, SessionActorConfig, SessionCommandAction, SessionCommandContext,
-    SessionCommandOutput, SessionEventSink, SpawnAgentTool, SubagentLimits, SubagentMetadataStore,
-    SubagentOrchestrator, SubagentSessionFactory, SystemEventClock, ToolOutputStream, TurnStatus,
-    UnrestorablePath, Usage, WorktreeSubagentSessionFactory, base_agent_system_turn,
-    builtin_command_registry, builtin_hook_dispatcher, load_instruction_stack,
-    load_nested_instruction_stack, project_session_events,
+    BudgetLedgerTotals, ClientId, Config, EngineEvent, EventClock, EventMeta,
+    FolderTrustController, FolderTrustOperation, MessageDisposition, ModelDriver,
+    MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome, PermissionGate,
+    ProviderFactory, ProviderNativeWebSearcher, QuestionId, ReviewFileDecision, RewindCheckpoint,
+    SESSION_EVENT_VERSION, SequenceId, SessionActor, SessionActorConfig, SessionCommandAction,
+    SessionCommandContext, SessionCommandOutput, SessionEventSink, SessionReview, SpawnAgentTool,
+    SubagentLimits, SubagentMetadataStore, SubagentOrchestrator, SubagentSessionFactory,
+    SystemEventClock, ToolOutputStream, TurnStatus, UnrestorablePath, Usage,
+    WorktreeSubagentSessionFactory, base_agent_system_turn, builtin_command_registry,
+    builtin_hook_dispatcher, load_instruction_stack, load_nested_instruction_stack,
+    project_session_events,
 };
 use rw_store::{
     checkpoint::{CheckpointStore, OpaqueMutation, RewindHandle},
     config::ConfigLoader,
     credentials::{CredentialManager, CredentialReference},
     session::{
-        AccountingLedger, SessionEventLog, SessionIndex, SessionProjection, SessionSummary,
-        TurnAccountingEntry, UtcTimestamp,
+        AccountingLedger, SessionEventLog, SessionIndex, SessionProjection, SessionStoreError,
+        SessionSummary, TurnAccountingEntry, UtcTimestamp,
     },
     trust::FolderTrustStore,
 };
@@ -77,6 +78,9 @@ const MAX_REDIRECTS: usize = 5;
 const SESSION_METADATA_VERSION: u16 = 1;
 const PROMPT_SHAPE_VERSION: u16 = 2;
 const CHECKPOINT_ROOTS_VERSION: u16 = 1;
+const MAX_GLOBAL_REVIEW_FILES: usize = 1_024;
+const MAX_GLOBAL_REVIEW_DIFF_BYTES: usize = 2 * 1024 * 1024;
+const MAX_WORKSPACE_ROOTS: usize = 32;
 const MAX_INITIAL_PROJECT_MEMORY_BYTES: usize = 128 * 1024;
 const INITIAL_MEMORY_FRAME_OPEN: &str = "<rottweiler_untrusted_project_memory_v1>";
 const INITIAL_MEMORY_FRAME_CLOSE: &str = "</rottweiler_untrusted_project_memory_v1>";
@@ -864,6 +868,11 @@ fn canonical_workspace_roots(primary: &Path, additional: &[PathBuf]) -> Result<V
             roots.push(canonical);
         }
     }
+    if roots.len() > MAX_WORKSPACE_ROOTS {
+        return Err(miette!(
+            "workspace root count exceeds the supported maximum of {MAX_WORKSPACE_ROOTS}"
+        ));
+    }
     Ok(roots)
 }
 
@@ -934,16 +943,12 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
             workspace_roots = generation.roots;
         }
     }
-    let execution_lease_path = storage_root
-        .join("sessions")
-        .join(&session_id)
-        .join("execution.lock");
-    let execution_lease = Arc::new(
-        tokio::task::spawn_blocking(move || ExecutionLease::acquire(execution_lease_path))
+    let execution_lease_path = workspace_execution_lease_path(&storage_root, &workspace)?;
+    let execution_lease =
+        tokio::task::spawn_blocking(move || acquire_shared_execution_lease(&execution_lease_path))
             .await
             .map_err(|error| miette!("execution lease worker failed: {error}"))?
-            .map_err(|error| miette!("execution lease could not lock: {error}"))?,
-    );
+            .map_err(|error| miette!("execution lease could not lock: {error}"))?;
 
     let configured_model_alias = options
         .model
@@ -952,7 +957,9 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     let (mut initial_context, persisted_model_alias) = if resuming {
         let metadata = load_session_metadata(&storage_root, &session_id, &workspace)?;
         let mut context = metadata.initial_session_context;
-        let recorded_count = metadata.workspace_roots.len().max(1);
+        let recorded_count = metadata
+            .initial_context_workspace_root_count
+            .unwrap_or_else(|| metadata.workspace_roots.len().max(1));
         for root in workspace_roots.iter().skip(recorded_count) {
             if let Some(instructions) = rw_core::load_root_project_instructions(root)
                 .map_err(|error| miette!("project instructions could not load: {error}"))?
@@ -1839,17 +1846,12 @@ pub(crate) async fn compose_hosted_actor(
             ));
         }
     }
-    let execution_lease_path = options
-        .storage_root
-        .join("sessions")
-        .join(&session_id)
-        .join("execution.lock");
-    let execution_lease = Arc::new(
-        tokio::task::spawn_blocking(move || ExecutionLease::acquire(execution_lease_path))
+    let execution_lease_path = workspace_execution_lease_path(&options.storage_root, &workspace)?;
+    let execution_lease =
+        tokio::task::spawn_blocking(move || acquire_shared_execution_lease(&execution_lease_path))
             .await
             .map_err(|error| miette!("execution lease worker failed: {error}"))?
-            .map_err(|error| miette!("execution lease could not lock: {error}"))?,
-    );
+            .map_err(|error| miette!("execution lease could not lock: {error}"))?;
 
     let configured_model_alias = options
         .requested_model
@@ -1858,7 +1860,9 @@ pub(crate) async fn compose_hosted_actor(
     let (mut initial_context, persisted_model_alias) = if options.resume {
         let metadata = load_session_metadata(&options.storage_root, &session_id, &workspace)?;
         let mut context = metadata.initial_session_context;
-        let recorded_count = metadata.workspace_roots.len().max(1);
+        let recorded_count = metadata
+            .initial_context_workspace_root_count
+            .unwrap_or_else(|| metadata.workspace_roots.len().max(1));
         for root in workspace_roots.iter().skip(recorded_count) {
             if let Some(instructions) = rw_core::load_root_project_instructions(root)
                 .map_err(|error| miette!("project instructions could not load: {error}"))?
@@ -2501,6 +2505,16 @@ pub(crate) struct SessionMetadata {
     pub workspace_generation: u64,
     #[serde(default)]
     pub workspace_roots: Vec<PathBuf>,
+    #[serde(default)]
+    initial_context_workspace_root_count: Option<usize>,
+    #[serde(default)]
+    pub(crate) inherited_accounting_through: Option<SequenceId>,
+    #[serde(default)]
+    fork_parent_session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) fork_at_turn: Option<u64>,
+    #[serde(default)]
+    fork_operation_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2923,7 +2937,7 @@ fn validate_session_id(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn checkpoint_root(storage_root: &Path, workspace: &Path, session_id: &str) -> PathBuf {
+pub(crate) fn checkpoint_root(storage_root: &Path, workspace: &Path, session_id: &str) -> PathBuf {
     let digest = blake3::hash(workspace.as_os_str().as_encoded_bytes())
         .to_hex()
         .to_string();
@@ -2932,6 +2946,280 @@ fn checkpoint_root(storage_root: &Path, workspace: &Path, session_id: &str) -> P
         .join(digest)
         .join("sessions")
         .join(session_id)
+}
+
+fn workspace_execution_lease_path(storage_root: &Path, workspace: &Path) -> Result<PathBuf> {
+    let digest = blake3::hash(workspace.as_os_str().as_encoded_bytes())
+        .to_hex()
+        .to_string();
+    let directory = storage_root.join("workspaces").join(digest);
+    ensure_real_directory(&directory, true)?;
+    Ok(directory.join("execution.lock"))
+}
+
+fn acquire_shared_execution_lease(
+    path: &Path,
+) -> std::result::Result<Arc<ExecutionLease>, rw_core::runtime_support::ToolError> {
+    static LEASES: OnceLock<Mutex<HashMap<PathBuf, std::sync::Weak<ExecutionLease>>>> =
+        OnceLock::new();
+    let mut leases = LEASES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(lease) = leases.get(path).and_then(std::sync::Weak::upgrade) {
+        return Ok(lease);
+    }
+    let lease = Arc::new(ExecutionLease::acquire(path)?);
+    leases.insert(path.to_path_buf(), Arc::downgrade(&lease));
+    Ok(lease)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn fork_hosted_session_storage(
+    storage_root: &Path,
+    workspace: &Path,
+    parent_session_id: &str,
+    child_session_id: &str,
+    through_turn: u64,
+    through_sequence: Option<SequenceId>,
+    include_idle_tail: bool,
+    driver_client_id: ClientId,
+    fork_operation_id: Option<&str>,
+) -> Result<()> {
+    validate_session_id(parent_session_id)?;
+    validate_session_id(child_session_id)?;
+    let parent_metadata = load_session_metadata(storage_root, parent_session_id, workspace)?;
+    let parent_events = SessionEventLog::load_existing_bounded::<EngineEvent>(
+        storage_root,
+        parent_session_id,
+        crate::history::MAX_HISTORY_BYTES,
+        crate::history::MAX_HISTORY_EVENTS,
+    )
+    .map_err(|error| miette!("fork parent event log could not load: {error}"))?;
+    let through_sequence = if include_idle_tail {
+        through_sequence
+    } else if through_turn == 0 {
+        None
+    } else {
+        Some(
+            parent_events
+                .iter()
+                .rev()
+                .find_map(|event| match &event.event {
+                    EngineEvent::TurnFinished { turn_id, .. }
+                        if turn_id.0.parse::<u64>().ok() == Some(through_turn) =>
+                    {
+                        Some(event.sequence)
+                    }
+                    _ => None,
+                })
+                .ok_or_else(|| miette!("fork turn is not a durable completed boundary"))?,
+        )
+    };
+    let prefix_end = through_sequence
+        .map(|sequence| {
+            usize::try_from(sequence.0)
+                .map_err(|_| miette!("fork sequence cannot be represented"))?
+                .checked_add(1)
+                .ok_or_else(|| miette!("fork sequence cannot be represented"))
+        })
+        .transpose()?;
+    let prefix = prefix_end.map_or(Ok(&[][..]), |end| {
+        parent_events
+            .get(..end)
+            .ok_or_else(|| miette!("fork sequence is beyond the durable parent tail"))
+    })?;
+    if prefix
+        .iter()
+        .enumerate()
+        .any(|(index, event)| event.sequence.0 != index as u64)
+    {
+        return Err(miette!("fork parent envelope sequence is not contiguous"));
+    }
+    let projected = project_session_events(
+        &prefix
+            .iter()
+            .map(|event| event.event.clone())
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| miette!("fork prefix projection failed: {error}"))?;
+    let source_checkpoint_root = checkpoint_root(storage_root, workspace, parent_session_id);
+    let target_checkpoint_root = checkpoint_root(storage_root, workspace, child_session_id);
+    if target_checkpoint_root.exists() {
+        return Err(miette!("fork target checkpoint root already exists"));
+    }
+    let fork_roots = load_checkpoint_root_generation_exact(
+        &source_checkpoint_root,
+        projected.workspace_generation,
+    )?
+    .filter(|generation| generation.committed)
+    .map(|generation| generation.roots)
+    .ok_or_else(|| miette!("fork workspace-root generation is unavailable"))?;
+    let mapping = CheckpointRootMapping {
+        version: CHECKPOINT_ROOTS_VERSION,
+        generations: vec![CheckpointRootGeneration {
+            generation: projected.workspace_generation,
+            effective_from_turn: projected.completed_turns.saturating_add(1),
+            roots: fork_roots.clone(),
+            committed: true,
+        }],
+    };
+
+    let result = (|| -> Result<()> {
+        std::fs::create_dir_all(&target_checkpoint_root).into_diagnostic()?;
+        persist_private_json(
+            &target_checkpoint_root.join("workspace-roots.json"),
+            &mapping,
+        )?;
+        // Forks share the live workspace but not checkpoint history. A child starts
+        // with an empty mutation baseline so review/rewind only describe its own
+        // changes instead of attributing post-boundary parent changes to the child.
+        let _target_stores = open_checkpoint_stores(&target_checkpoint_root, &fork_roots)?;
+        let child_id = SessionId(child_session_id.to_owned());
+        let child_id_for_map = child_id.clone();
+        let log = SessionEventLog::fork_mapped_loaded::<EngineEvent, _>(
+            storage_root,
+            parent_session_id,
+            child_session_id,
+            parent_events,
+            through_sequence,
+            move |mut event| {
+                let meta = event.meta_mut().ok_or(SessionStoreError::CorruptEvent(
+                    "fork source contains a connection-scoped event",
+                ))?;
+                meta.session_id = child_id_for_map.clone();
+                match &mut event {
+                    EngineEvent::SessionCreated {
+                        driver_client_id: event_driver,
+                        ..
+                    }
+                    | EngineEvent::DriverChanged {
+                        driver_client_id: event_driver,
+                        ..
+                    } => *event_driver = driver_client_id.clone(),
+                    _ => {}
+                }
+                Ok(event)
+            },
+        )
+        .map_err(|error| miette!("fork event log could not persist: {error}"))?;
+        drop(log);
+        persist_forked_session_metadata(
+            storage_root,
+            child_session_id,
+            &parent_metadata,
+            projected.workspace_generation,
+            &fork_roots,
+            through_sequence,
+            through_turn,
+            fork_operation_id,
+        )?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&target_checkpoint_root);
+        let _ = std::fs::remove_dir_all(storage_root.join("sessions").join(child_session_id));
+    }
+    result
+}
+
+pub(crate) fn remove_forked_session_storage(
+    storage_root: &Path,
+    workspace: &Path,
+    child_session_id: &str,
+) -> Result<()> {
+    validate_session_id(child_session_id)?;
+    for path in [
+        checkpoint_root(storage_root, workspace, child_session_id),
+        storage_root.join("sessions").join(child_session_id),
+    ] {
+        match std::fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(miette!(
+                    "fork child storage cleanup failed at {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_forked_session_commit(
+    storage_root: &Path,
+    workspace: &Path,
+    child_session_id: &str,
+    operation_id: &str,
+    parent_session_id: &str,
+) -> Result<()> {
+    let metadata = load_session_metadata(storage_root, child_session_id, workspace)?;
+    if metadata.fork_operation_id.as_deref() != Some(operation_id)
+        || metadata.fork_parent_session_id.as_deref() != Some(parent_session_id)
+    {
+        return Err(miette!(
+            "fork metadata provenance does not match its journal"
+        ));
+    }
+    if metadata.workspace_roots.is_empty()
+        || metadata.workspace_roots.first().map(PathBuf::as_path) != Some(workspace)
+    {
+        return Err(miette!("fork workspace-root mapping is empty"));
+    }
+    if metadata
+        .workspace_roots
+        .iter()
+        .any(|root| !root.is_absolute())
+    {
+        return Err(miette!(
+            "fork workspace-root metadata contains a relative path"
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_forked_session_metadata(
+    storage_root: &Path,
+    child_session_id: &str,
+    parent: &SessionMetadata,
+    workspace_generation: u64,
+    workspace_roots: &[PathBuf],
+    inherited_accounting_through: Option<SequenceId>,
+    fork_at_turn: u64,
+    fork_operation_id: Option<&str>,
+) -> Result<()> {
+    let directory = storage_root.join("sessions").join(child_session_id);
+    ensure_real_directory(&directory, false)?;
+    let metadata = SessionMetadata {
+        version: SESSION_METADATA_VERSION,
+        session_id: child_session_id.to_owned(),
+        workspace: parent.workspace.clone(),
+        model_alias: parent.model_alias.clone(),
+        initial_session_context: parent.initial_session_context.clone(),
+        workspace_generation,
+        workspace_roots: workspace_roots.to_vec(),
+        initial_context_workspace_root_count: Some(
+            parent
+                .initial_context_workspace_root_count
+                .unwrap_or_else(|| parent.workspace_roots.len().max(1)),
+        ),
+        inherited_accounting_through,
+        fork_parent_session_id: Some(parent.session_id.clone()),
+        fork_at_turn: Some(fork_at_turn),
+        fork_operation_id: fork_operation_id.map(str::to_owned),
+    };
+    let bytes = serde_json::to_vec(&metadata).into_diagnostic()?;
+    let path = directory.join("metadata.json");
+    #[cfg(unix)]
+    {
+        persist_session_metadata_unix(&directory, &path, &bytes)
+    }
+    #[cfg(not(unix))]
+    {
+        persist_session_metadata_portable(&directory, &path, &bytes)
+    }
 }
 
 fn open_checkpoint_stores(
@@ -3102,6 +3390,14 @@ fn load_checkpoint_root_generation_exact(
         .find(|entry| entry.generation == generation && entry.committed))
 }
 
+pub(crate) fn load_checkpoint_roots_exact(
+    root: &Path,
+    generation: u64,
+) -> Result<Option<Vec<PathBuf>>> {
+    load_checkpoint_root_generation_exact(root, generation)
+        .map(|entry| entry.map(|entry| entry.roots))
+}
+
 pub(crate) fn load_session_workspace_roots(
     storage_root: &Path,
     workspace: &Path,
@@ -3116,11 +3412,17 @@ pub(crate) fn load_session_workspace_roots(
     if projected.workspace_generation == 0 {
         return Ok(vec![workspace.to_path_buf()]);
     }
-    load_checkpoint_root_generation_exact(&root, projected.workspace_generation)?
+    let roots = load_checkpoint_root_generation_exact(&root, projected.workspace_generation)?
         .map(|entry| entry.roots)
         .ok_or_else(|| {
             miette!("durable workspace event generation is absent from the local root journal")
-        })
+        })?;
+    if roots.len() > MAX_WORKSPACE_ROOTS {
+        return Err(miette!(
+            "durable workspace root count exceeds the supported maximum"
+        ));
+    }
+    Ok(roots)
 }
 
 fn restore_persisted_workspace_roots(
@@ -3232,6 +3534,11 @@ fn persist_session_metadata(
         initial_session_context: initial_session_context.to_vec(),
         workspace_generation: 0,
         workspace_roots: workspace_roots.to_vec(),
+        initial_context_workspace_root_count: Some(workspace_roots.len()),
+        inherited_accounting_through: None,
+        fork_parent_session_id: None,
+        fork_at_turn: None,
+        fork_operation_id: None,
     };
     let bytes = serde_json::to_vec(&metadata).into_diagnostic()?;
     let path = directory.join("metadata.json");
@@ -3241,14 +3548,34 @@ fn persist_session_metadata(
     }
     #[cfg(not(unix))]
     {
-        let mut options = std::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        let mut file = options.open(&path).into_diagnostic()?;
-        file.write_all(&bytes).into_diagnostic()?;
+        persist_session_metadata_portable(&directory, &path, &bytes)
+    }
+}
+
+#[cfg(not(unix))]
+fn persist_session_metadata_portable(directory: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = directory.join(format!(".metadata-{}-{nonce}.tmp", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    let mut file = options.open(&temporary).into_diagnostic()?;
+    let result = (|| -> Result<()> {
+        file.write_all(bytes).into_diagnostic()?;
         file.flush().into_diagnostic()?;
         sync_file(&file)?;
-        sync_directory(&directory)
+        if path.exists() {
+            return Err(miette!("session metadata already exists"));
+        }
+        std::fs::rename(&temporary, path).into_diagnostic()?;
+        sync_directory(directory)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
     }
+    result
 }
 
 fn load_session_metadata(
@@ -3291,6 +3618,15 @@ pub(crate) fn load_session_metadata_any(
             "session metadata identity does not match this session and canonical workspace"
         ));
     }
+    if metadata.workspace_roots.len() > MAX_WORKSPACE_ROOTS
+        || metadata
+            .initial_context_workspace_root_count
+            .is_some_and(|count| count > MAX_WORKSPACE_ROOTS)
+    {
+        return Err(miette!(
+            "session metadata exceeds the supported workspace root maximum"
+        ));
+    }
     Ok(metadata)
 }
 
@@ -3311,9 +3647,14 @@ fn open_session_metadata_directory(directory: &Path) -> Result<std::os::fd::Owne
 #[cfg(unix)]
 fn persist_session_metadata_unix(directory: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = open_session_metadata_directory(directory)?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = format!(".metadata-{}-{nonce}.tmp", std::process::id());
     let descriptor = rustix::fs::openat(
         &parent,
-        "metadata.json",
+        &temporary,
         rustix::fs::OFlags::WRONLY
             | rustix::fs::OFlags::CREATE
             | rustix::fs::OFlags::EXCL
@@ -3324,15 +3665,30 @@ fn persist_session_metadata_unix(directory: &Path, path: &Path, bytes: &[u8]) ->
     .map_err(std::io::Error::from)
     .into_diagnostic()?;
     let mut file = std::fs::File::from(descriptor);
-    file.write_all(bytes).into_diagnostic()?;
-    file.flush().into_diagnostic()?;
-    rustix::fs::fsync(&file)
+    let result = (|| -> Result<()> {
+        file.write_all(bytes).into_diagnostic()?;
+        file.flush().into_diagnostic()?;
+        rustix::fs::fsync(&file)
+            .map_err(std::io::Error::from)
+            .into_diagnostic()?;
+        rustix::fs::renameat_with(
+            &parent,
+            &temporary,
+            &parent,
+            "metadata.json",
+            rustix::fs::RenameFlags::NOREPLACE,
+        )
         .map_err(std::io::Error::from)
         .into_diagnostic()?;
-    rustix::fs::fsync(&parent)
-        .map_err(std::io::Error::from)
-        .into_diagnostic()
-        .map_err(|error| miette!("could not synchronize {}: {error}", path.display()))
+        rustix::fs::fsync(&parent)
+            .map_err(std::io::Error::from)
+            .into_diagnostic()
+            .map_err(|error| miette!("could not synchronize {}: {error}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = rustix::fs::unlinkat(&parent, &temporary, rustix::fs::AtFlags::empty());
+    }
+    result
 }
 
 #[cfg(unix)]
@@ -3853,7 +4209,8 @@ fn redact_json_value(redactor: &FixtureRedactor, value: &mut serde_json::Value) 
 
 impl DurableEventSink {
     fn reconcile_accounting(&self, events: &[EngineEvent]) -> Result<()> {
-        let entries = project_accounting(&self.session_id, events)?;
+        let inherited_through = inherited_accounting_through(&self.storage_root, &self.session_id)?;
+        let entries = project_accounting(&self.session_id, events, inherited_through)?;
         if entries.is_empty() {
             return Ok(());
         }
@@ -3861,6 +4218,24 @@ impl DurableEventSink {
             .and_then(|ledger| ledger.reconcile(&entries))
             .map_err(|error| miette!("session accounting could not reconcile: {error}"))
     }
+}
+
+fn inherited_accounting_through(
+    storage_root: &Path,
+    session_id: &str,
+) -> Result<Option<SequenceId>> {
+    let path = storage_root
+        .join("sessions")
+        .join(session_id)
+        .join("metadata.json");
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).into_diagnostic(),
+    };
+    let metadata: SessionMetadata = serde_json::from_slice(&bytes)
+        .map_err(|error| miette!("session metadata is corrupt: {error}"))?;
+    Ok(metadata.inherited_accounting_through)
 }
 
 #[derive(Clone)]
@@ -4141,6 +4516,11 @@ impl RuntimeWorkspaceRootController {
         requested: &Path,
         current_roots: &[PathBuf],
     ) -> std::result::Result<Vec<PathBuf>, AgentLoopError> {
+        if current_roots.len() >= MAX_WORKSPACE_ROOTS {
+            return Err(AgentLoopError::InvalidConfiguration(format!(
+                "workspace root count is limited to {MAX_WORKSPACE_ROOTS}"
+            )));
+        }
         let primary_root = current_roots.first().ok_or_else(|| {
             AgentLoopError::InvalidConfiguration(
                 "workspace root generation requires an existing root".to_owned(),
@@ -4472,9 +4852,34 @@ impl FolderTrustController for RuntimeFolderTrustController {
     }
 }
 
-enum ActiveCheckpoint {
+enum ActiveCheckpointState {
     Known,
     Opaque(Vec<(usize, OpaqueMutation)>),
+}
+
+struct ActiveCheckpoint {
+    state: ActiveCheckpointState,
+    _workspace_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+struct ActiveRewind {
+    handles: Vec<RewindHandle>,
+    _workspace_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+fn shared_workspace_mutation_lock(workspace: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, std::sync::Weak<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(lock) = locks.get(workspace).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(workspace.to_path_buf(), Arc::downgrade(&lock));
+    lock
 }
 
 fn group_checkpoint_paths(
@@ -4610,10 +5015,93 @@ fn checkpoint_display_path(root_index: usize, path: &str) -> String {
     }
 }
 
+fn resolve_review_display_path(
+    store_count: usize,
+    path: &Path,
+) -> std::result::Result<(usize, PathBuf), AgentLoopError> {
+    if path.is_absolute() {
+        return Err(AgentLoopError::Persistence(
+            "review path must be workspace-relative".to_owned(),
+        ));
+    }
+    let mut components = path.components();
+    let first = components
+        .next()
+        .ok_or_else(|| AgentLoopError::Persistence("review path must not be empty".to_owned()))?;
+    let (root_index, relative) = match first {
+        Component::Normal(value) if value == "@root" => {
+            let root_index = components
+                .next()
+                .and_then(|component| match component {
+                    Component::Normal(value) => value.to_str(),
+                    _ => None,
+                })
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|index| *index > 0 && *index < store_count)
+                .ok_or_else(|| {
+                    AgentLoopError::Persistence(
+                        "review path has an invalid workspace-root index".to_owned(),
+                    )
+                })?;
+            (root_index, components.collect::<PathBuf>())
+        }
+        Component::Normal(_) => (0, path.to_path_buf()),
+        Component::Prefix(_) | Component::RootDir | Component::CurDir | Component::ParentDir => {
+            return Err(AgentLoopError::Persistence(
+                "review path is not a confined relative path".to_owned(),
+            ));
+        }
+    };
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(AgentLoopError::Persistence(
+            "review path is not a confined file path".to_owned(),
+        ));
+    }
+    Ok((root_index, relative))
+}
+
+fn merge_root_reviews(
+    session_id: SessionId,
+    reviews: Vec<SessionReview>,
+) -> std::result::Result<SessionReview, AgentLoopError> {
+    let file_count = reviews
+        .iter()
+        .map(|review| review.files.len())
+        .sum::<usize>();
+    if file_count > MAX_GLOBAL_REVIEW_FILES {
+        return Err(AgentLoopError::Persistence(
+            "session review exceeds the global file limit".to_owned(),
+        ));
+    }
+    let mut remaining = MAX_GLOBAL_REVIEW_DIFF_BYTES;
+    let mut files = Vec::with_capacity(file_count);
+    for (root_index, review) in reviews.into_iter().enumerate() {
+        for mut file in review.files {
+            file.path = checkpoint_display_path(root_index, &file.path);
+            if file.unified_diff.len() > remaining {
+                let mut boundary = remaining;
+                while boundary > 0 && !file.unified_diff.is_char_boundary(boundary) {
+                    boundary -= 1;
+                }
+                file.unified_diff.truncate(boundary);
+                file.truncated = true;
+            }
+            remaining = remaining.saturating_sub(file.unified_diff.len());
+            files.push(file);
+        }
+    }
+    Ok(SessionReview { session_id, files })
+}
+
 struct DurableCheckpointCoordinator {
     stores: Arc<Vec<Arc<CheckpointStore>>>,
+    workspace_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     active: Mutex<HashMap<String, ActiveCheckpoint>>,
-    rewinds: Mutex<HashMap<String, Vec<RewindHandle>>>,
+    rewinds: Mutex<HashMap<String, ActiveRewind>>,
 }
 
 impl DurableCheckpointCoordinator {
@@ -4623,8 +5111,13 @@ impl DurableCheckpointCoordinator {
     }
 
     fn from_stores(stores: Arc<Vec<Arc<CheckpointStore>>>) -> Self {
+        let workspace_mutation_lock = stores.first().map_or_else(
+            || Arc::new(tokio::sync::Mutex::new(())),
+            |store| shared_workspace_mutation_lock(store.workspace_root()),
+        );
         Self {
             stores,
+            workspace_mutation_lock,
             active: Mutex::new(HashMap::new()),
             rewinds: Mutex::new(HashMap::new()),
         }
@@ -4643,6 +5136,7 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         if matches!(scope, MutationScope::None) {
             return Ok(MutationCheckpoint { id: None });
         }
+        let workspace_guard = Arc::clone(&self.workspace_mutation_lock).lock_owned().await;
         let session_id = session_id.0.clone();
         let scope = scope.clone();
         let stores = Arc::clone(&self.stores);
@@ -4656,7 +5150,7 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
                             .checkpoint_known(&session_id, agent_turn, paths)
                             .map_err(checkpoint_agent_error)?;
                     }
-                    ActiveCheckpoint::Known
+                    ActiveCheckpointState::Known
                 }
                 MutationScope::OpaqueWorkspace => {
                     let mut mutations = Vec::with_capacity(stores.len());
@@ -4668,7 +5162,7 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
                                 .map_err(checkpoint_agent_error)?,
                         ));
                     }
-                    ActiveCheckpoint::Opaque(mutations)
+                    ActiveCheckpointState::Opaque(mutations)
                 }
             })
         })
@@ -4677,7 +5171,13 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         self.active
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(tool_call_id.to_owned(), active);
+            .insert(
+                tool_call_id.to_owned(),
+                ActiveCheckpoint {
+                    state: active,
+                    _workspace_guard: workspace_guard,
+                },
+            );
         Ok(MutationCheckpoint {
             id: Some(tool_call_id.to_owned()),
         })
@@ -4697,7 +5197,7 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(id)
             .ok_or_else(|| AgentLoopError::Persistence("unknown mutation checkpoint".to_owned()))?;
-        if let ActiveCheckpoint::Opaque(mutations) = active {
+        if let ActiveCheckpointState::Opaque(mutations) = active.state {
             let stores = Arc::clone(&self.stores);
             tokio::task::spawn_blocking(move || {
                 for (root_index, mutation) in mutations {
@@ -4718,6 +5218,7 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         to_turn: u64,
         operation_id: &str,
     ) -> std::result::Result<RewindCheckpoint, AgentLoopError> {
+        let workspace_guard = Arc::clone(&self.workspace_mutation_lock).lock_owned().await;
         let stores = Arc::clone(&self.stores);
         let session_id = session_id.0.clone();
         let operation_id_owned = operation_id.to_owned();
@@ -4747,7 +5248,13 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         self.rewinds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(operation_id.to_owned(), handles);
+            .insert(
+                operation_id.to_owned(),
+                ActiveRewind {
+                    handles,
+                    _workspace_guard: workspace_guard,
+                },
+            );
         Ok(RewindCheckpoint {
             id: operation_id.to_owned(),
             unrestorable_paths,
@@ -4758,12 +5265,13 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         &self,
         checkpoint: &RewindCheckpoint,
     ) -> std::result::Result<(), AgentLoopError> {
-        let handles = self
+        let rewind = self
             .rewinds
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&checkpoint.id)
             .ok_or_else(|| AgentLoopError::Persistence("unknown rewind checkpoint".to_owned()))?;
+        let handles = rewind.handles;
         let stores = Arc::clone(&self.stores);
         tokio::task::spawn_blocking(move || {
             if handles.len() != stores.len() {
@@ -4777,6 +5285,61 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
         .await
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
         .map_err(checkpoint_agent_error)
+    }
+
+    async fn session_review(
+        &self,
+        session_id: &SessionId,
+    ) -> std::result::Result<SessionReview, AgentLoopError> {
+        let _workspace_guard = Arc::clone(&self.workspace_mutation_lock).lock_owned().await;
+        let stores = Arc::clone(&self.stores);
+        let session_id = session_id.clone();
+        tokio::task::spawn_blocking(move || {
+            let reviews = stores
+                .iter()
+                .map(|store| {
+                    store
+                        .session_review(&session_id.0)
+                        .map_err(checkpoint_agent_error)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            merge_root_reviews(session_id, reviews)
+        })
+        .await
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
+    }
+
+    async fn resolve_review_file(
+        &self,
+        session_id: &SessionId,
+        path: &Path,
+        decision: ReviewFileDecision,
+        current_hash: &str,
+    ) -> std::result::Result<SessionReview, AgentLoopError> {
+        let _workspace_guard = Arc::clone(&self.workspace_mutation_lock).lock_owned().await;
+        let stores = Arc::clone(&self.stores);
+        let session_id = session_id.clone();
+        let path = path.to_path_buf();
+        let current_hash = current_hash.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let (root_index, relative) = resolve_review_display_path(stores.len(), &path)?;
+            let mut reviews = stores
+                .iter()
+                .map(|store| {
+                    store
+                        .session_review(&session_id.0)
+                        .map_err(checkpoint_agent_error)
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let _ = merge_root_reviews(session_id.clone(), reviews.clone())?;
+            let target_review = stores[root_index]
+                .resolve_review_file(&session_id.0, &relative, decision, &current_hash)
+                .map_err(checkpoint_agent_error)?;
+            reviews[root_index] = target_review;
+            merge_root_reviews(session_id, reviews)
+        })
+        .await
+        .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
     }
 }
 
@@ -5657,7 +6220,7 @@ fn credential_shaped_environment_name(name: &str) -> bool {
         || normalized.ends_with("_CREDENTIALS")
 }
 
-fn register_credential_environment(redactor: &FixtureRedactor) {
+pub(crate) fn register_credential_environment(redactor: &FixtureRedactor) {
     for (name, value) in std::env::vars_os() {
         let (Some(name), Some(value)) = (name.to_str(), value.to_str()) else {
             continue;
@@ -9094,7 +9657,8 @@ fn refresh_session_index(storage_root: &Path) -> Result<()> {
                     .map_err(|error| miette!("session {id:?} could not open: {error}"))?;
                 let events = load_session_events(&log)?;
                 projections.push(project_session(&id, &events, log.path()));
-                accounting_entries.extend(project_accounting(&id, &events)?);
+                let inherited_through = inherited_accounting_through(storage_root, &id)?;
+                accounting_entries.extend(project_accounting(&id, &events, inherited_through)?);
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -9120,7 +9684,11 @@ fn update_one_session_index(
         .map_err(|error| miette!("session index could not open: {error}"))?
         .upsert(&projection)
         .map_err(|error| miette!("session index could not update: {error}"))?;
-    let accounting_entries = project_accounting(session_id, &events)?;
+    let accounting_entries = project_accounting(
+        session_id,
+        &events,
+        inherited_accounting_through(storage_root, session_id)?,
+    )?;
     AccountingLedger::open(storage_root)
         .and_then(|ledger| ledger.reconcile(&accounting_entries))
         .map_err(|error| miette!("session accounting could not update: {error}"))
@@ -9129,9 +9697,17 @@ fn update_one_session_index(
 fn project_accounting(
     session_id: &str,
     events: &[EngineEvent],
+    inherited_through: Option<SequenceId>,
 ) -> Result<Vec<TurnAccountingEntry>> {
     events
         .iter()
+        .filter(|event| {
+            inherited_through.is_none_or(|boundary| {
+                event
+                    .meta()
+                    .is_none_or(|meta| meta.sequence_id.0 > boundary.0)
+            })
+        })
         .filter_map(|event| match event {
             EngineEvent::TurnFinished {
                 meta,
@@ -10905,14 +11481,14 @@ mod tests {
         std::fs::create_dir_all(project.join("src")).expect("project");
         let project = std::fs::canonicalize(project).expect("canonical project");
         std::fs::write(project.join("src/lib.rs"), "fn visible() {}\n").expect("source");
-        let agents = home.join(".agents/commands/review.md");
+        let agents = home.join(".agents/commands/code-review.md");
         std::fs::create_dir_all(agents.parent().expect("commands")).expect("agents commands");
         std::fs::write(
             &agents,
             "---\ndescription: Ported Claude review\nmodel: fast\nallowed-tools: [Read]\nargument-hint: '[path] [focus]'\n---\nReview $ARGUMENTS first=$1 second=$2 source=@src/lib.rs",
         )
         .expect("agents command");
-        let rottweiler = home.join(".rottweiler/commands/review.md");
+        let rottweiler = home.join(".rottweiler/commands/code-review.md");
         std::fs::create_dir_all(rottweiler.parent().expect("commands"))
             .expect("rottweiler commands");
         std::fs::write(rottweiler, "---\ndescription: shadowed\n---\nWRONG")
@@ -10954,8 +11530,13 @@ mod tests {
         )
         .expect("commands");
         let mut context = SessionCommandContext::default();
+        assert!(
+            registry
+                .descriptors()
+                .any(|descriptor| descriptor.name() == "review")
+        );
         let review = registry
-            .dispatch_line(&mut context, "/review 'src/lib.rs' correctness")
+            .dispatch_line(&mut context, "/code-review 'src/lib.rs' correctness")
             .await
             .expect("review command");
         let SessionCommandAction::SubmitPrompt {
@@ -12392,6 +12973,250 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
+        let fixture = tempdir().expect("fixture");
+        let storage = fixture.path().join("storage");
+        let workspace = fixture.path().join("workspace");
+        let added = fixture.path().join("added");
+        let added_later = fixture.path().join("added-later");
+        std::fs::create_dir(&storage).expect("storage");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(&added).expect("added workspace");
+        std::fs::create_dir(&added_later).expect("later added workspace");
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &storage,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("storage permissions");
+        initialize_private_storage_root(&storage).expect("private storage");
+        std::fs::create_dir(storage.join("sessions")).expect("sessions directory");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let added = added.canonicalize().expect("canonical added workspace");
+        let added_later = added_later
+            .canonicalize()
+            .expect("canonical later added workspace");
+        let parent = SessionId("fork-storage-parent".to_owned());
+        let child = SessionId("fork-storage-child".to_owned());
+        let driver = ClientId("current-driver".to_owned());
+        std::fs::create_dir(storage.join("sessions").join(&parent.0))
+            .expect("parent session directory");
+        persist_session_metadata(
+            &storage,
+            &parent.0,
+            &workspace,
+            "fast",
+            &[],
+            std::slice::from_ref(&workspace),
+        )
+        .expect("parent metadata");
+        let parent_stores = open_checkpoint_stores(
+            &checkpoint_root(&storage, &workspace, &parent.0),
+            std::slice::from_ref(&workspace),
+        )
+        .expect("parent checkpoints");
+        let parent_checkpoint_root = checkpoint_root(&storage, &workspace, &parent.0);
+        append_checkpoint_root_generation(
+            &parent_checkpoint_root,
+            std::slice::from_ref(&workspace),
+            &[workspace.clone(), added.clone()],
+            1,
+            2,
+        )
+        .expect("prepare added root");
+        commit_checkpoint_root_generation(&parent_checkpoint_root, 1).expect("commit added root");
+        append_checkpoint_root_generation(
+            &parent_checkpoint_root,
+            &[workspace.clone(), added.clone()],
+            &[workspace.clone(), added.clone(), added_later.clone()],
+            2,
+            3,
+        )
+        .expect("prepare later root");
+        commit_checkpoint_root_generation(&parent_checkpoint_root, 2).expect("commit later root");
+        std::fs::write(workspace.join("tracked.txt"), "base\n").expect("baseline file");
+        parent_stores[0]
+            .checkpoint_known(&parent.0, 1, [PathBuf::from("tracked.txt")])
+            .expect("parent checkpoint");
+        std::fs::write(workspace.join("tracked.txt"), "parent change\n").expect("parent mutation");
+        assert_eq!(
+            parent_stores[0]
+                .session_review(&parent.0)
+                .expect("review")
+                .files
+                .len(),
+            1
+        );
+
+        let mut log = SessionEventLog::open(&storage, &parent.0).expect("parent log");
+        let meta = |sequence| EventMeta {
+            protocol_version: SESSION_EVENT_VERSION,
+            session_id: parent.clone(),
+            sequence_id: SequenceId(sequence),
+            emitted_at: "2026-07-10T12:34:56.789Z".to_owned(),
+            caused_by: None,
+        };
+        log.append(EngineEvent::SessionCreated {
+            meta: meta(0),
+            driver_client_id: ClientId("historic-driver".to_owned()),
+        })
+        .expect("created");
+        log.append(EngineEvent::TurnStarted {
+            meta: meta(1),
+            turn_id: TurnId("1".to_owned()),
+        })
+        .expect("started");
+        log.append(EngineEvent::TurnFinished {
+            meta: meta(2),
+            turn_id: TurnId("1".to_owned()),
+            status: TurnStatus::Completed,
+            usage: Usage {
+                input_tokens: 3,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            cost: Cost::AiCredits {
+                credits_micros: 7,
+                nominal_amount_micros: None,
+                currency: None,
+            },
+        })
+        .expect("finished");
+        log.append(EngineEvent::WorkspaceRootsChanged {
+            meta: meta(3),
+            generation: 1,
+            effective_from_turn: 2,
+            roots: vec![
+                rw_core::WorkspaceRootDescriptor {
+                    index: 0,
+                    path: "@root/0".to_owned(),
+                    machine_local: false,
+                },
+                rw_core::WorkspaceRootDescriptor {
+                    index: 1,
+                    path: "@root/1".to_owned(),
+                    machine_local: false,
+                },
+            ],
+        })
+        .expect("workspace roots changed");
+        log.append(EngineEvent::TurnStarted {
+            meta: meta(4),
+            turn_id: TurnId("2".to_owned()),
+        })
+        .expect("second turn started");
+        log.append(EngineEvent::TurnFinished {
+            meta: meta(5),
+            turn_id: TurnId("2".to_owned()),
+            status: TurnStatus::Completed,
+            usage: Usage {
+                input_tokens: 2,
+                output_tokens: 3,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+                reasoning_tokens: 0,
+            },
+            cost: Cost::AiCredits {
+                credits_micros: 4,
+                nominal_amount_micros: None,
+                currency: None,
+            },
+        })
+        .expect("second turn finished");
+        log.append(EngineEvent::WorkspaceRootsChanged {
+            meta: meta(6),
+            generation: 2,
+            effective_from_turn: 3,
+            roots: (0..3)
+                .map(|index| rw_core::WorkspaceRootDescriptor {
+                    index,
+                    path: format!("@root/{index}"),
+                    machine_local: false,
+                })
+                .collect(),
+        })
+        .expect("later workspace roots changed");
+        drop(log);
+        let parent_path = storage
+            .join("sessions")
+            .join(&parent.0)
+            .join("events.jsonl");
+        let parent_bytes = std::fs::read(&parent_path).expect("parent bytes");
+        fork_hosted_session_storage(
+            &storage,
+            &workspace,
+            &parent.0,
+            &child.0,
+            2,
+            None,
+            false,
+            driver.clone(),
+            None,
+        )
+        .expect("fork");
+        assert_eq!(
+            std::fs::read(parent_path).expect("parent remains"),
+            parent_bytes
+        );
+
+        let child_events =
+            load_session_events(&SessionEventLog::open(&storage, &child.0).expect("child log"))
+                .expect("child events");
+        assert!(
+            matches!(child_events.first(), Some(EngineEvent::SessionCreated {
+            meta, driver_client_id,
+        }) if meta.session_id == child && driver_client_id == &driver)
+        );
+        let inherited = inherited_accounting_through(&storage, &child.0).expect("boundary");
+        assert_eq!(inherited, Some(SequenceId(5)));
+        assert!(
+            project_accounting(&child.0, &child_events, inherited)
+                .expect("accounting")
+                .is_empty()
+        );
+        let child_metadata =
+            load_session_metadata(&storage, &child.0, &workspace).expect("child metadata");
+        assert_eq!(
+            child_metadata.workspace_roots,
+            vec![workspace.clone(), added.clone()]
+        );
+        assert_eq!(child_metadata.initial_context_workspace_root_count, Some(1));
+        assert_eq!(child_metadata.fork_at_turn, Some(2));
+        assert_eq!(
+            load_session_workspace_roots(&storage, &workspace, &parent.0)
+                .expect("current parent roots"),
+            vec![workspace.clone(), added.clone(), added_later]
+        );
+        let child_stores = open_checkpoint_stores(
+            &checkpoint_root(&storage, &workspace, &child.0),
+            &[workspace.clone(), added],
+        )
+        .expect("child checkpoints");
+        assert!(child_stores.iter().all(|store| {
+            store
+                .session_review(&child.0)
+                .expect("child review")
+                .files
+                .is_empty()
+        }));
+        child_stores[0]
+            .checkpoint_known(&child.0, 3, [PathBuf::from("tracked.txt")])
+            .expect("child checkpoint");
+        std::fs::write(workspace.join("tracked.txt"), "child change\n").expect("child edit");
+        assert_eq!(
+            child_stores[0]
+                .session_review(&child.0)
+                .expect("child review")
+                .files
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn accounting_projection_keeps_main_and_compaction_attribution() {
         let meta = |sequence| EventMeta {
             protocol_version: SESSION_EVENT_VERSION,
@@ -12436,6 +13261,7 @@ mod tests {
                     cost: Some(cost.clone()),
                 },
             ],
+            None,
         )
         .expect("accounting projection");
 
@@ -12950,6 +13776,59 @@ mod tests {
             .acknowledge_rewind(&rewind)
             .await
             .expect("ack rewind");
+    }
+
+    #[tokio::test]
+    async fn shared_workspace_sessions_serialize_mutation_checkpoints() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::write(workspace.join("shared.txt"), "base\n").expect("fixture");
+        let first_store = Arc::new(
+            CheckpointStore::open(&root.path().join("first"), &workspace).expect("first store"),
+        );
+        let second_store = Arc::new(
+            CheckpointStore::open(&root.path().join("second"), &workspace).expect("second store"),
+        );
+        let first = Arc::new(DurableCheckpointCoordinator::new(first_store));
+        let second = Arc::new(DurableCheckpointCoordinator::new(second_store));
+        let first_checkpoint = first
+            .begin(
+                &SessionId("parent".to_owned()),
+                1,
+                "parent-edit",
+                &MutationScope::Paths(vec![PathBuf::from("shared.txt")]),
+            )
+            .await
+            .expect("parent begins");
+        let child_begin = tokio::spawn({
+            let second = Arc::clone(&second);
+            async move {
+                second
+                    .begin(
+                        &SessionId("child".to_owned()),
+                        2,
+                        "child-edit",
+                        &MutationScope::Paths(vec![PathBuf::from("shared.txt")]),
+                    )
+                    .await
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!child_begin.is_finished());
+        first
+            .finish(&first_checkpoint, MutationCheckpointOutcome::Completed)
+            .await
+            .expect("parent finishes");
+        let child_checkpoint = tokio::time::timeout(std::time::Duration::from_secs(1), child_begin)
+            .await
+            .expect("child unblocks")
+            .expect("child task")
+            .expect("child begins");
+        second
+            .finish(&child_checkpoint, MutationCheckpointOutcome::Completed)
+            .await
+            .expect("child finishes");
     }
 
     #[tokio::test]
