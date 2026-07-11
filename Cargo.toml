@@ -30,6 +30,14 @@ pedantic = { level = "warn", priority = -1 }
 expect_used = "warn"
 unwrap_used = "warn"
 
+[profile.dev]
+# Keep actionable file/line backtraces without duplicating full debug data
+# across every feature-specific dependency and test artifact.
+debug = "line-tables-only"
+
+[profile.test]
+debug = "line-tables-only"
+
 [profile.release]
 strip = true
 lto = "thin"
@@ -51,6 +59,7 @@ nix = { version = "0.28.0", features = ["poll"] }
 portable-pty = "0.9.0"
 rpassword = "=7.5.4"
 regex = "1.12.2"
+rmcp = { version = "=2.2.0", default-features = false, features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client", "transport-streamable-http-server"] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
 schemars = { version = "1.2.1", features = ["preserve_order"] }

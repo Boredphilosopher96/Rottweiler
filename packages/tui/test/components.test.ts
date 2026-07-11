@@ -307,11 +307,18 @@ describe("M4 retained components", () => {
     for (const event of events) {
       app.handleEvent(event)
     }
+    app.handleEvent({
+      type: "ui_notification",
+      meta: meta("3"),
+      plugin_id: "reviewer",
+      title: "Review ready",
+      message: "Open the result",
+    })
     renderer.emit(CliRenderEvents.FOCUS)
-    app.handleEvent({ type: "turn_started", meta: meta("3"), turn_id: "2" })
+    app.handleEvent({ type: "turn_started", meta: meta("4"), turn_id: "2" })
     app.handleEvent({
       type: "turn_finished",
-      meta: meta("4"),
+      meta: meta("5"),
       turn_id: "2",
       status: "completed",
       usage: events[1]!.type === "turn_finished" ? events[1]!.usage : neverUsage(),
@@ -321,7 +328,7 @@ describe("M4 retained components", () => {
           : { kind: "unavailable", reason: "fixture" },
     })
 
-    expect(notifications).toEqual(["turn_finished"])
+    expect(notifications).toEqual(["turn_finished", "plugin"])
   })
 
   test("renders compact nested subagent progress without replacing retained rows", async () => {

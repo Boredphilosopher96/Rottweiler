@@ -7,6 +7,9 @@
 packages/tui/node_modules/
 packages/tui/dist/
 packages/tui/*.bun-build
+packages/plugin-sdk/node_modules/
+packages/plugin-sdk/dist/
+packages/plugin-sdk/*.bun-build
 .rottweiler/sessions/
 .rottweiler/checkpoints/
 .rottweiler/runtime/

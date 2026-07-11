@@ -6,6 +6,7 @@ mod engine;
 mod host;
 mod init;
 mod instructions;
+mod mcp;
 mod orchestration;
 mod permission;
 mod provider_factory;
@@ -31,13 +32,13 @@ pub use engine::{
     FolderTrustOperation, InterruptedToolRepair, MessageDisposition, ModelContextMetadata,
     ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator, MutationCheckpointOutcome,
     NoopFolderTrustController, NoopMutationCheckpointCoordinator, NoopSecretRedactor,
-    NoopSessionEventSink, NoopWorkspaceRootController, RecoveredQuestion, RewindCheckpoint,
-    SESSION_EVENT_VERSION, SecretRedactor, SessionActor, SessionActorConfig, SessionCommandAction,
-    SessionCommandContext, SessionCommandOutput, SessionEventSink, SessionHandle,
-    SessionProjectionError, SessionRecoveredState, SessionSnapshot, SessionSubscription,
-    SessionUsage, SystemEventClock, TOOL_CANCELLATION_GRACE, WorkspaceRootController,
-    WorkspaceRuntimeGeneration, builtin_command_registry, builtin_hook_dispatcher,
-    project_session_events,
+    NoopSessionEventSink, NoopWorkspaceRootController, PluginSessionCapability, RecoveredQuestion,
+    RewindCheckpoint, SESSION_EVENT_VERSION, SecretRedactor, SessionActor, SessionActorConfig,
+    SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,
+    SessionHandle, SessionProjectionError, SessionRecoveredState, SessionSnapshot,
+    SessionSubscription, SessionUsage, SystemEventClock, TOOL_CANCELLATION_GRACE,
+    WorkspaceRootController, WorkspaceRuntimeGeneration, builtin_command_registry,
+    builtin_hook_dispatcher, project_session_events,
 };
 pub use host::{
     BoundClient, CreateSessionRequest, EngineHost, EngineHostConfig, HostError, HostQueryService,
@@ -52,6 +53,12 @@ pub use instructions::{
     MAX_ROOT_INSTRUCTIONS_BYTES, ProjectInstructions, ProjectInstructionsError,
     base_agent_system_turn, initial_session_context, load_instruction_stack,
     load_nested_instruction_stack, load_root_project_instructions,
+};
+pub use mcp::{
+    LoopbackMcpAuthority, McpOAuthBinding, McpOAuthLogin, McpOAuthLoginConfig, McpOAuthLoginResult,
+    McpOAuthRefreshBinding, McpPolicyProxy, ProductionMcpHttpClient, ProductionMcpHttpConnector,
+    ProductionMcpHttpError, ToonMcpEncoder, VaultMcpTokenProvider, begin_mcp_oauth_login,
+    encode_mcp_oauth_credential, register_mcp_tools,
 };
 pub use orchestration::{
     ActorSubagentSessionFactory, DEFAULT_SUBAGENT_CONCURRENCY, DEFAULT_SUBAGENT_MAX_DEPTH,
@@ -91,6 +98,34 @@ pub use rw_types::{
 /// needed to assemble a headless runtime. Provider and tool implementations
 /// remain in their lower architectural layers.
 pub mod runtime_support {
+    /// Extension and plugin composition surface for executable frontends.
+    pub mod plugin {
+        pub use rw_ext::{
+            ApprovalRequirement, ApprovalStore, ApprovalStoreError, CapabilityEnforcer,
+            CapabilityViolation, DenyPushHandler, ExecutableIdentity, HookDispatchStatus,
+            HookDispatcher, HookEvent, HookHandler, HookRegistration, LaunchedPluginProcess,
+            METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_TOOL_CALL,
+            METHOD_UI_NOTIFY, PluginBoundaryRedactor, PluginCapabilities, PluginEventRouter,
+            PluginHost, PluginLauncher, PluginManifest, PluginProcessConfig,
+            PluginProcessConfigError, PluginProcessError, PluginRpcClient, PluginRpcError,
+            PluginSandboxMode, PluginSandboxProfile, PluginStdin, PluginStdout,
+            PluginToolCapability, PluginToolEffect, PushHandler, RpcCommandAdapter, RpcHookHandler,
+            RpcProviderAdapter, RpcToolAdapter, SupervisedPluginProcess, approve_plugin_launch,
+            plugin_launch_approval_requirement,
+        };
+    }
+
+    /// MCP composition surface for executable frontends.
+    pub mod mcp {
+        pub use rw_mcp::{
+            BridgeError, EngineMcpBridge, EngineTool, FilesystemSpool, McpClient,
+            McpConnectionApprovalPolicy, McpConnector, McpError, McpLimits, McpManager,
+            McpServerAuthority, McpServerConfig, McpStdioSandboxPolicy, McpToolCapabilityOverrides,
+            McpTransportConfig, OverflowReference, OverflowSpool, RottweilerMcpServerFactory,
+            SandboxedStdioConnector, ServerId, ServerState, SessionSummary, serve_stdio,
+        };
+    }
+
     pub use rw_ext::{
         AgentDefinition, AgentPermissionMode, AgentPromptSource, AgentRegistry, AgentRegistryError,
         ArtifactLocation, ArtifactOrigin, ArtifactScope, CLAUDE_FRONTMATTER_MIGRATION,
@@ -107,11 +142,12 @@ pub mod runtime_support {
     pub use rw_providers::{
         BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,
         FixtureRedactor, GuardedHttpFetchError, GuardedHttpFetchRequest, GuardedHttpFetchResponse,
+        GuardedHttpMethod, GuardedHttpRequest, GuardedHttpStreamResponse,
         NativeWebSearchCapability, NativeWebSearchRequest, PricingTable, Provider, ProviderError,
         ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyAuthentication, ProxyEnvironment,
         ProxySettings, Recorder, ReplayProvider, Secret as ProviderSecret, ThinkingLevel,
         ToolChoice, ToolDefinition, WireMode, deny_outbound_network_for_process,
-        guarded_http_fetch,
+        guarded_http_fetch, guarded_http_request,
     };
     pub use rw_tools::{
         ApplyWorktreeDiffTool, AskUserInput, AskUserTool, BashSandboxMode, BashTool,
@@ -124,14 +160,15 @@ pub mod runtime_support {
         MutationScope, NetworkPolicy as SandboxNetworkPolicy, NoopOutputSink, Position,
         QuestionAsker, Range, ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult,
         RenameTool, ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
-        SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode, SubagentProgressEvent,
-        SupervisedEgressProxy, SymbolIndex, SymbolsTool, TodoTool, TokioCommandExecutor, Tool,
-        ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
-        ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool, WebFetcher, WebSearchRequest,
-        WebSearchResponse, WebSearchResult, WebSearchSource, WebSearchTool, WebSearcher,
-        WorkspaceBinding, WorkspaceSymbolIndex, WorkspaceUriMapper, WorktreeIsolation,
-        WorktreeLeaseRecord, WorktreeLimits, WriteTool, discover_sandboxed_lsp_servers,
-        maybe_run_sandbox_helper, probe_policy_egress,
+        SandboxedProtocolLauncher, SubagentEventSink, SubagentLifecycleEvent,
+        SubagentLifecycleMode, SubagentProgressEvent, SupervisedEgressProxy, SymbolIndex,
+        SymbolsTool, TodoTool, TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError,
+        ToolLimits, ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult, UpstreamProxy,
+        WebFetchTool, WebFetcher, WebSearchRequest, WebSearchResponse, WebSearchResult,
+        WebSearchSource, WebSearchTool, WebSearcher, WorkspaceBinding, WorkspaceSymbolIndex,
+        WorkspaceUriMapper, WorktreeIsolation, WorktreeLeaseRecord, WorktreeLimits, WriteTool,
+        discover_sandboxed_lsp_servers, maybe_run_sandbox_helper, normalize_egress_domain,
+        probe_policy_egress, probe_sandbox, shell_launch_plan,
     };
     pub use rw_types::{
         Answer, ApprovalBinding, ApprovalDecision, Block, ClientCommand, ClientId, CommandOutcome,

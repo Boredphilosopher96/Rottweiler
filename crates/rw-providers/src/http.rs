@@ -1,5 +1,6 @@
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    pin::Pin,
     sync::atomic::{AtomicUsize, Ordering},
     time::Duration,
 };
@@ -12,6 +13,77 @@ use url::Url;
 use crate::{NetworkPolicy, ProviderError, ProviderErrorKind, ProxyAuthentication};
 
 static PROCESS_NETWORK_DENY_DEPTH: AtomicUsize = AtomicUsize::new(0);
+const MAX_GUARDED_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_GUARDED_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GUARDED_HEADERS: usize = 128;
+const MAX_GUARDED_HEADER_BYTES: usize = 64 * 1024;
+const MAX_GUARDED_HEADER_VALUE_BYTES: usize = 8 * 1024;
+
+/// Methods supported by the guarded provider-neutral HTTP boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuardedHttpMethod {
+    Get,
+    Post,
+    Delete,
+}
+
+/// One guarded request, including streaming limits used by MCP and OAuth.
+#[derive(Clone)]
+pub struct GuardedHttpRequest {
+    pub method: GuardedHttpMethod,
+    pub url: Url,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub proxy: Option<Url>,
+    pub proxy_authentication: Option<ProxyAuthentication>,
+    pub dns_pin: Option<(String, SocketAddr)>,
+    pub allow_private_destinations: bool,
+    pub response_deadline: Duration,
+    pub frame_deadline: Duration,
+    pub max_frame_bytes: usize,
+    pub max_body_bytes: usize,
+}
+
+impl std::fmt::Debug for GuardedHttpRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GuardedHttpRequest")
+            .field("method", &self.method)
+            .field("url", &redacted_url(&self.url))
+            .field(
+                "header_names",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("body_bytes", &self.body.len())
+            .field("proxy", &self.proxy.as_ref().map(redacted_url))
+            .field("proxy_authentication", &self.proxy_authentication)
+            .field("dns_pin", &self.dns_pin)
+            .field(
+                "allow_private_destinations",
+                &self.allow_private_destinations,
+            )
+            .field("response_deadline", &self.response_deadline)
+            .field("frame_deadline", &self.frame_deadline)
+            .field("max_frame_bytes", &self.max_frame_bytes)
+            .field("max_body_bytes", &self.max_body_bytes)
+            .finish()
+    }
+}
+
+pub type GuardedHttpByteStream =
+    Pin<Box<dyn futures_util::Stream<Item = Result<Vec<u8>, GuardedHttpFetchError>> + Send>>;
+
+/// Headers and a bounded, deadline-aware response stream.
+pub struct GuardedHttpStreamResponse {
+    pub status: u16,
+    pub final_url: Url,
+    pub headers: Vec<(String, String)>,
+    pub body: GuardedHttpByteStream,
+}
 
 /// One already policy-validated HTTP GET passed to the guarded transport.
 #[derive(Clone, Debug)]
@@ -58,6 +130,327 @@ pub enum GuardedHttpFetchError {
         /// Configured response bound.
         limit: usize,
     },
+    #[error("HTTP response frame exceeded the {limit}-byte limit")]
+    FrameLimit { limit: usize },
+    #[error("HTTP response deadline expired")]
+    Deadline,
+}
+
+/// Execute a method/body-capable no-redirect request and return a bounded stream.
+///
+/// # Errors
+///
+/// Returns a sanitized guard, request, transport, deadline, frame-limit, or
+/// total-body-limit error. Redirect responses are returned and never followed.
+#[allow(clippy::too_many_lines)]
+pub async fn guarded_http_request(
+    request: GuardedHttpRequest,
+) -> Result<GuardedHttpStreamResponse, GuardedHttpFetchError> {
+    require_process_network()?;
+    validate_guarded_destination(&request)?;
+    if request.proxy.is_some() && request.dns_pin.is_some() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "target DNS pin cannot be enforced through a forward proxy",
+        )
+        .into());
+    }
+    if request.proxy.is_none() && request.proxy_authentication.is_some() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "proxy authentication requires an explicit proxy",
+        )
+        .into());
+    }
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(request.response_deadline);
+    if let Some((host, address)) = &request.dns_pin {
+        builder = builder.resolve(host, *address);
+    }
+    if let Some(proxy_url) = &request.proxy {
+        let mut proxy = reqwest::Proxy::all(proxy_url.as_str()).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "configured HTTP proxy URL is invalid",
+            )
+        })?;
+        if let Some(authentication) = &request.proxy_authentication {
+            proxy = proxy.basic_auth(authentication.username(), authentication.password());
+        }
+        builder = builder.proxy(proxy);
+    }
+    let client = builder.build().map_err(transport_error)?;
+    let method = match request.method {
+        GuardedHttpMethod::Get => reqwest::Method::GET,
+        GuardedHttpMethod::Post => reqwest::Method::POST,
+        GuardedHttpMethod::Delete => reqwest::Method::DELETE,
+    };
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (name, value) in request.headers {
+        let name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "guarded HTTP header name is invalid",
+            )
+        })?;
+        let value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "guarded HTTP header value is invalid",
+            )
+        })?;
+        headers.append(name, value);
+    }
+    let response = client
+        .request(method, request.url)
+        .headers(headers)
+        .body(request.body)
+        .send()
+        .await
+        .map_err(transport_error)?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > request.max_body_bytes as u64)
+    {
+        return Err(GuardedHttpFetchError::SizeLimit {
+            limit: request.max_body_bytes,
+        });
+    }
+    let status = response.status().as_u16();
+    let final_url = response.url().clone();
+    let inbound_headers = response.headers();
+    if inbound_headers.len() > MAX_GUARDED_HEADERS
+        || inbound_headers
+            .iter()
+            .any(|(_, value)| value.as_bytes().len() > MAX_GUARDED_HEADER_VALUE_BYTES)
+        || inbound_headers
+            .iter()
+            .fold(0_usize, |total, (name, value)| {
+                total
+                    .saturating_add(name.as_str().len())
+                    .saturating_add(value.as_bytes().len())
+            })
+            > MAX_GUARDED_HEADER_BYTES
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "guarded HTTP response headers exceeded their size cap",
+        )
+        .into());
+    }
+    let response_headers = inbound_headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), value.to_owned()))
+        })
+        .collect();
+    let frame_deadline = request.frame_deadline;
+    let max_frame = request.max_frame_bytes;
+    let max_body = request.max_body_bytes;
+    let stream = futures_util::stream::unfold(
+        (response.bytes_stream(), 0_usize, false),
+        move |(mut stream, total, done)| async move {
+            if done {
+                return None;
+            }
+            let Ok(next) = tokio::time::timeout(frame_deadline, stream.next()).await else {
+                return Some((Err(GuardedHttpFetchError::Deadline), (stream, total, true)));
+            };
+            match next {
+                None => None,
+                Some(Err(error)) => Some((
+                    Err(GuardedHttpFetchError::Provider(transport_error(error))),
+                    (stream, total, true),
+                )),
+                Some(Ok(bytes)) if bytes.len() > max_frame => Some((
+                    Err(GuardedHttpFetchError::FrameLimit { limit: max_frame }),
+                    (stream, total, true),
+                )),
+                Some(Ok(bytes)) if total.saturating_add(bytes.len()) > max_body => Some((
+                    Err(GuardedHttpFetchError::SizeLimit { limit: max_body }),
+                    (stream, total, true),
+                )),
+                Some(Ok(bytes)) => {
+                    let total = total + bytes.len();
+                    Some((Ok(bytes.to_vec()), (stream, total, false)))
+                }
+            }
+        },
+    );
+    Ok(GuardedHttpStreamResponse {
+        status,
+        final_url,
+        headers: response_headers,
+        body: Box::pin(stream),
+    })
+}
+
+fn validate_guarded_destination(request: &GuardedHttpRequest) -> Result<(), GuardedHttpFetchError> {
+    if !matches!(request.url.scheme(), "http" | "https")
+        || request.url.username() != ""
+        || request.url.password().is_some()
+        || request.url.query().is_some()
+        || request.url.fragment().is_some()
+        || request.body.len() > MAX_GUARDED_REQUEST_BYTES
+        || request.max_frame_bytes == 0
+        || request.max_body_bytes == 0
+        || request.max_frame_bytes > request.max_body_bytes
+        || request.max_body_bytes > MAX_GUARDED_RESPONSE_BYTES
+        || request.response_deadline.is_zero()
+        || request.frame_deadline.is_zero()
+        || request.headers.len() > MAX_GUARDED_HEADERS
+        || request
+            .headers
+            .iter()
+            .fold(0_usize, |total, (name, value)| {
+                total.saturating_add(name.len()).saturating_add(value.len())
+            })
+            > MAX_GUARDED_HEADER_BYTES
+        || request
+            .headers
+            .iter()
+            .any(|(_, value)| value.len() > MAX_GUARDED_HEADER_VALUE_BYTES)
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "guarded HTTP URL is invalid",
+        )
+        .into());
+    }
+    if let Some(proxy) = &request.proxy
+        && (!matches!(proxy.scheme(), "http" | "https")
+            || proxy.username() != ""
+            || proxy.password().is_some()
+            || proxy.query().is_some()
+            || proxy.fragment().is_some()
+            || !proxy.host_str().is_some_and(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || parse_url_ip(host).is_some_and(|address| address.is_loopback())
+            }))
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "guarded HTTP proxy must be a credential-free loopback policy proxy",
+        )
+        .into());
+    }
+    if request.allow_private_destinations {
+        return Ok(());
+    }
+    if request.proxy.is_none()
+        && request.dns_pin.is_none()
+        && request
+            .url
+            .host_str()
+            .is_some_and(|host| parse_url_ip(host).is_none())
+    {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "direct guarded HTTP hostname requires a DNS address pin",
+        )
+        .into());
+    }
+    let address = if let Some((host, address)) = &request.dns_pin {
+        if request.url.host_str() != Some(host.as_str()) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "DNS pin host does not match request host",
+            )
+            .into());
+        }
+        Some(address.ip())
+    } else {
+        request.url.host_str().and_then(parse_url_ip)
+    };
+    if address.is_some_and(is_local_or_private) {
+        return Err(ProviderError::new(
+            ProviderErrorKind::InvalidRequest,
+            "private or local HTTP destination is forbidden",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn is_local_or_private(address: IpAddr) -> bool {
+    !is_public_ip(address)
+}
+
+fn parse_url_ip(host: &str) -> Option<IpAddr> {
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse()
+        .ok()
+}
+
+fn is_public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(value) => is_public_v4(value),
+        IpAddr::V6(value) => is_public_v6(value),
+    }
+}
+
+fn is_public_v4(address: Ipv4Addr) -> bool {
+    let [a, b, c, _] = address.octets();
+    !(address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_broadcast()
+        || address.is_documentation()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || a == 0
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 198 && (18..=19).contains(&b))
+        || a >= 240)
+}
+
+fn is_public_v6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    if let Some(mapped) = address.to_ipv4_mapped() {
+        return is_public_v4(mapped);
+    }
+    if segments[..6] == [0, 0, 0, 0, 0, 0] {
+        return is_public_v4(embedded_ipv4(segments[6], segments[7]));
+    }
+    if segments[0] == 0x0064 && segments[1] == 0xff9b {
+        return segments[2..6] == [0, 0, 0, 0]
+            && is_public_v4(embedded_ipv4(segments[6], segments[7]));
+    }
+    if segments[0] == 0x2002 {
+        return is_public_v4(embedded_ipv4(segments[1], segments[2]));
+    }
+    if matches!(segments[4], 0 | 0x0200) && segments[5] == 0x5efe {
+        return is_public_v4(embedded_ipv4(segments[6], segments[7]));
+    }
+    !(address.is_loopback()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || address.is_unique_local()
+        || address.is_unicast_link_local()
+        || (segments[0] == 0x2001 && matches!(segments[1], 0 | 0x0db8)))
+}
+
+fn embedded_ipv4(high: u16, low: u16) -> Ipv4Addr {
+    let [a, b] = high.to_be_bytes();
+    let [c, d] = low.to_be_bytes();
+    Ipv4Addr::new(a, b, c, d)
+}
+
+fn redacted_url(url: &Url) -> String {
+    let mut redacted = url.clone();
+    let _ = redacted.set_username("");
+    let _ = redacted.set_password(None);
+    redacted.set_query(url.query().map(|_| "[REDACTED]"));
+    redacted.set_fragment(None);
+    redacted.to_string()
 }
 
 /// Performs one guarded, non-redirecting HTTP GET.
@@ -324,6 +717,108 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn guarded_destination_rejects_reserved_and_mapped_private_addresses() {
+        for address in [
+            "100.64.0.1",
+            "198.18.0.1",
+            "::ffff:127.0.0.1",
+            "2002:7f00:1::",
+        ] {
+            let address: IpAddr = address.parse().expect("IP");
+            assert!(is_local_or_private(address), "{address} must be denied");
+        }
+    }
+
+    #[test]
+    fn guarded_request_debug_redacts_url_queries_and_proxy_userinfo() {
+        let request = GuardedHttpRequest {
+            method: GuardedHttpMethod::Get,
+            url: Url::parse("https://example.com/mcp?token=secret-canary").expect("URL"),
+            headers: Vec::new(),
+            body: Vec::new(),
+            proxy: Some(Url::parse("http://user:proxy-canary@127.0.0.1:8080").expect("proxy")),
+            proxy_authentication: None,
+            dns_pin: None,
+            allow_private_destinations: false,
+            response_deadline: Duration::from_secs(1),
+            frame_deadline: Duration::from_secs(1),
+            max_frame_bytes: 1,
+            max_body_bytes: 1,
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("secret-canary"));
+        assert!(!debug.contains("proxy-canary"));
+    }
+
+    #[tokio::test]
+    async fn guarded_stream_request_denies_private_destinations_by_default() {
+        let error = guarded_http_request(GuardedHttpRequest {
+            method: GuardedHttpMethod::Get,
+            url: Url::parse("http://127.0.0.1:9/private").expect("URL"),
+            headers: Vec::new(),
+            body: Vec::new(),
+            proxy: None,
+            proxy_authentication: None,
+            dns_pin: None,
+            allow_private_destinations: false,
+            response_deadline: Duration::from_secs(1),
+            frame_deadline: Duration::from_secs(1),
+            max_frame_bytes: 1024,
+            max_body_bytes: 1024,
+        })
+        .await
+        .err()
+        .expect("private destination must fail");
+        assert!(matches!(
+            error,
+            GuardedHttpFetchError::Provider(ProviderError {
+                kind: ProviderErrorKind::InvalidRequest,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn guarded_stream_request_supports_post_body_with_bounded_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            while !request.ends_with(b"payload") {
+                let length = socket.read(&mut buffer).await.expect("request");
+                assert_ne!(length, 0, "request ended before body");
+                request.extend_from_slice(&buffer[..length]);
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(request.starts_with("POST /mcp HTTP/1.1"));
+            assert!(request.ends_with("payload"));
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 9\r\nConnection: close\r\n\r\ndata: x\n\n").await.expect("response");
+        });
+        let mut response = guarded_http_request(GuardedHttpRequest {
+            method: GuardedHttpMethod::Post,
+            url: Url::parse(&format!("http://{address}/mcp")).expect("URL"),
+            headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+            body: b"payload".to_vec(),
+            proxy: None,
+            proxy_authentication: None,
+            dns_pin: None,
+            allow_private_destinations: true,
+            response_deadline: Duration::from_secs(2),
+            frame_deadline: Duration::from_secs(1),
+            max_frame_bytes: 64,
+            max_body_bytes: 64,
+        })
+        .await
+        .expect("guarded POST");
+        assert_eq!(response.status, 200);
+        let body = response.body.next().await.expect("frame").expect("body");
+        assert_eq!(body, b"data: x\n\n");
+        server.await.expect("server");
+    }
 
     #[tokio::test]
     async fn guarded_fetch_never_follows_redirects_and_returns_bounded_neutral_parts() {

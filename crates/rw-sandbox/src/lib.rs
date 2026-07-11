@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 mod proxy;
-pub use proxy::{EgressPin, ProxyLifecycle, SupervisedEgressProxy, UpstreamProxy};
+pub use proxy::{EgressPin, ProxyDenials, ProxyLifecycle, SupervisedEgressProxy, UpstreamProxy};
 
 /// Identifies this workspace component in diagnostics.
 pub const COMPONENT: &str = "sandbox";
@@ -46,6 +46,8 @@ pub enum NetworkPolicy {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SandboxPolicy {
     write_roots: Vec<PathBuf>,
+    #[serde(default)]
+    read_roots: Option<Vec<PathBuf>>,
     network: NetworkPolicy,
 }
 
@@ -79,6 +81,7 @@ impl SandboxPolicy {
         }
         Ok(Self {
             write_roots: roots.into_iter().collect(),
+            read_roots: None,
             network,
         })
     }
@@ -87,6 +90,40 @@ impl SandboxPolicy {
     #[must_use]
     pub fn write_roots(&self) -> &[PathBuf] {
         &self.write_roots
+    }
+
+    /// Restricts reads to these intrinsic runtime/code roots plus writable roots.
+    /// The default policy preserves broad-read command compatibility; security-
+    /// sensitive callers such as the plugin host opt into this narrower form.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a supplied root cannot be canonicalized.
+    pub fn with_read_roots<I, P>(mut self, read_roots: I) -> Result<Self, SandboxError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        let mut roots = BTreeSet::new();
+        for root in read_roots {
+            let supplied = root.as_ref();
+            let canonical =
+                supplied
+                    .canonicalize()
+                    .map_err(|source| SandboxError::InvalidReadRoot {
+                        path: supplied.to_path_buf(),
+                        source,
+                    })?;
+            roots.insert(canonical);
+        }
+        self.read_roots = Some(roots.into_iter().collect());
+        Ok(self)
+    }
+
+    /// Exact roots visible to a read-restricted child, if narrowing was requested.
+    #[must_use]
+    pub fn read_roots(&self) -> Option<&[PathBuf]> {
+        self.read_roots.as_deref()
     }
 
     /// Network authority for the child.
@@ -100,6 +137,7 @@ impl SandboxPolicy {
     pub fn with_network(&self, network: NetworkPolicy) -> Self {
         Self {
             write_roots: self.write_roots.clone(),
+            read_roots: self.read_roots.clone(),
             network,
         }
     }
@@ -495,6 +533,14 @@ pub fn shell_launch_plan(
             definition.push(root.as_os_str());
             args.push(definition);
         }
+        if let Some(read_roots) = &policy.read_roots {
+            for (index, root) in read_roots.iter().enumerate() {
+                args.push(OsString::from("-D"));
+                let mut definition = OsString::from(format!("RW_READ_{index}="));
+                definition.push(root.as_os_str());
+                args.push(definition);
+            }
+        }
         args.push(shell.as_os_str().to_owned());
         args.extend_from_slice(shell_args);
         Ok(LaunchPlan {
@@ -625,17 +671,25 @@ fn seatbelt_profile(policy: &SandboxPolicy) -> String {
         .map(|index| format!("(subpath (param \"RW_WRITE_{index}\"))"))
         .collect::<Vec<_>>()
         .join(" ");
-    // `allow default` preserves host toolchain compatibility.  The two deny
-    // rules are the security boundary: write operations outside the canonical
-    // roots and all network operations are rejected by Seatbelt.
+    let readable = policy.read_roots.as_ref().map(|roots| {
+        (0..roots.len())
+            .map(|index| format!("(subpath (param \"RW_READ_{index}\"))"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
     let network = match &policy.network {
         NetworkPolicy::Deny => "(deny network*)".to_owned(),
         NetworkPolicy::PolicyProxy { port, .. } => format!(
             "(deny network-outbound (require-not (remote ip \"localhost:{port}\"))) (deny network-bind) (deny network-inbound)"
         ),
     };
+    let read_rule = readable.map_or_else(String::new, |readable| {
+        format!(
+            "(deny file-read* (require-not (require-any (literal \"/\") (literal \"/dev/null\") {writable} {readable})))"
+        )
+    });
     format!(
-        "(version 1) (allow default) (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
+        "(version 1) (allow default) {read_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
     )
 }
 
@@ -882,12 +936,24 @@ mod linux {
             .handle_access(all)
             .map_err(sandbox_backend)?
             .create()
-            .map_err(sandbox_backend)?
-            .add_rule(PathBeneath::new(
-                PathFd::new("/").map_err(sandbox_backend)?,
-                read,
-            ))
             .map_err(sandbox_backend)?;
+        if let Some(read_roots) = &policy.read_roots {
+            for root in read_roots {
+                ruleset = ruleset
+                    .add_rule(PathBeneath::new(
+                        PathFd::new(root).map_err(sandbox_backend)?,
+                        read,
+                    ))
+                    .map_err(sandbox_backend)?;
+            }
+        } else {
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(
+                    PathFd::new("/").map_err(sandbox_backend)?,
+                    read,
+                ))
+                .map_err(sandbox_backend)?;
+        }
         for root in &policy.write_roots {
             ruleset = ruleset
                 .add_rule(PathBeneath::new(
@@ -984,6 +1050,15 @@ pub enum SandboxError {
     /// A writable root could not be canonicalized.
     #[error("sandbox write root is invalid: {path}")]
     InvalidWriteRoot {
+        /// Supplied path.
+        path: PathBuf,
+        /// Underlying filesystem failure.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A readable root could not be canonicalized.
+    #[error("sandbox read root is invalid: {path}")]
+    InvalidReadRoot {
         /// Supplied path.
         path: PathBuf,
         /// Underlying filesystem failure.

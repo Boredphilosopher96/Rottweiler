@@ -29,6 +29,9 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "driver_changed",
   "message_queued",
   "user_message_accepted",
+  "plugin_message_injected",
+  "plugin_status_changed",
+  "ui_notification",
   "conversation_turn_committed",
   "conversation_rewound",
   "turn_started",
@@ -342,7 +345,21 @@ function applyKnownEvent(
         },
       }
     case "user_message_accepted":
+    case "plugin_message_injected":
       return state
+    case "plugin_status_changed":
+      return {
+        ...state,
+        pluginStatuses: { ...state.pluginStatuses, [event.plugin_id]: event.status },
+      }
+    case "ui_notification":
+      return {
+        ...state,
+        pluginNotifications: [
+          ...state.pluginNotifications.slice(-63),
+          { pluginId: event.plugin_id, title: event.title, message: event.message },
+        ],
+      }
     case "conversation_turn_committed": {
       const transcript = [
         ...state.transcript,

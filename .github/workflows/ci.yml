@@ -31,12 +31,44 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --locked --workspace --all-features
+      - name: M8 production-composition functional acceptance (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cargo build --locked -p rw-cli --bin rw -p rw-mcp --features rw-mcp/test-support --bin rw-mcp-fixture
+          python3 crates/rw-cli/tests/m8_release_gate.py --rw target/debug/rw --fixture target/debug/rw-mcp-fixture --samples 1 --functional-only
       - run: cargo run --locked --quiet -p xtask -- codegen --check
       - run: python3 scripts/check-dependency-direction.py
       - run: python3 scripts/check-network-boundaries.py
       - run: cargo doc --locked --workspace --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+      - run: bun install --frozen-lockfile
+        working-directory: packages/plugin-sdk
+      - run: bun run typecheck
+        working-directory: packages/plugin-sdk
+      - run: bun test
+        working-directory: packages/plugin-sdk
+      - run: bun run build
+        working-directory: packages/plugin-sdk
+      - name: Generated TypeScript plugin scaffold conformance
+        shell: bash
+        run: |
+          root="$(mktemp -d)"
+          trap 'rm -rf "$root"' EXIT
+          cargo run --locked --quiet -p rw-cli -- plugin scaffold --lang ts --name ci-fixture "$root/plugin"
+          SCAFFOLD="$root/plugin" SDK="$GITHUB_WORKSPACE/packages/plugin-sdk" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          path = Path(os.environ["SCAFFOLD"]) / "package.json"
+          package = json.loads(path.read_text(encoding="utf-8"))
+          package["dependencies"]["@rottweiler/plugin"] = f"file:{os.environ['SDK']}"
+          path.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
+          PY
+          bun install --cwd "$root/plugin"
+          bun run --cwd "$root/plugin" typecheck
+          bun test --cwd "$root/plugin"
+          bun run --cwd "$root/plugin" build
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
       - run: bun test
@@ -54,7 +86,7 @@ jobs:
       - run: crates/rw-sandbox/tests/linux_security_gate.sh
 
   performance:
-    name: M2 and M4 performance budgets
+    name: M2, M4, and M8 performance budgets
     runs-on: macos-15
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
@@ -70,6 +102,7 @@ jobs:
         working-directory: packages/tui
       - run: crates/rw-cli/tests/perf_gate.sh
       - run: crates/rw-cli/tests/m4_release_gate.sh
+      - run: crates/rw-cli/tests/m8_release_gate.sh
       - run: scripts/build-release.sh
 
   m4-ssh-loopback:

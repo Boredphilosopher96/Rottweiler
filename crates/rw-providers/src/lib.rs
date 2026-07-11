@@ -37,8 +37,10 @@ pub use github_copilot::{
     github_copilot_ai_credits, github_copilot_micros_usd_per_million, parse_github_copilot_models,
 };
 pub use http::{
-    GuardedHttpFetchError, GuardedHttpFetchRequest, GuardedHttpFetchResponse,
+    GuardedHttpByteStream, GuardedHttpFetchError, GuardedHttpFetchRequest,
+    GuardedHttpFetchResponse, GuardedHttpMethod, GuardedHttpRequest, GuardedHttpStreamResponse,
     ProcessNetworkDenyGuard, deny_outbound_network_for_process, guarded_http_fetch,
+    guarded_http_request,
 };
 pub use models_dev::{
     DEFAULT_MODELS_DEV_URL, ModelsRefreshReport, default_models_path, refresh_models_dev,

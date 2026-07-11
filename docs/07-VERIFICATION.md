@@ -174,6 +174,19 @@ milestones must not substitute empty-stub benchmarks that pass without
 measuring the named behavior. Once activated, a budget remains in every later
 milestone's global gate.
 
+The M8 prompt-ready gate is `crates/rw-cli/tests/m8_release_gate.sh`. It runs the
+release `rw` binary with an exact persisted folder-trust inventory and MCP
+approval ledger, discovers three project-configured stdio servers, starts each
+through the production sandbox launcher, loads their real catalogs, composes
+the provider, tools, commands, and session actor, and observes a marker emitted
+only at that boundary. The subprocess harness requires three distinct child
+PIDs, complete `/mcp status` catalog evidence, and successful child reaping. It
+uses an in-memory provider and denied-network MCP sandboxes, so it neither reads
+the OS keychain nor opens a network connection. After five policy/executable
+warmups, release p99 across at least 100 independent fresh-process samples with
+identically seeded security state must remain below 250ms; this is explicitly a
+warm-cache, fresh-process budget. The isolated Cargo target is deleted on exit.
+
 ## 4. Token-economy benchmarks
 
 A corpus of structured payloads (search results, dir listings, MCP responses, diagnostics) with tokenized-size assertions:

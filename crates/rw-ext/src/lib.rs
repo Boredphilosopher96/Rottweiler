@@ -6,6 +6,8 @@ mod agent;
 mod command;
 mod discovery;
 mod hook;
+mod plugin;
+mod plugin_runtime;
 mod workflow;
 
 pub use agent::{
@@ -29,6 +31,8 @@ pub use hook::{
     HookEvent, HookFailure, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
     HookRegistrationError,
 };
+pub use plugin::*;
+pub use plugin_runtime::*;
 pub use workflow::{
     DiscoveredWorkflow, WorkflowCondition, WorkflowOnFail, WorkflowRunError, WorkflowRunReport,
     WorkflowRunner, WorkflowStep, WorkflowStepArtifact, WorkflowStepExecutionError,

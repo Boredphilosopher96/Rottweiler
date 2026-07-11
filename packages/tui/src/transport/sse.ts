@@ -140,11 +140,16 @@ export async function* parseSseStream(
 ): AsyncGenerator<SseMessage> {
   const parser = new SseParser(options)
   const reader = stream.getReader()
+  let cancellation: Promise<void> | null = null
+  const cancelReader = (reason: unknown): Promise<void> => {
+    cancellation ??= reader.cancel(reason)
+    return cancellation
+  }
   const onAbort = () => {
-    void reader.cancel(signal?.reason)
+    void cancelReader(signal?.reason)
   }
   if (signal?.aborted === true) {
-    void reader.cancel(signal.reason)
+    await cancelReader(signal.reason)
     reader.releaseLock()
     return
   } else {
@@ -165,6 +170,9 @@ export async function* parseSseStream(
     }
   } finally {
     signal?.removeEventListener("abort", onAbort)
+    if (cancellation !== null) {
+      await cancellation
+    }
     reader.releaseLock()
   }
 }

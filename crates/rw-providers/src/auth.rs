@@ -332,6 +332,13 @@ const RESERVED_AUTHORIZATION_PARAMETERS: [&str; 7] = [
     "code_challenge",
     "code_challenge_method",
 ];
+const RESERVED_TOKEN_PARAMETERS: [&str; 5] = [
+    "grant_type",
+    "code",
+    "redirect_uri",
+    "client_id",
+    "code_verifier",
+];
 
 /// Injectable cryptographic entropy boundary for OAuth state and PKCE.
 pub trait OAuthEntropy: Send + Sync + fmt::Debug {
@@ -379,6 +386,7 @@ pub struct OAuthAuthorizationCode {
     client: reqwest::Client,
     entropy: Arc<dyn OAuthEntropy>,
     extra_authorization_parameters: Vec<(String, String)>,
+    extra_token_parameters: Vec<(String, String)>,
     loopback_redirect: OAuthLoopbackRedirect,
 }
 
@@ -445,6 +453,7 @@ impl OAuthAuthorizationCode {
             client,
             entropy,
             extra_authorization_parameters: Vec::new(),
+            extra_token_parameters: Vec::new(),
             loopback_redirect: OAuthLoopbackRedirect::EphemeralIpLiteral,
         }
     }
@@ -462,6 +471,17 @@ impl OAuthAuthorizationCode {
         parameters: impl IntoIterator<Item = (String, String)>,
     ) -> Self {
         self.extra_authorization_parameters = parameters.into_iter().collect();
+        self
+    }
+
+    /// Adds provider-documented parameters to the authorization-code token
+    /// exchange. Core protocol fields remain owned by this implementation.
+    #[must_use]
+    pub fn with_token_parameters(
+        mut self,
+        parameters: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.extra_token_parameters = parameters.into_iter().collect();
         self
     }
 
@@ -486,6 +506,7 @@ impl OAuthAuthorizationCode {
             client_id: self.config.client_id.clone(),
             client: self.client.clone(),
             callback_timeout: self.config.callback_timeout,
+            extra_token_parameters: self.extra_token_parameters.clone(),
         })
     }
 
@@ -524,6 +545,24 @@ impl OAuthAuthorizationCode {
             return Err(ProviderError::new(
                 ProviderErrorKind::InvalidRequest,
                 "OAuth extra authorization parameters must be non-empty and non-reserved",
+            ));
+        }
+        if self.extra_token_parameters.len() > 32
+            || self.extra_token_parameters.iter().any(|(name, value)| {
+                name.trim().is_empty()
+                    || name.len() > 128
+                    || value.is_empty()
+                    || value.len() > 4096
+                    || name.chars().any(char::is_control)
+                    || value.chars().any(char::is_control)
+                    || RESERVED_TOKEN_PARAMETERS
+                        .iter()
+                        .any(|reserved| name == reserved)
+            })
+        {
+            return Err(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "OAuth extra token parameters must be bounded, non-empty, and non-reserved",
             ));
         }
         if self
@@ -621,6 +660,7 @@ pub struct OAuthLoginSession {
     client_id: String,
     client: reqwest::Client,
     callback_timeout: Duration,
+    extra_token_parameters: Vec<(String, String)>,
 }
 
 impl fmt::Debug for OAuthLoginSession {
@@ -668,13 +708,17 @@ impl OAuthLoginSession {
             )
         })??;
 
-        let form = [
-            ("grant_type", "authorization_code".to_owned()),
-            ("code", code),
-            ("redirect_uri", self.redirect_uri.to_string()),
-            ("client_id", self.client_id),
-            ("code_verifier", self.verifier.expose().to_owned()),
+        let mut form = vec![
+            ("grant_type".to_owned(), "authorization_code".to_owned()),
+            ("code".to_owned(), code),
+            ("redirect_uri".to_owned(), self.redirect_uri.to_string()),
+            ("client_id".to_owned(), self.client_id),
+            (
+                "code_verifier".to_owned(),
+                self.verifier.expose().to_owned(),
+            ),
         ];
+        form.extend(self.extra_token_parameters);
         crate::http::require_process_network()?;
         let response = self
             .client
@@ -1472,7 +1516,15 @@ mod tests {
             oauth_config(token_endpoint, Duration::from_secs(5)),
             client,
             Arc::new(FixedEntropy::new([state_bytes, verifier_bytes])),
-        );
+        )
+        .with_authorization_parameters([
+            ("resource".to_owned(), "https://mcp.example/mcp".to_owned()),
+            ("audience".to_owned(), "mcp.example".to_owned()),
+        ])
+        .with_token_parameters([
+            ("resource".to_owned(), "https://mcp.example/mcp".to_owned()),
+            ("audience".to_owned(), "mcp.example".to_owned()),
+        ]);
         let session = flow
             .begin()
             .await
@@ -1488,6 +1540,11 @@ mod tests {
             "fixture-client"
         );
         assert_eq!(query_value(&authorization_url, "scope"), "models tools");
+        assert_eq!(
+            query_value(&authorization_url, "resource"),
+            "https://mcp.example/mcp"
+        );
+        assert_eq!(query_value(&authorization_url, "audience"), "mcp.example");
         assert_eq!(
             query_value(&authorization_url, "code_challenge_method"),
             "S256"
@@ -1528,6 +1585,8 @@ mod tests {
         assert!(request.contains("grant_type=authorization_code"));
         assert!(request.contains("code=authorization-code-canary"));
         assert!(request.contains(&format!("code_verifier={verifier}")));
+        assert!(request.contains("resource=https%3A%2F%2Fmcp.example%2Fmcp"));
+        assert!(request.contains("audience=mcp.example"));
         assert!(!request.contains(PROXY_PASSWORD));
 
         let debug = format!("{tokens:?} {proxy_authentication:?}");
@@ -1613,7 +1672,7 @@ mod tests {
         callback_timeout: Duration,
     ) -> OAuthAuthorizationCodeConfig {
         OAuthAuthorizationCodeConfig {
-            authorization_endpoint: url("https://authorization.example/authorize?audience=api"),
+            authorization_endpoint: url("https://authorization.example/authorize"),
             token_endpoint,
             client_id: "fixture-client".to_owned(),
             scopes: vec!["models".to_owned(), "tools".to_owned()],

@@ -7,8 +7,42 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait = "0.1.89"
+blake3.workspace = true
+getrandom.workspace = true
+rmcp.workspace = true
 rw-tools.workspace = true
 rw-types.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "process", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3.23"
+tiktoken-rs = "0.9.1"
+
+[features]
+default = []
+test-support = []
+
+[[bin]]
+name = "rw-mcp-fixture"
+path = "src/bin/rw-mcp-fixture.rs"
+test = false
+doc = false
+required-features = ["test-support"]
+
+[[test]]
+name = "three_process_cold_start"
+path = "tests/three_process_cold_start.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "five_process_deferred_acceptance"
+path = "tests/five_process_deferred_acceptance.rs"
+required-features = ["test-support"]
 
 [lints]
 workspace = true

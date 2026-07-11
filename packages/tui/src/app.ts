@@ -92,6 +92,7 @@ export class RottweilerApp extends BoxRenderable {
   #pendingFilePreview: string | null = null
   #terminalSuspended = false
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
+  #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
   #onTerminalFocus = () => {
     this.#terminalFocused = true
   }
@@ -229,6 +230,9 @@ export class RottweilerApp extends BoxRenderable {
     const next = reduceRottweilerState(previous, engineEvent(event))
     this.setState(next)
     this.#notify(previous, next)
+    if (next.pluginNotifications.at(-1) !== previous.pluginNotifications.at(-1)) {
+      this.#schedulePluginNotificationDismissal(next.pluginNotifications.at(-1))
+    }
     if (event.type === "user_shell_state_changed") {
       if (event.active) {
         this.#clearPendingShellTimer()
@@ -316,6 +320,7 @@ export class RottweilerApp extends BoxRenderable {
 
   override destroy(): void {
     this.#clearPendingShellTimer()
+    this.#clearPluginNotificationTimer()
     this.ctx.off(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     this.ctx.off(CliRenderEvents.BLUR, this.#onTerminalBlur)
     this.#syntaxStyle.destroy()
@@ -603,6 +608,25 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
+  #schedulePluginNotificationDismissal(
+    notification: RottweilerState["pluginNotifications"][number] | undefined,
+  ): void {
+    this.#clearPluginNotificationTimer()
+    if (notification === undefined) return
+    this.#pluginNotificationTimer = setTimeout(() => {
+      this.#pluginNotificationTimer = null
+      if (this.#state.pluginNotifications.at(-1) !== notification) return
+      this.setState({ ...this.#state, pluginNotifications: [] })
+    }, 5_000)
+  }
+
+  #clearPluginNotificationTimer(): void {
+    if (this.#pluginNotificationTimer !== null) {
+      clearTimeout(this.#pluginNotificationTimer)
+      this.#pluginNotificationTimer = null
+    }
+  }
+
   #projectRejection(outcome: void | CommandOutcome | null): void {
     if (outcome?.type !== "rejected") {
       return
@@ -628,7 +652,17 @@ export class RottweilerApp extends BoxRenderable {
     const question = Object.values(next.questions).find(
       (candidate) => !candidate.answered && previous.questions[candidate.questionId] === undefined,
     )
-    if (approval !== undefined) {
+    const pluginNotification =
+      next.pluginNotifications.at(-1) !== previous.pluginNotifications.at(-1)
+        ? next.pluginNotifications.at(-1)
+        : undefined
+    if (pluginNotification !== undefined) {
+      void this.#options.notifications.notify({
+        kind: "plugin",
+        title: pluginNotification.title,
+        body: pluginNotification.message,
+      })
+    } else if (approval !== undefined) {
       void this.#options.notifications.notify({
         kind: "approval_needed",
         title: "Rottweiler needs approval",

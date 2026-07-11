@@ -10,7 +10,7 @@ const MAX_PROCESS_DIAGNOSTIC_BYTES = 64 * 1024
 export interface DesktopNotification {
   readonly title: string
   readonly body: string
-  readonly kind: "turn_finished" | "approval_needed" | "question_asked"
+  readonly kind: "turn_finished" | "approval_needed" | "question_asked" | "plugin"
 }
 
 export interface NotificationAdapter {

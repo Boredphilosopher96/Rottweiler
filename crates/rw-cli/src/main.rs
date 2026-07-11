@@ -22,6 +22,16 @@ use tracing_subscriber::EnvFilter;
 
 #[allow(dead_code)]
 mod host_runtime;
+#[allow(dead_code)]
+mod m8_config;
+#[allow(dead_code)]
+mod m8_runtime;
+mod mcp_cli;
+mod mcp_server;
+mod plugin_cli;
+mod plugin_dev;
+#[allow(dead_code)]
+mod plugin_launcher;
 mod project_commands;
 #[allow(dead_code)]
 mod remote;
@@ -179,6 +189,70 @@ enum Command {
         #[command(subcommand)]
         command: TrustCommand,
     },
+    /// Author and debug out-of-process plugins.
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
+    /// Expose approved Rottweiler tools and connection-owned sessions over MCP.
+    McpServer {
+        #[command(subcommand)]
+        command: McpServerCommand,
+    },
+    /// Manage configured MCP clients.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// Authenticate one configured HTTP MCP server with Authorization Code + PKCE.
+    Login { server: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpServerCommand {
+    /// Serve one MCP connection over standard input/output.
+    Stdio {
+        /// Primary workspace exposed to the server; defaults to the current directory.
+        #[arg(long, value_name = "PATH")]
+        workspace: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCommand {
+    /// Generate a deterministic plugin project.
+    Scaffold {
+        /// SDK language (currently `ts`).
+        #[arg(long, default_value = "ts")]
+        lang: String,
+        /// Destination directory.
+        #[arg(value_name = "PATH", default_value = "rottweiler-plugin")]
+        path: PathBuf,
+        /// Package and manifest name.
+        #[arg(long)]
+        name: Option<String>,
+        /// Replace existing regular template files.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Run a plugin under the development supervisor (experimental).
+    Dev {
+        #[arg(value_name = "PATH")]
+        path: PathBuf,
+        /// Explicitly authorize direct local development execution.
+        #[arg(long)]
+        allow_dev_exec: bool,
+    },
+    /// Inspect configured plugins and their exact approval state.
+    Status,
+    /// Approve one exact executable/config/origin/manifest identity.
+    Approve { name: String },
+    /// Revoke one durable plugin approval.
+    Revoke { name: String },
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
@@ -342,6 +416,84 @@ async fn main() -> Result<()> {
             command: AuthCommand::SetKey { provider },
         }) => auth_set_key(&provider)?,
         Some(Command::Trust { command }) => run_trust_command(command)?,
+        Some(Command::Plugin {
+            command:
+                PluginCommand::Scaffold {
+                    lang,
+                    path,
+                    name,
+                    force,
+                },
+        }) => {
+            if lang != "ts" {
+                return Err(miette!(
+                    "unsupported plugin scaffold language {lang:?}; expected ts"
+                ));
+            }
+            for written in plugin_cli::scaffold_typescript(&path, name.as_deref(), force)? {
+                println!("{}", written.display());
+            }
+        }
+        Some(Command::Plugin {
+            command: PluginCommand::Status,
+        }) => run_plugin_approval(None, false)?,
+        Some(Command::Plugin {
+            command: PluginCommand::Approve { name },
+        }) => run_plugin_approval(Some(&name), false)?,
+        Some(Command::Plugin {
+            command: PluginCommand::Revoke { name },
+        }) => run_plugin_approval(Some(&name), true)?,
+        Some(Command::Plugin {
+            command:
+                PluginCommand::Dev {
+                    path,
+                    allow_dev_exec,
+                },
+        }) => {
+            if !allow_dev_exec {
+                return Err(miette!(
+                    "plugin dev executes local code; pass --allow-dev-exec to grant explicit development authority"
+                ));
+            }
+            plugin_dev::run(&path).await?;
+        }
+        Some(Command::McpServer {
+            command: McpServerCommand::Stdio { workspace },
+        }) => {
+            let workspace = workspace.unwrap_or(std::env::current_dir().into_diagnostic()?);
+            let workspace_roots = canonical_workspace_roots(&workspace, &cli.add_dirs)?;
+            let provider_mode = if let Some(script) = cli.in_memory_replay_script.as_deref() {
+                runtime::HostedProviderMode::DeterministicReplay {
+                    provider_name: "mcp-server-replay".to_owned(),
+                    scripts: serde_json::from_slice(&fs::read(script).into_diagnostic()?)
+                        .into_diagnostic()?,
+                }
+            } else {
+                runtime::HostedProviderMode::Live
+            };
+            let options = host_runtime::CliHostOptions::from_environment(
+                workspace_roots,
+                cli.dangerously_trust,
+                cli.permission_mode,
+                cli.max_turns,
+                provider_mode,
+            )
+            .map_err(|_| miette!("MCP server configuration could not initialize"))?;
+            mcp_server::run_stdio(mcp_server::StdioServerOptions {
+                workspace_roots: options.allowed_workspaces,
+                storage_root: options.storage_root,
+                credentials_path: options.credentials_path,
+                config: options.config,
+                permission_mode: options.permission_mode,
+                max_turns: options.max_turns,
+                provider_mode: options.provider_mode,
+                dangerously_trust: options.dangerously_trust,
+            })
+            .await?;
+        }
+        Some(Command::Mcp {
+            command: McpCommand::Login { server },
+        }) => mcp_cli::login(&server, cli.dangerously_trust).await?,
         None => {
             let headless_or_line = cli.prompt.is_some()
                 || cli.line
@@ -697,6 +849,105 @@ fn run_trust_command(command: TrustCommand) -> Result<()> {
                 workspace.display()
             );
         }
+    }
+    Ok(())
+}
+
+fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Result<()> {
+    use std::io::IsTerminal as _;
+
+    let workspace =
+        fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
+    let loader = rw_store::config::ConfigLoader::from_environment().into_diagnostic()?;
+    let effective_config = loader.load().into_diagnostic()?;
+    let storage_root = loader
+        .credentials_path()
+        .parent()
+        .ok_or_else(|| miette!("configuration root has no parent"))?
+        .to_path_buf();
+    runtime::initialize_private_storage_root(&storage_root).into_diagnostic()?;
+    let (user_home, _) = runtime::extension_user_roots(&loader.credentials_path());
+    let catalog = m8_config::discover_executable_configs(
+        &user_home,
+        &workspace,
+        effective_config.project_trusted(),
+    )?;
+    let store = m8_runtime::PrivatePluginApprovalStore::open(&storage_root)?;
+    let selected = catalog
+        .plugins
+        .iter()
+        .filter(|plugin| name.is_none_or(|name| plugin.name == name))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return Err(miette!("configured plugin was not found"));
+    }
+    for plugin in selected {
+        if revoke {
+            println!(
+                "{}",
+                if store.revoke(&plugin.name)? {
+                    format!("revoked plugin {}", plugin.name)
+                } else {
+                    format!("plugin {} was not approved", plugin.name)
+                }
+            );
+            continue;
+        }
+        let manifest = plugin.load_manifest()?;
+        let process = plugin.process_config()?;
+        let scope = match plugin.origin {
+            m8_config::ExecutableConfigOrigin::User(_) => "user",
+            m8_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
+        };
+        let origin = format!("{scope}:{}", plugin.origin.path().display());
+        let requirement = rw_core::runtime_support::plugin::plugin_launch_approval_requirement(
+            &store, &manifest, &process, &origin,
+        )
+        .map_err(|error| miette!(error.to_string()))?;
+        let summary = serde_json::json!({
+            "name": plugin.name, "origin": origin, "executable": process.executable(),
+            "argv": process.argv().iter().map(|value| value.to_string_lossy()).collect::<Vec<_>>(),
+            "cwd": process.cwd(), "environment_names": process.environment_allowlist(),
+            "allowed_domains": process.allowed_domains(), "capabilities": manifest.capabilities,
+            "attested_files": process.attested_files(),
+            "code_root": process.code_root(),
+            "approval": format!("{requirement:?}"),
+        });
+        let rendered = serde_json::to_string_pretty(&summary).into_diagnostic()?;
+        if rendered.len() > 128 * 1024 {
+            return Err(miette!("plugin approval summary exceeded its size cap"));
+        }
+        println!("{rendered}");
+        if name.is_none() {
+            continue;
+        }
+        if matches!(
+            requirement,
+            rw_core::runtime_support::plugin::ApprovalRequirement::Approved
+        ) {
+            println!("plugin {} is already approved", plugin.name);
+            continue;
+        }
+        if !std::io::stdin().is_terminal() {
+            return Err(miette!(
+                "refusing plugin approval without an interactive terminal"
+            ));
+        }
+        eprint!("Approve this exact plugin identity? [y/N] ");
+        std::io::stderr().flush().into_diagnostic()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer).into_diagnostic()?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            return Err(miette!("plugin approval was not granted"));
+        }
+        rw_core::runtime_support::plugin::approve_plugin_launch(
+            &store, &manifest, &process, &origin,
+        )
+        .map_err(|error| miette!(error.to_string()))?;
+        println!(
+            "approved plugin {}; restart active sessions to launch it",
+            plugin.name
+        );
     }
     Ok(())
 }

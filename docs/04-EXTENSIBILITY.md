@@ -66,6 +66,59 @@ A plugin can register a provider (capability `providers`): the router forwards I
 
 Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second (a crate wrapping the protocol). The protocol doc + JSON schema is the source of truth; SDKs are conveniences.
 
+### Executable configuration and approval
+
+Executable configuration follows the normal `.agents`-before-`.rottweiler` discovery rule and is ignored at project scope until the folder is trusted. Commands are literal argv arrays: shell parsing and `PATH` lookup are never implicit, and the executable must resolve to an absolute executable file.
+
+```toml
+# .agents/mcp.toml
+[servers.local]
+argv = ["/absolute/path/to/mcp-server", "--stdio"]
+cwd = "."
+defer_tools = true
+inherit_env = []
+# Empty lists are the fail-closed defaults. Roots resolve relative to this file's
+# configuration base and must remain inside an active workspace root.
+read_roots = ["src", "docs"]
+write_roots = ["generated"]
+# Public DNS names only; traffic is forced through the supervised SSRF proxy.
+allowed_domains = ["api.example.com"]
+
+[servers.remote]
+endpoint = "https://mcp.example.com/rpc"
+defer_tools = true
+oauth_credential = "mcp.example"
+oauth_resource = "https://mcp.example.com/rpc"
+oauth_audience = "mcp.example.com"
+oauth_authorization_endpoint = "https://id.example.com/authorize"
+oauth_token_endpoint = "https://id.example.com/token"
+oauth_client_id = "public-client-id"
+oauth_scopes = ["mcp:read", "mcp:call"]
+
+# User-level mcp.toml only. Tool entries take precedence over the server default.
+[capability_overrides.local]
+default = ["reads_fs"]
+[capability_overrides.local.tools]
+read_document = ["reads_fs"]
+publish_document = ["network", "exec"]
+```
+
+```toml
+# .agents/plugins.toml
+[[plugins]]
+name = "example"
+argv = ["/absolute/workspace/.agents/plugins/example/dist/plugin"]
+manifest = ".agents/plugins/example/manifest.json"
+inherit_env = []
+allowed_domains = []
+```
+
+`/mcp` shows connection and approval state. Stdio servers receive only intrinsic runtime reads, scratch writes, and no network by default. `read_roots`, `write_roots`, and `allowed_domains` are bounded explicit process grants; roots must stay within active workspace authority, and domains use the supervised policy proxy with DNS pinning and private/local-address denial. Separately, virtual MCP tool calls classify as `network + exec` unless user-level `capability_overrides` supplies a server default or an exact per-tool override (`reads_fs`, `writes_fs`, `network`, `exec`); project configuration cannot downgrade this permission classification. Tool entries take precedence over the server default. Approval is bound to both kinds of grants together with the exact origin, transport, argv/environment names, OAuth references, and configuration fingerprint; changed configuration requires a new explicit fingerprint confirmation. `rw mcp login <server>` uses Authorization Code + PKCE and atomically stores the access token, optional refresh token, expiry, and exact resource/audience binding in the Rottweiler credential vault. Expired access is refreshed only against the same trusted token endpoint/client/proxy configuration, and a rotated refresh token is durably replaced before the new bearer is exposed. Plaintext tokens and environment-backed MCP OAuth references are rejected. Remote prompts are available through `/mcp.prompt <server> <prompt> [JSON object]`; catalog-derived namespaced aliases are conveniences and the stable command resolves the live server state at invocation.
+
+`rw plugin status|approve|revoke` manages the separately fingerprinted plugin approval ledger. Production approval pins and displays the executable plus every explicit interpreter entrypoint and adjacent dependency descriptor by canonical path, length, and BLAKE3 identity; identities are revalidated immediately before launch, and eval/module/package-runner forms are rejected because their executed content cannot be attested narrowly. A separately pinned `code_root` (the manifest's parent directory) is the only plugin-owned directory readable without `reads-fs`; it must be a strict descendant of an approved workspace root, never the workspace root itself. Omit `cwd` to default it to that code root. The TypeScript production path is the scaffold's `bun run build`, which emits a standalone `dist/plugin`; `bun run start` remains the development path. `rw plugin scaffold --lang ts` emits the canonical protocol-1 TypeScript template and manifest. `rw plugin dev <path> --allow-dev-exec` is an explicit local-development escape hatch: it runs under the restrictive plugin sandbox, watches source files without a build loop, and never grants or mutates production approval.
+
+Protocol 1 is frozen by the M8 conformance suite: the Rust host runs the canonical generated scaffold plus independent tool/hook, event/push, and provider fixtures, and kills an undeclared-capability fixture. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Wire details and limits live in `packages/plugin-sdk/PROTOCOL.md` and its checked-in JSON schema.
+
 ## Tier 3 — WASM (post-v1)
 
 wasmtime component-model host for latency-critical in-process hooks. Same capability manifest, same hook names. Not in v1 (ADR-003).

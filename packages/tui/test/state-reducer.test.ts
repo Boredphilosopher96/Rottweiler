@@ -59,6 +59,35 @@ function childResult(
 }
 
 describe("pure TUI state reducer", () => {
+  test("projects plugin status and bounded UI notifications as known durable events", () => {
+    let state = reduce(createInitialState(), {
+      type: "plugin_status_changed",
+      meta: meta("1"),
+      plugin_id: "formatter",
+      status: "watching",
+    })
+    state = reduce(state, {
+      type: "ui_notification",
+      meta: meta("2"),
+      plugin_id: "formatter",
+      title: "Format complete",
+      message: "src/main.rs",
+    })
+    state = reduce(state, {
+      type: "plugin_message_injected",
+      meta: meta("3"),
+      plugin_id: "formatter",
+      content: "/help remains plain text",
+      queued: true,
+    })
+
+    expect(state.pluginStatuses).toEqual({ formatter: "watching" })
+    expect(state.pluginNotifications).toEqual([
+      { pluginId: "formatter", title: "Format complete", message: "src/main.rs" },
+    ])
+    expect(state.protocol.unknownEvents).toBe(0)
+  })
+
   test("projects live workspace-root generations using only virtual paths", () => {
     const state = reduce(createInitialState(), {
       type: "workspace_roots_changed",

@@ -10,6 +10,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use rw_tools::validate_mcp_virtual_tool;
 use thiserror::Error;
 
 use crate::{CommandDescriptor, DiscoveredWorkflow};
@@ -927,14 +928,17 @@ fn discover_agent(
         });
     }
     if tools.iter().any(|tool| {
-        tool.is_empty()
-            || !tool
+        let canonical = !tool.is_empty()
+            && tool
                 .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_');
+        !canonical && validate_mcp_virtual_tool(tool).is_err()
     }) {
         return Err(ExtensionDiscoveryError::InvalidAgent {
             path: path.to_owned(),
-            message: "`tools` entries must be canonical tool names".to_owned(),
+            message:
+                "`tools` entries must be canonical tool names or exact mcp:<server>/<tool> grants"
+                    .to_owned(),
         });
     }
     let permission_mode = AgentPermissionMode::parse(

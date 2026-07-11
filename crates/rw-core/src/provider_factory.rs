@@ -333,10 +333,20 @@ impl ProviderRuntime {
             .providers
             .get(candidate)
             .and_then(|provider| provider.cached_model_metadata());
-        let accounting = cached_metadata
-            .as_ref()
-            .map_or(model.accounting, |metadata| metadata.accounting);
-        match accounting {
+        if let Some(metadata) = cached_metadata.as_ref() {
+            return cost_from_model_metadata(metadata, usage);
+        }
+        if model.catalog_model.is_none() {
+            return cost_from_model_metadata(
+                &ProviderModelMetadata {
+                    capabilities: model.capabilities.clone(),
+                    pricing: model.pricing.clone(),
+                    accounting: model.accounting,
+                },
+                usage,
+            );
+        }
+        match model.accounting {
             UsageAccounting::ApiDollars => model
                 .catalog_model
                 .as_deref()
@@ -352,16 +362,12 @@ impl ProviderRuntime {
                 ),
             UsageAccounting::AiCredits {
                 micros_usd_per_credit,
-            } => cached_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.pricing.as_ref())
-                .or(model.pricing.as_ref())
-                .map_or_else(
-                    || Cost::Unavailable {
-                        reason: "authoritative AI-credit pricing is unavailable".to_owned(),
-                    },
-                    |pricing| ai_credit_cost(pricing, usage, micros_usd_per_credit),
-                ),
+            } => model.pricing.as_ref().map_or_else(
+                || Cost::Unavailable {
+                    reason: "authoritative AI-credit pricing is unavailable".to_owned(),
+                },
+                |pricing| ai_credit_cost(pricing, usage, micros_usd_per_credit),
+            ),
             UsageAccounting::SubscriptionQuota => Cost::SubscriptionQuota {
                 used: Some(total_usage_tokens(usage).to_string()),
                 unit: Some("tokens".to_owned()),
@@ -520,6 +526,7 @@ pub struct ProviderFactory<E = SystemEnvironment, K = OsKeychain> {
     pricing: PricingTable,
     retry: RetryPolicy,
     github_copilot_test_origins: BTreeMap<String, GitHubCopilotTestOrigin>,
+    extension_providers: Vec<(String, Arc<dyn Provider>)>,
 }
 
 #[derive(Clone)]
@@ -561,6 +568,7 @@ where
             pricing,
             retry: RetryPolicy::default(),
             github_copilot_test_origins: BTreeMap::new(),
+            extension_providers: Vec::new(),
         }
     }
 
@@ -568,6 +576,27 @@ where
     #[must_use]
     pub fn with_retry_policy(mut self, retry: RetryPolicy) -> Self {
         self.retry = retry;
+        self
+    }
+
+    /// Adds already-approved extension providers under their declared alias prefixes.
+    ///
+    /// Each prefix must be a canonical provider name followed by `/`, for
+    /// example `acme/`. Prefixes are validated together with built-in provider
+    /// names during [`Self::build`], before the immutable router is created.
+    /// The adapter's own name is intentionally not used for routing or exposed
+    /// as model metadata.
+    #[must_use]
+    pub fn with_extension_providers<I, S>(mut self, providers: I) -> Self
+    where
+        I: IntoIterator<Item = (S, Arc<dyn Provider>)>,
+        S: Into<String>,
+    {
+        self.extension_providers.extend(
+            providers
+                .into_iter()
+                .map(|(prefix, provider)| (prefix.into(), provider)),
+        );
         self
     }
 
@@ -643,6 +672,8 @@ where
                 format!("model alias {alias:?} must be non-empty and have candidates"),
             ));
         }
+        let extension_providers =
+            validate_extension_providers(&self.extension_providers, &config.providers)?;
         validate_proxy_auth_fields(
             "network",
             config.network.proxy.as_deref(),
@@ -694,6 +725,9 @@ where
         let mut connections = BTreeMap::new();
         for (provider_name, _) in unique_candidates.values() {
             if connections.contains_key(provider_name) {
+                continue;
+            }
+            if extension_providers.contains_key(&format!("{provider_name}/")) {
                 continue;
             }
             let provider_config = config.providers.get(provider_name).ok_or_else(|| {
@@ -763,6 +797,51 @@ where
 
         let mut route_candidates = BTreeMap::new();
         for (index, (candidate, (provider_name, model))) in unique_candidates.iter().enumerate() {
+            if let Some(inner) = extension_providers.get(&format!("{provider_name}/")) {
+                let metadata = inner.cached_model_metadata();
+                let capabilities = metadata
+                    .as_ref()
+                    .map_or_else(|| inner.capabilities(), |value| value.capabilities.clone());
+                let pricing = metadata.as_ref().and_then(|value| value.pricing.clone());
+                let accounting = metadata
+                    .as_ref()
+                    .map_or(UsageAccounting::UnpricedApi, |value| value.accounting);
+                let supported_thinking = if capabilities.thinking {
+                    vec![
+                        ThinkingLevel::Low,
+                        ThinkingLevel::Medium,
+                        ThinkingLevel::High,
+                    ]
+                } else {
+                    Vec::new()
+                };
+                let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
+                    inner: Arc::clone(inner),
+                    name: candidate.clone(),
+                    expected_model: model.clone(),
+                    capabilities: capabilities.clone(),
+                    supported_thinking,
+                    defer_capabilities: false,
+                });
+                let registration_key = format!("__model_{index:08}");
+                registration_keys.insert(candidate.clone(), registration_key.clone());
+                route_candidates.insert(registration_key.clone(), candidate.clone());
+                registry.push((registration_key, Arc::clone(&bounded)));
+                providers.insert(candidate.clone(), bounded);
+                models.insert(
+                    candidate.clone(),
+                    ResolvedModel {
+                        candidate: candidate.clone(),
+                        provider: provider_name.clone(),
+                        model: model.clone(),
+                        catalog_model: None,
+                        capabilities,
+                        pricing,
+                        accounting,
+                    },
+                );
+                continue;
+            }
             let connection = connections.get(provider_name).ok_or_else(|| {
                 ProviderFactoryError::new(provider_name, "provider connection is inconsistent")
             })?;
@@ -822,6 +901,7 @@ where
             )?;
             let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
                 inner,
+                name: candidate.clone(),
                 expected_model: model.clone(),
                 capabilities: capabilities.clone(),
                 supported_thinking,
@@ -1372,6 +1452,7 @@ impl RuntimeWarnings {
 
 struct ModelBoundProvider {
     inner: Arc<dyn Provider>,
+    name: String,
     expected_model: String,
     capabilities: Capabilities,
     supported_thinking: Vec<ThinkingLevel>,
@@ -1391,7 +1472,7 @@ impl fmt::Debug for ModelBoundProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ModelBoundProvider")
-            .field("name", &self.inner.name())
+            .field("name", &self.name)
             .field("capabilities", &self.capabilities)
             .finish_non_exhaustive()
     }
@@ -1469,7 +1550,7 @@ fn block_contains_image(block: &rw_types::Block) -> bool {
 #[async_trait]
 impl Provider for ModelBoundProvider {
     fn name(&self) -> &str {
-        self.inner.name()
+        &self.name
     }
 
     fn capabilities(&self) -> Capabilities {
@@ -1558,6 +1639,48 @@ impl AdapterKind {
             | Self::OpenAiCompatibleChat => None,
         }
     }
+}
+
+fn validate_extension_providers(
+    registrations: &[(String, Arc<dyn Provider>)],
+    built_in: &BTreeMap<String, ProviderConfig>,
+) -> Result<BTreeMap<String, Arc<dyn Provider>>, ProviderFactoryError> {
+    let mut providers = BTreeMap::<String, Arc<dyn Provider>>::new();
+    for (prefix, provider) in registrations {
+        let canonical = prefix.len() >= 2
+            && prefix.len() <= 64
+            && prefix.ends_with('/')
+            && prefix[..prefix.len() - 1].bytes().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'-' | b'_' | b'.')
+            });
+        if !canonical {
+            return Err(ProviderFactoryError::new(
+                "extensions",
+                "extension alias prefixes must be bounded canonical names ending in '/'",
+            ));
+        }
+        if built_in.keys().any(|name| prefix == &format!("{name}/")) {
+            return Err(ProviderFactoryError::new(
+                "extensions",
+                format!("extension alias prefix {prefix:?} collides with a configured provider"),
+            ));
+        }
+        if let Some(existing) = providers
+            .keys()
+            .find(|existing| prefix.starts_with(existing.as_str()) || existing.starts_with(prefix))
+        {
+            return Err(ProviderFactoryError::new(
+                "extensions",
+                format!(
+                    "extension alias prefix {prefix:?} overlaps registered prefix {existing:?}"
+                ),
+            ));
+        }
+        providers.insert(prefix.clone(), Arc::clone(provider));
+    }
+    Ok(providers)
 }
 
 fn parse_candidate(candidate: &str) -> Result<(&str, &str), ProviderFactoryError> {

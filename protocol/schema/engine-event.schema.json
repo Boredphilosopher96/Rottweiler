@@ -433,6 +433,89 @@
       ]
     },
     {
+      "description": "A plugin-originated user message was admitted through the bounded\nmachine boundary. The ordinary message/turn events remain authoritative\nfor conversation reconstruction.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "plugin_id": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "queued": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "plugin_message_injected"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "plugin_id",
+        "content",
+        "queued"
+      ]
+    },
+    {
+      "description": "Session-local status text published by an approved plugin.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "plugin_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "plugin_status_changed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "plugin_id",
+        "status"
+      ]
+    },
+    {
+      "description": "Session-local UI notification published by an approved plugin.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "plugin_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "ui_notification"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "plugin_id",
+        "title",
+        "message"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "meta": {

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use rw_tools::ToolRegistry;
+use rw_tools::{ToolRegistry, validate_mcp_virtual_tool};
 use thiserror::Error;
 
 use crate::{AgentPermissionMode, DiscoveredAgent, ExtensionCatalog, ExtensionDiscoveryError};
@@ -225,13 +225,17 @@ impl AgentRegistry {
     ) -> Result<(), AgentRegistryError> {
         let names = names.into_iter().collect::<BTreeSet<_>>();
         for definition in self.definitions.values_mut() {
+            let available = |name: &String| {
+                !matches!(name.as_str(), "tool_search" | "mcp_call")
+                    && (names.contains(name)
+                        || (name.starts_with("mcp:") && validate_mcp_virtual_tool(name).is_ok()))
+            };
             match &definition.prompt {
                 AgentPromptSource::Embedded(_) => {
-                    definition.tools.retain(|name| names.contains(name));
+                    definition.tools.retain(&available);
                 }
                 AgentPromptSource::Declarative(_) => {
-                    if let Some(name) = definition.tools.iter().find(|name| !names.contains(*name))
-                    {
+                    if let Some(name) = definition.tools.iter().find(|name| !available(name)) {
                         return Err(AgentRegistryError::UnknownTool {
                             agent: definition.name.clone(),
                             tool: name.clone(),
@@ -410,5 +414,57 @@ mod tests {
             .expect_err("fast is not configured");
 
         assert!(error.to_string().contains("unknown model alias `fast`"));
+    }
+
+    #[test]
+    fn declarative_agents_accept_exact_mcp_tools_and_reject_wildcards() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = project.join(".agents/agents/mcp-reader.md");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        let write_agent = |tool: &str| {
+            std::fs::write(
+                &path,
+                format!(
+                    "---\nname: mcp-reader\ndescription: exact remote reader\nmodel: fast\ntools: [{tool}]\npermission-mode: execute\nmax-turns: 4\n---\nUse only the selected MCP tool."
+                ),
+            )
+            .expect("agent");
+        };
+
+        write_agent("mcp:github/get_issue");
+        let catalog = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
+        )
+        .expect("catalog");
+        let mut registry = compose_agent_registry(&catalog).expect("registry");
+        registry
+            .resolve_tool_names(std::iter::empty())
+            .expect("deferred MCP tool is syntactically resolvable");
+        assert_eq!(
+            registry.load("mcp-reader").expect("agent").tools,
+            ["mcp:github/get_issue"]
+        );
+
+        write_agent("tool_search");
+        let catalog = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
+        )
+        .expect("catalog");
+        let mut registry = compose_agent_registry(&catalog).expect("registry");
+        assert!(
+            registry
+                .resolve_tool_names(["tool_search".to_owned(), "mcp_call".to_owned()])
+                .is_err(),
+            "declarative children must use exact virtual MCP entries"
+        );
+
+        write_agent("mcp:github/*");
+        let error = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
+        )
+        .expect_err("MCP wildcards are not part of the declarative contract");
+        assert!(error.to_string().contains("exact mcp:<server>/<tool>"));
     }
 }

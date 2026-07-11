@@ -9,6 +9,7 @@ mod builtins;
 mod files;
 mod intelligence;
 mod interaction;
+mod protocol;
 mod registry;
 mod search;
 mod symbols;
@@ -34,11 +35,16 @@ pub use interaction::{
     AskUserInput, AskUserTool, QuestionAsker, SubmitPlanTool, TodoAction, TodoInput, TodoItem,
     TodoStatus, TodoTool,
 };
+pub use protocol::{
+    ProtocolChildLauncher, ProtocolChildRequest, ProtocolProcessHandle, ProtocolSandboxPolicy,
+    SandboxedProtocolLauncher, SpawnedProtocolChild,
+};
 pub use registry::{
-    ApprovalPreview, CancellationToken, CapabilityManifest, MutationScope, NoopOutputSink,
-    SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode, SubagentProgressEvent, Tool,
-    ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
-    ToolRegistry, ToolResult, WorkspaceBinding,
+    ApprovalPreview, CancellationToken, CapabilityManifest, McpToolPolicy, MutationScope,
+    NoopOutputSink, SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode,
+    SubagentProgressEvent, Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits,
+    ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult, WorkspaceBinding,
+    validate_mcp_virtual_tool,
 };
 pub use rw_intel::{
     CodeIntelligence, Diagnostic, DiagnosticSeverity, IntelligenceBackend, IntelligenceResult,
@@ -49,7 +55,8 @@ pub use rw_intel::{
 pub use rw_sandbox::{
     EgressDecision, EgressPin, EgressPolicy, NetworkPolicy, SandboxError, SandboxPolicy,
     SandboxSupport, SupervisedEgressProxy, UpstreamProxy,
-    maybe_run_helper as maybe_run_sandbox_helper, probe_policy_egress,
+    maybe_run_helper as maybe_run_sandbox_helper, normalize_egress_domain, probe as probe_sandbox,
+    probe_policy_egress, shell_launch_plan,
 };
 pub use rw_types::{DiffArtifact, TouchedFile, TouchedFileStatus};
 pub use search::{GlobInput, GlobTool, GrepInput, GrepTool, LsInput, LsTool};

@@ -5,7 +5,7 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -33,13 +33,13 @@ use rw_core::runtime_support::{
     ReplayCommandExecutor, ReplayProvider, Role, SandboxNetworkPolicy, SandboxPolicy,
     SandboxSupport, SandboxedLspSpawner, SessionId, SupervisedEgressProxy, SymbolsTool,
     TemplatePart, ThinkingLevel, TodoTool, TokioCommandExecutor, Tool, ToolCapability, ToolChoice,
-    ToolContext, ToolDefinition, ToolDescriptor, ToolError, ToolLimits, ToolOutput,
-    ToolOutputChunk, ToolOutputPart, ToolOutputSink, ToolRegistry, ToolResult, ToolchainConfig,
-    Turn, TurnMeta, UpstreamProxy, WebFetchTool, WebFetcher, WebSearchConfig, WebSearchRequest,
-    WebSearchResponse, WebSearchTool, WebSearcher, WireMode, WorkspaceSymbolIndex,
-    WorkspaceUriMapper, WorktreeIsolation, WorktreeLeaseRecord, WorktreeLimits, WriteTool,
-    compose_agent_registry, deny_outbound_network_for_process, discover_sandboxed_lsp_servers,
-    guarded_http_fetch, probe_policy_egress,
+    ToolCommandOutcome, ToolContext, ToolDefinition, ToolDescriptor, ToolError, ToolLimits,
+    ToolOutput, ToolOutputChunk, ToolOutputPart, ToolOutputSink, ToolRegistry, ToolResult,
+    ToolchainConfig, Turn, TurnMeta, UpstreamProxy, WebFetchTool, WebFetcher, WebSearchConfig,
+    WebSearchRequest, WebSearchResponse, WebSearchTool, WebSearcher, WireMode,
+    WorkspaceSymbolIndex, WorkspaceUriMapper, WorktreeIsolation, WorktreeLeaseRecord,
+    WorktreeLimits, WriteTool, compose_agent_registry, deny_outbound_network_for_process,
+    discover_sandboxed_lsp_servers, guarded_http_fetch, probe_policy_egress,
 };
 use rw_core::{
     AccountingAttribution, ActorSubagentSessionFactory, AgentLoopError, BudgetLedgerQuery,
@@ -1114,7 +1114,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         options.dangerously_trust,
     )?;
     let derived_project_trusted = trusted_lsp_roots.first().copied().unwrap_or(false);
-    let built_tools = tokio::task::spawn_blocking(move || {
+    let mut built_tools = tokio::task::spawn_blocking(move || {
         build_tools(BuildToolsInput {
             workspace_roots: &tool_workspace_roots,
             trusted_lsp_roots: &trusted_lsp_roots,
@@ -1143,6 +1143,61 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         workspace: workspace.clone(),
         session_id: SessionId(session_id.clone()),
     });
+
+    // The hidden release gate uses an in-memory provider while deliberately
+    // exercising production executable discovery. Other offline/replay runs
+    // keep executable project configuration inert.
+    let executable_catalog = if inspection || (offline_fixture && !options.perf_markers) {
+        crate::m8_config::ExecutableConfigCatalog::default()
+    } else {
+        let (user_home, _) = extension_user_roots(&config_loader.credentials_path());
+        let catalog = crate::m8_config::discover_executable_configs(
+            &user_home,
+            &workspace,
+            derived_project_trusted || options.dangerously_trust,
+        )?;
+        for warning in &catalog.warnings {
+            eprintln!("warning: {warning}");
+        }
+        catalog
+    };
+    let mcp_runtime = if executable_catalog.mcp_servers.is_empty() {
+        None
+    } else {
+        let session_root = storage_root.join("sessions").join(&session_id);
+        let runtime = crate::m8_runtime::McpSessionRuntime::start_production(
+            &executable_catalog.mcp_servers,
+            &workspace_roots,
+            &session_root,
+            &std::env::current_exe().into_diagnostic()?,
+            &config_loader.credentials_path(),
+            root_global_proxy
+                .as_ref()
+                .map(|proxy| proxy.upstream.clone()),
+        )
+        .await?;
+        let mut registry = built_tools
+            .registry
+            .subset(
+                built_tools
+                    .registry
+                    .descriptors()
+                    .iter()
+                    .map(|descriptor| descriptor.name.as_str()),
+            )
+            .map_err(|error| miette!("MCP tool registry could not clone: {error}"))?;
+        rw_core::register_mcp_tools(
+            &mut registry,
+            Arc::clone(&runtime.manager),
+            Arc::clone(&runtime.spool),
+        )
+        .map_err(|error| miette!("MCP tools could not register: {error}"))?;
+        built_tools.registry = Arc::new(registry);
+        if let Some(index) = runtime.deferred_context().await? {
+            initial_context.push(index);
+        }
+        Some(runtime)
+    };
 
     let inspection_profile = if inspection {
         Some(recorded_prompt_shape.as_ref().map_or_else(
@@ -1207,7 +1262,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     } else {
         None
     };
-    let actor_tools = inspection_profile.as_ref().map_or_else(
+    let mut actor_tools = inspection_profile.as_ref().map_or_else(
         || Ok(Arc::clone(&built_tools.registry)),
         historical_tool_registry,
     )?;
@@ -1220,6 +1275,41 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         || (options.replay_dir.is_some() && options.record_replay_script.is_none())
         || options.in_memory_replay_script.is_some())
     .then(deny_outbound_network_for_process);
+    let plugin_redactor = Arc::new(crate::m8_runtime::SharedPluginRedactor::new(
+        fixture_redactor.clone(),
+    ));
+    let plugin_runtime = if executable_catalog.plugins.is_empty() || inspection {
+        None
+    } else {
+        let runtime = crate::m8_runtime::PluginSessionRuntime::start(
+            &executable_catalog.plugins,
+            &storage_root,
+            &workspace_roots,
+            &std::env::current_exe().into_diagnostic()?,
+            plugin_redactor.clone(),
+        )
+        .await?;
+        for pending in &runtime.pending {
+            eprintln!("warning: plugin {pending}");
+        }
+        if !runtime.tools.is_empty() {
+            let names = actor_tools
+                .descriptors()
+                .into_iter()
+                .map(|descriptor| descriptor.name)
+                .collect::<Vec<_>>();
+            let mut registry = actor_tools
+                .subset(names.iter().map(String::as_str))
+                .map_err(|error| miette!("plugin tool registry could not clone: {error}"))?;
+            for tool in &runtime.tools {
+                registry
+                    .register(Arc::clone(tool))
+                    .map_err(|error| miette!("plugin tool could not register: {error}"))?;
+            }
+            actor_tools = Arc::new(registry);
+        }
+        Some(runtime)
+    };
     let (model, engine_redactor): (Arc<dyn ModelDriver>, FixtureRedactor) = if inspection {
         let cache_support = inspection_profile
             .as_ref()
@@ -1303,6 +1393,12 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
             .map_err(|error| miette!("bundled model catalog is invalid: {error}"))?;
         let runtime = Arc::new(
             ProviderFactory::system(config_loader.credentials_path(), pricing)
+                .with_extension_providers(
+                    plugin_runtime
+                        .iter()
+                        .flat_map(|runtime| runtime.providers.iter())
+                        .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider))),
+                )
                 .build(&loaded_config.config)
                 .map_err(|error| miette!("provider runtime could not start: {error}"))?,
         );
@@ -1316,6 +1412,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         (runtime, redactor)
     };
     register_credential_environment(&engine_redactor);
+    plugin_redactor.bind(engine_redactor.clone());
     let model: Arc<dyn ModelDriver> = if inspection {
         model
     } else {
@@ -1370,6 +1467,13 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         &extension_catalog,
         Arc::clone(&built_tools.code_intelligence),
     )?;
+    if let Some(plugins) = &plugin_runtime {
+        for (registration, handler) in &plugins.hooks {
+            runtime_hooks
+                .register_shared(registration.clone(), Arc::clone(handler))
+                .map_err(|error| miette!("plugin hook could not register: {error}"))?;
+        }
+    }
     register_nested_instruction_guard(
         &mut runtime_hooks,
         Arc::clone(&instruction_workspace_roots),
@@ -1405,6 +1509,18 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         root_authorization: WorkspaceRootAuthorization::LocalUnrestricted,
     });
     let commands_cell = Arc::new(OnceLock::<Arc<RuntimeCommandRegistry>>::new());
+    let actor_event_sink: Arc<dyn SessionEventSink> = if let Some(runtime) = plugin_runtime
+        .as_ref()
+        .filter(|runtime| !runtime.event_routers.is_empty())
+    {
+        Arc::new(PluginFanoutEventSink::new(
+            durable_sink.clone(),
+            runtime.event_routers.clone(),
+            engine_redactor.clone(),
+        ))
+    } else {
+        durable_sink.clone()
+    };
     let secret_redactor: Arc<dyn rw_core::SecretRedactor> =
         Arc::new(SharedEngineSecretRedactor(engine_redactor));
     let runtime_tools = if inspection {
@@ -1543,12 +1659,29 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         .map_err(display_agent_error)?;
         registry
     };
-    let runtime_commands = Arc::new(compose_runtime_commands(
+    let mut runtime_commands = compose_runtime_commands(
         &extension_catalog,
         &workspace_roots,
         &storage_root,
         &runtime_tools,
-    )?);
+    )?;
+    if let Some(mcp) = &mcp_runtime {
+        crate::m8_runtime::register_mcp_command(
+            &mut runtime_commands,
+            Arc::clone(&mcp.manager),
+            Some(Arc::clone(&mcp.approvals)),
+        )
+        .await
+        .map_err(|error| miette!("MCP command could not register: {error}"))?;
+    }
+    if let Some(plugins) = &plugin_runtime {
+        for (descriptor, handler) in &plugins.commands {
+            runtime_commands
+                .register_shared(descriptor.clone(), Arc::clone(handler))
+                .map_err(|error| miette!("plugin command could not register: {error}"))?;
+        }
+    }
+    let runtime_commands = Arc::new(runtime_commands);
     let _ = commands_cell.set(Arc::clone(&runtime_commands));
     let actor = SessionActor::spawn(SessionActorConfig {
         session_id: SessionId(session_id.clone()),
@@ -1564,7 +1697,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         permissions,
         hooks: runtime_hooks,
         commands: runtime_commands,
-        event_sink: durable_sink.clone(),
+        event_sink: actor_event_sink,
         event_clock: Arc::new(SystemEventClock),
         secret_redactor,
         checkpoints: checkpoint_coordinator,
@@ -1578,6 +1711,15 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         event_capacity: DEFAULT_EVENT_CAPACITY,
     })
     .map_err(display_agent_error)?;
+    if let Some(plugins) = &plugin_runtime {
+        plugins.bind_push(&actor)?;
+    }
+    if options.perf_markers {
+        // Emitted only after provider/tool/command composition, MCP catalog
+        // initialization, and actor creation. The M8 subprocess gate measures
+        // process spawn through observing this line on stderr.
+        eprintln!("rw_perf_prompt_ready=1");
+    }
 
     let outcome = if let Some(turn) = prompt_dump_turn {
         let dump = actor
@@ -1618,6 +1760,12 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         .todo
         .clear_session(&SessionId(session_id.clone()))
         .await;
+    if let Some(mcp) = &mcp_runtime {
+        mcp.shutdown().await;
+    }
+    if let Some(plugins) = &plugin_runtime {
+        plugins.shutdown().await;
+    }
     if let Some(status) = outcome
         && status != TurnStatus::Completed
     {
@@ -1833,7 +1981,7 @@ pub(crate) async fn compose_hosted_actor(
         options.dangerously_trust,
     )?;
     let derived_project_trusted = trusted_lsp_roots.first().copied().unwrap_or(false);
-    let built_tools = tokio::task::spawn_blocking(move || {
+    let mut built_tools = tokio::task::spawn_blocking(move || {
         build_tools(BuildToolsInput {
             workspace_roots: &tool_workspace_roots,
             trusted_lsp_roots: &trusted_lsp_roots,
@@ -1863,53 +2011,152 @@ pub(crate) async fn compose_hosted_actor(
         session_id: options.session_id.clone(),
     });
 
-    let (model, engine_redactor): (Arc<dyn ModelDriver>, FixtureRedactor) = match options
-        .provider_mode
-    {
-        HostedProviderMode::Live => {
-            let pricing = PricingTable::bundled()
-                .map_err(|error| miette!("bundled model catalog is invalid: {error}"))?;
-            match ProviderFactory::system(options.credentials_path, pricing).build(&options.config)
-            {
-                Ok(runtime) => {
-                    let runtime = Arc::new(runtime);
-                    if let Some(searcher) = &built_tools.websearch {
-                        let runtime = Arc::clone(&runtime);
-                        searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-                            runtime.native_web_searcher(alias)
-                        })));
-                    }
-                    let redactor = runtime.fixture_redactor();
-                    (runtime, redactor)
-                }
-                Err(error) => (
-                    Arc::new(UnavailableHostedModel {
-                        alias: persisted_model_alias.clone(),
-                        reason: error.to_string(),
-                        compaction: options.config.compaction.clone(),
-                        budget: options.config.budget.clone(),
-                    }),
-                    fixture_redactor,
-                ),
-            }
+    let executable_catalog = if offline {
+        crate::m8_config::ExecutableConfigCatalog::default()
+    } else {
+        let (user_home, _) = extension_user_roots(&extension_credentials_path);
+        let catalog = crate::m8_config::discover_executable_configs(
+            &user_home,
+            &workspace,
+            derived_project_trusted || options.dangerously_trust,
+        )?;
+        for warning in &catalog.warnings {
+            eprintln!("warning: {warning}");
         }
-        HostedProviderMode::DeterministicReplay {
-            provider_name,
-            scripts,
-        } => {
-            let provider: Arc<dyn Provider> =
-                Arc::new(ScriptProvider::new(provider_name, scripts, 0));
-            (
-                Arc::new(ProviderModel::new(
-                    provider,
-                    options.config.compaction.clone(),
-                    options.config.budget.clone(),
-                )),
-                fixture_redactor,
-            )
-        }
+        catalog
     };
+    let mcp_runtime = if executable_catalog.mcp_servers.is_empty() {
+        None
+    } else {
+        let runtime = Arc::new(
+            crate::m8_runtime::McpSessionRuntime::start_production(
+                &executable_catalog.mcp_servers,
+                &workspace_roots,
+                &options.storage_root.join("sessions").join(&session_id),
+                &std::env::current_exe().into_diagnostic()?,
+                &options.credentials_path,
+                root_global_proxy
+                    .as_ref()
+                    .map(|proxy| proxy.upstream.clone()),
+            )
+            .await?,
+        );
+        let names = built_tools
+            .registry
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.name)
+            .collect::<Vec<_>>();
+        let mut registry = built_tools
+            .registry
+            .subset(names.iter().map(String::as_str))
+            .map_err(|error| miette!("MCP tool registry could not clone: {error}"))?;
+        rw_core::register_mcp_tools(
+            &mut registry,
+            Arc::clone(&runtime.manager),
+            Arc::clone(&runtime.spool),
+        )
+        .map_err(|error| miette!("MCP tools could not register: {error}"))?;
+        built_tools.registry = Arc::new(registry);
+        if let Some(index) = runtime.deferred_context().await? {
+            initial_context.push(index);
+        }
+        Some(runtime)
+    };
+    let plugin_redactor = Arc::new(crate::m8_runtime::SharedPluginRedactor::new(
+        fixture_redactor.clone(),
+    ));
+    let plugin_runtime = if executable_catalog.plugins.is_empty() {
+        None
+    } else {
+        let runtime = Arc::new(
+            crate::m8_runtime::PluginSessionRuntime::start(
+                &executable_catalog.plugins,
+                &options.storage_root,
+                &workspace_roots,
+                &std::env::current_exe().into_diagnostic()?,
+                plugin_redactor.clone(),
+            )
+            .await?,
+        );
+        for pending in &runtime.pending {
+            eprintln!("warning: plugin {pending}");
+        }
+        if !runtime.tools.is_empty() {
+            let names = built_tools
+                .registry
+                .descriptors()
+                .into_iter()
+                .map(|descriptor| descriptor.name)
+                .collect::<Vec<_>>();
+            let mut registry = built_tools
+                .registry
+                .subset(names.iter().map(String::as_str))
+                .map_err(|error| miette!("plugin tool registry could not clone: {error}"))?;
+            for tool in &runtime.tools {
+                registry
+                    .register(Arc::clone(tool))
+                    .map_err(|error| miette!("plugin tool could not register: {error}"))?;
+            }
+            built_tools.registry = Arc::new(registry);
+        }
+        Some(runtime)
+    };
+
+    let (model, engine_redactor): (Arc<dyn ModelDriver>, FixtureRedactor) =
+        match options.provider_mode {
+            HostedProviderMode::Live => {
+                let pricing = PricingTable::bundled()
+                    .map_err(|error| miette!("bundled model catalog is invalid: {error}"))?;
+                match ProviderFactory::system(options.credentials_path, pricing)
+                    .with_extension_providers(
+                        plugin_runtime
+                            .iter()
+                            .flat_map(|runtime| runtime.providers.iter())
+                            .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider))),
+                    )
+                    .build(&options.config)
+                {
+                    Ok(runtime) => {
+                        let runtime = Arc::new(runtime);
+                        if let Some(searcher) = &built_tools.websearch {
+                            let runtime = Arc::clone(&runtime);
+                            searcher.bind_native_resolver(Some(Arc::new(move |alias| {
+                                runtime.native_web_searcher(alias)
+                            })));
+                        }
+                        let redactor = runtime.fixture_redactor();
+                        (runtime, redactor)
+                    }
+                    Err(error) => (
+                        Arc::new(UnavailableHostedModel {
+                            alias: persisted_model_alias.clone(),
+                            reason: error.to_string(),
+                            compaction: options.config.compaction.clone(),
+                            budget: options.config.budget.clone(),
+                        }),
+                        fixture_redactor,
+                    ),
+                }
+            }
+            HostedProviderMode::DeterministicReplay {
+                provider_name,
+                scripts,
+            } => {
+                let provider: Arc<dyn Provider> =
+                    Arc::new(ScriptProvider::new(provider_name, scripts, 0));
+                (
+                    Arc::new(ProviderModel::new(
+                        provider,
+                        options.config.compaction.clone(),
+                        options.config.budget.clone(),
+                    )),
+                    fixture_redactor,
+                )
+            }
+        };
     register_credential_environment(&engine_redactor);
+    plugin_redactor.bind(engine_redactor.clone());
     let model: Arc<dyn ModelDriver> = Arc::new(PromptRecordingModel {
         inner: model,
         journal: Arc::clone(&durable_sink.prompt_shapes),
@@ -1960,6 +2207,13 @@ pub(crate) async fn compose_hosted_actor(
         &extension_catalog,
         Arc::clone(&built_tools.code_intelligence),
     )?;
+    if let Some(plugins) = &plugin_runtime {
+        for (registration, handler) in &plugins.hooks {
+            runtime_hooks
+                .register_shared(registration.clone(), Arc::clone(handler))
+                .map_err(|error| miette!("plugin hook could not register: {error}"))?;
+        }
+    }
     register_nested_instruction_guard(
         &mut runtime_hooks,
         Arc::clone(&instruction_workspace_roots),
@@ -1995,6 +2249,18 @@ pub(crate) async fn compose_hosted_actor(
         root_authorization: WorkspaceRootAuthorization::Hosted(allowed_workspace_roots.clone()),
     });
     let commands_cell = Arc::new(OnceLock::<Arc<RuntimeCommandRegistry>>::new());
+    let actor_event_sink: Arc<dyn SessionEventSink> = if let Some(runtime) = plugin_runtime
+        .as_ref()
+        .filter(|runtime| !runtime.event_routers.is_empty())
+    {
+        Arc::new(PluginFanoutEventSink::new(
+            durable_sink.clone(),
+            runtime.event_routers.clone(),
+            engine_redactor.clone(),
+        ))
+    } else {
+        durable_sink.clone()
+    };
     let secret_redactor: Arc<dyn rw_core::SecretRedactor> =
         Arc::new(SharedEngineSecretRedactor(engine_redactor));
     let mut agents = compose_agent_registry(&extension_catalog)
@@ -2129,12 +2395,29 @@ pub(crate) async fn compose_hosted_actor(
     )
     .await
     .map_err(display_agent_error)?;
-    let runtime_commands = Arc::new(compose_runtime_commands(
+    let mut runtime_commands = compose_runtime_commands(
         &extension_catalog,
         &workspace_roots,
         &options.storage_root,
         &runtime_tools,
-    )?);
+    )?;
+    if let Some(mcp) = &mcp_runtime {
+        crate::m8_runtime::register_mcp_command(
+            &mut runtime_commands,
+            Arc::clone(&mcp.manager),
+            Some(Arc::clone(&mcp.approvals)),
+        )
+        .await
+        .map_err(|error| miette!("MCP command could not register: {error}"))?;
+    }
+    if let Some(plugins) = &plugin_runtime {
+        for (descriptor, handler) in &plugins.commands {
+            runtime_commands
+                .register_shared(descriptor.clone(), Arc::clone(handler))
+                .map_err(|error| miette!("plugin command could not register: {error}"))?;
+        }
+    }
+    let runtime_commands = Arc::new(runtime_commands);
     let _ = commands_cell.set(Arc::clone(&runtime_commands));
     let handle = SessionActor::spawn(SessionActorConfig {
         session_id: options.session_id,
@@ -2150,7 +2433,7 @@ pub(crate) async fn compose_hosted_actor(
         permissions,
         hooks: runtime_hooks,
         commands: runtime_commands,
-        event_sink: durable_sink,
+        event_sink: actor_event_sink,
         event_clock: Arc::new(SystemEventClock),
         secret_redactor,
         checkpoints: checkpoint_coordinator,
@@ -2164,6 +2447,21 @@ pub(crate) async fn compose_hosted_actor(
         event_capacity: DEFAULT_EVENT_CAPACITY,
     })
     .map_err(display_agent_error)?;
+    if let Some(plugins) = &plugin_runtime {
+        plugins.bind_push(&handle)?;
+    }
+    if mcp_runtime.is_some() || plugin_runtime.is_some() {
+        let mut lifecycle = handle.subscribe();
+        tokio::spawn(async move {
+            while lifecycle.recv().await.is_ok() {}
+            if let Some(mcp) = mcp_runtime {
+                mcp.shutdown().await;
+            }
+            if let Some(plugins) = plugin_runtime {
+                plugins.shutdown().await;
+            }
+        });
+    }
     Ok(HostedActorRuntime {
         handle,
         model_alias: descriptor_model,
@@ -3311,6 +3609,245 @@ impl SessionEventSink for DurableEventSink {
             daily_cost_unavailable_entries: totals.day_unavailable_turns,
             daily_non_usd_monetary_entries: totals.day_non_usd_monetary_turns,
         })
+    }
+}
+
+struct PluginFanoutEventSink {
+    inner: Arc<DurableEventSink>,
+    workers: Vec<PluginFanoutWorker>,
+    redactor: FixtureRedactor,
+}
+
+const PLUGIN_EVENT_QUEUE_CAPACITY: usize = 64;
+const PLUGIN_EVENT_SUSTAINED_OVERFLOW: usize = 64;
+const PLUGIN_EVENT_DELIVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+struct PluginFanoutMessage {
+    event: String,
+    payload: serde_json::Value,
+}
+
+#[async_trait]
+trait PluginEventPublisher: Send + Sync {
+    async fn publish(
+        &self,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> std::result::Result<(), rw_core::runtime_support::plugin::PluginRpcError>;
+}
+
+#[async_trait]
+impl PluginEventPublisher for rw_core::runtime_support::plugin::PluginEventRouter {
+    async fn publish(
+        &self,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> std::result::Result<(), rw_core::runtime_support::plugin::PluginRpcError> {
+        rw_core::runtime_support::plugin::PluginEventRouter::publish(self, event, payload).await
+    }
+}
+
+struct PluginFanoutWorker {
+    subscriptions: BTreeSet<String>,
+    sender: mpsc::Sender<PluginFanoutMessage>,
+    overflow: Arc<AtomicUsize>,
+    disabled: Arc<AtomicBool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl PluginFanoutWorker {
+    fn new(subscriptions: BTreeSet<String>, publisher: Arc<dyn PluginEventPublisher>) -> Self {
+        let (sender, mut receiver) =
+            mpsc::channel::<PluginFanoutMessage>(PLUGIN_EVENT_QUEUE_CAPACITY);
+        let overflow = Arc::new(AtomicUsize::new(0));
+        let disabled = Arc::new(AtomicBool::new(false));
+        let worker_overflow = Arc::clone(&overflow);
+        let worker_disabled = Arc::clone(&disabled);
+        let task = tokio::spawn(async move {
+            while let Some(message) = receiver.recv().await {
+                if worker_disabled.load(Ordering::Acquire) {
+                    break;
+                }
+                let delivered = tokio::time::timeout(
+                    PLUGIN_EVENT_DELIVERY_TIMEOUT,
+                    publisher.publish(&message.event, message.payload),
+                )
+                .await
+                .is_ok_and(|result| result.is_ok());
+                if delivered {
+                    worker_overflow.store(0, Ordering::Release);
+                } else {
+                    let failures = worker_overflow
+                        .fetch_add(1, Ordering::AcqRel)
+                        .saturating_add(1);
+                    if failures >= PLUGIN_EVENT_SUSTAINED_OVERFLOW
+                        && !worker_disabled.swap(true, Ordering::AcqRel)
+                    {
+                        tracing::warn!(
+                            delivery_failures = failures,
+                            "plugin event fanout disabled after sustained delivery failure"
+                        );
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            subscriptions,
+            sender,
+            overflow,
+            disabled,
+            task,
+        }
+    }
+
+    fn publish(&self, kind: &str, pascal: &str, payload: serde_json::Value) {
+        if self.disabled.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(subscription) = self
+            .subscriptions
+            .iter()
+            .find(|subscription| subscription.as_str() == kind || subscription.as_str() == pascal)
+        else {
+            return;
+        };
+        match self.sender.try_send(PluginFanoutMessage {
+            event: subscription.clone(),
+            payload,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let overflow = self
+                    .overflow
+                    .fetch_add(1, Ordering::AcqRel)
+                    .saturating_add(1);
+                if overflow >= PLUGIN_EVENT_SUSTAINED_OVERFLOW
+                    && !self.disabled.swap(true, Ordering::AcqRel)
+                {
+                    tracing::warn!(
+                        dropped_events = overflow,
+                        "plugin event fanout disabled after sustained backpressure"
+                    );
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.disabled.store(true, Ordering::Release);
+            }
+        }
+    }
+}
+
+impl Drop for PluginFanoutWorker {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl PluginFanoutEventSink {
+    fn new(
+        inner: Arc<DurableEventSink>,
+        routers: Vec<(
+            BTreeSet<String>,
+            Arc<rw_core::runtime_support::plugin::PluginEventRouter>,
+        )>,
+        redactor: FixtureRedactor,
+    ) -> Self {
+        let workers = routers
+            .into_iter()
+            .map(|(subscriptions, router)| {
+                let publisher: Arc<dyn PluginEventPublisher> = router;
+                PluginFanoutWorker::new(subscriptions, publisher)
+            })
+            .collect();
+        Self {
+            inner,
+            workers,
+            redactor,
+        }
+    }
+
+    fn publish(&self, event: &EngineEvent) {
+        let Some((kind, pascal, payload)) = plugin_event_payload(&self.redactor, event) else {
+            return;
+        };
+        for worker in &self.workers {
+            worker.publish(&kind, &pascal, payload.clone());
+        }
+    }
+}
+
+fn plugin_event_payload(
+    redactor: &FixtureRedactor,
+    event: &EngineEvent,
+) -> Option<(String, String, serde_json::Value)> {
+    let mut payload = serde_json::to_value(event).ok()?;
+    redact_json_value(redactor, &mut payload);
+    if !matches!(serde_json::to_vec(&payload), Ok(bytes) if bytes.len() <= 256 * 1024) {
+        return None;
+    }
+    let kind = payload.get("type")?.as_str()?.to_owned();
+    let pascal = kind
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_ascii_uppercase().to_string() + chars.as_str()
+            })
+        })
+        .collect::<String>();
+    Some((kind, pascal, payload))
+}
+
+#[async_trait]
+impl SessionEventSink for PluginFanoutEventSink {
+    async fn append(&self, event: EngineEvent) -> std::result::Result<EngineEvent, AgentLoopError> {
+        let event = self.inner.append(event).await?;
+        self.publish(&event);
+        Ok(event)
+    }
+    async fn append_batch(
+        &self,
+        batch: Vec<EngineEvent>,
+    ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
+        let events = self.inner.append_batch(batch).await?;
+        for event in &events {
+            self.publish(event);
+        }
+        Ok(events)
+    }
+    async fn read_after(
+        &self,
+        last_seen: Option<SequenceId>,
+    ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
+        self.inner.read_after(last_seen).await
+    }
+    async fn last_sequence(&self) -> std::result::Result<Option<SequenceId>, AgentLoopError> {
+        self.inner.last_sequence().await
+    }
+    async fn budget_totals(
+        &self,
+        query: BudgetLedgerQuery,
+    ) -> std::result::Result<BudgetLedgerTotals, AgentLoopError> {
+        self.inner.budget_totals(query).await
+    }
+}
+
+fn redact_json_value(redactor: &FixtureRedactor, value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => *text = redactor.redact_text(text),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_json_value(redactor, value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_json_value(redactor, value);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -6317,7 +6854,7 @@ fn discover_runtime_extensions_derived(
         .map_err(|error| miette!("extension discovery failed: {error}"))
 }
 
-fn extension_user_roots(credentials_path: &Path) -> (PathBuf, PathBuf) {
+pub(crate) fn extension_user_roots(credentials_path: &Path) -> (PathBuf, PathBuf) {
     let rottweiler = credentials_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -6464,15 +7001,14 @@ fn build_command_executor(
     command_safety: &Arc<CommandSafetyClassifier>,
     global_proxy: Option<&ResolvedToolProxy>,
 ) -> Result<Arc<dyn CommandExecutor>> {
-    let scratch = std::env::temp_dir().join(format!("rottweiler-sandbox-{}", std::process::id()));
-    create_private_sandbox_scratch(&scratch)?;
+    let scratch = PrivateScratch::create("sandbox")?;
     let mut sandbox_roots = workspace_roots.to_vec();
-    sandbox_roots.push(scratch);
+    sandbox_roots.push(scratch.path().to_path_buf());
     let sandbox_policy = Arc::new(
         SandboxPolicy::new(&sandbox_roots, SandboxNetworkPolicy::Deny)
             .map_err(|error| miette!("OS sandbox policy could not be built: {error}"))?,
     );
-    build_command_executor_for_policy(
+    let executor = build_command_executor_for_policy(
         &sandbox_policy,
         workspace,
         command_fixture_mode,
@@ -6480,7 +7016,11 @@ fn build_command_executor(
         command_safety,
         global_proxy,
         true,
-    )
+    )?;
+    Ok(Arc::new(ScratchGuardedCommandExecutor {
+        inner: executor,
+        _scratch: scratch,
+    }))
 }
 
 fn build_read_only_hook_executor(
@@ -6492,23 +7032,78 @@ fn build_read_only_hook_executor(
         command_fixture_mode,
         READ_ONLY_HOOK_COMMAND_FIXTURE_NAMESPACE,
     );
-    let scratch =
-        std::env::temp_dir().join(format!("rottweiler-hook-readonly-{}", std::process::id()));
-    create_private_sandbox_scratch(&scratch)?;
+    let scratch = PrivateScratch::create("hook-readonly")?;
     let sandbox_policy = Arc::new(
-        SandboxPolicy::new([&scratch], SandboxNetworkPolicy::Deny)
+        SandboxPolicy::new([scratch.path()], SandboxNetworkPolicy::Deny)
             .map_err(|error| miette!("read-only hook sandbox could not be built: {error}"))?,
     );
     let executor = build_command_executor_for_policy(
         &sandbox_policy,
-        &scratch,
+        scratch.path(),
         command_fixture_mode,
         execution_lease,
         command_safety,
         None,
         false,
     )?;
-    Ok((executor, scratch))
+    let path = scratch.path().to_path_buf();
+    Ok((
+        Arc::new(ScratchGuardedCommandExecutor {
+            inner: executor,
+            _scratch: scratch,
+        }),
+        path,
+    ))
+}
+
+struct PrivateScratch {
+    path: PathBuf,
+}
+
+impl PrivateScratch {
+    fn create(kind: &str) -> Result<Self> {
+        let mut random = [0_u8; 8];
+        getrandom::fill(&mut random)
+            .map_err(|error| miette!("scratch randomness failed: {error}"))?;
+        let path = std::env::temp_dir().join(format!(
+            "rottweiler-{kind}-{}-{}",
+            std::process::id(),
+            u64::from_ne_bytes(random)
+        ));
+        create_private_sandbox_scratch(&path)?;
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for PrivateScratch {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %self.path.display(), %error, "scratch cleanup failed");
+        }
+    }
+}
+
+struct ScratchGuardedCommandExecutor {
+    inner: Arc<dyn CommandExecutor>,
+    _scratch: PrivateScratch,
+}
+
+#[async_trait]
+impl CommandExecutor for ScratchGuardedCommandExecutor {
+    async fn run(
+        &self,
+        request: CommandRequest,
+        cancellation: CancellationToken,
+        output: Arc<dyn ToolOutputSink>,
+    ) -> std::result::Result<ToolCommandOutcome, ToolError> {
+        self.inner.run(request, cancellation, output).await
+    }
 }
 
 fn build_command_executor_for_policy(
@@ -7315,6 +7910,7 @@ struct MultiRootCodeIntelligence {
     providers: Vec<Arc<CodeIntelligence>>,
     symbols: Arc<WorkspaceSymbolIndex>,
     indexed: tokio::sync::Mutex<bool>,
+    _scratch: PrivateScratch,
 }
 
 fn lsp_servers_for_root(
@@ -7344,12 +7940,11 @@ impl MultiRootCodeIntelligence {
         } else {
             discover_sandboxed_lsp_servers(roots)
         };
-        let scratch = std::env::temp_dir().join(format!("rottweiler-lsp-{}", std::process::id()));
-        create_private_sandbox_scratch(&scratch)?;
+        let scratch = PrivateScratch::create("lsp")?;
         let helper = std::env::current_exe()
             .map_err(|error| miette!("LSP sandbox helper could not resolve: {error}"))?;
         let spawner = Arc::new(
-            SandboxedLspSpawner::new(roots, &scratch, helper)
+            SandboxedLspSpawner::new(roots, scratch.path(), helper)
                 .map_err(|error| miette!("LSP sandbox could not start: {error}"))?,
         );
         let uri_mapper = Arc::new(
@@ -7380,6 +7975,7 @@ impl MultiRootCodeIntelligence {
             providers,
             symbols,
             indexed: tokio::sync::Mutex::new(false),
+            _scratch: scratch,
         })
     }
 
@@ -7817,8 +8413,12 @@ impl WebFetcher for PolicyWebFetcher {
                         GuardedHttpFetchError::Provider(error) => {
                             ToolError::Network(error.to_string())
                         }
-                        GuardedHttpFetchError::SizeLimit { limit } => {
+                        GuardedHttpFetchError::SizeLimit { limit }
+                        | GuardedHttpFetchError::FrameLimit { limit } => {
                             ToolError::SizeLimit { limit }
+                        }
+                        GuardedHttpFetchError::Deadline => {
+                            ToolError::Network("HTTP response deadline expired".to_owned())
                         }
                     })?
                 },
@@ -13660,5 +14260,110 @@ mod tests {
         assert!(redacted.contains("visible-canary"));
         assert!(!credential_shaped_environment_name("MAX_TOKENS"));
         assert!(!credential_shaped_environment_name("TOKEN_COUNT"));
+    }
+
+    #[test]
+    fn plugin_event_fanout_uses_canonical_names_and_redacts_payloads() {
+        let redactor = FixtureRedactor::new(["fanout-secret-canary".to_owned()]);
+        let event = EngineEvent::PluginStatusChanged {
+            meta: EventMeta {
+                protocol_version: SESSION_EVENT_VERSION,
+                session_id: SessionId("fixture-session".to_owned()),
+                sequence_id: SequenceId(4),
+                emitted_at: "2026-07-11T00:00:00Z".to_owned(),
+                caused_by: None,
+            },
+            plugin_id: "fixture-plugin".to_owned(),
+            status: "working fanout-secret-canary".to_owned(),
+        };
+        let (wire_name, manifest_name, payload) =
+            plugin_event_payload(&redactor, &event).expect("fanout payload");
+        assert_eq!(wire_name, "plugin_status_changed");
+        assert_eq!(manifest_name, "PluginStatusChanged");
+        let encoded = serde_json::to_string(&payload).expect("encoded payload");
+        assert!(!encoded.contains("fanout-secret-canary"));
+        assert!(encoded.contains("[REDACTED]"));
+    }
+
+    struct BlockedPluginEventPublisher;
+
+    struct FailingPluginEventPublisher;
+
+    #[async_trait]
+    impl PluginEventPublisher for BlockedPluginEventPublisher {
+        async fn publish(
+            &self,
+            _event: &str,
+            _payload: serde_json::Value,
+        ) -> std::result::Result<(), rw_core::runtime_support::plugin::PluginRpcError> {
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl PluginEventPublisher for FailingPluginEventPublisher {
+        async fn publish(
+            &self,
+            _event: &str,
+            _payload: serde_json::Value,
+        ) -> std::result::Result<(), rw_core::runtime_support::plugin::PluginRpcError> {
+            Err(rw_core::runtime_support::plugin::PluginRpcError {
+                code: "fixture_failure".to_owned(),
+                message: "fixture delivery failed".to_owned(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_event_fanout_is_nonblocking_bounded_and_disables_sustained_overflow() {
+        let worker = PluginFanoutWorker::new(
+            BTreeSet::from(["TextDelta".to_owned()]),
+            Arc::new(BlockedPluginEventPublisher),
+        );
+        let started = std::time::Instant::now();
+        for index in 0..10_000 {
+            worker.publish(
+                "text_delta",
+                "TextDelta",
+                serde_json::json!({"type":"text_delta","index":index}),
+            );
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(100),
+            "fanout producer blocked on a stalled plugin"
+        );
+        assert!(worker.disabled.load(Ordering::Acquire));
+        assert!(
+            worker.overflow.load(Ordering::Acquire) >= PLUGIN_EVENT_SUSTAINED_OVERFLOW,
+            "sustained overflow was not accounted"
+        );
+        assert!(worker.sender.capacity() <= PLUGIN_EVENT_QUEUE_CAPACITY);
+    }
+
+    #[tokio::test]
+    async fn plugin_event_fanout_disables_sustained_rpc_failures() {
+        let worker = PluginFanoutWorker::new(
+            BTreeSet::from(["TextDelta".to_owned()]),
+            Arc::new(FailingPluginEventPublisher),
+        );
+        for index in 0..PLUGIN_EVENT_SUSTAINED_OVERFLOW {
+            worker.publish(
+                "text_delta",
+                "TextDelta",
+                serde_json::json!({"type":"text_delta","index":index}),
+            );
+            tokio::task::yield_now().await;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !worker.disabled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failing plugin must be disabled");
+        assert!(
+            worker.overflow.load(Ordering::Acquire) >= PLUGIN_EVENT_SUSTAINED_OVERFLOW,
+            "sustained delivery failures were not accounted"
+        );
     }
 }

@@ -339,6 +339,7 @@ export class StatusLineRenderable extends TextRenderable {
         : `ctx ${formatPercent(state.context.used_tokens, state.context.usable_tokens)}`
     const cache =
       state.cost === null ? "cache —" : `cache ${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
+    const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
     this.content = [
       `◉ ${state.mode ?? "execute"}`,
       `model ${state.model ?? "fast"}`,
@@ -346,6 +347,7 @@ export class StatusLineRenderable extends TextRenderable {
       formatSessionCost(state.cost),
       cache,
       `git ${this.#branch ?? "—"}`,
+      ...(pluginStatus === undefined ? [] : [`${pluginStatus[0]} ${pluginStatus[1]}`]),
     ].join("  │  ")
   }
 }
@@ -370,6 +372,7 @@ export class StateBannerRenderable extends TextRenderable {
   update(state: RottweilerState): void {
     const latestBudget = state.budgets.at(-1)
     const latestError = state.errors.at(-1)
+    const latestPluginNotification = state.pluginNotifications.at(-1)
     if (latestError !== undefined) {
       this.visible = true
       this.fg = this.#theme.danger
@@ -389,6 +392,10 @@ export class StateBannerRenderable extends TextRenderable {
         state.connection.gap === null
           ? `${state.connection.phase} · attempt ${state.connection.attempt}`
           : `Replaying event gap ${state.connection.gap.expected}…${state.connection.gap.received}`
+    } else if (latestPluginNotification !== undefined) {
+      this.visible = true
+      this.fg = this.#theme.info
+      this.content = `${latestPluginNotification.title} · ${latestPluginNotification.message}`
     } else {
       this.visible = false
       this.content = ""

@@ -1,0 +1,35 @@
+{
+  "name": "@rottweiler/plugin",
+  "version": "0.1.0",
+  "description": "Official TypeScript SDK for Rottweiler protocol 1 plugins",
+  "type": "module",
+  "packageManager": "bun@1.3.14",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./scaffold": {
+      "types": "./dist/scaffold.d.ts",
+      "default": "./dist/scaffold.js"
+    },
+    "./protocol-1.json": "./fixtures/wire/protocol-1.json",
+    "./protocol-1.schema.json": "./fixtures/wire/protocol-1.schema.json"
+  },
+  "bin": {
+    "rottweiler-plugin-scaffold": "./dist/bin/scaffold.js"
+  },
+  "files": ["dist", "fixtures/wire/protocol-1.json", "fixtures/wire/protocol-1.schema.json", "PROTOCOL.md", "README.md"],
+  "scripts": {
+    "build": "bun run build.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "bun": "1.3.14"
+  }
+}

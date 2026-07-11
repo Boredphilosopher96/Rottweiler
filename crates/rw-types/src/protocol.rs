@@ -1134,6 +1134,28 @@ pub enum EngineEvent {
         content: String,
         attachments: Vec<StoredAttachment>,
     },
+    /// A plugin-originated user message was admitted through the bounded
+    /// machine boundary. The ordinary message/turn events remain authoritative
+    /// for conversation reconstruction.
+    PluginMessageInjected {
+        meta: EventMeta,
+        plugin_id: String,
+        content: String,
+        queued: bool,
+    },
+    /// Session-local status text published by an approved plugin.
+    PluginStatusChanged {
+        meta: EventMeta,
+        plugin_id: String,
+        status: String,
+    },
+    /// Session-local UI notification published by an approved plugin.
+    UiNotification {
+        meta: EventMeta,
+        plugin_id: String,
+        title: String,
+        message: String,
+    },
     ConversationTurnCommitted {
         meta: EventMeta,
         #[serde(with = "decimal_u64")]
@@ -1412,6 +1434,9 @@ impl EngineEvent {
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
+            | Self::PluginMessageInjected { meta, .. }
+            | Self::PluginStatusChanged { meta, .. }
+            | Self::UiNotification { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }
             | Self::TurnStarted { meta, .. }
@@ -1470,6 +1495,9 @@ impl EngineEvent {
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
+            | Self::PluginMessageInjected { meta, .. }
+            | Self::PluginStatusChanged { meta, .. }
+            | Self::UiNotification { meta, .. }
             | Self::ConversationTurnCommitted { meta, .. }
             | Self::ConversationRewound { meta, .. }
             | Self::TurnStarted { meta, .. }

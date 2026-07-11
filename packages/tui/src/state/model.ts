@@ -221,6 +221,12 @@ export interface WorkspaceRootsProjection {
   readonly roots: readonly string[]
 }
 
+export interface PluginNotificationProjection {
+  readonly pluginId: string
+  readonly title: string
+  readonly message: string
+}
+
 export interface RottweilerState {
   readonly connection: ConnectionProjection
   readonly lastSequence: string | null
@@ -235,6 +241,8 @@ export interface RottweilerState {
   readonly questions: Readonly<Record<string, QuestionProjection>>
   readonly commandAcks: Readonly<Record<string, CommandAcknowledgement>>
   readonly queuedMessages: readonly QueuedMessageProjection[]
+  readonly pluginStatuses: Readonly<Record<string, string>>
+  readonly pluginNotifications: readonly PluginNotificationProjection[]
   readonly context: ContextSnapshot | null
   readonly cost: CostSnapshot | null
   readonly promptDump: PromptDump | null
@@ -275,6 +283,8 @@ export function createInitialState(): RottweilerState {
     questions: {},
     commandAcks: {},
     queuedMessages: [],
+    pluginStatuses: {},
+    pluginNotifications: [],
     context: null,
     cost: null,
     promptDump: null,

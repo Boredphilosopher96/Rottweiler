@@ -11,10 +11,11 @@ use std::{
 use async_trait::async_trait;
 use rw_ext::{AgentPermissionMode, AgentRegistry, LoadedAgent};
 use rw_tools::{
-    CancellationToken, CapabilityManifest, DiffArtifactAuthority, SessionDiffArtifactAuthority,
-    SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode, SubagentProgressEvent, Tool,
-    ToolContext, ToolDescriptor, ToolError, ToolRegistry, ToolResult, WorkspaceBinding,
-    WorktreeIsolation, WorktreeLease, WorktreeLeaseRecord,
+    CancellationToken, CapabilityManifest, DiffArtifactAuthority, McpToolPolicy,
+    SessionDiffArtifactAuthority, SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode,
+    SubagentProgressEvent, Tool, ToolContext, ToolDescriptor, ToolError, ToolRegistry, ToolResult,
+    WorkspaceBinding, WorktreeIsolation, WorktreeLease, WorktreeLeaseRecord,
+    validate_mcp_virtual_tool,
 };
 use rw_types::config::PermissionDecision;
 use rw_types::{
@@ -696,6 +697,13 @@ impl SubagentOrchestrator {
                 .descriptors()
                 .into_iter()
                 .map(|descriptor| descriptor.name)
+                .chain(
+                    request
+                        .tools
+                        .iter()
+                        .filter(|name| name.starts_with("mcp:"))
+                        .cloned(),
+                )
                 .collect(),
             policy: SubagentRecoveryPolicy {
                 model_alias: request.model.clone(),
@@ -1274,10 +1282,24 @@ impl SubagentOrchestrator {
                 "recovery tool allowlist contains duplicates".to_owned(),
             ));
         }
+        let mut registered_names = Vec::new();
+        let mut mcp_grants = Vec::new();
+        for name in &record.tool_names {
+            if name.starts_with("mcp:") {
+                validate_mcp_virtual_tool(name)
+                    .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?;
+                mcp_grants.push(name.clone());
+            } else {
+                registered_names.push(name.as_str());
+            }
+        }
+        let mcp_policy = McpToolPolicy::restricted(mcp_grants)
+            .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?;
         let allowed_tools = Arc::new(
             self.tool_registry()
-                .subset(record.tool_names.iter().map(String::as_str))
-                .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?,
+                .subset(registered_names)
+                .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?
+                .with_mcp_tool_policy(mcp_policy),
         );
         let current_capabilities = CapabilityManifest::new(
             allowed_tools
@@ -1431,7 +1453,31 @@ fn restricted_registry(
                 .to_owned(),
         ));
     }
+    if requested
+        .iter()
+        .any(|name| matches!(name.as_str(), "tool_search" | "mcp_call"))
+    {
+        return Err(OrchestrationError::InvalidRequest(
+            "child agents must grant exact `mcp:<server>/<tool>` entries instead of generic MCP gateway tools"
+                .to_owned(),
+        ));
+    }
+    let mut mcp_grants = Vec::new();
+    for name in requested.iter().filter(|name| name.starts_with("mcp:")) {
+        validate_mcp_virtual_tool(name)
+            .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?;
+        mcp_grants.push(name.clone());
+    }
+    if !mcp_grants.is_empty() && mode != SubagentPermissionMode::Execute {
+        return Err(OrchestrationError::InvalidRequest(
+            "MCP tools require an execute-mode child because remote mutation capabilities are opaque"
+                .to_owned(),
+        ));
+    }
     let allowed = requested.iter().filter(|name| {
+        if name.starts_with("mcp:") {
+            return false;
+        }
         mode == SubagentPermissionMode::Execute
             || tools.descriptor(name).is_some_and(|descriptor| {
                 descriptor
@@ -1442,9 +1488,15 @@ fn restricted_registry(
             })
             || (mode == SubagentPermissionMode::Plan && name.as_str() == "submit_plan")
     });
+    let mut allowed = allowed.map(String::as_str).collect::<Vec<_>>();
+    if !mcp_grants.is_empty() {
+        allowed.extend(["tool_search", "mcp_call"]);
+    }
+    let policy = McpToolPolicy::restricted(mcp_grants)
+        .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?;
     tools
-        .subset(allowed.map(String::as_str))
-        .map(Arc::new)
+        .subset(allowed)
+        .map(|registry| Arc::new(registry.with_mcp_tool_policy(policy)))
         .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))
 }
 
@@ -1790,13 +1842,19 @@ impl Tool for SpawnAgentTool {
                     .agents
                     .load(&agent)
                     .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-                let tools = self.orchestrator.tool_registry();
+                let tools = restricted_registry(
+                    &self.orchestrator.tool_registry(),
+                    &agent.tools,
+                    match agent.permission_mode {
+                        AgentPermissionMode::Discuss => SubagentPermissionMode::Discuss,
+                        AgentPermissionMode::Plan => SubagentPermissionMode::Plan,
+                        AgentPermissionMode::Execute => SubagentPermissionMode::Execute,
+                    },
+                )
+                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
                 let mut capabilities =
                     vec![ToolCapability::ReadFilesystem, ToolCapability::Execute];
-                for name in &agent.tools {
-                    let descriptor = tools.descriptor(name).ok_or_else(|| {
-                        ToolError::InvalidInput(format!("agent tool `{name}` is not registered"))
-                    })?;
+                for descriptor in tools.descriptors() {
                     capabilities.extend(descriptor.capabilities.capabilities().iter().cloned());
                 }
                 Ok(CapabilityManifest::new(capabilities))
@@ -2338,7 +2396,7 @@ fn bind_child_tools(
             .register(tool)
             .map_err(|error| OrchestrationError::InvalidRequest(error.to_string()))?;
     }
-    Ok(child)
+    Ok(child.with_mcp_tool_policy(allowed.mcp_tool_policy().clone()))
 }
 
 struct ActorSubagentSession {
@@ -2943,6 +3001,35 @@ mod tests {
         result: ToolResult,
     }
 
+    struct GatewayTool(&'static str);
+
+    #[async_trait]
+    impl Tool for GatewayTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor {
+                name: self.0.to_owned(),
+                description: "MCP gateway fixture".to_owned(),
+                input_schema: Value::Null,
+                capabilities: CapabilityManifest::new([
+                    ToolCapability::Network,
+                    ToolCapability::Execute,
+                ]),
+            }
+        }
+
+        fn workspace_binding(&self) -> WorkspaceBinding {
+            WorkspaceBinding::RootIndependent
+        }
+
+        async fn execute(
+            &self,
+            _context: &ToolContext,
+            _input: Value,
+        ) -> Result<ToolResult, ToolError> {
+            panic!("gateway fixture must not execute")
+        }
+    }
+
     #[async_trait]
     impl Tool for MutatingTool {
         fn descriptor(&self) -> ToolDescriptor {
@@ -3007,6 +3094,53 @@ mod tests {
             .err()
             .expect("root-bound fallback must fail");
         assert!(missing_root_bound.to_string().contains("was not rebuilt"));
+    }
+
+    #[test]
+    fn child_mcp_virtual_tools_mint_only_exact_gateway_authority() {
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(GatewayTool("tool_search")))
+            .expect("search gateway");
+        tools
+            .register(Arc::new(GatewayTool("mcp_call")))
+            .expect("call gateway");
+        let tools = Arc::new(tools);
+
+        let restricted = restricted_registry(
+            &tools,
+            &["mcp:github/get_issue".to_owned()],
+            SubagentPermissionMode::Execute,
+        )
+        .expect("exact MCP policy");
+        assert!(restricted.descriptor("tool_search").is_some());
+        assert!(restricted.descriptor("mcp_call").is_some());
+        assert!(restricted.mcp_tool_policy().allows("github", "get_issue"));
+        assert!(
+            !restricted
+                .mcp_tool_policy()
+                .allows("github", "delete_issue")
+        );
+
+        for invalid in ["mcp:github/*", "tool_search", "mcp_call"] {
+            assert!(
+                restricted_registry(
+                    &tools,
+                    &[invalid.to_owned()],
+                    SubagentPermissionMode::Execute,
+                )
+                .is_err(),
+                "{invalid} must not widen child MCP authority"
+            );
+        }
+        assert!(
+            restricted_registry(
+                &tools,
+                &["mcp:github/get_issue".to_owned()],
+                SubagentPermissionMode::Discuss,
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

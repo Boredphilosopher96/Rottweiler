@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rottweiler.dev/schema/plugin/protocol-1.json",
+  "title": "Rottweiler plugin protocol 1 conformance fixture",
+  "type": "object",
+  "required": ["protocol", "status", "framing", "limits", "methods", "initialize_request", "initialize_response", "provider_event_notification", "provider_complete_response", "provider_cancel_notification"],
+  "properties": {
+    "protocol": { "const": 1 },
+    "status": { "const": "frozen" },
+    "framing": { "const": "newline-delimited-json-rpc-2.0" },
+    "limits": {
+      "type": "object",
+      "required": ["max_frame_bytes", "max_manifest_bytes", "max_capabilities_per_kind", "max_name_bytes", "max_version_bytes", "max_description_bytes", "max_schema_bytes", "max_schema_depth"],
+      "properties": {
+        "max_frame_bytes": { "const": 4194304 },
+        "max_manifest_bytes": { "const": 262144 },
+        "max_capabilities_per_kind": { "const": 256 },
+        "max_name_bytes": { "const": 128 },
+        "max_version_bytes": { "const": 64 },
+        "max_description_bytes": { "const": 16384 },
+        "max_schema_bytes": { "const": 65536 },
+        "max_schema_depth": { "const": 32 }
+      },
+      "additionalProperties": false
+    },
+    "methods": { "type": "object" },
+    "initialize_request": { "$ref": "#/$defs/request" },
+    "initialize_response": { "$ref": "#/$defs/success" },
+    "provider_event_notification": { "$ref": "#/$defs/notification" },
+    "provider_complete_response": { "$ref": "#/$defs/success" },
+    "provider_cancel_notification": { "$ref": "#/$defs/notification" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": { "oneOf": [{ "type": "integer" }, { "type": "string", "minLength": 1, "maxLength": 128 }] },
+    "request": {
+      "type": "object", "required": ["jsonrpc", "id", "method"],
+      "properties": { "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" }, "method": { "type": "string", "minLength": 1, "maxLength": 128 }, "params": true },
+      "additionalProperties": false
+    },
+    "notification": {
+      "type": "object", "required": ["jsonrpc", "method"],
+      "properties": { "jsonrpc": { "const": "2.0" }, "method": { "type": "string", "minLength": 1, "maxLength": 128 }, "params": true },
+      "additionalProperties": false
+    },
+    "success": {
+      "type": "object", "required": ["jsonrpc", "id", "result"],
+      "properties": { "jsonrpc": { "const": "2.0" }, "id": { "$ref": "#/$defs/id" }, "result": true },
+      "additionalProperties": false
+    },
+    "tool_effect": { "enum": ["reads-fs", "writes-fs", "network", "exec"] },
+    "tool_declaration": {
+      "type": "object", "required": ["name", "description", "schema", "caps"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9_]+$", "maxLength": 128 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 16384 },
+        "schema": { "type": "object" },
+        "caps": { "type": "array", "maxItems": 4, "uniqueItems": true, "items": { "$ref": "#/$defs/tool_effect" } }
+      }, "additionalProperties": false
+    },
+    "hook_name": { "enum": ["session_start", "session_end", "user_prompt_submit", "pre_tool", "post_tool", "pre_compact", "turn_end", "permission_check"] },
+    "hook_declaration": {
+      "oneOf": [
+        { "$ref": "#/$defs/hook_name" },
+        { "type": "object", "required": ["name", "failure_policy"], "properties": {
+          "name": { "$ref": "#/$defs/hook_name" }, "failure_policy": { "enum": ["fail-open", "fail-closed"] }
+        }, "additionalProperties": false }
+      ]
+    },
+    "capabilities": {
+      "type": "object", "properties": {
+        "tools": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/tool_declaration" } },
+        "commands": { "type": "array", "maxItems": 256, "items": { "type": "object", "required": ["name", "description"], "properties": {
+          "name": { "type": "string", "pattern": "^[a-z0-9_.-]+$", "maxLength": 128 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 16384 },
+          "argument_hint": { "type": "string", "minLength": 1, "maxLength": 16384 },
+          "allowed_tools": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9_]+$", "maxLength": 128 } }
+        }, "additionalProperties": false } },
+        "hooks": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/hook_declaration" } },
+        "providers": { "type": "array", "maxItems": 256, "items": { "type": "object", "required": ["alias-prefix"], "properties": {
+          "alias-prefix": { "type": "string", "pattern": "^[a-z0-9_.-]+/$", "maxLength": 128 }
+        }, "additionalProperties": false } },
+        "event_subscriptions": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9_]*$", "maxLength": 128 } },
+        "push": { "type": "array", "maxItems": 3, "uniqueItems": true, "items": { "enum": ["session/inject_message", "session/set_status", "ui/notify"] } }
+      }, "additionalProperties": false
+    },
+    "manifest": {
+      "type": "object", "required": ["name", "version", "protocol", "capabilities"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9_.-]+$", "maxLength": 128 },
+        "version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "protocol": { "const": 1 }, "capabilities": { "$ref": "#/$defs/capabilities" }
+      }, "additionalProperties": false
+    },
+    "initialize_params": { "type": "object", "required": ["host", "protocol", "min_protocol", "max_frame_bytes"], "properties": {
+      "host": { "const": "rottweiler" }, "protocol": { "const": 1 }, "min_protocol": { "const": 1 }, "max_frame_bytes": { "const": 4194304 }
+    }, "additionalProperties": false },
+    "command_params": { "type": "object", "required": ["name", "arguments"], "properties": {
+      "name": { "type": "string", "pattern": "^[a-z0-9_.-]+$", "maxLength": 128 }, "arguments": { "type": "string" }
+    }, "additionalProperties": false },
+    "tool_call_params": { "type": "object", "required": ["name", "input"], "properties": {
+      "name": { "type": "string", "pattern": "^[a-z0-9_]+$", "maxLength": 128 }, "input": { "type": "object" }
+    }, "additionalProperties": false },
+    "tool_result": { "type": "object", "required": ["content", "data"], "properties": {
+      "content": { "type": "string" }, "data": true, "truncated": { "type": "boolean" }
+    }, "additionalProperties": false },
+    "hook_params": { "type": "object", "required": ["hook", "payload"], "properties": {
+      "hook": { "$ref": "#/$defs/hook_name" }, "payload": { "type": "object" }
+    }, "additionalProperties": false },
+    "hook_result": { "oneOf": [
+      { "type": "object", "required": ["decision"], "properties": { "decision": { "const": "allow" }, "payload": true }, "additionalProperties": false },
+      { "type": "object", "required": ["decision", "message"], "properties": { "decision": { "const": "deny" }, "message": { "type": "string", "minLength": 1, "maxLength": 16384 } }, "additionalProperties": false },
+      { "type": "object", "required": ["decision", "payload"], "properties": { "decision": { "const": "replace" }, "payload": true }, "additionalProperties": false }
+    ] },
+    "provider_request": { "type": "object", "required": ["model", "turns", "tools", "tool_choice", "max_output_tokens", "temperature", "thinking"], "properties": {
+      "model": { "type": "string" }, "turns": { "type": "array" }, "tools": { "type": "array" },
+      "tool_choice": { "type": "object", "required": ["mode"], "properties": { "mode": { "enum": ["auto", "required", "none", "named"] }, "name": { "type": "string" } }, "additionalProperties": false },
+      "max_output_tokens": { "type": "integer", "minimum": 0, "maximum": 4294967295 }, "temperature": { "type": ["number", "null"] },
+      "thinking": { "enum": ["off", "low", "medium", "high"] }, "cache_hint": { "type": ["object", "null"] }
+    }, "additionalProperties": false },
+    "provider_event": { "type": "object", "required": ["type"], "properties": {
+      "type": { "enum": ["route_selected", "message_start", "text_delta", "thinking_delta", "tool_call_start", "tool_call_arguments_delta", "tool_call_end", "citation", "usage", "finished"] },
+      "route": { "type": "string" }, "model": { "type": "string" }, "text": { "type": "string" }, "content": { "type": "string" },
+      "signature": { "type": ["string", "null"] }, "id": { "type": "string" }, "name": { "type": "string" }, "json_fragment": { "type": "string" },
+      "arguments": true, "uri": { "type": "string" }, "title": { "type": ["string", "null"] }, "start_index": { "type": ["integer", "null"] },
+      "end_index": { "type": ["integer", "null"] }, "usage": { "type": "object" }, "reason": { "enum": ["stop", "length", "tool_calls", "content_filter", "unknown"] }
+    }, "additionalProperties": false },
+    "provider_params": { "type": "object", "required": ["alias", "request"], "properties": {
+      "alias": { "type": "string" }, "request": { "$ref": "#/$defs/provider_request" }
+    }, "additionalProperties": false },
+    "provider_event_params": { "type": "object", "required": ["request_id", "event"], "properties": {
+      "request_id": { "$ref": "#/$defs/id" }, "event": { "$ref": "#/$defs/provider_event" }
+    }, "additionalProperties": false },
+    "provider_cancel_params": { "type": "object", "required": ["request_id"], "properties": {
+      "request_id": { "$ref": "#/$defs/id" }
+    }, "additionalProperties": false },
+    "event_params": { "type": "object", "required": ["event", "payload"], "properties": { "event": { "type": "string" }, "payload": { "type": "object" } }, "additionalProperties": false },
+    "inject_message_params": { "type": "object", "required": ["session_id", "content"], "properties": { "session_id": { "type": "string", "maxLength": 128 }, "content": { "type": "string", "maxLength": 262144 } }, "additionalProperties": false },
+    "set_status_params": { "type": "object", "required": ["session_id", "status"], "properties": { "session_id": { "type": "string", "maxLength": 128 }, "status": { "type": "string", "maxLength": 16384 } }, "additionalProperties": false },
+    "notify_params": { "type": "object", "required": ["title", "message"], "properties": { "title": { "type": "string", "maxLength": 128 }, "message": { "type": "string", "maxLength": 16384 }, "session_id": { "type": "string", "maxLength": 128 } }, "additionalProperties": false }
+    }
+}

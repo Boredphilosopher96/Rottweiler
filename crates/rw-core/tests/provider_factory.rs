@@ -9,12 +9,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use rw_core::{ModelAccounting, ModelDriver, ProviderFactory};
 use rw_providers::{
-    CacheHint, ModelPricing, NetworkPolicy, PricingTable, Provider, ProviderErrorKind,
-    ProviderRequest, ProxyEnvironment, Recorder, ReplayProvider, RetryPolicy, ThinkingLevel,
-    ToolChoice, ToolDefinition,
+    BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason, ModelPricing,
+    NetworkPolicy, PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent,
+    ProviderModelMetadata, ProviderRequest, ProxyEnvironment, Recorder, ReplayProvider,
+    RetryPolicy, ThinkingLevel, ToolChoice, ToolDefinition, UsageAccounting, WireMode,
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
@@ -32,6 +34,45 @@ const OAUTH_CANARY: &str = "rw-oauth-secret-canary";
 const REFRESH_CANARY: &str = "rw-refresh-secret-canary";
 const ROTATED_CANARY: &str = "rw-rotated-refresh-canary";
 const REFRESHED_ACCESS_CANARY: &str = "rw-refreshed-access-canary";
+
+struct ExtensionFixtureProvider {
+    private_name: String,
+    capabilities: Capabilities,
+    metadata: Option<ProviderModelMetadata>,
+}
+
+#[async_trait]
+impl Provider for ExtensionFixtureProvider {
+    fn name(&self) -> &str {
+        &self.private_name
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.capabilities.clone()
+    }
+
+    async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
+        Ok(self.metadata.clone())
+    }
+
+    fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
+        self.metadata.clone()
+    }
+
+    async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        Ok(Box::pin(futures_util::stream::iter([
+            Ok(ProviderEvent::MessageStart {
+                model: request.model.clone(),
+            }),
+            Ok(ProviderEvent::TextDelta {
+                text: format!("extension:{}", request.model),
+            }),
+            Ok(ProviderEvent::Finished {
+                reason: FinishReason::Stop,
+            }),
+        ])))
+    }
+}
 
 #[derive(Clone, Default)]
 struct TestEnvironment(BTreeMap<String, String>);
@@ -440,6 +481,218 @@ fn request(model: &str) -> ProviderRequest {
         thinking: ThinkingLevel::Off,
         cache_hint: None,
     }
+}
+
+fn extension_capabilities() -> Capabilities {
+    Capabilities {
+        tool_calling: true,
+        vision: false,
+        thinking: false,
+        cache_breakpoints: CacheBreakpointSupport::None,
+        max_context_tokens: Some(32_768),
+        max_output_tokens: Some(2_048),
+        wire_mode: WireMode::NormalizedReplay,
+    }
+}
+
+fn extension_provider(
+    private_name: &str,
+    metadata: Option<ProviderModelMetadata>,
+) -> Arc<dyn Provider> {
+    Arc::new(ExtensionFixtureProvider {
+        private_name: private_name.to_owned(),
+        capabilities: extension_capabilities(),
+        metadata,
+    })
+}
+
+fn extension_config(candidate: &str) -> rw_types::config::Config {
+    let mut config = rw_types::config::Config::default();
+    "fast".clone_into(&mut config.models.default);
+    config
+        .models
+        .aliases
+        .insert("fast".to_owned(), vec![candidate.to_owned()]);
+    config
+}
+
+fn extension_factory() -> ProviderFactory<TestEnvironment, TestKeychain> {
+    ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestKeychain::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Deny,
+        pricing([("unrelated/catalog-model", false)]),
+    )
+}
+
+#[tokio::test]
+async fn approved_extension_alias_stream_is_model_bound_and_replay_compatible() {
+    let private_name = "private-adapter-secret-name";
+    let runtime = extension_factory()
+        .with_extension_providers([("custom/", extension_provider(private_name, None))])
+        .build(&extension_config("custom/model-a"))
+        .unwrap_or_else(|error| panic!("extension factory must build: {error}"));
+
+    let events = runtime
+        .stream_alias("fast", request("model-a"))
+        .unwrap_or_else(|error| panic!("extension alias must route: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(|event| {
+        matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "extension:model-a")
+    }));
+    let bound = runtime
+        .provider("custom/model-a")
+        .unwrap_or_else(|| panic!("extension candidate must be registered"));
+    assert_eq!(bound.name(), "custom/model-a");
+    assert_ne!(bound.name(), private_name);
+    let mismatch = bound
+        .stream(request("model-b"))
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("model-bound extension must reject another model"));
+    assert_eq!(mismatch.kind, ProviderErrorKind::InvalidRequest);
+
+    let directory = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+    let recorder = Recorder::new(bound, directory.path(), runtime.fixture_redactor());
+    let live = recorder
+        .stream(request("model-a"))
+        .await
+        .unwrap_or_else(|error| panic!("extension recording must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    recorder
+        .flush()
+        .await
+        .unwrap_or_else(|error| panic!("extension recording must flush: {error}"));
+    let replay = ReplayProvider::load("custom/model-a", directory.path())
+        .await
+        .unwrap_or_else(|error| panic!("extension replay must load: {error}"));
+    let replayed = replay
+        .stream(request("model-a"))
+        .await
+        .unwrap_or_else(|error| panic!("extension replay must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert_eq!(live, replayed);
+}
+
+#[tokio::test]
+async fn extension_metadata_is_preserved_and_unknown_pricing_stays_unpriced() {
+    let capabilities = Capabilities {
+        vision: true,
+        max_context_tokens: Some(65_536),
+        ..extension_capabilities()
+    };
+    let metadata = ProviderModelMetadata {
+        capabilities: capabilities.clone(),
+        pricing: Some(ModelPricing {
+            display_name: "Custom Model".to_owned(),
+            max_context_tokens: Some(65_536),
+            max_output_tokens: Some(2_048),
+            supports_tools: true,
+            supports_thinking: false,
+            reasoning_efforts: Vec::new(),
+            input_per_million_micros_usd: 4,
+            output_per_million_micros_usd: 8,
+            cache_read_per_million_micros_usd: None,
+            cache_write_per_million_micros_usd: None,
+            reasoning_per_million_micros_usd: None,
+        }),
+        accounting: UsageAccounting::ApiDollars,
+    };
+    let runtime = extension_factory()
+        .with_extension_providers([(
+            "custom/",
+            extension_provider("private-plugin", Some(metadata.clone())),
+        )])
+        .build(&extension_config("custom/model-a"))
+        .unwrap_or_else(|error| panic!("metadata extension must build: {error}"));
+    let resolved = runtime
+        .resolved_model("custom/model-a")
+        .unwrap_or_else(|| panic!("extension model must resolve"));
+    assert_eq!(resolved.provider(), "custom");
+    assert_eq!(resolved.capabilities(), &capabilities);
+    assert_eq!(resolved.pricing(), metadata.pricing.as_ref());
+    assert_eq!(resolved.accounting(), UsageAccounting::ApiDollars);
+    assert_eq!(
+        runtime
+            .model_metadata("custom/model-a")
+            .await
+            .unwrap_or_else(|error| panic!("extension metadata must resolve: {error}")),
+        metadata
+    );
+    assert_eq!(
+        runtime.accounting_for_alias(
+            "fast",
+            rw_providers::TokenUsage {
+                output_tokens: 1_000_000,
+                ..rw_providers::TokenUsage::default()
+            },
+        ),
+        Cost::Monetary {
+            amount_micros: 8,
+            currency: "USD".to_owned(),
+        }
+    );
+
+    let unknown = extension_factory()
+        .with_extension_providers([("custom/", extension_provider("private-plugin", None))])
+        .build(&extension_config("custom/model-a"))
+        .unwrap_or_else(|error| panic!("unpriced extension must build: {error}"));
+    let resolved = unknown
+        .resolved_model("custom/model-a")
+        .unwrap_or_else(|| panic!("unpriced extension model must resolve"));
+    assert_eq!(resolved.capabilities(), &extension_capabilities());
+    assert_eq!(resolved.pricing(), None);
+    assert_eq!(resolved.accounting(), UsageAccounting::UnpricedApi);
+    assert!(matches!(
+        unknown.accounting_for_alias("fast", rw_providers::TokenUsage::default()),
+        Cost::Unavailable { .. }
+    ));
+}
+
+#[test]
+fn extension_alias_prefixes_reject_collisions_overlap_and_unregistered_candidates() {
+    let provider = || extension_provider("private-plugin", None);
+
+    let mut built_in_collision = extension_config("custom/model-a");
+    built_in_collision.providers.insert(
+        "custom".to_owned(),
+        ProviderConfig {
+            kind: "openai_compatible".to_owned(),
+            base_url: Some("http://127.0.0.1:1/v1/chat/completions".to_owned()),
+            ..ProviderConfig::default()
+        },
+    );
+    let collision = extension_factory()
+        .with_extension_providers([("custom/", provider())])
+        .build(&built_in_collision)
+        .err()
+        .unwrap_or_else(|| panic!("built-in prefix collision must fail"));
+    assert!(collision.to_string().contains("collides"));
+
+    let overlap = extension_factory()
+        .with_extension_providers([("custom/", provider()), ("custom/", provider())])
+        .build(&extension_config("custom/model-a"))
+        .err()
+        .unwrap_or_else(|| panic!("overlapping extension prefixes must fail"));
+    assert!(overlap.to_string().contains("overlaps"));
+
+    let unregistered = extension_factory()
+        .with_extension_providers([("custom/", provider())])
+        .build(&extension_config("other/model-a"))
+        .err()
+        .unwrap_or_else(|| panic!("unregistered alias must fail"));
+    assert!(unregistered.to_string().contains("unconfigured provider"));
+
+    let invalid = extension_factory()
+        .with_extension_providers([("Custom/", provider())])
+        .build(&extension_config("custom/model-a"))
+        .err()
+        .unwrap_or_else(|| panic!("non-canonical extension prefix must fail"));
+    let diagnostic = format!("{invalid:?} {invalid}");
+    assert!(!diagnostic.contains("private-plugin"));
 }
 
 #[tokio::test]

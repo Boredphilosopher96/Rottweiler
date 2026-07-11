@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
 use std::ffi::OsString;
 #[cfg(unix)]
@@ -65,6 +65,96 @@ pub struct ToolLimits {
     pub max_search_results: usize,
     pub max_directory_entries: usize,
     pub max_web_bytes: usize,
+}
+
+/// Immutable authority for the generic MCP gateway tools.
+///
+/// Main sessions use [`Self::Unrestricted`] and are still constrained by the
+/// host's approved MCP configuration. Child sessions use [`Self::Restricted`]
+/// with exact canonical `mcp:<server>/<tool>` grants. Keeping this on the
+/// invocation context prevents a generic `mcp_call` from widening a child
+/// agent's declarative allowlist.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum McpToolPolicy {
+    #[default]
+    Unrestricted,
+    Restricted(Arc<BTreeSet<String>>),
+}
+
+impl McpToolPolicy {
+    /// Builds a fail-closed policy from canonical virtual MCP tool ids.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed, non-canonical, duplicate, or oversized entries.
+    pub fn restricted(entries: impl IntoIterator<Item = String>) -> Result<Self, ToolError> {
+        let mut grants = BTreeSet::new();
+        for entry in entries {
+            validate_mcp_virtual_tool(&entry)?;
+            if !grants.insert(entry.clone()) {
+                return Err(ToolError::InvalidInput(format!(
+                    "duplicate MCP virtual tool grant: {entry}"
+                )));
+            }
+            if grants.len() > 128 {
+                return Err(ToolError::InvalidInput(
+                    "MCP virtual tool allowlist exceeds 128 entries".to_owned(),
+                ));
+            }
+        }
+        Ok(Self::Restricted(Arc::new(grants)))
+    }
+
+    #[must_use]
+    pub fn allows(&self, server: &str, tool: &str) -> bool {
+        match self {
+            Self::Unrestricted => true,
+            Self::Restricted(grants) => grants.contains(&format!("mcp:{server}/{tool}")),
+        }
+    }
+
+    #[must_use]
+    pub fn grants(&self) -> Option<&BTreeSet<String>> {
+        match self {
+            Self::Unrestricted => None,
+            Self::Restricted(grants) => Some(grants),
+        }
+    }
+}
+
+/// Validates the exact declarative spelling used for an MCP tool grant.
+/// Wildcards are intentionally unsupported.
+///
+/// # Errors
+///
+/// Returns when the entry is not canonical `mcp:<server>/<tool>` syntax.
+pub fn validate_mcp_virtual_tool(entry: &str) -> Result<(), ToolError> {
+    let Some(rest) = entry.strip_prefix("mcp:") else {
+        return Err(ToolError::InvalidInput(format!(
+            "MCP virtual tool must use mcp:<server>/<tool>: {entry}"
+        )));
+    };
+    let Some((server, tool)) = rest.split_once('/') else {
+        return Err(ToolError::InvalidInput(format!(
+            "MCP virtual tool must use mcp:<server>/<tool>: {entry}"
+        )));
+    };
+    let valid_server = !server.is_empty()
+        && server.len() <= 96
+        && server
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+    let valid_tool = !tool.is_empty()
+        && tool.len() <= 256
+        && !tool
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace());
+    if !valid_server || !valid_tool || tool.contains('*') {
+        return Err(ToolError::InvalidInput(format!(
+            "invalid MCP virtual tool grant: {entry}"
+        )));
+    }
+    Ok(())
 }
 
 impl Default for ToolLimits {
@@ -196,6 +286,7 @@ pub struct ToolContext {
     pub output: Arc<dyn ToolOutputSink>,
     question_asker: Option<Arc<dyn QuestionAsker>>,
     subagent_events: Option<Arc<dyn SubagentEventSink>>,
+    mcp_tool_policy: McpToolPolicy,
 }
 
 impl ToolContext {
@@ -274,6 +365,7 @@ impl ToolContext {
             output: Arc::new(NoopOutputSink),
             question_asker: None,
             subagent_events: None,
+            mcp_tool_policy: McpToolPolicy::Unrestricted,
         })
     }
 
@@ -311,6 +403,17 @@ impl ToolContext {
     #[must_use]
     pub fn model_alias(&self) -> Option<&str> {
         self.model_alias.as_deref()
+    }
+
+    #[must_use]
+    pub fn with_mcp_tool_policy(mut self, policy: McpToolPolicy) -> Self {
+        self.mcp_tool_policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub fn mcp_tool_policy(&self) -> &McpToolPolicy {
+        &self.mcp_tool_policy
     }
 
     #[must_use]
@@ -865,9 +968,10 @@ impl Tool for GuardedTool {
 }
 
 /// Deterministic registry. It resolves tools; core remains responsible for permission checks.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
+    mcp_tool_policy: McpToolPolicy,
 }
 
 impl ToolRegistry {
@@ -977,7 +1081,22 @@ impl ToolRegistry {
                 .entry(name.to_owned())
                 .or_insert_with(|| registered.clone());
         }
-        Ok(Self { tools })
+        Ok(Self {
+            tools,
+            mcp_tool_policy: self.mcp_tool_policy.clone(),
+        })
+    }
+
+    /// Binds the immutable MCP gateway policy copied into each invocation.
+    #[must_use]
+    pub fn with_mcp_tool_policy(mut self, policy: McpToolPolicy) -> Self {
+        self.mcp_tool_policy = policy;
+        self
+    }
+
+    #[must_use]
+    pub fn mcp_tool_policy(&self) -> &McpToolPolicy {
+        &self.mcp_tool_policy
     }
 
     #[must_use]
@@ -1052,6 +1171,33 @@ mod tests {
             registry.subset(["missing"]),
             Err(ToolError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn mcp_policy_accepts_only_exact_canonical_grants() {
+        let policy = McpToolPolicy::restricted([
+            "mcp:github/get_issue".to_owned(),
+            "mcp:github/search/code".to_owned(),
+        ])
+        .expect("exact grants");
+        assert!(policy.allows("github", "get_issue"));
+        assert!(policy.allows("github", "search/code"));
+        assert!(!policy.allows("github", "delete_issue"));
+        assert!(!policy.allows("other", "get_issue"));
+
+        for invalid in [
+            "mcp:github/*",
+            "mcp:*/get_issue",
+            "mcp:github/",
+            "mcp:/get_issue",
+            "MCP:github/get_issue",
+            "mcp:github/get issue",
+        ] {
+            assert!(
+                McpToolPolicy::restricted([invalid.to_owned()]).is_err(),
+                "{invalid} must fail closed"
+            );
+        }
     }
 
     #[test]

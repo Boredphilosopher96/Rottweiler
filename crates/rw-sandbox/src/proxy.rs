@@ -153,6 +153,7 @@ pub struct SupervisedEgressProxy {
     policy: Arc<Mutex<EgressPolicy>>,
     running: Arc<AtomicBool>,
     stopped: Arc<AtomicBool>,
+    denials: Arc<AtomicUsize>,
     worker: Mutex<Option<JoinHandle<()>>>,
     connection_workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
     clients: Arc<Mutex<BTreeMap<usize, TcpStream>>>,
@@ -171,6 +172,20 @@ pub struct SupervisedEgressProxy {
 #[derive(Clone, Debug)]
 pub struct ProxyLifecycle {
     stopped: Arc<AtomicBool>,
+}
+
+/// Cloneable monotonic observation of policy-denied egress attempts.
+#[derive(Clone, Debug)]
+pub struct ProxyDenials {
+    denials: Arc<AtomicUsize>,
+}
+
+impl ProxyDenials {
+    /// Number of requests rejected by the domain/private-address policy.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.denials.load(Ordering::Acquire)
+    }
 }
 
 impl ProxyLifecycle {
@@ -248,6 +263,7 @@ impl SupervisedEgressProxy {
         let running = Arc::new(AtomicBool::new(true));
         let stopped = Arc::new(AtomicBool::new(false));
         let active = Arc::new(AtomicUsize::new(0));
+        let denials = Arc::new(AtomicUsize::new(0));
         let next_connection = Arc::new(AtomicUsize::new(0));
         let connection_workers = Arc::new(Mutex::new(Vec::new()));
         let clients = Arc::new(Mutex::new(BTreeMap::new()));
@@ -267,6 +283,7 @@ impl SupervisedEgressProxy {
         let worker_connections = Arc::clone(&connection_workers);
         let worker_clients = Arc::clone(&clients);
         let worker_next_connection = Arc::clone(&next_connection);
+        let worker_denials = Arc::clone(&denials);
         let worker = thread::Builder::new()
             .name("rottweiler-egress-proxy".to_owned())
             .spawn(move || {
@@ -278,6 +295,7 @@ impl SupervisedEgressProxy {
                     &worker_running,
                     &active,
                     &worker_next_connection,
+                    &worker_denials,
                     &worker_connections,
                     &worker_clients,
                 );
@@ -317,6 +335,7 @@ impl SupervisedEgressProxy {
             policy,
             running,
             stopped,
+            denials,
             worker: Mutex::new(Some(worker)),
             connection_workers,
             clients,
@@ -364,6 +383,15 @@ impl SupervisedEgressProxy {
     pub fn lifecycle(&self) -> ProxyLifecycle {
         ProxyLifecycle {
             stopped: Arc::clone(&self.stopped),
+        }
+    }
+
+    /// Returns an observer suitable for a process supervisor. A denial is a
+    /// terminal capability violation when the owning manifest omitted network.
+    #[must_use]
+    pub fn denials(&self) -> ProxyDenials {
+        ProxyDenials {
+            denials: Arc::clone(&self.denials),
         }
     }
 
@@ -509,6 +537,7 @@ fn serve(
     running: &Arc<AtomicBool>,
     active: &Arc<AtomicUsize>,
     next_connection: &Arc<AtomicUsize>,
+    denials: &Arc<AtomicUsize>,
     workers: &Arc<Mutex<Vec<JoinHandle<()>>>>,
     clients: &Arc<Mutex<BTreeMap<usize, TcpStream>>>,
 ) {
@@ -533,6 +562,7 @@ fn serve(
                 let active_for_connection = Arc::clone(active);
                 let running = Arc::clone(running);
                 let clients_for_connection = Arc::clone(clients);
+                let denials = Arc::clone(denials);
                 let connection = next_connection.fetch_add(1, Ordering::Relaxed);
                 if let Ok(control) = stream.try_clone() {
                     clients
@@ -551,6 +581,7 @@ fn serve(
                             upstream_proxy.as_ref(),
                             &pins,
                             &running,
+                            &denials,
                         );
                         clients_for_connection
                             .lock()
@@ -613,6 +644,7 @@ fn handle_connection(
     upstream_proxy: Option<&UpstreamProxy>,
     pins: &BTreeMap<(String, u16), Vec<SocketAddr>>,
     running: &AtomicBool,
+    denials: &AtomicUsize,
 ) -> io::Result<()> {
     client.set_read_timeout(Some(Duration::from_secs(5)))?;
     client.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -633,6 +665,7 @@ fn handle_connection(
             policy,
             upstream_proxy,
             pins,
+            denials,
             method,
             authority,
             version,
@@ -643,7 +676,7 @@ fn handle_connection(
         write_response(&mut client, 400, "invalid-authority")?;
         return Ok(());
     };
-    let Some(addresses) = policy_resolve(&mut client, policy, pins, &host, port)? else {
+    let Some(addresses) = policy_resolve(&mut client, policy, pins, &host, port, denials)? else {
         return Ok(());
     };
     client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
@@ -667,6 +700,7 @@ fn policy_resolve(
     pins: &BTreeMap<(String, u16), Vec<SocketAddr>>,
     host: &str,
     port: u16,
+    denials: &AtomicUsize,
 ) -> io::Result<Option<Vec<SocketAddr>>> {
     let addresses = normalize_host(host)
         .and_then(|host| pins.get(&(host, port)).cloned())
@@ -687,10 +721,12 @@ fn policy_resolve(
     match decision {
         EgressDecision::Allowed => {}
         EgressDecision::ApprovalRequired => {
+            denials.fetch_add(1, Ordering::AcqRel);
             write_response(client, 403, "approval-required")?;
             return Ok(None);
         }
         EgressDecision::HardDenied => {
+            denials.fetch_add(1, Ordering::AcqRel);
             write_response(client, 403, "private-or-unresolved-target")?;
             return Ok(None);
         }
@@ -704,6 +740,7 @@ fn forward_plain_http(
     policy: &Mutex<EgressPolicy>,
     upstream_proxy: Option<&UpstreamProxy>,
     pins: &BTreeMap<(String, u16), Vec<SocketAddr>>,
+    denials: &AtomicUsize,
     method: &str,
     target: &str,
     version: &str,
@@ -726,7 +763,7 @@ fn forward_plain_http(
         return Ok(());
     };
     let port = url.port_or_known_default().unwrap_or(80);
-    let Some(addresses) = policy_resolve(&mut client, policy, pins, host, port)? else {
+    let Some(addresses) = policy_resolve(&mut client, policy, pins, host, port, denials)? else {
         return Ok(());
     };
     let Some(mut upstream) = connect_plain_target(&addresses, upstream_proxy)? else {

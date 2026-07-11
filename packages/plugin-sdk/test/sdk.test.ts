@@ -1,0 +1,655 @@
+import { describe, expect, test } from "bun:test"
+import { cpSync, readFileSync, readdirSync } from "node:fs"
+import { mkdtemp, readFile, rm, symlink } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
+import {
+  BoundedJsonWriter,
+  definePlugin,
+  LineTooLargeError,
+  UnterminatedLineError,
+  PluginServer,
+  PROTOCOL_LIMITS,
+  readBoundedLines,
+  readableStreamBytes,
+  renderTypeScriptScaffold,
+  RPC_METHODS,
+  scaffoldTypeScriptPlugin,
+  type JsonValue,
+  type PluginDefinition,
+  type RpcOutput,
+  type ServerTransport,
+} from "../src/index.ts"
+
+const encoder = new TextEncoder()
+const decoder = new TextDecoder()
+const initializeParams = {
+  host: "rottweiler",
+  protocol: 1,
+  min_protocol: 1,
+  max_frame_bytes: PROTOCOL_LIMITS.maxLineBytes,
+} as const
+
+const providerRequest: JsonValue = {
+  model: "model",
+  turns: [],
+  tools: [],
+  tool_choice: { mode: "auto" },
+  max_output_tokens: 64,
+  temperature: null,
+  thinking: "off",
+}
+
+function fixtureDefinition(secret = "handler-secret"): PluginDefinition {
+  return definePlugin({
+    manifest: {
+      name: "fixture",
+      version: "1.0.0",
+      protocol: 1,
+      capabilities: {
+        tools: [{ name: "echo", description: "echo", schema: { type: "object" }, caps: [] }],
+        commands: [{ name: "fixture", description: "fixture command" }],
+        hooks: [{ name: "pre_tool", failure_policy: "fail-closed" }],
+        providers: [{ "alias-prefix": "fixture/" }],
+        event_subscriptions: ["TurnFinished"],
+        push: ["ui/notify", "session/set_status"],
+      },
+    },
+    handlers: {
+      tools: {
+        echo: async ({ input }, { push }) => {
+          await push.notify("fixture", "called")
+          if (input.fail === true) throw new Error(secret)
+          return { content: JSON.stringify(input), data: input }
+        },
+      },
+      commands: { fixture: ({ arguments: args }) => ({ arguments: args }) },
+      hooks: { pre_tool: () => ({ decision: "deny", message: "fixture deny" }) },
+      providers: {
+        "fixture/": async function* ({ alias }) {
+          yield { type: "message_start", model: alias }
+          yield { type: "text_delta", text: alias }
+          yield { type: "finished", reason: "stop" }
+        },
+      },
+      events: { TurnFinished: async ({ payload }, { push }) => {
+        if (typeof payload.session_id === "string") await push.setStatus(payload.session_id, "done")
+      } },
+    },
+  })
+}
+
+function harness(definition = fixtureDefinition()): {
+  server: PluginServer
+  messages: JsonValue[]
+  errors: string[]
+} {
+  const messages: JsonValue[] = []
+  const errors: string[] = []
+  const output: RpcOutput = {
+    write(line) {
+      messages.push(JSON.parse(decoder.decode(line)) as JsonValue)
+    },
+  }
+  const transport: ServerTransport = {
+    input: (async function* () {})(),
+    output,
+    error: { write: (message) => errors.push(message) },
+  }
+  return { server: new PluginServer(definition, transport), messages, errors }
+}
+
+async function request(server: PluginServer, id: number, method: string, params?: JsonValue): Promise<void> {
+  await server.handleLine(JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) }))
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition timed out")
+    await Bun.sleep(1)
+  }
+}
+
+describe("wire protocol", () => {
+  test("exports the frozen canonical method table", () => {
+    expect(Object.isFrozen(RPC_METHODS)).toBe(true)
+    expect(RPC_METHODS).toEqual({
+      initialize: "initialize",
+      toolCall: "tool/call",
+      commandExecute: "command/execute",
+      hookInvoke: "hook/invoke",
+      providerComplete: "provider/complete",
+      providerEvent: "provider/event",
+      providerCancel: "provider/cancel",
+      eventPublish: "event/publish",
+      injectMessage: "session/inject_message",
+      setStatus: "session/set_status",
+      notify: "ui/notify",
+      shutdown: "shutdown",
+      exit: "exit",
+    })
+  })
+
+  test("matches the language-neutral protocol 1 wire fixture", async () => {
+    const fixture = JSON.parse(
+      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-1.json"), "utf8"),
+    ) as { methods: typeof RPC_METHODS }
+    expect(fixture.methods).toEqual(RPC_METHODS)
+  })
+
+  test("shared fixture matches the frozen schema constants and manifest contract", async () => {
+    const fixture = JSON.parse(
+      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-1.json"), "utf8"),
+    ) as { status: string; limits: Record<string, number>; initialize_response: { result: PluginDefinition["manifest"] } }
+    const schema = JSON.parse(
+      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-1.schema.json"), "utf8"),
+    ) as { properties: { status: { const: string }; limits: { properties: Record<string, { const: number }> } }; $defs: Record<string, unknown> }
+    expect(fixture.status).toBe(schema.properties.status.const)
+    for (const [name, value] of Object.entries(fixture.limits)) {
+      const schemaLimit = schema.properties.limits.properties[name]?.const
+      if (schemaLimit === undefined) throw new Error(`schema is missing limit ${name}`)
+      expect(value).toBe(schemaLimit)
+    }
+    expect(schema.$defs).toMatchObject({
+      manifest: expect.any(Object), tool_result: expect.any(Object), hook_result: expect.any(Object),
+      provider_request: expect.any(Object), provider_event_params: expect.any(Object),
+      provider_cancel_params: expect.any(Object),
+      inject_message_params: expect.any(Object), set_status_params: expect.any(Object), notify_params: expect.any(Object),
+    })
+    expect(() => definePlugin({
+      manifest: fixture.initialize_response.result,
+      handlers: { events: { TurnFinished: () => undefined } },
+    })).not.toThrow()
+  })
+
+  test("initializes and dispatches every declared request kind", async () => {
+    const { server, messages } = harness()
+    await request(server, 1, RPC_METHODS.initialize, initializeParams)
+    await request(server, 2, RPC_METHODS.toolCall, {
+      name: "echo", input: { value: 7 },
+    })
+    await request(server, 3, RPC_METHODS.commandExecute, {
+      name: "fixture", arguments: "hello",
+    })
+    await request(server, 4, RPC_METHODS.hookInvoke, {
+      hook: "pre_tool", payload: { name: "bash" },
+    })
+    await request(server, 5, RPC_METHODS.providerComplete, {
+      alias: "fixture/model", request: providerRequest,
+    })
+    await waitFor(() => messages.some((message) =>
+      typeof message === "object" && message !== null && "id" in message && message.id === 5
+    ))
+    await request(server, 6, RPC_METHODS.eventPublish, {
+      event: "TurnFinished", payload: { session_id: "s" },
+    })
+    expect(messages).toHaveLength(11)
+    expect(messages[0]).toMatchObject({ id: 1, result: { protocol: 1 } })
+    expect(messages[1]).toEqual({
+      jsonrpc: "2.0", id: "plugin-push-1", method: "ui/notify", params: { title: "fixture", message: "called" },
+    })
+    expect(messages[2]).toEqual({
+      jsonrpc: "2.0", id: 2, result: { content: '{"value":7}', data: { value: 7 } },
+    })
+    expect(messages.slice(5, 8)).toEqual([
+      { jsonrpc: "2.0", method: "provider/event", params: { request_id: 5, event: { type: "message_start", model: "fixture/model" } } },
+      { jsonrpc: "2.0", method: "provider/event", params: { request_id: 5, event: { type: "text_delta", text: "fixture/model" } } },
+      { jsonrpc: "2.0", method: "provider/event", params: { request_id: 5, event: { type: "finished", reason: "stop" } } },
+    ])
+    expect(messages[10]).toEqual({ jsonrpc: "2.0", id: 6, result: null })
+  })
+
+  test("runs the pre_tool deny and custom-tool conformance plugin over stdio", () => {
+    const lines = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams },
+      {
+        jsonrpc: "2.0", id: 2, method: "tool/call",
+        params: { name: "fixture_echo", input: { text: "hello" } },
+      },
+      {
+        jsonrpc: "2.0", id: 3, method: "hook/invoke",
+        params: { hook: "pre_tool", payload: { name: "bash" } },
+      },
+      { jsonrpc: "2.0", id: 4, method: "shutdown" },
+    ].map((line) => JSON.stringify(line)).join("\n") + "\n"
+    const child = Bun.spawnSync(
+      ["bun", join(import.meta.dir, "../fixtures/conformance/pre-tool-deny-custom-tool.ts")],
+      { stdin: encoder.encode(lines), stdout: "pipe", stderr: "pipe", timeout: 5_000, maxBuffer: 1024 * 1024 },
+    )
+    expect(child.exitCode).toBe(0)
+    expect(child.stderr.toString()).toBe("")
+    const responses = child.stdout.toString().trim().split("\n").map((line) => JSON.parse(line) as JsonValue)
+    expect(responses[1]).toEqual({
+      jsonrpc: "2.0", id: 2, result: { content: "hello", data: { text: "hello" } },
+    })
+    expect(responses[2]).toEqual({
+      jsonrpc: "2.0", id: 3,
+      result: { decision: "deny", message: "conformance policy denies bash" },
+    })
+  })
+
+  test("runs event and incrementally streamed provider conformance plugins over stdio", async () => {
+    const eventWire = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams },
+      { jsonrpc: "2.0", method: "event/publish", params: { event: "TurnFinished", payload: { session_id: "s" } } },
+      { jsonrpc: "2.0", id: 2, method: "shutdown", params: {} },
+    ].map((line) => JSON.stringify(line)).join("\n") + "\n"
+    const eventChild = Bun.spawnSync(
+      ["bun", join(import.meta.dir, "../fixtures/conformance/event-subscriber.ts")],
+      { stdin: encoder.encode(eventWire), stdout: "pipe", stderr: "pipe", timeout: 5_000 },
+    )
+    expect(eventChild.exitCode).toBe(0)
+    const eventResponses = eventChild.stdout.toString().trim().split("\n").map((line) => JSON.parse(line) as JsonValue)
+    expect(eventResponses[1]).toEqual({
+      jsonrpc: "2.0", id: "plugin-push-1", method: "session/set_status",
+      params: { session_id: "s", status: "turn complete" },
+    })
+
+    const providerWire = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams },
+      {
+        jsonrpc: "2.0", id: 2, method: "provider/complete",
+        params: { alias: "fixture/model", request: providerRequest },
+      },
+    ].map((line) => JSON.stringify(line)).join("\n") + "\n"
+    const providerChild = Bun.spawn(
+      ["bun", join(import.meta.dir, "../fixtures/conformance/provider.ts")],
+      { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+    )
+    providerChild.stdin.write(providerWire)
+    providerChild.stdin.flush()
+    const providerResponses: JsonValue[] = []
+    let firstDeltaAt: number | undefined
+    let completedAt: number | undefined
+    for await (const line of readBoundedLines(readableStreamBytes(providerChild.stdout))) {
+      const response = JSON.parse(line) as JsonValue
+      providerResponses.push(response)
+      if (typeof response === "object" && response !== null && !Array.isArray(response)) {
+        if (response.method === "provider/event") {
+          const params = response.params as { event?: { type?: string } } | undefined
+          if (params?.event?.type === "text_delta") firstDeltaAt = performance.now()
+        }
+        if (response.id === 2) {
+          completedAt = performance.now()
+          providerChild.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 3, method: "shutdown", params: {} })}\n`)
+          providerChild.stdin.end()
+        }
+        if (response.id === 3) break
+      }
+    }
+    expect(await providerChild.exited).toBe(0)
+    expect(firstDeltaAt).toBeNumber()
+    expect(completedAt).toBeNumber()
+    expect((completedAt ?? 0) - (firstDeltaAt ?? 0)).toBeGreaterThanOrEqual(50)
+    expect(providerResponses.filter((response) =>
+      typeof response === "object" && response !== null && !Array.isArray(response) && response.method === "provider/event"
+    )).toHaveLength(4)
+    expect(providerResponses.some((response) =>
+      typeof response === "object" && response !== null && !Array.isArray(response)
+        && response.id === 2 && response.result === null
+    )).toBe(true)
+  })
+
+  test("provider/cancel aborts and cleans the correlated producer", async () => {
+    let cleaned = false
+    const definition = definePlugin({
+      manifest: {
+        name: "cancel-provider", version: "1", protocol: 1,
+        capabilities: { providers: [{ "alias-prefix": "fixture/" }] },
+      },
+      handlers: { providers: {
+        "fixture/": async function* (_params, { signal }) {
+          try {
+            yield { type: "text_delta", text: "first" }
+            await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }))
+          } finally {
+            cleaned = true
+          }
+        },
+      } },
+    })
+    const { server, messages } = harness(definition)
+    await request(server, 1, RPC_METHODS.initialize, initializeParams)
+    await request(server, 2, RPC_METHODS.providerComplete, {
+      alias: "fixture/model", request: providerRequest,
+    })
+    await waitFor(() => messages.some((message) =>
+      typeof message === "object" && message !== null && !Array.isArray(message)
+        && message.method === RPC_METHODS.providerEvent
+    ))
+    await server.handleLine(JSON.stringify({
+      jsonrpc: "2.0", method: RPC_METHODS.providerCancel, params: { request_id: 2 },
+    }))
+    await waitFor(() => cleaned && messages.some((message) =>
+      typeof message === "object" && message !== null && !Array.isArray(message)
+        && message.id === 2 && "error" in message
+    ))
+    expect(cleaned).toBe(true)
+    expect(messages.filter((message) =>
+      typeof message === "object" && message !== null && !Array.isArray(message)
+        && message.method === RPC_METHODS.providerEvent
+    )).toHaveLength(1)
+  })
+
+  test("exercises the raw capability-violator host fixture", () => {
+    const wire = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: initializeParams },
+      { jsonrpc: "2.0", id: 2, method: "tool/call", params: { name: "escaped", input: {} } },
+    ].map((line) => JSON.stringify(line)).join("\n") + "\n"
+    const child = Bun.spawnSync(
+      ["bun", join(import.meta.dir, "../fixtures/conformance/capability-violator.ts")],
+      { stdin: encoder.encode(wire), stdout: "pipe", stderr: "pipe", timeout: 5_000 },
+    )
+    expect(child.exitCode).toBe(0)
+    const responses = child.stdout.toString().trim().split("\n").map((line) => JSON.parse(line) as JsonValue)
+    expect(responses[0]).toMatchObject({ result: { capabilities: {} } })
+    expect(responses[1]).toMatchObject({ result: { escaped: true } })
+  })
+
+  test("never serializes handler exceptions or secret-bearing stacks", async () => {
+    const secret = "CANARY_DO_NOT_LOG"
+    const { server, messages, errors } = harness(fixtureDefinition(secret))
+    await request(server, 1, RPC_METHODS.initialize, initializeParams)
+    await request(server, 2, RPC_METHODS.toolCall, {
+      name: "echo", input: { fail: true },
+    })
+    expect(JSON.stringify(messages)).not.toContain(secret)
+    expect(errors.join("")).not.toContain(secret)
+    expect(messages.at(-1)).toEqual({
+      jsonrpc: "2.0", id: 2, error: { code: -32603, message: "plugin handler failed" },
+    })
+  })
+
+  test("rejects calls before initialize and incompatible protocol", async () => {
+    const { server, messages } = harness()
+    await request(server, 1, RPC_METHODS.toolCall, {})
+    await request(server, 2, RPC_METHODS.initialize, { ...initializeParams, protocol: 2 })
+    expect(messages).toEqual([
+      { jsonrpc: "2.0", id: 1, error: { code: -32002, message: "plugin is not initialized" } },
+      { jsonrpc: "2.0", id: 2, error: { code: -32001, message: "unsupported plugin protocol" } },
+    ])
+  })
+
+  test("parse and unknown-method errors are JSON-RPC compliant", async () => {
+    const { server, messages } = harness()
+    await server.handleLine("{")
+    await request(server, 1, RPC_METHODS.initialize, initializeParams)
+    await request(server, 2, "no/such/method", {})
+    expect(messages[0]).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } })
+    expect(messages[2]).toEqual({ jsonrpc: "2.0", id: 2, error: { code: -32601, message: "method not found" } })
+  })
+
+  test("gracefully shuts down when aborted while input is idle", async () => {
+    let shutdowns = 0
+    const definition = definePlugin({
+      manifest: { name: "shutdown", version: "1", protocol: 1, capabilities: {} },
+      handlers: { shutdown: () => { shutdowns += 1 } },
+    })
+    const { server } = harness(definition)
+    const controller = new AbortController()
+    const idle = (async function* () { await new Promise<never>(() => undefined) })()
+    const serving = server.serve(idle, 1024, controller.signal)
+    controller.abort()
+    await serving
+    expect(shutdowns).toBe(1)
+  })
+
+  test("hard-bounds hung handlers and aborts their context signal", async () => {
+    let observedAbort = false
+    const definition = definePlugin({
+      manifest: {
+        name: "hung-handler", version: "1", protocol: 1,
+        capabilities: {
+          tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }],
+        },
+      },
+      handlers: {
+        tools: {
+          hang: (_params, { signal }) => new Promise<never>(() => {
+            signal.addEventListener("abort", () => { observedAbort = true }, { once: true })
+          }),
+        },
+      },
+    })
+    const messages: JsonValue[] = []
+    const transport: ServerTransport = {
+      input: (async function* () {})(),
+      output: { write: (line) => { messages.push(JSON.parse(decoder.decode(line)) as JsonValue) } },
+    }
+    const server = new PluginServer(definition, transport, 4096, 20)
+    await request(server, 1, RPC_METHODS.initialize, initializeParams)
+    const started = performance.now()
+    await request(server, 2, RPC_METHODS.toolCall, { name: "hang", input: {} })
+    expect(performance.now() - started).toBeLessThan(250)
+    expect(observedAbort).toBe(true)
+    expect(messages.at(-1)).toEqual({
+      jsonrpc: "2.0", id: 2, error: { code: -32004, message: "plugin handler timed out" },
+    })
+  })
+
+  test("cancels an in-flight handler during shutdown", async () => {
+    let observedAbort = false
+    const definition = definePlugin({
+      manifest: {
+        name: "abort-handler", version: "1", protocol: 1,
+        capabilities: { tools: [{ name: "hang", description: "hang", schema: {}, caps: [] }] },
+      },
+      handlers: { tools: { hang: (_params, { signal }) => new Promise<never>(() => {
+        signal.addEventListener("abort", () => { observedAbort = true }, { once: true })
+      }) } },
+    })
+    const { server, messages } = harness(definition)
+    await request(server, 1, RPC_METHODS.initialize, initializeParams)
+    const pending = request(server, 2, RPC_METHODS.toolCall, { name: "hang", input: {} })
+    await Bun.sleep(1)
+    await server.shutdown()
+    await pending
+    expect(observedAbort).toBe(true)
+    expect(messages.at(-1)).toEqual({
+      jsonrpc: "2.0", id: 2, error: { code: -32800, message: "plugin request cancelled" },
+    })
+  })
+
+  test("refuses undeclared pushes locally without emitting a push frame", async () => {
+    const definition = definePlugin({
+      manifest: {
+        name: "no-push", version: "1", protocol: 1,
+        capabilities: { tools: [{ name: "attempt", description: "attempt", schema: {}, caps: [] }] },
+      },
+      handlers: { tools: { attempt: async (_params, { push }) => {
+        await push.notify("x", "y")
+        return { content: "unreachable", data: null }
+      } } },
+    })
+    const { server, messages } = harness(definition)
+    await request(server, 1, RPC_METHODS.initialize, initializeParams)
+    await request(server, 2, RPC_METHODS.toolCall, { name: "attempt", input: {} })
+    expect(messages).toHaveLength(2)
+    expect(messages[1]).toEqual({
+      jsonrpc: "2.0", id: 2, error: { code: -32003, message: "push method is not declared" },
+    })
+  })
+})
+
+describe("bounded transport and manifests", () => {
+  test("reads fragmented UTF-8 newline frames", async () => {
+    async function* chunks() {
+      yield encoder.encode('{"text":"')
+      yield encoder.encode('🐕"}\r\n{"ok":true}\n')
+    }
+    const lines: string[] = []
+    for await (const line of readBoundedLines(chunks(), 64)) lines.push(line)
+    expect(lines).toEqual(['{"text":"🐕"}', '{"ok":true}'])
+  })
+
+  test("rejects oversized input and output", async () => {
+    async function* chunks() { yield encoder.encode("12345") }
+    await expect(async () => {
+      for await (const _line of readBoundedLines(chunks(), 4)) void _line
+    }).toThrow(LineTooLargeError)
+    const writer = new BoundedJsonWriter({ write() {} }, 8)
+    await expect(writer.write({ too: "large" })).rejects.toBeInstanceOf(LineTooLargeError)
+  })
+
+  test("rejects an unterminated final JSON-RPC line", async () => {
+    async function* chunks() { yield encoder.encode('{"jsonrpc":"2.0"}') }
+    await expect(async () => {
+      for await (const _line of readBoundedLines(chunks(), 64)) void _line
+    }).toThrow(UnterminatedLineError)
+  })
+
+  test("rejects undeclared handlers and unbounded manifests before startup", () => {
+    expect(() => definePlugin({
+      manifest: { name: "bad", version: "1", protocol: 1, capabilities: {} },
+      handlers: { tools: { escaped: () => ({ content: "escaped", data: null }) } },
+    })).toThrow("exceeds the manifest")
+    expect(() => definePlugin({
+      manifest: {
+        name: "x".repeat(PROTOCOL_LIMITS.maxNameBytes + 1),
+        version: "1", protocol: 1, capabilities: {},
+      },
+      handlers: {},
+    })).toThrow("plugin name")
+  })
+
+  test("matches Rust canonical manifest limits and names", () => {
+    expect(() => definePlugin({
+      manifest: { name: "version", version: "x".repeat(65), protocol: 1, capabilities: {} },
+      handlers: {},
+    })).toThrow("plugin version")
+    expect(() => definePlugin({
+      manifest: {
+        name: "event", version: "1", protocol: 1,
+        capabilities: { event_subscriptions: ["turnFinished"] },
+      },
+      handlers: { events: { turnFinished: () => undefined } },
+    })).toThrow("canonical event")
+    expect(() => definePlugin({
+      manifest: {
+        name: "provider", version: "1", protocol: 1,
+        capabilities: { providers: [{ "alias-prefix": "fixture" }] },
+      },
+      handlers: { providers: { fixture: async function* () { yield { type: "finished", reason: "stop" } } } },
+    })).toThrow("ending in /")
+
+    let schema: JsonValue = {}
+    for (let depth = 0; depth < 33; depth += 1) schema = { nested: schema }
+    expect(() => definePlugin({
+      manifest: {
+        name: "schema", version: "1", protocol: 1,
+        capabilities: {
+          tools: [{ name: "deep", description: "deep", schema: schema as never, caps: [] }],
+        },
+      },
+      handlers: { tools: { deep: () => ({ content: "deep", data: null }) } },
+    })).toThrow("size or depth")
+  })
+
+  test("locks the approved manifest and handler registry", () => {
+    const definition = fixtureDefinition()
+    expect(Object.isFrozen(definition)).toBe(true)
+    expect(Object.isFrozen(definition.manifest.capabilities)).toBe(true)
+    expect(Object.isFrozen(definition.handlers.tools)).toBe(true)
+  })
+})
+
+describe("scaffold", () => {
+  test("is deterministic and contains the conformance hook and custom tool", () => {
+    const first = renderTypeScriptScaffold({ name: "Policy Plugin" })
+    expect(first).toEqual(renderTypeScriptScaffold({ name: "Policy Plugin" }))
+    const source = first.find((file) => file.path === "src/index.ts")?.contents ?? ""
+    expect(source).toContain('name: "hello"')
+    expect(source).toContain('name: "pre_tool", failure_policy: "fail-closed"')
+    expect(first.some((file) => file.path === "manifest.json")).toBe(true)
+  })
+
+  test("matches the language-neutral canonical scaffold byte-for-byte", () => {
+    const rendered = new Map(renderTypeScriptScaffold({ name: "fixture" }).map((file) => [file.path, file.contents]))
+    const fixtureRoot = join(import.meta.dir, "../fixtures/scaffold")
+    for (const path of [
+      "package.json",
+      "tsconfig.json",
+      "manifest.json",
+      "src/index.ts",
+      "test/plugin.test.ts",
+      ".gitignore",
+    ]) {
+      const fixturePath = path === ".gitignore" ? "gitignore" : path
+      const expected = readFileSync(join(fixtureRoot, fixturePath), "utf8")
+        .replaceAll("__ROTTWEILER_PLUGIN_NAME__", "fixture")
+      expect(rendered.get(path), path).toBe(expected)
+    }
+  })
+
+  test("writes once by default and requires force to replace", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rottweiler-sdk-scaffold-"))
+    try {
+      await scaffoldTypeScriptPlugin(directory, { name: "fixture" })
+      expect(await readFile(join(directory, "src/index.ts"), "utf8")).toContain('name: "fixture"')
+      await expect(scaffoldTypeScriptPlugin(directory, { name: "fixture" })).rejects.toMatchObject({ code: "EEXIST" })
+      await scaffoldTypeScriptPlugin(directory, { name: "fixture", force: true })
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("preflights every target and refuses symlink replacement", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rottweiler-sdk-scaffold-link-"))
+    try {
+      await symlink(join(directory, "elsewhere"), join(directory, "package.json"))
+      await expect(scaffoldTypeScriptPlugin(directory, { force: true })).rejects.toThrow("symlink")
+      expect(await readFile(join(directory, "package.json"), "utf8").catch(() => "missing")).toBe("missing")
+    } finally {
+      await rm(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("failed builds clean their system-temp staging directory", () => {
+    const prefix = "rottweiler-plugin-sdk-build-"
+    const before = new Set(readdirSync(tmpdir()).filter((entry) => entry.startsWith(prefix)))
+    const failed = Bun.spawnSync(["bun", "run", "build.ts"], {
+      cwd: join(import.meta.dir, ".."),
+      env: { ...process.env, ROTTWEILER_SDK_TEST_FAIL_AFTER_STAGE: "1" },
+      stdout: "ignore",
+      stderr: "ignore",
+    })
+    expect(failed.exitCode).not.toBe(0)
+    const additions = readdirSync(tmpdir()).filter((entry) => entry.startsWith(prefix) && !before.has(entry))
+    expect(additions).toEqual([])
+  })
+
+  test("builds byte-identically from two checkout roots", async () => {
+    const roots = await Promise.all([
+      mkdtemp(join(tmpdir(), "rottweiler-sdk-repro-a-")),
+      mkdtemp(join(tmpdir(), "rottweiler-sdk-repro-b-")),
+    ])
+    const packageRoot = join(import.meta.dir, "..")
+    const copyInputs = ["build.ts", "package.json", "tsconfig.json", "tsconfig.build.json", "src"]
+    try {
+      for (const root of roots) {
+        for (const input of copyInputs) cpSync(join(packageRoot, input), join(root, input), { recursive: true })
+        await symlink(join(packageRoot, "node_modules"), join(root, "node_modules"), "dir")
+        const built = Bun.spawnSync(["bun", "run", "build.ts"], { cwd: root, stdout: "ignore", stderr: "pipe" })
+        expect(built.exitCode, built.stderr.toString()).toBe(0)
+      }
+      const snapshot = (root: string): Record<string, string> => {
+        const result: Record<string, string> = {}
+        const walk = (directory: string, prefix = "") => {
+          for (const entry of readdirSync(directory, { withFileTypes: true })) {
+            const relative = join(prefix, entry.name)
+            const absolute = join(directory, entry.name)
+            if (entry.isDirectory()) walk(absolute, relative)
+            else result[relative] = new Bun.CryptoHasher("sha256").update(readFileSync(absolute)).digest("hex")
+          }
+        }
+        walk(join(root, "dist"))
+        return result
+      }
+      expect(snapshot(roots[0]!)).toEqual(snapshot(roots[1]!))
+    } finally {
+      await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })))
+    }
+  })
+})

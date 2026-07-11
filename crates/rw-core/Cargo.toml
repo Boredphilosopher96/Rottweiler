@@ -9,10 +9,13 @@ rust-version.workspace = true
 [dependencies]
 async-trait = "0.1.89"
 blake3.workspace = true
+bytes = "1.11.1"
 getrandom.workspace = true
 futures-util = "0.3.31"
+http = "1.3.1"
 globset.workspace = true
 rw-context.workspace = true
+rmcp.workspace = true
 rw-ext.workspace = true
 rw-mcp.workspace = true
 rw-providers.workspace = true
@@ -23,6 +26,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true
+sse-stream = "0.2.4"
 tokio = { workspace = true, features = ["time"] }
 thiserror.workspace = true
 tracing.workspace = true
@@ -32,7 +36,10 @@ url.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+hyper.workspace = true
+hyper-util.workspace = true
 tempfile = "3.23"
+tower-service = "0.3.3"
 
 [lints]
 workspace = true

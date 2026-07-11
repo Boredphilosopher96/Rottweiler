@@ -100,6 +100,11 @@ const MAX_TOTAL_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_CAPTURED_SHELL_OUTPUT_BYTES: usize = 1024 * 1024;
 const MAX_APPROVAL_DIFF_BYTES: usize = 256 * 1024;
 const MAX_COMMAND_TOOL_FRAME_BYTES: usize = 256 * 1024;
+const MAX_PLUGIN_ID_BYTES: usize = 64;
+const MAX_PLUGIN_MESSAGE_BYTES: usize = 256 * 1024;
+const MAX_PLUGIN_STATUS_BYTES: usize = 16 * 1024;
+const MAX_PLUGIN_NOTIFICATION_TITLE_BYTES: usize = 64;
+const MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Debug)]
 struct PreparedUserMessage {
@@ -441,6 +446,20 @@ enum PendingEvent {
         content: String,
         attachments: Vec<StoredAttachment>,
     },
+    PluginMessageInjected {
+        plugin_id: String,
+        content: String,
+        queued: bool,
+    },
+    PluginStatusChanged {
+        plugin_id: String,
+        status: String,
+    },
+    UiNotification {
+        plugin_id: String,
+        title: String,
+        message: String,
+    },
     TextDelta {
         turn: u64,
         text: String,
@@ -769,6 +788,31 @@ impl PendingEvent {
                 position: u64::try_from(position).unwrap_or(u64::MAX),
                 content,
                 attachments,
+            },
+            Self::PluginMessageInjected {
+                plugin_id,
+                content,
+                queued,
+            } => EngineEvent::PluginMessageInjected {
+                meta,
+                plugin_id,
+                content,
+                queued,
+            },
+            Self::PluginStatusChanged { plugin_id, status } => EngineEvent::PluginStatusChanged {
+                meta,
+                plugin_id,
+                status,
+            },
+            Self::UiNotification {
+                plugin_id,
+                title,
+                message,
+            } => EngineEvent::UiNotification {
+                meta,
+                plugin_id,
+                title,
+                message,
             },
             Self::TextDelta { turn, text } => EngineEvent::TextDelta {
                 meta,
@@ -1302,6 +1346,32 @@ fn recovered_pending_event(
             content: content.clone(),
             attachments: attachments.clone(),
         },
+        EngineEvent::PluginMessageInjected {
+            plugin_id,
+            content,
+            queued,
+            ..
+        } => PendingEvent::PluginMessageInjected {
+            plugin_id: plugin_id.clone(),
+            content: content.clone(),
+            queued: *queued,
+        },
+        EngineEvent::PluginStatusChanged {
+            plugin_id, status, ..
+        } => PendingEvent::PluginStatusChanged {
+            plugin_id: plugin_id.clone(),
+            status: status.clone(),
+        },
+        EngineEvent::UiNotification {
+            plugin_id,
+            title,
+            message,
+            ..
+        } => PendingEvent::UiNotification {
+            plugin_id: plugin_id.clone(),
+            title: title.clone(),
+            message: message.clone(),
+        },
         EngineEvent::ConversationTurnCommitted {
             agent_turn, turn, ..
         } => PendingEvent::ConversationTurnCommitted {
@@ -1739,6 +1809,9 @@ pub fn project_session_events(
                     .or_default()
                     .push(content.clone());
             }
+            PendingEvent::PluginMessageInjected { .. }
+            | PendingEvent::PluginStatusChanged { .. }
+            | PendingEvent::UiNotification { .. } => {}
             PendingEvent::ConversationTurnCommitted { agent_turn, turn } => {
                 if let Some(compacted) = &mut compacted_conversation {
                     compacted.push((*agent_turn, turn.clone()));
@@ -3357,7 +3430,13 @@ impl SessionActorConfig {
         configured.workspace_root.clone_from(&generation.roots[0]);
         configured.additional_workspace_roots = generation.roots.iter().skip(1).cloned().collect();
         configured.workspace_generation = generation.generation;
-        configured.tools = Arc::clone(&generation.tools);
+        configured.tools = Arc::new(
+            generation
+                .tools
+                .as_ref()
+                .clone()
+                .with_mcp_tool_policy(self.tools.mcp_tool_policy().clone()),
+        );
         configured.hooks = Arc::clone(&generation.hooks);
         configured.commands = Arc::clone(&generation.commands);
         configured.permissions = Arc::clone(&generation.permissions);
@@ -3441,7 +3520,8 @@ impl SessionActor {
             std::iter::once(&config.workspace_root).chain(&config.additional_workspace_roots),
         )
         .map_err(|error| AgentLoopError::ToolContext(error.to_string()))?
-        .with_session_id(config.session_id.clone());
+        .with_session_id(config.session_id.clone())
+        .with_mcp_tool_policy(config.tools.mcp_tool_policy().clone());
         let (command_tx, command_rx) = mpsc::channel(64);
         let (event_tx, _) = broadcast::channel(config.event_capacity);
         let active_turn = Arc::new(AtomicU64::new(0));
@@ -3591,11 +3671,155 @@ pub struct SessionHandle {
     local_last_seen: Option<SequenceId>,
 }
 
+/// Opaque, plugin-scoped machine capability for one session actor.
+///
+/// This capability deliberately exposes only the three approved plugin push
+/// operations. It cannot dispatch client commands, acquire the driver lease,
+/// answer permissions, or interrupt a turn.
+#[derive(Clone)]
+pub struct PluginSessionCapability {
+    commands: mpsc::Sender<ActorCommand>,
+    plugin_id: String,
+}
+
+impl fmt::Debug for PluginSessionCapability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PluginSessionCapability")
+            .field("plugin_id", &self.plugin_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PluginSessionCapability {
+    /// Injects one plain user message through normal actor sequencing.
+    /// Slash-prefixed content remains a message and is never command-dispatched.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, or control-bearing input and a closed actor.
+    pub async fn inject_message(
+        &self,
+        content: impl Into<String>,
+    ) -> Result<MessageDisposition, AgentLoopError> {
+        let content = content.into();
+        validate_plugin_text("injected message", &content, MAX_PLUGIN_MESSAGE_BYTES)?;
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::PluginInjectMessage {
+                plugin_id: self.plugin_id.clone(),
+                content,
+                respond,
+            })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
+    /// Publishes bounded session status text without taking the driver lease.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, or control-bearing input, persistence failure,
+    /// and a closed actor.
+    pub async fn set_status(&self, status: impl Into<String>) -> Result<(), AgentLoopError> {
+        let status = status.into();
+        validate_plugin_text("plugin status", &status, MAX_PLUGIN_STATUS_BYTES)?;
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::PluginSetStatus {
+                plugin_id: self.plugin_id.clone(),
+                status,
+                respond,
+            })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
+    /// Publishes a bounded session-local UI notification.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, or control-bearing input, persistence failure,
+    /// and a closed actor.
+    pub async fn notify(
+        &self,
+        title: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Result<(), AgentLoopError> {
+        let title = title.into();
+        let message = message.into();
+        validate_plugin_text(
+            "notification title",
+            &title,
+            MAX_PLUGIN_NOTIFICATION_TITLE_BYTES,
+        )?;
+        validate_plugin_text(
+            "notification message",
+            &message,
+            MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES,
+        )?;
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::PluginNotify {
+                plugin_id: self.plugin_id.clone(),
+                title,
+                message,
+                respond,
+            })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+}
+
+fn validate_plugin_text(label: &str, value: &str, max_bytes: usize) -> Result<(), AgentLoopError> {
+    if value.is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
+        return Err(AgentLoopError::InvalidConfiguration(format!(
+            "{label} is empty, exceeds its byte limit, or contains control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_plugin_id(plugin_id: &str) -> Result<(), AgentLoopError> {
+    if plugin_id.is_empty()
+        || plugin_id.len() > MAX_PLUGIN_ID_BYTES
+        || !plugin_id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+    {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "plugin id must be a bounded canonical name".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 impl SessionHandle {
     /// Stable id of the session routed by this handle.
     #[must_use]
     pub const fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    /// Mints the narrow machine capability for one approved logical plugin.
+    /// The capability cannot access protocol dispatch or the driver lease.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical plugin id.
+    pub fn plugin_session_capability(
+        &self,
+        plugin_id: impl Into<String>,
+    ) -> Result<PluginSessionCapability, AgentLoopError> {
+        let plugin_id = plugin_id.into();
+        validate_plugin_id(&plugin_id)?;
+        Ok(PluginSessionCapability {
+            commands: self.commands.clone(),
+            plugin_id,
+        })
     }
 
     /// Current durable event-log tail used by host reconnect completion.
@@ -4048,6 +4272,22 @@ enum ActorCommand {
         shell_id: ShellId,
         status: i32,
         captured_output: Option<String>,
+        respond: oneshot::Sender<Result<(), AgentLoopError>>,
+    },
+    PluginInjectMessage {
+        plugin_id: String,
+        content: String,
+        respond: oneshot::Sender<Result<MessageDisposition, AgentLoopError>>,
+    },
+    PluginSetStatus {
+        plugin_id: String,
+        status: String,
+        respond: oneshot::Sender<Result<(), AgentLoopError>>,
+    },
+    PluginNotify {
+        plugin_id: String,
+        title: String,
+        message: String,
         respond: oneshot::Sender<Result<(), AgentLoopError>>,
     },
     SendMessage {
@@ -5465,6 +5705,87 @@ fn start_workspace_initialization(
     });
 }
 
+async fn handle_plugin_message(
+    plugin_id: String,
+    content: String,
+    state: &mut ActorState,
+    runtime: StartTurnRuntime<'_>,
+) -> Result<MessageDisposition, AgentLoopError> {
+    validate_plugin_id(&plugin_id)?;
+    validate_plugin_text("injected message", &content, MAX_PLUGIN_MESSAGE_BYTES)?;
+    if state.poisoned {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "session requires recovery before plugin message injection".to_owned(),
+        ));
+    }
+    if state.active_shell.is_some() {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "an agent turn cannot start while the foreground user shell is active".to_owned(),
+        ));
+    }
+    if state.initialization_running {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "workspace initialization is still running".to_owned(),
+        ));
+    }
+    let content = runtime.config.secret_redactor.redact(&content);
+    validate_plugin_text(
+        "redacted injected message",
+        &content,
+        MAX_PLUGIN_MESSAGE_BYTES,
+    )?;
+    let disposition = if state.running.is_some() {
+        state.queued.push_back(content.clone());
+        if let Err(error) = emit(
+            state,
+            runtime.events,
+            &runtime.config.event_sink,
+            PendingEvent::MessageQueued {
+                position: state.queued.len(),
+                content: content.clone(),
+                attachments: Vec::new(),
+            },
+        )
+        .await
+        {
+            state.queued.pop_back();
+            return Err(error);
+        }
+        MessageDisposition::Queued
+    } else {
+        start_turn(
+            state,
+            runtime.config,
+            runtime.tool_context,
+            runtime.signals,
+            runtime.events,
+            vec![(content.clone(), Vec::new())],
+            runtime.active_turn,
+        )
+        .await?;
+        MessageDisposition::Started
+    };
+    if let Err(error) = emit(
+        state,
+        runtime.events,
+        &runtime.config.event_sink,
+        PendingEvent::PluginMessageInjected {
+            plugin_id,
+            content,
+            queued: disposition == MessageDisposition::Queued,
+        },
+    )
+    .await
+    {
+        if let Some(running) = &state.running {
+            running.cancellation.cancel();
+        }
+        state.poisoned = true;
+        return Err(error);
+    }
+    Ok(disposition)
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_actor_command(
     command: ActorCommand,
@@ -6537,6 +6858,102 @@ async fn handle_actor_command(
             }
             state.transient_cause = None;
         }
+        ActorCommand::PluginInjectMessage {
+            plugin_id,
+            content,
+            respond,
+        } => {
+            let result = handle_plugin_message(
+                plugin_id,
+                content,
+                state,
+                StartTurnRuntime {
+                    config,
+                    tool_context,
+                    signals: turn_signals,
+                    events,
+                    active_turn,
+                },
+            )
+            .await;
+            let _ = respond.send(result);
+        }
+        ActorCommand::PluginSetStatus {
+            plugin_id,
+            status,
+            respond,
+        } => {
+            let result = async {
+                validate_plugin_id(&plugin_id)?;
+                validate_plugin_text("plugin status", &status, MAX_PLUGIN_STATUS_BYTES)?;
+                if state.poisoned {
+                    return Err(AgentLoopError::InvalidConfiguration(
+                        "session requires recovery before plugin status updates".to_owned(),
+                    ));
+                }
+                let status = config.secret_redactor.redact(&status);
+                validate_plugin_text("redacted plugin status", &status, MAX_PLUGIN_STATUS_BYTES)?;
+                emit(
+                    state,
+                    events,
+                    &config.event_sink,
+                    PendingEvent::PluginStatusChanged { plugin_id, status },
+                )
+                .await
+            }
+            .await;
+            let _ = respond.send(result);
+        }
+        ActorCommand::PluginNotify {
+            plugin_id,
+            title,
+            message,
+            respond,
+        } => {
+            let result = async {
+                validate_plugin_id(&plugin_id)?;
+                validate_plugin_text(
+                    "notification title",
+                    &title,
+                    MAX_PLUGIN_NOTIFICATION_TITLE_BYTES,
+                )?;
+                validate_plugin_text(
+                    "notification message",
+                    &message,
+                    MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES,
+                )?;
+                if state.poisoned {
+                    return Err(AgentLoopError::InvalidConfiguration(
+                        "session requires recovery before plugin notifications".to_owned(),
+                    ));
+                }
+                let title = config.secret_redactor.redact(&title);
+                let message = config.secret_redactor.redact(&message);
+                validate_plugin_text(
+                    "redacted notification title",
+                    &title,
+                    MAX_PLUGIN_NOTIFICATION_TITLE_BYTES,
+                )?;
+                validate_plugin_text(
+                    "redacted notification message",
+                    &message,
+                    MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES,
+                )?;
+                emit(
+                    state,
+                    events,
+                    &config.event_sink,
+                    PendingEvent::UiNotification {
+                        plugin_id,
+                        title,
+                        message,
+                    },
+                )
+                .await
+            }
+            .await;
+            let _ = respond.send(result);
+        }
         ActorCommand::SendMessage {
             content,
             attachments,
@@ -6815,9 +7232,11 @@ async fn handle_actor_command(
                                 }
                                 let replacement_context =
                                     match ToolContext::from_workspace_roots(&generation.roots) {
-                                        Ok(context) => {
-                                            context.with_session_id(config.session_id.clone())
-                                        }
+                                        Ok(context) => context
+                                            .with_session_id(config.session_id.clone())
+                                            .with_mcp_tool_policy(
+                                                config.tools.mcp_tool_policy().clone(),
+                                            ),
                                         Err(_error) => {
                                             let _ = config
                                                 .workspace_roots
@@ -17388,6 +17807,219 @@ mod tests {
             driver_events.recv().await.expect("old driver notification"),
             EngineEvent::DriverChanged { .. }
         ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
+        let root = TempDir::new().expect("tempdir");
+        let sink = Arc::new(RecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(PendingModel),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.event_sink = sink.clone();
+        actor_config.secret_redactor = Arc::new(CanarySecretRedactor);
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let session_id = SessionId("fixture-session".to_owned());
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AttachSession {
+                    meta: protocol_meta("tui", "attach-tui"),
+                    session_id: session_id.clone(),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                })
+                .await
+                .expect("attach TUI"),
+            CommandOutcome::Accepted
+        );
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SendMessage {
+                    meta: protocol_meta("tui", "start-turn"),
+                    session_id: session_id.clone(),
+                    content: "first".to_owned(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("start pending turn"),
+            CommandOutcome::Accepted
+        );
+
+        let plugin = handle
+            .plugin_session_capability("fixture-plugin")
+            .expect("plugin capability");
+        assert_eq!(
+            plugin
+                .inject_message("/help KNOWN_CANARY")
+                .await
+                .expect("queue injected message"),
+            MessageDisposition::Queued
+        );
+        plugin
+            .set_status("working KNOWN_CANARY")
+            .await
+            .expect("plugin status");
+        plugin
+            .notify("fixture", "notice KNOWN_CANARY")
+            .await
+            .expect("plugin notification");
+        assert_eq!(
+            handle
+                .snapshot()
+                .await
+                .expect("queued snapshot")
+                .queued_messages,
+            vec!["/help [REDACTED]"]
+        );
+
+        let before_denials = sink.events.lock().expect("events").len();
+        assert!(handle.plugin_session_capability("Invalid-Plugin").is_err());
+        assert!(
+            handle
+                .plugin_session_capability("x".repeat(MAX_PLUGIN_ID_BYTES.saturating_add(1)))
+                .is_err()
+        );
+        assert!(plugin.inject_message("bad\nmessage").await.is_err());
+        assert!(
+            plugin
+                .inject_message("x".repeat(MAX_PLUGIN_MESSAGE_BYTES.saturating_add(1)))
+                .await
+                .is_err()
+        );
+        assert!(plugin.set_status("bad\tstatus").await.is_err());
+        assert!(
+            plugin
+                .set_status("x".repeat(MAX_PLUGIN_STATUS_BYTES.saturating_add(1)))
+                .await
+                .is_err()
+        );
+        assert!(plugin.notify("bad\ntitle", "message").await.is_err());
+        assert!(
+            plugin
+                .notify(
+                    "x".repeat(MAX_PLUGIN_NOTIFICATION_TITLE_BYTES.saturating_add(1)),
+                    "message",
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            plugin
+                .notify(
+                    "title",
+                    "x".repeat(MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES.saturating_add(1)),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sink.events.lock().expect("events").len(),
+            before_denials,
+            "rejected inputs must never reach the actor log"
+        );
+
+        let wires = sink
+            .events
+            .lock()
+            .expect("events")
+            .iter()
+            .map(|event| event.wire.clone())
+            .collect::<Vec<_>>();
+        let queued = wires
+            .iter()
+            .position(|event| matches!(event, EngineEvent::MessageQueued { content, .. } if content == "/help [REDACTED]"))
+            .expect("queued event");
+        let injected = wires
+            .iter()
+            .position(|event| matches!(event, EngineEvent::PluginMessageInjected { plugin_id, content, queued: true, .. } if plugin_id == "fixture-plugin" && content == "/help [REDACTED]"))
+            .expect("injection audit event");
+        let status = wires
+            .iter()
+            .position(|event| matches!(event, EngineEvent::PluginStatusChanged { plugin_id, status, .. } if plugin_id == "fixture-plugin" && status == "working [REDACTED]"))
+            .expect("status event");
+        let notification = wires
+            .iter()
+            .position(|event| matches!(event, EngineEvent::UiNotification { plugin_id, title, message, .. } if plugin_id == "fixture-plugin" && title == "fixture" && message == "notice [REDACTED]"))
+            .expect("notification event");
+        assert!(queued < injected && injected < status && status < notification);
+        let first_sequence = wires[queued].meta().expect("queued metadata").sequence_id.0;
+        assert_eq!(
+            [queued, injected, status, notification].map(|index| wires[index]
+                .meta()
+                .expect("durable metadata")
+                .sequence_id
+                .0),
+            [
+                first_sequence,
+                first_sequence.saturating_add(1),
+                first_sequence.saturating_add(2),
+                first_sequence.saturating_add(3),
+            ]
+        );
+        assert!(
+            wires
+                .iter()
+                .all(|event| { !matches!(event, EngineEvent::DriverChanged { .. }) })
+        );
+        assert!(matches!(
+            wires.first(),
+            Some(EngineEvent::SessionCreated {
+                driver_client_id: ClientId(driver),
+                ..
+            }) if driver == "tui"
+        ));
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::Interrupt {
+                    meta: protocol_meta("tui", "interrupt-first"),
+                    session_id: session_id.clone(),
+                })
+                .await
+                .expect("interrupt first turn"),
+            CommandOutcome::Accepted
+        );
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let processed = sink.events.lock().expect("events").iter().any(|event| {
+                    matches!(
+                        &event.wire,
+                        EngineEvent::UserMessageAccepted { content, .. }
+                            if content == "/help [REDACTED]"
+                    )
+                });
+                if processed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queued injection must start through normal sequencing");
+        let final_wires = sink
+            .events
+            .lock()
+            .expect("events")
+            .iter()
+            .map(|event| event.wire.clone())
+            .collect::<Vec<_>>();
+        assert!(final_wires.iter().all(|event| {
+            !matches!(event, EngineEvent::CommandFinished { name, .. } if name == "help")
+        }));
+        let recovered = project_session_events(&final_wires).expect("project plugin events");
+        assert_eq!(recovered.driver_client_id, Some(ClientId("tui".to_owned())));
+
+        let _ = handle
+            .dispatch(ClientCommand::Interrupt {
+                meta: protocol_meta("tui", "interrupt-second"),
+                session_id,
+            })
+            .await;
     }
 
     #[tokio::test]
