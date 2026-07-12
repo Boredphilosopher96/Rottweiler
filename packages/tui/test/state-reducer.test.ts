@@ -16,6 +16,7 @@ import {
   MAX_TODO_CONTENT_BYTES,
   reduceRottweilerState,
   transportConnected,
+  transportDisconnected,
   type RottweilerState,
 } from "../src/state"
 import type { WireEngineEvent } from "../src/transport"
@@ -60,6 +61,35 @@ function childResult(
 }
 
 describe("pure TUI state reducer", () => {
+  test("drops connection-scoped provider auth challenges on disconnect", () => {
+    const pending = reduce(createInitialState(), {
+      type: "provider_auth_started",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client-auth",
+        request_id: "request-auth",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-state",
+      provider: "github_copilot",
+      attempt_id: "attempt-auth",
+      challenge: {
+        kind: "device_code",
+        verification_uri: "https://github.com/login/device",
+        user_code: "ABCD-EFGH",
+        expires_in_seconds: 900,
+        poll_interval_seconds: 5,
+      },
+      warnings: [],
+    })
+    expect(pending.providerAuth.pending?.attemptId).toBe("attempt-auth")
+    const disconnected = reduceRottweilerState(
+      pending,
+      transportDisconnected(1, "fixture disconnect"),
+    )
+    expect(disconnected.providerAuth.pending).toBeNull()
+  })
+
   test("retains command catalog truncation so the UI cannot imply completeness", () => {
     const state = reduce(createInitialState(), {
       type: "command_descriptors_listed",
@@ -106,6 +136,80 @@ describe("pure TUI state reducer", () => {
         toolCalling: true,
       },
     ])
+  })
+
+  test("projects the unique concrete current model before the first turn", () => {
+    const state = reduce(createInitialState(), {
+      type: "models_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client-current",
+        request_id: "request-current",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      models: [
+        {
+          alias: "openai/gpt-5-mini",
+          id: "openai/gpt-5-mini",
+          display_name: "GPT-5 mini",
+          provider: "openai",
+          providers: ["openai"],
+          aliases: ["fast"],
+          current: true,
+          available: true,
+          capabilities: {
+            tool_calling: true,
+            vision: true,
+            thinking: true,
+            cache_behavior: "none",
+          },
+        },
+      ],
+      aliases: [{ alias: "fast", candidates: ["openai/gpt-5-mini"], current: true }],
+      providers: [],
+    })
+    expect(state.model).toBe("openai/gpt-5-mini")
+    expect(state.provider).toBe("openai")
+  })
+
+  test("model catalog refresh does not overwrite a newer durable model event", () => {
+    const durable = reduce(createInitialState(), {
+      type: "model_changed",
+      meta: meta("1"),
+      model: "anthropic/claude-sonnet-4-5",
+      provider: "anthropic",
+    })
+    const refreshed = reduce(durable, {
+      type: "models_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client-current",
+        request_id: "request-current",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      models: [
+        {
+          alias: "openai/gpt-5-mini",
+          id: "openai/gpt-5-mini",
+          display_name: "GPT-5 mini",
+          provider: "openai",
+          providers: ["openai"],
+          aliases: ["fast"],
+          current: true,
+          available: true,
+          capabilities: {
+            tool_calling: true,
+            vision: true,
+            thinking: true,
+            cache_behavior: "none",
+          },
+        },
+      ],
+      aliases: [],
+      providers: [],
+    })
+    expect(refreshed.model).toBe("anthropic/claude-sonnet-4-5")
+    expect(refreshed.provider).toBe("anthropic")
   })
 
   test("projects only bounded successful todo tool snapshots", () => {

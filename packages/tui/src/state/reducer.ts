@@ -144,6 +144,7 @@ export function reduceRottweilerState(
     case "transport_disconnected":
       return {
         ...state,
+        providerAuth: { ...state.providerAuth, pending: null },
         connection: {
           ...state.connection,
           phase: state.connection.gap === null ? "disconnected" : "replaying",
@@ -154,6 +155,7 @@ export function reduceRottweilerState(
     case "transport_closed":
       return {
         ...state,
+        providerAuth: { ...state.providerAuth, pending: null },
         connection: { ...state.connection, phase: "closed", error: null },
       }
   }
@@ -339,8 +341,18 @@ function applyKnownEvent(
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
       }
     case "models_listed":
+      const currentModels = event.models.filter(
+        (model) => model.current === true && model.available !== false,
+      )
+      const currentModel = currentModels.length === 1 ? currentModels[0] : undefined
       return {
         ...state,
+        ...(state.model !== null || currentModel === undefined
+          ? {}
+          : {
+              model: currentModel.id ?? currentModel.alias,
+              provider: currentModel.provider ?? currentModel.providers?.[0] ?? null,
+            }),
         models: event.models.map((model) => ({
           alias: model.alias,
           ...(model.id === undefined ? {} : { id: model.id }),
