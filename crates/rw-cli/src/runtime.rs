@@ -1000,8 +1000,14 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         }
     }
     let execution_lease_path = workspace_execution_lease_path(&storage_root, &workspace)?;
+    // The event writer above already excludes a live process resuming this
+    // exact session. If a crashed process's command watchdog is the only
+    // remaining lease owner, wait for it to finish killing the command group
+    // before checkpoint recovery. Fresh sessions still fail fast when another
+    // Rottweiler instance owns the workspace.
+    let wait_for_execution_lease = resuming;
     let execution_lease = tokio::task::spawn_blocking(move || {
-        acquire_shared_execution_lease(&execution_lease_path, false)
+        acquire_shared_execution_lease(&execution_lease_path, wait_for_execution_lease)
     })
     .await
     .map_err(|error| miette!("execution lease worker failed: {error}"))?
