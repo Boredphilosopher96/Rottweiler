@@ -3374,7 +3374,7 @@ sys.exit(92)
         let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
         loop {
             let group_gone = rustix::process::test_kill_process_group(command_pid).is_err();
-            let watchdog_gone = rustix::process::test_kill_process(watchdog_pid).is_err();
+            let watchdog_gone = !test_process_is_running(watchdog_pid);
             if group_gone && watchdog_gone {
                 break;
             }
@@ -3456,7 +3456,7 @@ sys.exit(92)
             "lease released before command group disappearance"
         );
         assert!(
-            rustix::process::test_kill_process(watchdog_pid).is_err(),
+            !test_process_is_running(watchdog_pid),
             "lease released before watchdog exit"
         );
         drop(resumed_lease);
@@ -3501,6 +3501,26 @@ sys.exit(92)
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         rustix::process::Pid::from_raw(raw).expect("positive pid")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn test_process_is_running(pid: rustix::process::Pid) -> bool {
+        let stat = match std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero())) {
+            Ok(stat) => stat,
+            Err(_) => return false,
+        };
+        // The watchdog is orphaned when its executor is SIGKILLed. Linux can
+        // retain the exited process as a zombie until PID 1 reaps it, during
+        // which time kill(pid, 0) still reports success. The state is the first
+        // field after the final ')' because comm may contain spaces.
+        stat.rsplit_once(") ")
+            .and_then(|(_, fields)| fields.as_bytes().first().copied())
+            != Some(b'Z')
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn test_process_is_running(pid: rustix::process::Pid) -> bool {
+        rustix::process::test_kill_process(pid).is_ok()
     }
 
     #[test]
