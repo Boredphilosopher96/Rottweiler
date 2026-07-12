@@ -13,7 +13,10 @@ use std::{
 
 use async_trait::async_trait;
 use rw_core::SequenceId;
-use tokio::process::{Child, Command};
+use tokio::{
+    io::AsyncReadExt as _,
+    process::{Child, Command},
+};
 
 const SOCKET_ENV: &str = "ROTTWEILER_ENGINE_SOCKET";
 const TOKEN_FILE_ENV: &str = "ROTTWEILER_ENGINE_TOKEN_FILE";
@@ -23,6 +26,7 @@ const LAST_SEEN_FILE_ENV: &str = "ROTTWEILER_LAST_SEEN_FILE";
 const FORK_OPERATION_DIRECTORY_ENV: &str = "ROTTWEILER_FORK_OPERATION_DIRECTORY";
 const WAIT_FOR_EXECUTION_LEASE_ARG: &str = "--wait-for-execution-lease";
 const TUI_KEYBINDINGS_ENV: &str = "ROTTWEILER_TUI_KEYBINDINGS";
+const ENGINE_STDERR_TAIL_BYTES: usize = 16 * 1024;
 
 type ShellBrokerResult = Result<(), crate::shell_broker::ShellBrokerError>;
 type ShellBrokerTask = tokio::task::JoinHandle<ShellBrokerResult>;
@@ -32,6 +36,7 @@ type ShellBrokerReady = tokio::sync::oneshot::Receiver<Result<(), String>>;
 pub enum StdioMode {
     Inherit,
     Null,
+    CaptureStderr,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,7 +106,10 @@ pub enum SupervisorError {
 
 enum EngineStartOutcome {
     Ready(io::Result<()>),
-    Exited(io::Result<ExitStatus>),
+    Exited {
+        status: io::Result<ExitStatus>,
+        stderr_tail: Option<String>,
+    },
 }
 
 impl std::fmt::Display for SupervisorError {
@@ -159,6 +167,9 @@ pub enum ProcessSignal {
 #[async_trait]
 pub trait ManagedChild: Send + 'static {
     async fn wait(&mut self) -> io::Result<ExitStatus>;
+    async fn stderr_tail(&mut self) -> io::Result<Option<String>> {
+        Ok(None)
+    }
     fn signal_group(&self, signal: ProcessSignal) -> io::Result<()>;
 }
 
@@ -189,12 +200,23 @@ pub struct TokioManagedChild {
     child: Child,
     pid: Option<rustix::process::Pid>,
     process_group: Option<rustix::process::Pid>,
+    stderr_reader: Option<tokio::task::JoinHandle<io::Result<Vec<u8>>>>,
 }
 
 #[async_trait]
 impl ManagedChild for TokioManagedChild {
     async fn wait(&mut self) -> io::Result<ExitStatus> {
         self.child.wait().await
+    }
+
+    async fn stderr_tail(&mut self) -> io::Result<Option<String>> {
+        let Some(reader) = self.stderr_reader.take() else {
+            return Ok(None);
+        };
+        let bytes = reader
+            .await
+            .map_err(|error| io::Error::other(format!("stderr reader failed: {error}")))??;
+        Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
     }
 
     fn signal_group(&self, signal: ProcessSignal) -> io::Result<()> {
@@ -237,11 +259,35 @@ impl ProcessBackend for TokioProcessBackend {
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
             }
+            StdioMode::CaptureStderr => {
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped());
+            }
         }
         if spec.new_process_group {
             command.as_std_mut().process_group(0);
         }
-        let child = command.spawn()?;
+        let mut child = command.spawn()?;
+        let stderr_reader = child.stderr.take().map(|stderr| {
+            tokio::spawn(async move {
+                let mut stderr = stderr;
+                let mut tail = Vec::with_capacity(ENGINE_STDERR_TAIL_BYTES);
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    let read = stderr.read(&mut chunk).await?;
+                    if read == 0 {
+                        break;
+                    }
+                    tail.extend_from_slice(&chunk[..read]);
+                    if tail.len() > ENGINE_STDERR_TAIL_BYTES {
+                        tail.drain(..tail.len() - ENGINE_STDERR_TAIL_BYTES);
+                    }
+                }
+                Ok(tail)
+            })
+        });
         let pid = child
             .id()
             .and_then(|id| i32::try_from(id).ok())
@@ -251,6 +297,7 @@ impl ProcessBackend for TokioProcessBackend {
             child,
             pid,
             process_group,
+            stderr_reader,
         })
     }
 
@@ -581,7 +628,12 @@ impl<B: ProcessBackend> Supervisor<B> {
     async fn wait_for_engine_start(&self, engine: &mut B::Child) -> EngineStartOutcome {
         tokio::select! {
             biased;
-            exit = engine.wait() => EngineStartOutcome::Exited(exit),
+            status = engine.wait() => {
+                let stderr_tail = engine.stderr_tail().await.ok().flatten().map(|tail| {
+                    sanitize_engine_stderr(&tail, &self.config.token_file)
+                });
+                EngineStartOutcome::Exited { status, stderr_tail }
+            },
             readiness = self.backend.wait_ready(&self.config.socket, &self.config.token_file) => {
                 EngineStartOutcome::Ready(readiness)
             }
@@ -594,15 +646,27 @@ impl<B: ProcessBackend> Supervisor<B> {
     ) -> Result<(), SupervisorError> {
         match outcome {
             EngineStartOutcome::Ready(readiness) => readiness.map_err(SupervisorError::Readiness),
-            EngineStartOutcome::Exited(Ok(status)) => {
+            EngineStartOutcome::Exited {
+                status: Ok(status),
+                stderr_tail,
+            } => {
                 // wait() consumed this process. Relinquish cleanup ownership so
                 // a recycled PID/process-group id can never be signalled.
                 engine.take();
+                let detail = stderr_tail
+                    .filter(|tail| !tail.trim().is_empty())
+                    .map_or_else(
+                        || "; another Rottweiler process may already own this session".to_owned(),
+                        |tail| format!(": {}", tail.trim()),
+                    );
                 Err(SupervisorError::Readiness(io::Error::other(format!(
-                    "engine exited before authenticated readiness ({status}); another Rottweiler process may already own this session",
+                    "engine exited before authenticated readiness ({status}){detail}",
                 ))))
             }
-            EngineStartOutcome::Exited(Err(source)) => Err(SupervisorError::Wait {
+            EngineStartOutcome::Exited {
+                status: Err(source),
+                ..
+            } => Err(SupervisorError::Wait {
                 component: "engine",
                 source,
             }),
@@ -700,10 +764,31 @@ fn engine_spec(config: &SupervisorConfig) -> ChildSpec {
             // owning PTY. Production live-provider launches remain quiet.
             StdioMode::Inherit
         } else {
-            StdioMode::Null
+            StdioMode::CaptureStderr
         },
         new_process_group: true,
     }
+}
+
+fn sanitize_engine_stderr(value: &str, token_file: &Path) -> String {
+    let token = std::fs::read_to_string(token_file).ok();
+    let mut sanitized = token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map_or_else(
+            || value.to_owned(),
+            |token| value.replace(token, "[REDACTED]"),
+        );
+    sanitized.retain(|character| character == '\n' || character == '\t' || !character.is_control());
+    if sanitized.len() > ENGINE_STDERR_TAIL_BYTES {
+        let mut start = sanitized.len() - ENGINE_STDERR_TAIL_BYTES;
+        while !sanitized.is_char_boundary(start) {
+            start += 1;
+        }
+        sanitized = sanitized[start..].to_owned();
+    }
+    sanitized
 }
 
 fn tui_spec(config: &SupervisorConfig, last_seen: Option<SequenceId>) -> ChildSpec {
@@ -896,6 +981,7 @@ mod tests {
             engine_spec(&config).args,
             ["serve", "--max-turns", "32", "--permission-mode", "strict",].map(OsString::from)
         );
+        assert_eq!(engine_spec(&config).stdio, StdioMode::CaptureStderr);
     }
 
     #[test]
@@ -1027,6 +1113,7 @@ mod tests {
         wait_error_once: AtomicBool,
         terminated: AtomicBool,
         lifecycle: Arc<Mutex<Vec<String>>>,
+        stderr_tail: Option<String>,
     }
 
     #[async_trait]
@@ -1050,6 +1137,10 @@ mod tests {
                 .expect("lifecycle")
                 .push(format!("wait:{}", self.name));
             Ok(self.outcome.unwrap_or_else(|| ExitStatus::from_raw(0)))
+        }
+
+        async fn stderr_tail(&mut self) -> io::Result<Option<String>> {
+            Ok(self.stderr_tail.take())
         }
 
         fn signal_group(&self, signal: ProcessSignal) -> io::Result<()> {
@@ -1142,6 +1233,8 @@ mod tests {
                 wait_error_once: AtomicBool::new(wait_error_once),
                 terminated: AtomicBool::new(false),
                 lifecycle: Arc::clone(&self.lifecycle),
+                stderr_tail: matches!(self.scenario, Scenario::EngineStartupFailure)
+                    .then(|| "workspace authorization failed".to_owned()),
             })
         }
 
@@ -1305,10 +1398,55 @@ mod tests {
             run_scenario_with_config(Scenario::EngineStartupFailure, fixture_config()).await;
         let error = result.expect_err("startup must fail").to_string();
         assert!(error.contains("engine exited before authenticated readiness"));
+        assert!(error.contains("workspace authorization failed"));
         assert_eq!(specs.len(), 1);
         assert!(!lifecycle.iter().any(|event| event.contains("tui")));
         assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
         assert!(!lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn captured_stderr_is_drained_concurrently_bounded_and_tail_biased() {
+        let spec = ChildSpec {
+            program: PathBuf::from("/bin/sh"),
+            args: vec![
+                OsString::from("-c"),
+                OsString::from(
+                    "i=0; while [ $i -lt 20000 ]; do printf x >&2; i=$((i+1)); done; printf TAIL-SENTINEL >&2",
+                ),
+            ],
+            env: BTreeMap::new(),
+            stdio: StdioMode::CaptureStderr,
+            new_process_group: true,
+        };
+        let mut child = TokioProcessBackend.spawn(spec).await.expect("spawn");
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("stderr pipe must not deadlock")
+            .expect("wait");
+        assert!(status.success());
+        let tail = child
+            .stderr_tail()
+            .await
+            .expect("read stderr")
+            .expect("captured stderr");
+        assert!(tail.len() <= ENGINE_STDERR_TAIL_BYTES);
+        assert!(tail.ends_with("TAIL-SENTINEL"));
+    }
+
+    #[test]
+    fn engine_stderr_diagnostics_strip_control_bytes_and_bootstrap_token() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let token_file = directory.path().join("auth.token");
+        std::fs::write(&token_file, "top-secret-token\n").expect("token fixture");
+        let output = sanitize_engine_stderr(
+            "failure \u{1b}[31mtop-secret-token\u{7} details\n",
+            &token_file,
+        );
+        assert!(!output.contains("top-secret-token"));
+        assert!(!output.contains('\u{1b}'));
+        assert!(!output.contains('\u{7}'));
+        assert!(output.contains("[REDACTED]"));
     }
 
     #[tokio::test]
