@@ -17,6 +17,14 @@ mod symbols;
 mod web;
 mod worktree;
 
+#[cfg(all(test, unix))]
+pub(crate) async fn acquire_process_lifecycle_test_gate() -> tokio::sync::MutexGuard<'static, ()> {
+    static GATE: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await
+}
+
 pub use background::{
     BackgroundKillInput, BackgroundKillTool, BackgroundOutputInput, BackgroundOutputTool,
     BackgroundProcessLimits, BackgroundProcessManager, BackgroundProcessSnapshot,

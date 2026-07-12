@@ -73,8 +73,14 @@ def one(index):
         raise SystemExit(f"missing performance marker: {error}") from error
     return elapsed_ms, turn_ms
 
-# Warm executable pages and the deterministic fixture before collecting p99.
-one(-1)
+# A fat-LTO link leaves hosted Apple runners hot while macOS may still inspect
+# the newly installed executable. Use one fixed settle period and five fixed
+# fresh-process warmups, matching the M4 release-path policy. Measured results
+# are never retried or trimmed: all 500 samples still enforce the absolute
+# startup and turn budgets below.
+time.sleep(15 if sys.platform == "darwin" else 1)
+for index in range(-5, 0):
+    one(index)
 sample_count = int(os.environ.get("ROTTWEILER_PERF_SAMPLES", "500"))
 if sample_count < 100:
     raise SystemExit("ROTTWEILER_PERF_SAMPLES must be at least 100")

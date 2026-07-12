@@ -195,11 +195,15 @@ impl DirectoryIdentity {
 #[derive(Clone, Debug)]
 pub struct WorktreeIsolation {
     repository_root: PathBuf,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    repository_common_dir: PathBuf,
     private_root: PathBuf,
     limits: WorktreeLimits,
-    registry_gate: Arc<tokio::sync::Mutex<()>>,
+    registry_state: Arc<tokio::sync::OnceCell<WorktreeRegistryState>>,
+}
+
+#[derive(Debug)]
+struct WorktreeRegistryState {
+    common_dir: PathBuf,
+    process_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 struct WorktreeRegistryGuard {
@@ -375,15 +379,11 @@ impl WorktreeIsolation {
                 reported.display()
             )));
         }
-        let repository_common_dir = git_common_directory(&repository_root, &cancellation).await?;
-        let registry_gate = process_worktree_registry_gate(&repository_common_dir);
         Ok(Self {
             repository_root,
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            repository_common_dir,
             private_root,
             limits,
-            registry_gate,
+            registry_state: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
@@ -401,13 +401,23 @@ impl WorktreeIsolation {
         &self,
         cancellation: &CancellationToken,
     ) -> Result<WorktreeRegistryGuard, ToolError> {
+        let state = self
+            .registry_state
+            .get_or_try_init(|| async {
+                let common_dir = git_common_directory(&self.repository_root, cancellation).await?;
+                Ok::<_, ToolError>(WorktreeRegistryState {
+                    process_gate: process_worktree_registry_gate(&common_dir),
+                    common_dir,
+                })
+            })
+            .await?;
         let process = tokio::select! {
-            guard = Arc::clone(&self.registry_gate).lock_owned() => guard,
+            guard = Arc::clone(&state.process_gate).lock_owned() => guard,
             () = cancellation.cancelled() => return Err(ToolError::Cancelled),
         };
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let cross_process = {
-            let descriptor = open_worktree_registry_lock(&self.repository_common_dir)?;
+            let descriptor = open_worktree_registry_lock(&state.common_dir)?;
             loop {
                 match rustix::fs::flock(
                     &descriptor,
@@ -423,7 +433,7 @@ impl WorktreeIsolation {
                     Err(source) => {
                         return Err(ToolError::Io {
                             operation: "lock Git worktree registry",
-                            path: self.repository_common_dir.join(".rottweiler-worktree.lock"),
+                            path: state.common_dir.join(".rottweiler-worktree.lock"),
                             source: source.into(),
                         });
                     }
@@ -2082,12 +2092,22 @@ mod tests {
         let private_two = tempfile::tempdir().expect("second private tempdir");
         let first = isolation(repo.path(), private_one.path()).await;
         let second = isolation(repo.path(), private_two.path()).await;
-        assert!(Arc::ptr_eq(&first.registry_gate, &second.registry_gate));
+        assert!(first.registry_state.get().is_none());
+        assert!(second.registry_state.get().is_none());
 
         let existing = first
             .create(CancellationToken::default())
             .await
             .expect("existing lease");
+        assert!(first.registry_state.get().is_some());
+        assert!(second.registry_state.get().is_none());
+        drop(
+            second
+                .lock_registry(&CancellationToken::default())
+                .await
+                .expect("initialize second manager gate"),
+        );
+        assert!(second.registry_state.get().is_some());
         let held = first
             .lock_registry(&CancellationToken::default())
             .await
@@ -2664,6 +2684,8 @@ mod tests {
 
     #[tokio::test]
     async fn active_git_process_is_reaped_on_cancellation() {
+        #[cfg(unix)]
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let repo = repository();
         let input = vec![b'x'; 32 * 1024 * 1024];
         let cancellation = CancellationToken::default();

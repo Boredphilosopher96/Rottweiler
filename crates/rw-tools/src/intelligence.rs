@@ -676,6 +676,7 @@ mod tests {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn production_lsp_spawner_denies_writes_and_network_while_stdio_works() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         if rw_sandbox::probe().support != rw_sandbox::SandboxSupport::Enforced {
             return;
         }
@@ -780,6 +781,7 @@ if "TYPE_ERROR" in text:
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
     async fn lsp_handle_kills_and_reaps_the_complete_process_group() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         if rw_sandbox::probe().support != rw_sandbox::SandboxSupport::Enforced {
             return;
         }

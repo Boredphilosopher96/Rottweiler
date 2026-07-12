@@ -128,6 +128,7 @@ jobs:
       - run: crates/rw-cli/tests/perf_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
+          ROTTWEILER_PERF_SAMPLES: 500
       - run: crates/rw-cli/tests/m4_release_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m4.json

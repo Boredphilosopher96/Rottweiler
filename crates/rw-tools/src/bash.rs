@@ -1709,8 +1709,8 @@ printf 'ready\n' >&2
 if [ -n "$2" ]; then printf '%s\n' "$$" > "$2"; fi
 if IFS= read -r _; then exit 0; fi
 if [ -n "$3" ]; then while [ -e "$3" ]; do sleep 0.01; done; fi
-kill -KILL -- "-$1" 2>/dev/null || :
-while kill -0 -- "-$1" 2>/dev/null; do sleep 0.01; done
+kill -KILL "-$1" 2>/dev/null || :
+while kill -0 "-$1" 2>/dev/null; do sleep 0.01; done
 "#;
     let mut command = Command::new("/bin/sh");
     command
@@ -2345,6 +2345,7 @@ mod tests {
     async fn general_commands_do_not_source_login_or_shell_control_profiles() {
         use std::os::unix::fs::PermissionsExt as _;
 
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("root");
         let home = root.path().join("home");
         let trusted = root.path().join("trusted");
@@ -2424,6 +2425,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn sandboxed_eperm_and_explicit_unsandboxed_escape_have_distinct_boundaries() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temporary directory");
         let workspace = root.path().join("workspace");
         let scratch = root.path().join("scratch");
@@ -2506,6 +2508,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn sandboxed_executor_denies_network_even_for_safe_list_eligible_processes() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temporary directory");
         let workspace = root.path().join("workspace");
         let scratch = root.path().join("scratch");
@@ -2560,6 +2563,7 @@ sys.exit(92)
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn requested_domains_receive_one_command_scoped_proxy_only() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temporary directory");
         let workspace = root.path().join("workspace");
         let scratch = root.path().join("scratch");
@@ -2611,6 +2615,7 @@ sys.exit(92)
     async fn safe_listed_git_status_really_runs_inside_the_sandbox() {
         use std::os::unix::fs::PermissionsExt as _;
 
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temporary directory");
         let workspace = root.path().join("workspace");
         let scratch = root.path().join("scratch");
@@ -2994,6 +2999,7 @@ sys.exit(92)
     #[cfg(unix)]
     #[tokio::test]
     async fn cancellation_before_launch_gate_never_releases_the_command() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temp directory");
         let sentinel = root.path().join("must-not-run");
         let command = format!(
@@ -3047,6 +3053,7 @@ sys.exit(92)
     #[cfg(unix)]
     #[tokio::test]
     async fn process_group_cancellation_kills_a_descendant_holding_the_pipes() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temp directory");
         let descendant_pid_file = root.path().join("descendant.pid");
         let command = format!(
@@ -3123,6 +3130,7 @@ sys.exit(92)
     #[cfg(unix)]
     #[tokio::test]
     async fn real_executor_disarms_and_reaps_watchdog_on_normal_completion() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temp directory");
         let sink = Arc::new(RecordingSink::default());
         let outcome = TokioCommandExecutor::default()
@@ -3152,6 +3160,7 @@ sys.exit(92)
     #[cfg(unix)]
     #[tokio::test]
     async fn executor_waits_for_background_group_members_before_returning() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temp directory");
         let pid_file = root.path().join("background.pid");
         let outcome = TokioCommandExecutor::default()
@@ -3179,23 +3188,33 @@ sys.exit(92)
     #[cfg(unix)]
     #[tokio::test]
     async fn lease_descriptor_is_not_inherited_by_user_or_unrelated_commands() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temp directory");
         let lease = Arc::new(
             ExecutionLease::acquire(root.path().join("execution.lock")).expect("execution lease"),
         );
         let descriptor = lease.test_watchdog_raw_fd().to_string();
-        let probe = "if eval \"true <&$1\" 2>/dev/null; then exit 90; else exit 0; fi";
-        let unrelated = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg(probe)
-            .arg("lease-probe")
-            .arg(&descriptor)
+        let metadata = lease.file.metadata().expect("lease metadata");
+        let device = metadata.dev().to_string();
+        let inode = metadata.ino().to_string();
+        let executable = std::env::current_exe().expect("current test executable");
+        let unrelated = std::process::Command::new(&executable)
+            .arg("--exact")
+            .arg("bash::tests::lease_descriptor_probe_subprocess_helper")
+            .arg("--nocapture")
+            .env("ROTTWEILER_LEASE_PROBE_FD", &descriptor)
+            .env("ROTTWEILER_LEASE_PROBE_DEV", &device)
+            .env("ROTTWEILER_LEASE_PROBE_INO", &inode)
             .status()
             .expect("unrelated descriptor probe");
         assert!(unrelated.success(), "unrelated child inherited lease fd");
 
-        let user_probe =
-            format!("if eval \"true <&{descriptor}\" 2>/dev/null; then exit 90; else exit 0; fi");
+        let user_probe = format!(
+            "{} --exact bash::tests::lease_descriptor_probe_subprocess_helper --nocapture",
+            shell_words::quote(executable.to_string_lossy().as_ref())
+        );
         let outcome = TokioCommandExecutor::with_execution_lease(lease)
             .run(
                 CommandRequest {
@@ -3203,7 +3222,11 @@ sys.exit(92)
                     network_domains: Vec::new(),
                     command: user_probe,
                     cwd: root.path().to_path_buf(),
-                    env: BTreeMap::new(),
+                    env: BTreeMap::from([
+                        ("ROTTWEILER_LEASE_PROBE_FD".to_owned(), descriptor),
+                        ("ROTTWEILER_LEASE_PROBE_DEV".to_owned(), device),
+                        ("ROTTWEILER_LEASE_PROBE_INO".to_owned(), inode),
+                    ]),
                 },
                 CancellationToken::default(),
                 Arc::new(crate::NoopOutputSink),
@@ -3211,6 +3234,31 @@ sys.exit(92)
             .await
             .expect("user command descriptor probe");
         assert_eq!(outcome.exit_code, 0, "user command inherited lease fd");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lease_descriptor_probe_subprocess_helper() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let Some(descriptor) = std::env::var_os("ROTTWEILER_LEASE_PROBE_FD") else {
+            return;
+        };
+        let expected_device = std::env::var("ROTTWEILER_LEASE_PROBE_DEV")
+            .expect("expected lease device")
+            .parse::<u64>()
+            .expect("numeric lease device");
+        let expected_inode = std::env::var("ROTTWEILER_LEASE_PROBE_INO")
+            .expect("expected lease inode")
+            .parse::<u64>()
+            .expect("numeric lease inode");
+        let inherited = std::fs::metadata(format!("/dev/fd/{}", descriptor.to_string_lossy()))
+            .is_ok_and(|metadata| {
+                metadata.dev() == expected_device && metadata.ino() == expected_inode
+            });
+        if inherited {
+            std::process::exit(90);
+        }
     }
 
     #[cfg(unix)]
@@ -3252,6 +3300,7 @@ sys.exit(92)
     #[cfg(unix)]
     #[tokio::test]
     async fn sigkill_of_executor_parent_kills_group_and_prevents_delayed_side_effects() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temp directory");
         let ready = root.path().join("command.pid");
         let watchdog_pid_file = root.path().join("watchdog.pid");
@@ -3307,6 +3356,7 @@ sys.exit(92)
     #[cfg(unix)]
     #[tokio::test]
     async fn watchdog_lease_blocks_resumer_until_killed_group_is_absent() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("temp directory");
         let lease_path = root.path().join("execution.lock");
         let pause = root.path().join("pause-watchdog");

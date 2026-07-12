@@ -1184,6 +1184,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn session_shutdown_kills_and_reaps_command_descendants() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("root");
         let policy = Arc::new(
             crate::SandboxPolicy::new([root.path()], crate::NetworkPolicy::Deny)
@@ -1196,32 +1197,40 @@ mod tests {
         let session = SessionId("descendants".to_owned());
         let started = manager
             .start(
+                // The configured executor advertises real supervised-background
+                // support. This fixture exercises process-group ownership only,
+                // so the request deliberately bypasses sandbox-helper composition;
+                // native sandbox enforcement has separate acceptance coverage.
                 Arc::new(TokioCommandExecutor::default().sandboxed(policy)),
                 &session,
                 CommandRequest {
-                    sandbox: BashSandboxMode::ReadOnly,
+                    sandbox: BashSandboxMode::Unsandboxed,
                     ..request(root.path(), "sleep 60 & echo CHILD:$!; wait")
                 },
             )
             .expect("start");
         let mut child_pid = None;
         for _ in 0..200 {
-            child_pid = manager
+            let (snapshot, chunks) = manager
                 .output(&session, &started.process_id, None)
-                .ok()
-                .and_then(|(_, chunks)| {
-                    chunks.into_iter().find_map(|chunk| {
-                        chunk
-                            .content
-                            .split("CHILD:")
-                            .nth(1)
-                            .and_then(|value| value.lines().next())
-                            .and_then(|value| value.trim().parse::<i32>().ok())
-                    })
-                });
+                .expect("background process output");
+            let rendered = chunks
+                .iter()
+                .map(|chunk| chunk.content.as_str())
+                .collect::<String>();
+            child_pid = rendered
+                .split("CHILD:")
+                .nth(1)
+                .and_then(|value| value.lines().next())
+                .and_then(|value| value.trim().parse::<i32>().ok());
             if child_pid.is_some() {
                 break;
             }
+            assert!(
+                snapshot.status.running(),
+                "background command completed before publishing its child pid: status={:?}, output={rendered:?}",
+                snapshot.status
+            );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let pid = child_pid.expect("nonempty numeric child pid before deadline");
@@ -1240,6 +1249,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn delayed_background_writer_is_denied_by_read_only_sandbox() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         let root = tempdir().expect("root");
         let policy = Arc::new(
             crate::SandboxPolicy::new([root.path()], crate::NetworkPolicy::Deny)
