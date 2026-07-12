@@ -129,10 +129,15 @@ display names, capabilities, alias membership, availability/current selection,
 and provider rows containing only a display name, sanitized auth interaction
 kind, boolean auth/reachability state, and model count. This lets `/models`,
 `/providers`, and quick-connect flows work without teaching the TUI provider
-wire formats. Provider configuration, endpoints, proxy settings, credential
-references or values, account identifiers, raw transport errors, and route
-implementation details remain inside `rw-providers`. Status strings crossing
-the protocol are category-only and size-bounded.
+wire formats. Provider configuration, configured inference/token/discovery
+endpoints, proxy settings, credential references or values, account identifiers,
+raw transport errors, and route implementation details remain inside Rust.
+During an explicit login only, a bounded authorization/verification URL,
+loopback redirect URI, and one-time device user code may cross as an ephemeral
+connection-scoped challenge because the user must act on them. Challenges are
+never durable events: session/control logs, provider recordings, replay,
+exports, and reconnect gaps must not retain them. Status strings crossing the
+protocol are category-only and size-bounded.
 
 Engine events share one delivery channel, but have two explicit scopes.
 `CommandAcknowledged` is a connection-scoped control event with a request id,

@@ -873,25 +873,31 @@ impl ModelCatalogSource for ProviderRuntime {
             .map(|(name, provider)| (name.clone(), Arc::clone(provider)))
             .collect::<Vec<_>>();
         let discovery_timeout = self.model_discovery_timeout;
-        let pending = futures_util::stream::FuturesUnordered::new();
-        for (provider_name, provider) in providers {
-            let candidate = discovery_candidate(&self.config, &provider_name);
-            pending.push(async move {
-                let discovery = tokio::time::timeout(discovery_timeout, provider.discover_models())
-                    .await
-                    .map_err(|_| "model discovery timed out".to_owned())
-                    .and_then(|result| {
-                        result.map_err(|error| provider_discovery_status(&error).to_owned())
-                    })
-                    .and_then(|catalog| {
-                        catalog.ok_or_else(|| {
-                            "provider does not expose live model discovery".to_owned()
-                        })
-                    });
-                (provider_name, candidate, true, discovery)
-            });
-        }
-        let discoveries = pending.collect::<Vec<_>>().await;
+        let pending = providers
+            .into_iter()
+            .map(|(provider_name, provider)| {
+                let candidate = discovery_candidate(&self.config, &provider_name);
+                async move {
+                    let discovery =
+                        tokio::time::timeout(discovery_timeout, provider.discover_models())
+                            .await
+                            .map_err(|_| "model discovery timed out".to_owned())
+                            .and_then(|result| {
+                                result.map_err(|error| provider_discovery_status(&error).to_owned())
+                            })
+                            .and_then(|catalog| {
+                                catalog.ok_or_else(|| {
+                                    "provider does not expose live model discovery".to_owned()
+                                })
+                            });
+                    (provider_name, candidate, true, discovery)
+                }
+            })
+            .collect::<Vec<_>>();
+        let discoveries = futures_util::stream::iter(pending)
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
         Ok(project_model_catalog(
             &self.config,
             &self.pricing_table,
@@ -1251,86 +1257,12 @@ where
 
         // Authentication and proxy state is endpoint-scoped, not model-scoped.
         // Sharing one refresh source prevents concurrent model adapters from
-        // racing refresh-token rotation or duplicating token exchanges.
+        // racing refresh-token rotation or duplicating token exchanges. Each
+        // provider composes independently so a broken first candidate cannot
+        // suppress a later healthy route in the same alias chain.
         let mut connections = BTreeMap::new();
-        for (provider_name, _) in unique_candidates.values() {
-            if connections.contains_key(provider_name) {
-                continue;
-            }
-            if extension_providers.contains_key(&format!("{provider_name}/")) {
-                continue;
-            }
-            let provider_config = config.providers.get(provider_name).ok_or_else(|| {
-                ProviderFactoryError::new(
-                    provider_name,
-                    "model candidate references an unconfigured provider",
-                )
-            })?;
-            let kind = AdapterKind::parse(provider_name, &provider_config.kind)?;
-            let endpoint = resolve_endpoint(provider_name, provider_config, kind)?;
-            let proxy = proxies.resolve(provider_name, &endpoint);
-            let proxy_authentication = self.resolve_proxy_authentication(
-                provider_name,
-                provider_config,
-                &config.network,
-                proxy.as_ref().map(|resolution| resolution.source),
-                &redactor,
-                &warnings,
-            )?;
-            let auth = if kind == AdapterKind::OpenAiSubscription {
-                self.resolve_openai_subscription_auth(
-                    provider_name,
-                    provider_config,
-                    proxy.as_ref().map(|value| &value.url),
-                    proxy_authentication.as_ref(),
-                    &redactor,
-                    &warnings,
-                )?
-            } else if kind == AdapterKind::GitHubCopilot {
-                Arc::new(StaticAuth::new(AuthMaterial::None)) as Arc<dyn AuthProvider>
-            } else {
-                self.resolve_auth(
-                    provider_name,
-                    provider_config,
-                    kind,
-                    &endpoint,
-                    proxy.as_ref().map(|value| &value.url),
-                    proxy_authentication.as_ref(),
-                    &redactor,
-                    &warnings,
-                )?
-            };
-            let copilot_runtime = if kind == AdapterKind::GitHubCopilot {
-                Some(self.resolve_github_copilot_runtime(
-                    provider_name,
-                    provider_config,
-                    proxy.as_ref().map(|value| &value.url),
-                    proxy_authentication.as_ref(),
-                    &redactor,
-                    &warnings,
-                )?)
-            } else {
-                None
-            };
-            connections.insert(
-                provider_name.clone(),
-                ProviderConnection {
-                    kind,
-                    endpoint,
-                    auth,
-                    copilot_runtime,
-                    proxy: proxy.map(|value| value.url),
-                    proxy_authentication,
-                },
-            );
-        }
-        // Configured-but-unaliased providers remain available to the live
-        // catalog and concrete picker. Their composition failure is isolated
-        // so an unused credential cannot break an otherwise valid session.
         for (provider_name, provider_config) in &config.providers {
-            if connections.contains_key(provider_name)
-                || extension_providers.contains_key(&format!("{provider_name}/"))
-            {
+            if extension_providers.contains_key(&format!("{provider_name}/")) {
                 continue;
             }
             let resolved: Result<ProviderConnection, ProviderFactoryError> = (|| {
@@ -1447,9 +1379,12 @@ where
                 );
                 continue;
             }
-            let connection = connections.get(provider_name).ok_or_else(|| {
-                ProviderFactoryError::new(provider_name, "provider connection is inconsistent")
-            })?;
+            let Some(connection) = connections.get(provider_name) else {
+                warnings.extend([format!(
+                    "model candidate {candidate:?} is unavailable because provider {provider_name:?} could not be composed"
+                )]);
+                continue;
+            };
             let kind = connection.kind;
             let (catalog_model, pricing) = if kind == AdapterKind::GitHubCopilot {
                 (None, None)
@@ -1462,10 +1397,10 @@ where
                 )
             };
             if kind == AdapterKind::OpenAiSubscription && !subscription_model_allowed(model) {
-                return Err(ProviderFactoryError::new(
-                    provider_name,
-                    "model is not in the conservative ChatGPT subscription allowlist",
-                ));
+                warnings.extend([format!(
+                    "model candidate {candidate:?} is outside the conservative ChatGPT subscription allowlist"
+                )]);
+                continue;
             }
             let supported_thinking = if kind == AdapterKind::OpenAiSubscription {
                 vec![
@@ -1501,7 +1436,7 @@ where
                 _ if pricing.is_some() => UsageAccounting::ApiDollars,
                 _ => UsageAccounting::UnpricedApi,
             };
-            let inner = construct_adapter(
+            let inner = match construct_adapter(
                 candidate,
                 kind,
                 connection.endpoint.clone(),
@@ -1512,7 +1447,16 @@ where
                 self.network_policy,
                 &capabilities,
                 &supported_thinking,
-            )?;
+            ) {
+                Ok(inner) => inner,
+                Err(error) => {
+                    warnings.extend([format!(
+                        "model candidate {candidate:?} could not be composed: {}",
+                        error.reason
+                    )]);
+                    continue;
+                }
+            };
             let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
                 inner,
                 name: candidate.clone(),
@@ -1550,14 +1494,31 @@ where
         for (alias, candidates) in &config.models.aliases {
             let routed = candidates
                 .iter()
-                .map(|candidate| {
-                    let registration = registration_keys.get(candidate).ok_or_else(|| {
-                        ProviderFactoryError::new("models", "candidate registry is inconsistent")
-                    })?;
-                    let model = &unique_candidates[candidate].1;
-                    Ok(format!("{registration}/{model}"))
+                .filter_map(|candidate| {
+                    let registration = registration_keys.get(candidate)?;
+                    let model = &unique_candidates.get(candidate)?.1;
+                    Some(format!("{registration}/{model}"))
                 })
-                .collect::<Result<Vec<_>, ProviderFactoryError>>()?;
+                .collect::<Vec<_>>();
+            if routed.is_empty() {
+                if let Some((provider_name, _)) = candidates
+                    .iter()
+                    .filter_map(|candidate| unique_candidates.get(candidate))
+                    .find(|(provider_name, _)| {
+                        !config.providers.contains_key(provider_name)
+                            && !extension_providers.contains_key(&format!("{provider_name}/"))
+                    })
+                {
+                    return Err(ProviderFactoryError::new(
+                        provider_name,
+                        "model candidate references an unconfigured provider",
+                    ));
+                }
+                return Err(ProviderFactoryError::new(
+                    "models",
+                    format!("model alias {alias:?} has no usable provider route"),
+                ));
+            }
             router_aliases.insert(alias.clone(), routed);
         }
         let router = ProviderRouter::with_registry(router_aliases, registry, self.retry.clone())
@@ -2356,7 +2317,8 @@ impl Provider for ModelBoundProvider {
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         self.validate(&request)?;
-        self.inner.stream(request).await
+        let stream = self.inner.stream(request).await?;
+        Ok(qualify_bound_message_start(stream, self.name.clone()))
     }
 
     async fn stream_with_wire_sink(
@@ -2365,8 +2327,24 @@ impl Provider for ModelBoundProvider {
         sink: Arc<dyn WireFrameSink>,
     ) -> Result<BoxEventStream, ProviderError> {
         self.validate(&request)?;
-        self.inner.stream_with_wire_sink(request, sink).await
+        let stream = self.inner.stream_with_wire_sink(request, sink).await?;
+        Ok(qualify_bound_message_start(stream, self.name.clone()))
     }
+}
+
+fn qualify_bound_message_start(mut stream: BoxEventStream, candidate: String) -> BoxEventStream {
+    Box::pin(async_stream::try_stream! {
+        while let Some(event) = stream.next().await {
+            match event? {
+                rw_providers::ProviderEvent::MessageStart { .. } => {
+                    yield rw_providers::ProviderEvent::MessageStart {
+                        model: candidate.clone(),
+                    };
+                }
+                event => yield event,
+            }
+        }
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

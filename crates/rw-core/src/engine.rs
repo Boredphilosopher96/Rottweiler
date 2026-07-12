@@ -12688,6 +12688,19 @@ mod tests {
                 currency: "USD".to_owned(),
             }
         }
+
+        fn qualified_model_for_route(
+            &self,
+            _alias: &str,
+            route: Option<&str>,
+            _reported_model: Option<&str>,
+        ) -> Option<String> {
+            match route {
+                Some("__model_cheap") => Some("cheap/shared-model-id".to_owned()),
+                Some("__model_expensive") => Some("expensive/shared-model-id".to_owned()),
+                _ => None,
+            }
+        }
     }
 
     struct DelayedSummaryModel;
@@ -20239,6 +20252,17 @@ mod tests {
                 ..
             })
         ));
+        assert!(cheap.iter().any(|event| matches!(
+            &event.kind,
+            PendingEvent::ConversationTurnCommitted {
+                turn: Turn {
+                    role: Role::Assistant,
+                    meta: TurnMeta { model: Some(model), .. },
+                    ..
+                },
+                ..
+            } if model == "cheap/shared-model-id"
+        )));
 
         let (expensive, expensive_requests) = run("__model_expensive").await;
         assert_eq!(expensive_requests, 1);
@@ -20262,6 +20286,17 @@ mod tests {
                 ..
             })
         ));
+        assert!(expensive.iter().any(|event| matches!(
+            &event.kind,
+            PendingEvent::ConversationTurnCommitted {
+                turn: Turn {
+                    role: Role::Assistant,
+                    meta: TurnMeta { model: Some(model), .. },
+                    ..
+                },
+                ..
+            } if model == "expensive/shared-model-id"
+        )));
     }
 
     #[tokio::test]

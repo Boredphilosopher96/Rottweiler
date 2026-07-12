@@ -42,6 +42,26 @@ struct ExtensionFixtureProvider {
     metadata: Option<ProviderModelMetadata>,
 }
 
+struct StartFailProvider;
+
+#[async_trait]
+impl Provider for StartFailProvider {
+    fn name(&self) -> &'static str {
+        "private-start-failure"
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        extension_capabilities()
+    }
+
+    async fn stream(&self, _request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        Err(ProviderError::new(
+            ProviderErrorKind::Server,
+            "fixture start failure",
+        ))
+    }
+}
+
 #[async_trait]
 impl Provider for ExtensionFixtureProvider {
     fn name(&self) -> &str {
@@ -854,6 +874,76 @@ async fn explicit_provider_route_excludes_other_alias_candidates() {
             .stream_alias_provider("fast", "missing", request("ignored"))
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn alias_fallback_message_start_uses_exact_provider_qualified_candidate() {
+    let mut config = extension_config("alpha/model-a");
+    config.models.aliases.insert(
+        "fast".to_owned(),
+        vec!["alpha/model-a".to_owned(), "beta/model-b".to_owned()],
+    );
+    let failing: Arc<dyn Provider> = Arc::new(StartFailProvider);
+    let runtime = extension_factory()
+        .with_retry_policy(RetryPolicy {
+            max_attempts: 1,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            jitter_fraction: 0.0,
+        })
+        .with_extension_providers([
+            ("alpha/", failing),
+            ("beta/", extension_provider("beta-private", None)),
+        ])
+        .build(&config)
+        .unwrap_or_else(|error| panic!("fallback runtime must build: {error}"));
+
+    let events = runtime
+        .stream_alias("fast", request("ignored"))
+        .unwrap_or_else(|error| panic!("fallback stream must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(|event| {
+        matches!(event, Ok(ProviderEvent::MessageStart { model }) if model == "beta/model-b")
+    }));
+    assert!(!events.iter().any(|event| {
+        matches!(event, Ok(ProviderEvent::MessageStart { model }) if model == "model-b" || model == "beta/beta/model-b")
+    }));
+}
+
+#[tokio::test]
+async fn missing_first_provider_credential_preserves_healthy_fallback_route() {
+    let mut config = extension_config("missing/model-a");
+    config.models.aliases.insert(
+        "fast".to_owned(),
+        vec!["missing/model-a".to_owned(), "healthy/model-b".to_owned()],
+    );
+    config.providers.insert(
+        "missing".to_owned(),
+        ProviderConfig {
+            kind: "openai_compatible".to_owned(),
+            base_url: Some("https://example.invalid/v1/chat/completions".to_owned()),
+            api_key_credential: Some("missing-provider-key".to_owned()),
+            ..ProviderConfig::default()
+        },
+    );
+    let runtime = extension_factory()
+        .with_extension_providers([("healthy/", extension_provider("healthy-private", None))])
+        .build(&config)
+        .unwrap_or_else(|error| panic!("healthy fallback must keep runtime available: {error}"));
+
+    assert!(runtime.provider("missing/model-a").is_none());
+    let events = runtime
+        .stream_alias("fast", request("ignored"))
+        .unwrap_or_else(|error| panic!("healthy fallback must stream: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(|event| {
+        matches!(event, Ok(ProviderEvent::MessageStart { model }) if model == "healthy/model-b")
+    }));
+    assert!(events.iter().any(|event| {
+        matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "extension:model-b")
+    }));
 }
 
 #[tokio::test]

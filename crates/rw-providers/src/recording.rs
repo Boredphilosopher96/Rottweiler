@@ -1025,7 +1025,7 @@ impl Provider for ReplayProvider {
         let items = if fixture.raw_sse.is_empty() {
             recorded_to_results(fixture.items)
         } else {
-            let parsed = match fixture.wire_mode {
+            let mut parsed = match fixture.wire_mode {
                 WireMode::AnthropicMessages => {
                     crate::anthropic::replay_sse_frames(&fixture.raw_sse)
                 }
@@ -1056,9 +1056,36 @@ impl Provider for ReplayProvider {
                     &fixture.raw_sse,
                 ),
             };
+            qualify_replayed_bound_identity(&mut parsed, &fixture.items, &self.name);
             reconcile_raw_replay(parsed, fixture.items)?
         };
         Ok(Box::pin(futures_util::stream::iter(items)))
+    }
+}
+
+fn qualify_replayed_bound_identity(
+    parsed: &mut [Result<ProviderEvent, ProviderError>],
+    recorded: &[RecordedItem],
+    provider_name: &str,
+) {
+    for (parsed_item, recorded_item) in parsed.iter_mut().zip(recorded) {
+        let (
+            Ok(ProviderEvent::MessageStart {
+                model: parsed_model,
+            }),
+            RecordedItem::Event {
+                event:
+                    ProviderEvent::MessageStart {
+                        model: recorded_model,
+                    },
+            },
+        ) = (parsed_item, recorded_item)
+        else {
+            continue;
+        };
+        if recorded_model == provider_name {
+            recorded_model.clone_into(parsed_model);
+        }
     }
 }
 

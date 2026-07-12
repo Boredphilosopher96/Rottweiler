@@ -1927,6 +1927,11 @@ async fn terminate_and_wait_process_group(child_id: Option<u32>) -> Result<(), T
             }
         }
         if tokio::time::Instant::now() >= deadline {
+            if linux_process_group_has_no_live_members(raw_pid.as_raw_nonzero().get()).await
+                == Some(true)
+            {
+                return Ok(());
+            }
             // Returning would allow the opaque-checkpoint post-scan to race a
             // surviving group member. Keep the operation pending and the
             // watchdog/lease armed: this is the fail-closed state.
@@ -1935,6 +1940,73 @@ async fn terminate_and_wait_process_group(child_id: Option<u32>) -> Result<(), T
         }
         sleep(Duration::from_millis(10)).await;
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn linux_process_group_has_no_live_members(process_group: i32) -> Option<bool> {
+    tokio::task::spawn_blocking(move || {
+        const ENTRY_CAP: usize = 32 * 1024;
+        const STAT_CAP: u64 = 4 * 1024;
+        const TOTAL_CAP: usize = 8 * 1024 * 1024;
+        let entries = std::fs::read_dir("/proc").ok()?;
+        let mut entry_count = 0_usize;
+        let mut total_bytes = 0_usize;
+        for entry in entries {
+            entry_count = entry_count.checked_add(1)?;
+            if entry_count > ENTRY_CAP {
+                return None;
+            }
+            let entry = entry.ok()?;
+            let file_name = entry.file_name();
+            if !file_name.as_encoded_bytes().iter().all(u8::is_ascii_digit) {
+                continue;
+            }
+            let mut stat = Vec::new();
+            match std::fs::File::open(entry.path().join("stat")) {
+                Ok(file) => {
+                    file.take(STAT_CAP + 1).read_to_end(&mut stat).ok()?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            }
+            if stat.len() as u64 > STAT_CAP {
+                return None;
+            }
+            total_bytes = total_bytes.checked_add(stat.len())?;
+            if total_bytes > TOTAL_CAP {
+                return None;
+            }
+            let (group, state) = parse_linux_process_stat(&stat)?;
+            if group == process_group && state != b'Z' {
+                return Some(false);
+            }
+        }
+        Some(true)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_process_stat(stat: &[u8]) -> Option<(i32, u8)> {
+    let stat = std::str::from_utf8(stat).ok()?;
+    let (_, fields) = stat.rsplit_once(") ")?;
+    let mut fields = fields.split_ascii_whitespace();
+    let state = fields.next()?.as_bytes();
+    if state.len() != 1 {
+        return None;
+    }
+    let _parent = fields.next()?.parse::<i32>().ok()?;
+    let process_group = fields.next()?.parse::<i32>().ok()?;
+    Some((process_group, state[0]))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn linux_process_group_has_no_live_members(
+    _process_group: i32,
+) -> std::future::Ready<Option<bool>> {
+    std::future::ready(None)
 }
 
 #[cfg(target_os = "macos")]
@@ -2378,6 +2450,20 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_stat_parser_extracts_process_group_and_zombie_state() {
+        assert_eq!(
+            parse_linux_process_stat(b"123 (worker (fixture)) Z 1 42 42 0 -1\n"),
+            Some((42, b'Z'))
+        );
+        assert_eq!(
+            parse_linux_process_stat(b"123 (worker) S 1 42 42 0 -1\n"),
+            Some((42, b'S'))
+        );
+        assert_eq!(parse_linux_process_stat(b"123 worker Z 1 42\n"), None);
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
