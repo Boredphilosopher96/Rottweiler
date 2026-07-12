@@ -85,6 +85,24 @@ function stripLinuxArtifact(path: string, label: string): void {
     )
   }
 }
+
+function signDarwinArtifact(path: string, label: string): void {
+  if (process.platform !== "darwin") return
+  const signed = spawnSync(
+    "/usr/bin/codesign",
+    ["--force", "--sign", "-", "--timestamp=none", path],
+    { encoding: "utf8" },
+  )
+  if (signed.error !== undefined) {
+    throw new Error(`failed to sign macOS ${label}: ${signed.error.message}`)
+  }
+  if (signed.status !== 0) {
+    const detail = signed.stderr.trim()
+    throw new Error(
+      `failed to sign macOS ${label} (exit ${signed.status})${detail === "" ? "" : `: ${detail}`}`,
+    )
+  }
+}
 const nativePrelude: BunPlugin = {
   name: "rottweiler-opentui-native",
   setup(build) {
@@ -150,3 +168,5 @@ mkdirSync(outputDirectory, { recursive: true })
 const outputNativePath = join(outputDirectory, selectedNativeLibrary)
 copyFileSync(selectedNativePath, outputNativePath)
 stripLinuxArtifact(outputNativePath, "OpenTUI native library")
+signDarwinArtifact(outputExecutable, "OpenTUI executable")
+signDarwinArtifact(outputNativePath, "OpenTUI native library")

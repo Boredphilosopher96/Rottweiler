@@ -106,7 +106,8 @@ class DistributionRenderTests(unittest.TestCase):
             self.assertIn('refute_path_exists bin/"rottweiler-tui"', formula_text)
             self.assertIn('license "Apache-2.0"', formula_text)
             self.assertIn("preserve_rpath", formula_text)
-            self.assertIn("brew upgrade rottweiler", formula_text)
+            self.assertIn("managed by Homebrew", formula_text)
+            self.assertIn("brew upgrade", formula_text)
             self.assertIn("--proto '=https'", bootstrap_text)
             self.assertIn("--proto-redir '=https'", bootstrap_text)
             self.assertIn("--tlsv1.2", bootstrap_text)
@@ -225,12 +226,16 @@ class DistributionRenderTests(unittest.TestCase):
         )
         self.assertNotIn('bin.install "rottweiler-tui"', text)
         self.assertIn('refute_path_exists bin/"rottweiler-tui"', text)
+        self.assertIn("managed by Homebrew", text)
+        self.assertIn("brew upgrade", text)
         if subprocess.run(["sh", "-c", "command -v ruby"], check=False).returncode == 0:
             subprocess.run(["ruby", "-c", str(formula)], check=True)
 
         tui_build = (REPO / "packages/tui/build.ts").read_text(encoding="utf-8")
         self.assertIn('process.env.ROTTWEILER_STRIP_BIN ?? "/usr/bin/strip"', tui_build)
         self.assertIn("isAbsolute(stripExecutable)", tui_build)
+        self.assertIn('"/usr/bin/codesign"', tui_build)
+        self.assertIn('"--timestamp=none"', tui_build)
 
 
 if __name__ == "__main__":

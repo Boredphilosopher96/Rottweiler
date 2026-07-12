@@ -25,6 +25,8 @@ class Rottweiler < Formula
     native = OS.mac? ? "libopentui.dylib" : "libopentui.so"
     assert_predicate libexec/native, :file?
     refute_path_exists bin/"rottweiler-tui"
-    assert_match "brew upgrade rottweiler", shell_output("#{bin}/rw upgrade 2>&1", 1)
+    guidance = shell_output("#{bin}/rw upgrade 2>&1", 1)
+    assert_match "managed by Homebrew", guidance
+    assert_match "brew upgrade", guidance
   end
 end
