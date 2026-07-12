@@ -169,6 +169,7 @@ pub(crate) struct CliHostOptions {
     pub max_turns: usize,
     pub provider_mode: HostedProviderMode,
     pub dangerously_trust: bool,
+    pub wait_for_execution_lease: bool,
 }
 
 impl CliHostOptions {
@@ -178,6 +179,7 @@ impl CliHostOptions {
         permission_mode: Option<PermissionMode>,
         max_turns: usize,
         provider_mode: HostedProviderMode,
+        wait_for_execution_lease: bool,
     ) -> Result<Self, HostError> {
         let loader = ConfigLoader::from_environment()
             .map_err(|error| HostError::Persistence(error.to_string()))?;
@@ -204,6 +206,7 @@ impl CliHostOptions {
             max_turns,
             provider_mode,
             dangerously_trust,
+            wait_for_execution_lease,
         })
     }
 }
@@ -1228,6 +1231,7 @@ impl CliSessionFactory {
             max_turns: self.options.max_turns,
             provider_mode: self.options.provider_mode.clone(),
             dangerously_trust: self.options.dangerously_trust,
+            wait_for_execution_lease: self.options.wait_for_execution_lease,
         })
         .await
         .map_err(|error| {
@@ -3006,6 +3010,7 @@ mod tests {
                 event_delay_ms: 0,
             },
             dangerously_trust: false,
+            wait_for_execution_lease: false,
         })
         .expect("factory")
     }
@@ -3635,6 +3640,7 @@ mod tests {
                 event_delay_ms: 0,
             },
             dangerously_trust: false,
+            wait_for_execution_lease: false,
         })
         .expect("factory");
         let parent_id = SessionId("production-fork-parent".to_owned());

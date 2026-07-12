@@ -272,6 +272,7 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
         max_turns: options.max_turns,
         provider_mode: options.provider_mode,
         dangerously_trust: options.dangerously_trust,
+        wait_for_execution_lease: false,
     };
     let factory = Arc::new(
         CliSessionFactory::new(host_options)

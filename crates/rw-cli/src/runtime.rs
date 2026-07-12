@@ -875,6 +875,7 @@ pub(crate) struct HostedSessionComposition {
     pub max_turns: usize,
     pub provider_mode: HostedProviderMode,
     pub dangerously_trust: bool,
+    pub wait_for_execution_lease: bool,
 }
 
 pub(crate) struct HostedActorRuntime {
@@ -999,11 +1000,12 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         }
     }
     let execution_lease_path = workspace_execution_lease_path(&storage_root, &workspace)?;
-    let execution_lease =
-        tokio::task::spawn_blocking(move || acquire_shared_execution_lease(&execution_lease_path))
-            .await
-            .map_err(|error| miette!("execution lease worker failed: {error}"))?
-            .map_err(|error| miette!("execution lease could not lock: {error}"))?;
+    let execution_lease = tokio::task::spawn_blocking(move || {
+        acquire_shared_execution_lease(&execution_lease_path, false)
+    })
+    .await
+    .map_err(|error| miette!("execution lease worker failed: {error}"))?
+    .map_err(|error| miette!("execution lease could not lock: {error}"))?;
 
     let configured_model_alias = options
         .model
@@ -1909,11 +1911,13 @@ pub(crate) async fn compose_hosted_actor(
         }
     }
     let execution_lease_path = workspace_execution_lease_path(&options.storage_root, &workspace)?;
-    let execution_lease =
-        tokio::task::spawn_blocking(move || acquire_shared_execution_lease(&execution_lease_path))
-            .await
-            .map_err(|error| miette!("execution lease worker failed: {error}"))?
-            .map_err(|error| miette!("execution lease could not lock: {error}"))?;
+    let wait_for_execution_lease = options.wait_for_execution_lease;
+    let execution_lease = tokio::task::spawn_blocking(move || {
+        acquire_shared_execution_lease(&execution_lease_path, wait_for_execution_lease)
+    })
+    .await
+    .map_err(|error| miette!("execution lease worker failed: {error}"))?
+    .map_err(|error| miette!("execution lease could not lock: {error}"))?;
 
     let configured_model_alias = options
         .requested_model
@@ -3029,6 +3033,7 @@ fn workspace_execution_lease_path(storage_root: &Path, workspace: &Path) -> Resu
 
 fn acquire_shared_execution_lease(
     path: &Path,
+    wait: bool,
 ) -> std::result::Result<Arc<ExecutionLease>, rw_core::runtime_support::ToolError> {
     static LEASES: OnceLock<Mutex<HashMap<PathBuf, std::sync::Weak<ExecutionLease>>>> =
         OnceLock::new();
@@ -3039,7 +3044,15 @@ fn acquire_shared_execution_lease(
     if let Some(lease) = leases.get(path).and_then(std::sync::Weak::upgrade) {
         return Ok(lease);
     }
-    let lease = Arc::new(ExecutionLease::acquire(path)?);
+    let lease = Arc::new(if wait {
+        // A replacement engine must wait for an old watchdog to finish killing
+        // its command group before it can safely recover the workspace.
+        ExecutionLease::acquire(path)?
+    } else {
+        // A competing interactive host must fail fast instead of waiting until
+        // the supervisor's health deadline.
+        ExecutionLease::try_acquire(path)?
+    });
     leases.insert(path.to_path_buf(), Arc::downgrade(&lease));
     Ok(lease)
 }

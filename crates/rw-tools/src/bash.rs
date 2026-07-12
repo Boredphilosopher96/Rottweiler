@@ -333,7 +333,18 @@ impl ExecutionLease {
     /// Returns an error for a missing or unsafe parent directory, an unsafe
     /// lease file, insecure permissions, or a lock failure.
     pub fn acquire(path: impl AsRef<Path>) -> Result<Self, ToolError> {
-        acquire_execution_lease(path.as_ref())
+        acquire_execution_lease(path.as_ref(), true)
+    }
+
+    /// Opens an execution lease without waiting behind another process.
+    ///
+    /// # Errors
+    ///
+    /// Returns `WouldBlock` through [`ToolError::Io`] when another process
+    /// already owns the workspace lease, in addition to the safety errors
+    /// documented by [`Self::acquire`].
+    pub fn try_acquire(path: impl AsRef<Path>) -> Result<Self, ToolError> {
+        acquire_execution_lease(path.as_ref(), false)
     }
 
     #[cfg(unix)]
@@ -355,7 +366,7 @@ impl ExecutionLease {
 }
 
 #[cfg(unix)]
-fn acquire_execution_lease(path: &Path) -> Result<ExecutionLease, ToolError> {
+fn acquire_execution_lease(path: &Path, wait: bool) -> Result<ExecutionLease, ToolError> {
     let parent_path = path
         .parent()
         .ok_or_else(|| ToolError::Command("execution lease has no parent".to_owned()))?;
@@ -431,19 +442,7 @@ fn acquire_execution_lease(path: &Path) -> Result<ExecutionLease, ToolError> {
             "execution lease permissions must not grant group or other access".to_owned(),
         ));
     }
-    loop {
-        match rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive) {
-            Ok(()) => break,
-            Err(rustix::io::Errno::INTR) => {}
-            Err(source) => {
-                return Err(ToolError::Io {
-                    operation: "lock execution lease",
-                    path: path.to_path_buf(),
-                    source: std::io::Error::from(source),
-                });
-            }
-        }
-    }
+    lock_execution_lease(&file, path, wait)?;
     rustix::fs::fsync(&parent)
         .map_err(std::io::Error::from)
         .map_err(|source| ToolError::Io {
@@ -454,8 +453,30 @@ fn acquire_execution_lease(path: &Path) -> Result<ExecutionLease, ToolError> {
     Ok(ExecutionLease { file })
 }
 
+#[cfg(unix)]
+fn lock_execution_lease(file: &std::fs::File, path: &Path, wait: bool) -> Result<(), ToolError> {
+    let operation = if wait {
+        rustix::fs::FlockOperation::LockExclusive
+    } else {
+        rustix::fs::FlockOperation::NonBlockingLockExclusive
+    };
+    loop {
+        match rustix::fs::flock(file, operation) {
+            Ok(()) => return Ok(()),
+            Err(rustix::io::Errno::INTR) => {}
+            Err(source) => {
+                return Err(ToolError::Io {
+                    operation: "lock execution lease",
+                    path: path.to_path_buf(),
+                    source: std::io::Error::from(source),
+                });
+            }
+        }
+    }
+}
+
 #[cfg(not(unix))]
-fn acquire_execution_lease(path: &Path) -> Result<ExecutionLease, ToolError> {
+fn acquire_execution_lease(path: &Path, _wait: bool) -> Result<ExecutionLease, ToolError> {
     Err(ToolError::Command(format!(
         "execution leases are unavailable on this platform; refusing unlocked session startup at {}",
         path.display()
@@ -2275,6 +2296,20 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn nonblocking_execution_lease_refuses_an_existing_owner_immediately() {
+        let root = tempdir().expect("temp directory");
+        let path = root.path().join("execution.lock");
+        let _owner = ExecutionLease::acquire(&path).expect("initial execution lease");
+        let started = std::time::Instant::now();
+        let error = ExecutionLease::try_acquire(&path).expect_err("second lease must fail");
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert!(
+            matches!(error, ToolError::Io { source, .. } if source.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
 
     #[test]
     fn built_in_safe_list_accepts_only_plain_git_status() {

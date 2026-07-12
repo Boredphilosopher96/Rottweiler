@@ -138,12 +138,25 @@ impl RemoteConfig {
     /// explicit detach and pre-existing engines remain remote-owned. An omitted
     /// permission mode lets the remote host load its own user policy.
     pub fn engine_start_command(&self) -> Result<SshCommand, RemoteError> {
+        self.engine_command(false)
+    }
+
+    /// Starts a replacement engine which may wait for the crashed engine's
+    /// watchdog to release workspace execution ownership.
+    pub fn engine_recovery_command(&self) -> Result<SshCommand, RemoteError> {
+        self.engine_command(true)
+    }
+
+    fn engine_command(&self, wait_for_execution_lease: bool) -> Result<SshCommand, RemoteError> {
         self.validate()?;
         let mut remote_argv = vec![
             self.remote_rw_executable.to_string_lossy().into_owned(),
             "serve".to_owned(),
             "--detach".to_owned(),
         ];
+        if wait_for_execution_lease {
+            remote_argv.push("--wait-for-execution-lease".to_owned());
+        }
         if let Some(mode) = self.permission_mode {
             remote_argv.extend([
                 "--permission-mode".to_owned(),
@@ -314,7 +327,10 @@ pub trait RemoteRecoveryRuntime: Send {
     async fn authenticated_health(&mut self) -> Result<bool, String>;
     async fn tunnel_alive(&mut self) -> Result<bool, String>;
     async fn restart_tunnel(&mut self) -> Result<(), String>;
-    async fn attach_or_start(&mut self) -> Result<RemoteAttachment, String>;
+    async fn attach_or_start(
+        &mut self,
+        wait_for_execution_lease: bool,
+    ) -> Result<RemoteAttachment, String>;
     async fn install_bootstrap_token(&mut self, token: &str) -> Result<(), String>;
 }
 
@@ -326,7 +342,7 @@ pub async fn initialize_remote<R: RemoteRecoveryRuntime>(
 ) -> Result<RemoteInitialization, RemoteInitializationError> {
     let attachment =
         runtime
-            .attach_or_start()
+            .attach_or_start(false)
             .await
             .map_err(|message| RemoteInitializationError {
                 message,
@@ -373,7 +389,7 @@ pub async fn recover_remote<R: RemoteRecoveryRuntime>(
         }
     }
 
-    let attachment = runtime.attach_or_start().await?;
+    let attachment = runtime.attach_or_start(true).await?;
     runtime
         .install_bootstrap_token(&attachment.bootstrap_token)
         .await?;
@@ -672,6 +688,12 @@ mod tests {
             ]
             .map(OsString::from)
         );
+        let recovery = config.engine_recovery_command().expect("recovery command");
+        assert!(recovery.args.last().is_some_and(|command| {
+            command
+                .to_string_lossy()
+                .contains("'--wait-for-execution-lease'")
+        }));
         let forward = config.forward_command().expect("forward command");
         assert_eq!(
             forward.args,
@@ -840,9 +862,16 @@ mod tests {
             state.tunnel_restarts.pop_front().unwrap_or(Ok(()))
         }
 
-        async fn attach_or_start(&mut self) -> Result<RemoteAttachment, String> {
+        async fn attach_or_start(
+            &mut self,
+            wait_for_execution_lease: bool,
+        ) -> Result<RemoteAttachment, String> {
             let mut state = self.0.lock().await;
-            state.calls.push("attach_or_start");
+            state.calls.push(if wait_for_execution_lease {
+                "attach_or_start_wait"
+            } else {
+                "attach_or_start"
+            });
             state
                 .attachments
                 .pop_front()
@@ -897,7 +926,7 @@ mod tests {
             [
                 "health",
                 "tunnel_alive",
-                "attach_or_start",
+                "attach_or_start_wait",
                 "install_token",
                 "health"
             ]
@@ -926,7 +955,7 @@ mod tests {
             [
                 "health",
                 "tunnel_alive",
-                "attach_or_start",
+                "attach_or_start_wait",
                 "install_token",
                 "health",
                 "restart_tunnel",

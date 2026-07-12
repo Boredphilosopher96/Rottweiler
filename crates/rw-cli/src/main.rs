@@ -190,6 +190,9 @@ enum Command {
         /// Engine-host workspace; defaults to the current directory.
         #[arg(long, value_name = "PATH")]
         workspace: Option<PathBuf>,
+        /// Wait for a crashed predecessor's watchdog to release workspace ownership.
+        #[arg(long, hide = true)]
+        wait_for_execution_lease: bool,
     },
     /// Inspect an assembled model prompt without calling a provider.
     Prompt {
@@ -494,6 +497,7 @@ async fn main() -> Result<()> {
             token_file,
             session,
             workspace,
+            wait_for_execution_lease,
         }) => {
             run_serve(
                 socket,
@@ -508,6 +512,7 @@ async fn main() -> Result<()> {
                 cli.dangerously_trust,
                 cli.in_memory_replay_script,
                 cli.record_script_delay_ms,
+                wait_for_execution_lease,
             )
             .await?;
         }
@@ -637,6 +642,7 @@ async fn main() -> Result<()> {
                 cli.permission_mode,
                 cli.max_turns,
                 provider_mode,
+                false,
             )
             .map_err(|_| miette!("MCP server configuration could not initialize"))?;
             mcp_server::run_stdio(mcp_server::StdioServerOptions {
@@ -1858,6 +1864,7 @@ async fn run_serve(
     dangerously_trust: bool,
     in_memory_replay_script: Option<PathBuf>,
     record_script_delay_ms: u64,
+    wait_for_execution_lease: bool,
 ) -> Result<()> {
     let storage_root = configuration_root_path()?;
     let paths = resolve_server_paths(socket, token_file, &storage_root)?;
@@ -1878,6 +1885,7 @@ async fn run_serve(
             model.as_deref(),
             &workspace_roots[1..],
             dangerously_trust,
+            wait_for_execution_lease,
         )
         .await;
     }
@@ -1907,6 +1915,7 @@ async fn run_serve(
             permission_mode,
             max_turns,
             provider_mode,
+            wait_for_execution_lease,
         )
         .map_err(|error| miette!(error.to_string()))?;
         let max_sessions = options.config.engine.max_concurrent_sessions;
@@ -2457,6 +2466,7 @@ async fn spawn_detached_server(
     model: Option<&str>,
     additional_workspaces: &[PathBuf],
     dangerously_trust: bool,
+    wait_for_execution_lease: bool,
 ) -> Result<()> {
     use std::process::Stdio;
 
@@ -2503,6 +2513,7 @@ async fn spawn_detached_server(
     if dangerously_trust {
         command.arg("--dangerously-trust");
     }
+    append_execution_lease_restart_flag(&mut command, wait_for_execution_lease);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -2538,6 +2549,15 @@ async fn spawn_detached_server(
             ));
         }
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+}
+
+fn append_execution_lease_restart_flag(
+    command: &mut tokio::process::Command,
+    wait_for_execution_lease: bool,
+) {
+    if wait_for_execution_lease {
+        command.arg("--wait-for-execution-lease");
     }
 }
 
@@ -2936,13 +2956,18 @@ impl remote::RemoteRecoveryRuntime for TokioRemoteRecoveryRuntime {
         Ok(())
     }
 
-    async fn attach_or_start(&mut self) -> std::result::Result<remote::RemoteAttachment, String> {
+    async fn attach_or_start(
+        &mut self,
+        wait_for_execution_lease: bool,
+    ) -> std::result::Result<remote::RemoteAttachment, String> {
         use std::process::Stdio;
 
-        let start = self
-            .config
-            .engine_start_command()
-            .map_err(|error| error.to_string())?;
+        let start = if wait_for_execution_lease {
+            self.config.engine_recovery_command()
+        } else {
+            self.config.engine_start_command()
+        }
+        .map_err(|error| error.to_string())?;
         let mut command = tokio::process::Command::new(&start.program);
         command
             .args(&start.args)
@@ -3296,11 +3321,25 @@ mod tests {
 
     use super::{
         Cli, Command, DetachedServerReady, RuntimeDirectoryGuard, TrustCommand, UpgradeChannel,
-        create_guarded_server_runtime, resolve_tui_executable, sync_install_paths,
-        valid_bootstrap_token, write_github_device_prompt, write_private_file_atomic,
+        append_execution_lease_restart_flag, create_guarded_server_runtime, resolve_tui_executable,
+        sync_install_paths, valid_bootstrap_token, write_github_device_prompt,
+        write_private_file_atomic,
     };
     #[cfg(unix)]
     use super::{rustix_device_id, rustix_mode_bits};
+
+    #[test]
+    fn detached_recovery_threads_the_execution_lease_wait_flag_to_the_real_child() {
+        let mut command = tokio::process::Command::new("rw");
+        command.arg("serve");
+        append_execution_lease_restart_flag(&mut command, true);
+        assert!(
+            command
+                .as_std()
+                .get_args()
+                .any(|argument| argument == "--wait-for-execution-lease")
+        );
+    }
 
     #[cfg(unix)]
     #[test]

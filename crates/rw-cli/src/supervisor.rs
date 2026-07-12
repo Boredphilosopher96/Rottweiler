@@ -21,6 +21,7 @@ const SESSION_ENV: &str = "ROTTWEILER_SESSION_ID";
 const LAST_SEEN_ENV: &str = "ROTTWEILER_LAST_SEEN_SEQUENCE";
 const LAST_SEEN_FILE_ENV: &str = "ROTTWEILER_LAST_SEEN_FILE";
 const FORK_OPERATION_DIRECTORY_ENV: &str = "ROTTWEILER_FORK_OPERATION_DIRECTORY";
+const WAIT_FOR_EXECUTION_LEASE_ARG: &str = "--wait-for-execution-lease";
 const TUI_KEYBINDINGS_ENV: &str = "ROTTWEILER_TUI_KEYBINDINGS";
 
 type ShellBrokerResult = Result<(), crate::shell_broker::ShellBrokerError>;
@@ -399,7 +400,7 @@ impl<B: ProcessBackend> Supervisor<B> {
                 }};
             }
 
-            let Some(spawned) = await_or_shutdown!(self.spawn_engine()) else {
+            let Some(spawned) = await_or_shutdown!(self.spawn_engine(false)) else {
                 return Ok(());
             };
             engine = Some(spawned?);
@@ -474,7 +475,7 @@ impl<B: ProcessBackend> Supervisor<B> {
                         if await_or_shutdown!(self.backend.sleep(delay)).is_none() {
                             return Ok(());
                         }
-                        let Some(spawned) = await_or_shutdown!(self.spawn_engine()) else {
+                        let Some(spawned) = await_or_shutdown!(self.spawn_engine(true)) else {
                             return Ok(());
                         };
                         engine = Some(spawned?);
@@ -556,13 +557,20 @@ impl<B: ProcessBackend> Supervisor<B> {
         )
     }
 
-    async fn spawn_engine(&self) -> Result<B::Child, SupervisorError> {
+    async fn spawn_engine(
+        &self,
+        wait_for_execution_lease: bool,
+    ) -> Result<B::Child, SupervisorError> {
         remove_stale_runtime_file(&self.config.socket, RuntimeFileKind::Socket)
             .map_err(SupervisorError::Readiness)?;
         remove_stale_runtime_file(&self.config.token_file, RuntimeFileKind::Regular)
             .map_err(SupervisorError::Readiness)?;
+        let mut spec = engine_spec(&self.config);
+        if wait_for_execution_lease {
+            spec.args.push(OsString::from(WAIT_FOR_EXECUTION_LEASE_ARG));
+        }
         self.backend
-            .spawn(engine_spec(&self.config))
+            .spawn(spec)
             .await
             .map_err(|source| SupervisorError::Spawn {
                 component: "engine",
@@ -1214,6 +1222,18 @@ mod tests {
     async fn engine_crash_reaps_tui_restarts_both_and_normal_tui_exit_reaps_engine() {
         let (specs, lifecycle) = run_scenario(Scenario::EngineCrash).await;
         assert_eq!(specs.len(), 4);
+        assert!(
+            !specs[0]
+                .args
+                .iter()
+                .any(|argument| argument == WAIT_FOR_EXECUTION_LEASE_ARG)
+        );
+        assert!(
+            specs[2]
+                .args
+                .iter()
+                .any(|argument| argument == WAIT_FOR_EXECUTION_LEASE_ARG)
+        );
         assert_eq!(
             &lifecycle[..3],
             ["spawn:engine", "ready:engine", "spawn:tui"]
