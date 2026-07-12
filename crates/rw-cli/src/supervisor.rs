@@ -98,6 +98,11 @@ pub enum SupervisorError {
     Signal(io::Error),
 }
 
+enum EngineStartOutcome {
+    Ready(io::Result<()>),
+    Exited(io::Result<ExitStatus>),
+}
+
 impl std::fmt::Display for SupervisorError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -398,13 +403,14 @@ impl<B: ProcessBackend> Supervisor<B> {
                 return Ok(());
             };
             engine = Some(spawned?);
-            let Some(readiness) = await_or_shutdown!(
-                self.backend
-                    .wait_ready(&self.config.socket, &self.config.token_file)
-            ) else {
+            let active_engine = engine.as_mut().ok_or(SupervisorError::InvalidConfig(
+                "engine state missing after spawn",
+            ))?;
+            let Some(startup) = await_or_shutdown!(self.wait_for_engine_start(active_engine))
+            else {
                 return Ok(());
             };
-            readiness.map_err(SupervisorError::Readiness)?;
+            Self::resolve_engine_start(&mut engine, startup)?;
             let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
                 return Ok(());
             };
@@ -472,13 +478,15 @@ impl<B: ProcessBackend> Supervisor<B> {
                             return Ok(());
                         };
                         engine = Some(spawned?);
-                        let Some(readiness) = await_or_shutdown!(
-                            self.backend
-                                .wait_ready(&self.config.socket, &self.config.token_file)
-                        ) else {
+                        let active_engine = engine.as_mut().ok_or(
+                            SupervisorError::InvalidConfig("engine state missing after restart"),
+                        )?;
+                        let Some(startup) =
+                            await_or_shutdown!(self.wait_for_engine_start(active_engine))
+                        else {
                             return Ok(());
                         };
-                        readiness.map_err(SupervisorError::Readiness)?;
+                        Self::resolve_engine_start(&mut engine, startup)?;
                         let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
                             return Ok(());
                         };
@@ -560,6 +568,37 @@ impl<B: ProcessBackend> Supervisor<B> {
                 component: "engine",
                 source,
             })
+    }
+
+    async fn wait_for_engine_start(&self, engine: &mut B::Child) -> EngineStartOutcome {
+        tokio::select! {
+            biased;
+            exit = engine.wait() => EngineStartOutcome::Exited(exit),
+            readiness = self.backend.wait_ready(&self.config.socket, &self.config.token_file) => {
+                EngineStartOutcome::Ready(readiness)
+            }
+        }
+    }
+
+    fn resolve_engine_start(
+        engine: &mut Option<B::Child>,
+        outcome: EngineStartOutcome,
+    ) -> Result<(), SupervisorError> {
+        match outcome {
+            EngineStartOutcome::Ready(readiness) => readiness.map_err(SupervisorError::Readiness),
+            EngineStartOutcome::Exited(Ok(status)) => {
+                // wait() consumed this process. Relinquish cleanup ownership so
+                // a recycled PID/process-group id can never be signalled.
+                engine.take();
+                Err(SupervisorError::Readiness(io::Error::other(format!(
+                    "engine exited before authenticated readiness ({status}); another Rottweiler process may already own this session",
+                ))))
+            }
+            EngineStartOutcome::Exited(Err(source)) => Err(SupervisorError::Wait {
+                component: "engine",
+                source,
+            }),
+        }
     }
 
     async fn spawn_tui(&self) -> Result<B::Child, SupervisorError> {
@@ -959,6 +998,7 @@ mod tests {
         ShutdownSignal,
         StartupSignal,
         ReadinessFailure,
+        EngineStartupFailure,
         EngineWaitError,
         TuiRestartBudget,
     }
@@ -967,12 +1007,15 @@ mod tests {
         scenario: Scenario,
         spawned: Arc<Mutex<Vec<ChildSpec>>>,
         lifecycle: Arc<Mutex<Vec<String>>>,
+        ready: Arc<AtomicBool>,
         count: AtomicUsize,
     }
 
     struct MockChild {
         name: &'static str,
         outcome: Option<ExitStatus>,
+        exit_after_ready: bool,
+        ready: Arc<AtomicBool>,
         wait_error_once: AtomicBool,
         terminated: AtomicBool,
         lifecycle: Arc<Mutex<Vec<String>>>,
@@ -981,6 +1024,9 @@ mod tests {
     #[async_trait]
     impl ManagedChild for MockChild {
         async fn wait(&mut self) -> io::Result<ExitStatus> {
+            while self.exit_after_ready && !self.ready.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
             if self.wait_error_once.swap(false, Ordering::AcqRel) {
                 self.lifecycle
                     .lock()
@@ -1037,14 +1083,14 @@ mod tests {
 
         async fn spawn(&self, spec: ChildSpec) -> io::Result<Self::Child> {
             let index = self.count.fetch_add(1, Ordering::Relaxed);
-            let engine = spec.stdio == StdioMode::Null;
+            let engine = spec.args.iter().any(|argument| argument == "serve");
             self.spawned.lock().expect("spawns").push(spec);
             self.lifecycle
                 .lock()
                 .expect("lifecycle")
                 .push(if engine { "spawn:engine" } else { "spawn:tui" }.to_owned());
             let (name, outcome, wait_error_once) = match (self.scenario, index, engine) {
-                (Scenario::EngineCrash, 0, true) => {
+                (Scenario::EngineCrash | Scenario::EngineStartupFailure, 0, true) => {
                     ("engine-1", Some(ExitStatus::from_raw(1 << 8)), false)
                 }
                 (
@@ -1079,6 +1125,12 @@ mod tests {
             Ok(MockChild {
                 name,
                 outcome,
+                exit_after_ready: matches!(
+                    self.scenario,
+                    Scenario::EngineCrash | Scenario::EngineWaitError
+                ) && index == 0
+                    && engine,
+                ready: Arc::clone(&self.ready),
                 wait_error_once: AtomicBool::new(wait_error_once),
                 terminated: AtomicBool::new(false),
                 lifecycle: Arc::clone(&self.lifecycle),
@@ -1100,6 +1152,10 @@ mod tests {
             if matches!(self.scenario, Scenario::ReadinessFailure) {
                 return Err(io::Error::other("injected readiness failure"));
             }
+            if matches!(self.scenario, Scenario::EngineStartupFailure) {
+                std::future::pending::<()>().await;
+            }
+            self.ready.store(true, Ordering::Release);
             Ok(())
         }
 
@@ -1128,6 +1184,7 @@ mod tests {
             scenario,
             spawned: Arc::clone(&spawned),
             lifecycle: Arc::clone(&lifecycle),
+            ready: Arc::new(AtomicBool::new(false)),
             count: AtomicUsize::new(0),
         };
         let result = Supervisor::new(config, backend, ResumeHandoff::default())
@@ -1220,6 +1277,18 @@ mod tests {
         assert!(!lifecycle.iter().any(|event| event.contains("tui")));
         assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
         assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn engine_startup_exit_surfaces_immediately_before_tui_spawn() {
+        let (result, specs, lifecycle) =
+            run_scenario_with_config(Scenario::EngineStartupFailure, fixture_config()).await;
+        let error = result.expect_err("startup must fail").to_string();
+        assert!(error.contains("engine exited before authenticated readiness"));
+        assert_eq!(specs.len(), 1);
+        assert!(!lifecycle.iter().any(|event| event.contains("tui")));
+        assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+        assert!(!lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
     }
 
     #[tokio::test]

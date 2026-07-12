@@ -6057,6 +6057,7 @@ async fn handle_plugin_message(
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 async fn handle_actor_command(
     command: ActorCommand,
     state: &mut ActorState,

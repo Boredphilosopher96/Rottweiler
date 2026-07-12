@@ -2454,10 +2454,9 @@ mod tests {
                             .await
                             .expect("command catalog event")
                             .expect("command catalog result")
+                            && session_id.0 == name
                         {
-                            if session_id.0 == name {
-                                break (session_id, commands, truncated);
-                            }
+                            break (session_id, commands, truncated);
                         }
                     }
                 })
