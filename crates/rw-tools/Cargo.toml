@@ -36,5 +36,10 @@ name = "linux_safe_list_network"
 path = "tests/linux_safe_list_network.rs"
 harness = false
 
+[[test]]
+name = "linux_command_recording"
+path = "tests/linux_command_recording.rs"
+harness = false
+
 [lints]
 workspace = true

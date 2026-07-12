@@ -12068,6 +12068,11 @@ mod tests {
         assert!(!lifecycle.exists());
     }
 
+    // Linux must execute this acceptance path from a harness-free binary whose
+    // entry point dispatches the self-hosted sandbox helper. The equivalent
+    // coverage lives in rw-tools/tests/linux_command_recording.rs; a libtest
+    // binary exits on the helper argv before the guarded shell can start.
+    #[cfg(target_os = "macos")]
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn ordinary_and_read_only_hook_commands_record_and_replay_in_distinct_streams() {
