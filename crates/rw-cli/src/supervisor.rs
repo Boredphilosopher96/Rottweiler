@@ -249,7 +249,7 @@ impl ProcessBackend for TokioProcessBackend {
     }
 
     async fn wait_ready(&self, socket: &Path, token_file: &Path) -> io::Result<()> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         loop {
             let socket_ready = std::fs::symlink_metadata(socket).is_ok_and(|metadata| {
                 use std::os::unix::fs::FileTypeExt as _;
@@ -259,15 +259,25 @@ impl ProcessBackend for TokioProcessBackend {
                 !metadata.file_type().is_symlink() && metadata.is_file() && metadata.len() == 64
             });
             if socket_ready && token_ready {
-                return Ok(());
+                let token = std::fs::read_to_string(token_file)?;
+                if crate::remote::probe_authenticated_health(
+                    socket,
+                    token.trim(),
+                    Duration::from_millis(250),
+                )
+                .await
+                .unwrap_or(false)
+                {
+                    return Ok(());
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "engine socket and token were not ready within 5 seconds",
+                    "engine did not pass authenticated health within 30 seconds",
                 ));
             }
-            tokio::time::sleep(Duration::from_millis(2)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -388,10 +398,6 @@ impl<B: ProcessBackend> Supervisor<B> {
                 return Ok(());
             };
             engine = Some(spawned?);
-            let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
-                return Ok(());
-            };
-            tui = Some(spawned?);
             let Some(readiness) = await_or_shutdown!(
                 self.backend
                     .wait_ready(&self.config.socket, &self.config.token_file)
@@ -399,6 +405,10 @@ impl<B: ProcessBackend> Supervisor<B> {
                 return Ok(());
             };
             readiness.map_err(SupervisorError::Readiness)?;
+            let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
+                return Ok(());
+            };
+            tui = Some(spawned?);
 
             let (broker_task, broker_ready) = self.start_shell_broker();
             shell_broker = Some(broker_task);
@@ -462,10 +472,6 @@ impl<B: ProcessBackend> Supervisor<B> {
                             return Ok(());
                         };
                         engine = Some(spawned?);
-                        let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
-                            return Ok(());
-                        };
-                        tui = Some(spawned?);
                         let Some(readiness) = await_or_shutdown!(
                             self.backend
                                 .wait_ready(&self.config.socket, &self.config.token_file)
@@ -473,6 +479,10 @@ impl<B: ProcessBackend> Supervisor<B> {
                             return Ok(());
                         };
                         readiness.map_err(SupervisorError::Readiness)?;
+                        let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
+                            return Ok(());
+                        };
+                        tui = Some(spawned?);
                     }
                     RuntimeEvent::Tui(status) => {
                         let status = status.map_err(|source| SupervisorError::Wait {
@@ -1149,7 +1159,7 @@ mod tests {
         assert_eq!(specs.len(), 4);
         assert_eq!(
             &lifecycle[..3],
-            ["spawn:engine", "spawn:tui", "ready:engine"]
+            ["spawn:engine", "ready:engine", "spawn:tui"]
         );
         assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
         assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
@@ -1163,7 +1173,7 @@ mod tests {
         assert_eq!(specs.len(), 3);
         assert_eq!(
             &lifecycle[..3],
-            ["spawn:engine", "spawn:tui", "ready:engine"]
+            ["spawn:engine", "ready:engine", "spawn:tui"]
         );
         assert_eq!(specs[1].env, specs[2].env);
         assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
@@ -1206,9 +1216,8 @@ mod tests {
         let (result, specs, lifecycle) =
             run_scenario_with_config(Scenario::ReadinessFailure, fixture_config()).await;
         assert!(matches!(result, Err(SupervisorError::Readiness(_))));
-        assert_eq!(specs.len(), 2);
-        assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
-        assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
+        assert_eq!(specs.len(), 1);
+        assert!(!lifecycle.iter().any(|event| event.contains("tui")));
         assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
         assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
     }

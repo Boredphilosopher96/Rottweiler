@@ -1923,9 +1923,6 @@ async fn run_serve(
             factory,
         )
         .map_err(|error| miette!(error.to_string()))?;
-        deferred
-            .install(server::HostedEngine::new(host.clone()))
-            .await;
         let resume = session_metadata_path(&storage_root, &session_id).is_file();
         host.prepare_session(
             CreateSessionRequest {
@@ -1937,6 +1934,12 @@ async fn run_serve(
         )
         .await
         .map_err(|error| miette!(error.to_string()))?;
+        // The transport socket is created before host composition so health
+        // probes can distinguish "starting" from "not running". Do not expose
+        // the hosted engine as ready until its supervisor-selected session is
+        // actually loaded: an early TUI resume can otherwise reserve the same
+        // fresh session id and permanently race initial creation.
+        deferred.install(server::HostedEngine::new(host)).await;
         Ok(())
     }
     .await;
