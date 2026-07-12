@@ -1643,7 +1643,8 @@ where
         &self,
         config: &Config,
     ) -> Result<ModelCatalogSnapshot, ProviderFactoryError> {
-        let discoveries = futures_util::stream::iter(config.providers.keys().cloned().map(
+        let provider_names = config.providers.keys().cloned().collect::<Vec<_>>();
+        let discoveries = futures_util::stream::iter(provider_names.into_iter().map(
             |provider_name| async move {
                 let candidate = discovery_candidate(config, &provider_name);
                 let mut isolated = config.clone();
