@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use rw_core::runtime_support::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandRegistryError,
+    CommandRegistryError, CommandSource,
 };
 use rw_core::{InitDepth, SessionCommandAction, SessionCommandContext, SessionCommandOutput};
 use rw_store::ProjectMemoryStore;
@@ -18,7 +18,8 @@ pub(crate) fn register_project_commands(
         CommandDescriptor::new(
             "init",
             "Generate a root AGENTS.md without executing project code",
-        ),
+        )
+        .with_source(CommandSource::Project),
         InitCommand {
             depth: InitDepth::Root,
         },
@@ -27,14 +28,16 @@ pub(crate) fn register_project_commands(
         CommandDescriptor::new(
             "deep-init",
             "Generate bounded root and per-package AGENTS.md files",
-        ),
+        )
+        .with_source(CommandSource::Project),
         InitCommand {
             depth: InitDepth::Deep,
         },
     )?;
     registry.register(
         CommandDescriptor::new("memory", "Read or update private project memory")
-            .with_argument_hint("[list|read <id>|write <text>|clear]"),
+            .with_argument_hint("[list|read <id>|write <text>|clear]")
+            .with_source(CommandSource::Project),
         MemoryCommand {
             workspace,
             storage_root,

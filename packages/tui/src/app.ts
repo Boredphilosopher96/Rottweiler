@@ -84,11 +84,14 @@ export interface TerminalHandoverAdapter {
   resume(): void
 }
 
-type PickerKind = "palette" | "commands" | "files" | "modes" | "models" | "providers" | "sessions"
+type PickerKind = "palette" | "commands" | "files" | "modes" | "models" | "providers" | "providerAuth" | "sessions" | "settings"
 type ProjectionKind = "commands" | "models" | "sessions" | "files"
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 
 type CommandChoice = RottweilerState["commands"][number]
+type ModelPickerChoice =
+  | { readonly kind: "alias"; readonly alias: RottweilerState["modelAliases"][number] }
+  | { readonly kind: "model"; readonly model: RottweilerState["models"][number] }
 
 const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
   { name: "help", description: "List available commands", usage: "/help" },
@@ -96,6 +99,7 @@ const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
   { name: "mode", description: "Show or switch the interaction mode", usage: "/mode [discuss|plan|execute]" },
   { name: "models", description: "Switch the active model", usage: "/models" },
   { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
+  { name: "settings", description: "Change safe user settings", usage: "/settings" },
   { name: "permissions", description: "Show or edit session permission rules", usage: "/permissions [list|approvals|add|remove|clear-session|revoke-session|revoke-project]" },
   { name: "plan", description: "Show the pending or approved plan", usage: "/plan" },
   { name: "rewind", description: "Restore a completed turn checkpoint", usage: "/rewind <turn>" },
@@ -154,7 +158,7 @@ export class RottweilerApp extends BoxRenderable {
   #modelProviderFilter: string | null = null
   #reviewOpen = false
   #pendingReviewSelection: string | null = null
-  #postSubmitPicker: "models" | "providers" | null = null
+  #postSubmitPicker: "models" | "providers" | "settings" | null = null
   #terminalSuspended = false
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
@@ -300,6 +304,7 @@ export class RottweilerApp extends BoxRenderable {
         this.#postSubmitPicker = null
         if (picker === "models") this.openModelPicker()
         else if (picker === "providers") this.openProviderPicker()
+        else if (picker === "settings") this.openSettingsPicker()
       },
     })
     this.statusLine = new StatusLineRenderable(ctx, theme)
@@ -512,6 +517,42 @@ export class RottweilerApp extends BoxRenderable {
     if (event.type === "command_finished" && event.name === "add-dir" && !next.replay.active) {
       this.#requestCommands()
     }
+    if (event.type === "provider_auth_started") {
+      const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
+      const attemptId = typeof eventRecord.attempt_id === "string" ? eventRecord.attempt_id : null
+      if (provider === null || attemptId === null) return
+      this.#command({
+        type: "complete_provider_auth",
+        provider,
+        attemptId,
+      })
+      this.openProviderAuthPicker()
+    }
+    if (event.type === "provider_configured") {
+      const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
+      if (provider === null) return
+      if (eventRecord.auth_kind === "oauth" || eventRecord.auth_kind === "device_flow") {
+        this.#command({ type: "begin_provider_auth", provider })
+      } else if (eventRecord.auth_kind === "api_key") {
+        this.#projectClientError(
+          "provider_api_key_cli_required",
+          `Provider profile created. API keys never enter the replayable UI protocol; run rw auth set-key ${provider}`,
+          true,
+        )
+      }
+    }
+    if (event.type === "provider_auth_finished") {
+      if (eventRecord.success === true) {
+        this.#requestModels(true)
+        this.openProviderPicker()
+      } else {
+        this.#projectClientError(
+          "provider_auth_failed",
+          typeof eventRecord.message === "string" ? eventRecord.message : "provider authentication failed",
+          true,
+        )
+      }
+    }
     if (
       event.type === "tool_call_finished" ||
       event.type === "conversation_rewound" ||
@@ -597,6 +638,23 @@ export class RottweilerApp extends BoxRenderable {
     if (!this.#modelsRequested) {
       this.#requestModels()
     }
+    this.#refreshPicker()
+  }
+
+  openProviderAuthPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "providerAuth"
+    this.#refreshPicker()
+  }
+
+  openSettingsPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "settings"
+    this.#command({ type: "list_settings" })
     this.#refreshPicker()
   }
 
@@ -933,7 +991,7 @@ export class RottweilerApp extends BoxRenderable {
           ...this.#slashCommandChoices().map((command) => ({
             id: command.name,
             label: `/${command.name}`,
-            description: command.description,
+            description: `${commandSourceLabel(command.source)} · ${command.description}`,
             searchText: command.usage,
             value: command,
           })),
@@ -972,6 +1030,12 @@ export class RottweilerApp extends BoxRenderable {
               clearAnchoredTrigger()
               this.closePicker()
               this.openProviderPicker()
+              return
+            }
+            if (command.name === "settings") {
+              clearAnchoredTrigger()
+              this.closePicker()
+              this.openSettingsPicker()
               return
             }
             this.composer.value = `/${command.name} `
@@ -1033,22 +1097,35 @@ export class RottweilerApp extends BoxRenderable {
         const models = this.#state.models.filter(
           (model) =>
             this.#modelProviderFilter === null ||
-            model.providers.includes(this.#modelProviderFilter),
+            (model.provider === undefined
+              ? model.providers.includes(this.#modelProviderFilter)
+              : model.provider === this.#modelProviderFilter),
         )
-        const modelItems: PickerItem<RottweilerState["models"][number] | null>[] =
-          models.map((model) => ({
-            id: model.alias,
-            label: model.alias,
+        const modelItems: PickerItem<ModelPickerChoice | null>[] =
+          [
+          ...(this.#modelProviderFilter === null
+            ? this.#state.modelAliases.map((alias) => ({
+                id: `alias:${alias.alias}`,
+                label: `${alias.current ? "● " : ""}Alias · ${alias.alias}`,
+                description: alias.candidates.join(" → "),
+                value: { kind: "alias" as const, alias },
+              }))
+            : []),
+          ...models.map((model) => ({
+            id: model.id ?? model.alias,
+            label: `${model.current === true ? "● " : ""}${model.displayName ?? model.alias}`,
             description: [
-              ...(model.providers.length === 0 ? ["unconfigured"] : model.providers),
+              model.provider ?? model.providers[0] ?? "unconfigured",
+              model.available === false ? (model.status ?? "unavailable") : "available",
               model.toolCalling ? "tools" : "",
               model.vision ? "vision" : "",
               model.thinking ? "thinking" : "",
             ]
               .filter(Boolean)
               .join(" · "),
-            value: model,
-          }))
+            value: { kind: "model" as const, model },
+          })),
+        ]
         const modelError = this.#projectionErrors.models
         if (modelError !== undefined) {
           modelItems.unshift({
@@ -1072,8 +1149,8 @@ export class RottweilerApp extends BoxRenderable {
             : `Models · ${this.#modelProviderFilter}`,
           modelItems,
           (item) => {
-            const model = item.value as RottweilerState["models"][number] | null
-            if (model === null) {
+            const selection = item.value as ModelPickerChoice | null
+            if (selection === null) {
               if (item.id === "models.error") {
                 this.#requestModels()
                 return
@@ -1085,30 +1162,62 @@ export class RottweilerApp extends BoxRenderable {
               this.closePicker()
               return
             }
+            if (selection.kind === "alias") {
+              this.#command({
+                type: "switch_model",
+                model: selection.alias.alias,
+                provider: null,
+              })
+              this.closePicker()
+              return
+            }
+            const model = selection.model
+            if (model.available === false) {
+              this.#projectClientError(
+                "model_unavailable",
+                model.status ?? `${model.displayName ?? model.alias} is unavailable`,
+                true,
+              )
+              return
+            }
             this.#command({
               type: "switch_model",
-              model: model.alias,
-              provider: this.#modelProviderFilter,
+              model: model.id ?? model.alias,
+              provider: model.provider ?? this.#modelProviderFilter,
             })
             this.closePicker()
           },
         )
         break
       case "providers": {
-        const providers = new Map<string, number>()
-        for (const model of this.#state.models) {
-          for (const provider of model.providers) {
-            providers.set(provider, (providers.get(provider) ?? 0) + 1)
-          }
-        }
-        const providerItems: PickerItem<string | null>[] = [...providers]
-          .sort(([left], [right]) => left.localeCompare(right))
-          .map(([provider, count]) => ({
-            id: provider,
-            label: provider,
-            description: `${count} model route${count === 1 ? "" : "s"}`,
-            value: provider,
-          }))
+        const providerChoices = this.#state.providers.length > 0
+          ? this.#state.providers
+          : [...new Set(this.#state.models.flatMap((model) => model.providers))].map((name) => ({
+              name,
+              authKind: "none" as const,
+              nextAction: "select_models" as const,
+              configured: true,
+              authenticated: true,
+              reachable: true,
+              modelCount: this.#state.models.filter((model) => model.providers.includes(name)).length,
+              status: null,
+            }))
+        const providerItems: PickerItem<RottweilerState["providers"][number] | null>[] =
+          providerChoices
+            .slice()
+            .sort((left, right) => left.name.localeCompare(right.name))
+            .map((provider) => ({
+              id: provider.name,
+              label: provider.name,
+              description: [
+                provider.authenticated ? "authenticated" : "not authenticated",
+                provider.reachable ? "reachable" : "unreachable",
+                `${provider.modelCount} model${provider.modelCount === 1 ? "" : "s"}`,
+                provider.nextAction.replaceAll("_", " "),
+                provider.status ?? "",
+              ].filter(Boolean).join(" · "),
+              value: provider,
+            }))
         const providerError = this.#projectionErrors.models
         if (providerError !== undefined) {
           providerItems.unshift({
@@ -1130,7 +1239,8 @@ export class RottweilerApp extends BoxRenderable {
           "Providers",
           providerItems,
           (item) => {
-            if (item.value === null) {
+            const provider = item.value as RottweilerState["providers"][number] | null
+            if (provider === null) {
               if (item.id === "providers.error") {
                 this.#requestModels()
                 return
@@ -1142,9 +1252,92 @@ export class RottweilerApp extends BoxRenderable {
               this.closePicker()
               return
             }
-            this.openModelPicker(item.value)
+            switch (provider.nextAction) {
+              case "select_models":
+                this.openModelPicker(provider.name)
+                break
+              case "authenticate":
+                this.#command({ type: "begin_provider_auth", provider: provider.name })
+                break
+              case "api_key_cli":
+                this.#projectClientError(
+                  "provider_api_key_cli_required",
+                  `API keys never enter the replayable UI protocol; run rw auth set-key ${provider.name}`,
+                  true,
+                )
+                break
+              case "configure":
+                this.#command({ type: "configure_builtin_provider", provider: provider.name })
+                break
+              case "none":
+                this.#projectClientError(
+                  "provider_auth_unavailable",
+                  provider.status ?? `${provider.name} has no safe authentication action`,
+                  true,
+                )
+                break
+            }
           },
         )
+        break
+      }
+      case "providerAuth": {
+        const pending = this.#state.providerAuth.pending
+        if (pending === null) {
+          this.openProviderPicker()
+          break
+        }
+        const prompt = pending.challenge.kind === "oauth"
+          ? `Open ${pending.challenge.authorization_url} · callback ${pending.challenge.redirect_uri}`
+          : `Open ${pending.challenge.verification_uri} · enter code ${pending.challenge.user_code}`
+        this.#openPicker(
+          `Authenticate ${pending.provider}`,
+          [
+            {
+              id: "provider-auth.waiting",
+              label: "Waiting for authentication…",
+              description: prompt,
+              searchText: prompt,
+              value: false,
+            },
+            {
+              id: "provider-auth.cancel",
+              label: "Cancel authentication",
+              description: pending.warnings.join(" · "),
+              value: true,
+            },
+          ],
+          (item) => {
+            if (item.value !== true) return
+            this.#command({
+              type: "cancel_provider_auth",
+              provider: pending.provider,
+              attemptId: pending.attemptId,
+            })
+          },
+        )
+        break
+      }
+      case "settings": {
+        const items = this.#state.settings.flatMap((setting) =>
+          setting.choices.map((value) => ({
+            id: `${setting.key}:${value}`,
+            label: `${setting.label} → ${value}`,
+            description: `${value === setting.value ? "current · " : ""}${setting.provenance}${setting.appliesImmediately ? " · live" : " · next session"}`,
+            value: { setting, value },
+          })),
+        )
+        this.#openPicker("Settings", items, (item) => {
+          const selection = item.value as {
+            setting: RottweilerState["settings"][number]
+            value: string
+          }
+          this.#command({
+            type: "set_setting",
+            key: selection.setting.key,
+            value: selection.value,
+          })
+        })
         break
       }
       case "modes":
@@ -1254,6 +1447,7 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
+
   #paletteActions(): readonly PaletteAction[] {
     const open = (action: () => void) => () => {
       this.closePicker()
@@ -1280,6 +1474,7 @@ export class RottweilerApp extends BoxRenderable {
       { id: "session.list", title: "Switch session", category: "Session", description: "Resume another durable session", run: open(() => this.openSessionPicker()) },
       { id: "model.list", title: "Switch model", category: "Agent", description: "Choose the active model alias", run: open(() => this.openModelPicker()) },
       { id: "provider.list", title: "Provider and model routes", category: "Agent", description: "Choose a configured provider route", run: open(() => this.openProviderPicker()) },
+      { id: "settings.open", title: "Settings", category: "Settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
       { id: "mode.list", title: "Switch mode", category: "Agent", description: "Choose discuss, plan, or execute", run: open(() => this.openModePicker()) },
       { id: "review.open", title: "Review changes", category: "Session", description: "Open the cumulative session diff", run: open(() => this.openReview()) },
       { id: "permissions.manage", title: "Permission settings", category: "Settings", description: "Inspect approvals and session rules", run: prefill("/permissions") },
@@ -1350,7 +1545,7 @@ export class RottweilerApp extends BoxRenderable {
       actions.push({
         id: `slash.${command.name}`,
         title: `Run /${command.name}`,
-        category: "Commands",
+        category: commandSourceLabel(command.source),
         description: command.description,
         run: prefill(`/${command.name}`),
       })
@@ -1406,10 +1601,10 @@ export class RottweilerApp extends BoxRenderable {
     this.#latestCommandsRequest = this.#command({ type: "list_commands" })
   }
 
-  #requestModels(): void {
+  #requestModels(refresh = false): void {
     this.#modelsRequested = true
     this.#clearProjectionError("models")
-    this.#latestModelsRequest = this.#command({ type: "list_models" })
+    this.#latestModelsRequest = this.#command({ type: "list_models", refresh })
   }
 
   #openChangedFileDiff(path: string): void {
@@ -1462,6 +1657,11 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (sessionAction?.type === "providers") {
       this.#postSubmitPicker = "providers"
+      this.closePicker()
+      return true
+    }
+    if (sessionAction?.type === "settings") {
+      this.#postSubmitPicker = "settings"
       this.closePicker()
       return true
     }
@@ -1668,7 +1868,13 @@ export class RottweilerApp extends BoxRenderable {
       | { readonly type: "get_session_review" | "get_workspace_status" }
       | { readonly type: "get_workspace_diff"; readonly path: string; readonly max_bytes: number }
       | { readonly type: "search_sessions"; readonly query: string; readonly limit: number }
-      | { readonly type: "list_commands" | "list_models" | "list_sessions" },
+      | { readonly type: "list_models"; readonly refresh: boolean }
+      | { readonly type: "list_settings" }
+      | { readonly type: "set_setting"; readonly key: string; readonly value: string }
+      | { readonly type: "begin_provider_auth"; readonly provider: string }
+      | { readonly type: "configure_builtin_provider"; readonly provider: string }
+      | { readonly type: "complete_provider_auth" | "cancel_provider_auth"; readonly provider: string; readonly attemptId: string }
+      | { readonly type: "list_commands" | "list_sessions" },
   ): string | null {
     if (
       this.#state.replay.active &&
@@ -1696,11 +1902,31 @@ export class RottweilerApp extends BoxRenderable {
     let dispatched: ClientCommand
     switch (command.type) {
       case "list_models":
+        dispatched = { ...command, meta, session_id: this.#sessionId }
+        break
       case "list_sessions":
         dispatched = { type: command.type, meta }
         break
       case "list_commands":
+      case "list_settings":
         dispatched = { type: command.type, meta, session_id: this.#sessionId }
+        break
+      case "set_setting":
+        dispatched = { ...command, meta, session_id: this.#sessionId }
+        break
+      case "begin_provider_auth":
+      case "configure_builtin_provider":
+        dispatched = { ...command, meta, session_id: this.#sessionId }
+        break
+      case "complete_provider_auth":
+      case "cancel_provider_auth":
+        dispatched = {
+          type: command.type,
+          meta,
+          session_id: this.#sessionId,
+          provider: command.provider,
+          attempt_id: command.attemptId,
+        }
         break
       case "search_sessions":
         dispatched = { ...command, meta }
@@ -1957,6 +2183,7 @@ type SessionAction =
   | { readonly type: "fork"; readonly atTurn: string | null }
   | { readonly type: "models" }
   | { readonly type: "providers" }
+  | { readonly type: "settings" }
   | { readonly type: "invalid"; readonly message: string }
 
 function parseSessionAction(content: string): SessionAction | null {
@@ -1976,6 +2203,11 @@ function parseSessionAction(content: string): SessionAction | null {
     return tokens.length === 1
       ? { type: "providers" }
       : { type: "invalid", message: "usage: /providers" }
+  }
+  if (command === "/settings") {
+    return tokens.length === 1
+      ? { type: "settings" }
+      : { type: "invalid", message: "usage: /settings" }
   }
   if (command !== "/fork") return null
   if (tokens.length === 1) return { type: "fork", atTurn: null }
@@ -2009,6 +2241,20 @@ function safeErrorMessage(error: unknown): string {
   return error instanceof Error && error.message.length > 0
     ? error.message
     : "the request could not be delivered to the engine"
+}
+
+function commandSourceLabel(source: CommandChoice["source"]): string {
+  switch (source) {
+    case "project": return "Project"
+    case "user": return "User"
+    case "plugin": return "Plugin"
+    case "skill": return "Skills"
+    case "workflow": return "Workflows"
+    case "mcp": return "MCP"
+    case "builtin":
+    case undefined:
+      return "Built-in"
+  }
 }
 
 function approvalBinding(diff: unknown): ApprovalBinding | null {

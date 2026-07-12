@@ -29,6 +29,10 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "sessions_search_ready",
   "command_descriptors_listed",
   "models_listed",
+  "settings_listed",
+  "provider_auth_started",
+  "provider_configured",
+  "provider_auth_finished",
   "workspace_files_found",
   "workspace_file_preview_ready",
   "workspace_status_ready",
@@ -89,6 +93,10 @@ const ACK_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "sessions_search_ready",
   "command_descriptors_listed",
   "models_listed",
+  "settings_listed",
+  "provider_auth_started",
+  "provider_configured",
+  "provider_auth_finished",
   "workspace_files_found",
   "workspace_file_preview_ready",
   "workspace_status_ready",
@@ -325,6 +333,7 @@ function applyKnownEvent(
           name: command.name,
           description: command.description,
           usage: command.usage,
+          source: command.source ?? "builtin",
         })),
         commandsTruncated: event.truncated,
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
@@ -334,13 +343,101 @@ function applyKnownEvent(
         ...state,
         models: event.models.map((model) => ({
           alias: model.alias,
+          ...(model.id === undefined ? {} : { id: model.id }),
+          ...(model.display_name === undefined ? {} : { displayName: model.display_name }),
+          ...(model.provider === undefined ? {} : { provider: model.provider }),
           // Older compatible hosts did not emit provider metadata.
           providers: model.providers ?? [],
+          ...(model.aliases === undefined ? {} : { aliases: model.aliases }),
+          ...(model.current === undefined ? {} : { current: model.current }),
+          ...(model.available === undefined ? {} : { available: model.available }),
+          ...(model.status === undefined ? {} : { status: model.status }),
           vision: model.capabilities.vision,
           thinking: model.capabilities.thinking,
           toolCalling: model.capabilities.tool_calling,
         })),
+        modelAliases: (event.aliases ?? []).map((alias) => ({
+          alias: alias.alias,
+          candidates: alias.candidates,
+          current: alias.current,
+        })),
+        providers: (event.providers ?? []).map((provider) => ({
+          name: provider.name,
+          authKind: provider.auth_kind,
+          nextAction: provider.next_action,
+          configured: provider.configured,
+          authenticated: provider.authenticated,
+          reachable: provider.reachable,
+          modelCount: provider.model_count,
+          status: provider.status ?? null,
+        })),
+        modelCatalogCached: event.cached ?? false,
+        providerAuth:
+          state.providerAuth.pending !== null &&
+          event.providers.some(
+            (provider) =>
+              provider.name === state.providerAuth.pending?.provider && provider.authenticated,
+          )
+            ? {
+                pending: null,
+                last: {
+                  provider: state.providerAuth.pending.provider,
+                  success: true,
+                  message: "provider authentication active",
+                  warnings: [],
+                },
+              }
+            : state.providerAuth,
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
+      }
+    case "settings_listed":
+      return {
+        ...state,
+        settings: event.settings.map((setting) => ({
+          key: setting.key,
+          label: setting.label,
+          value: setting.value,
+          choices: setting.choices,
+          provenance: setting.provenance,
+          appliesImmediately: setting.applies_immediately,
+        })),
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "provider_auth_started":
+      return {
+        ...state,
+        providerAuth: {
+          pending: {
+            attemptId: event.attempt_id,
+            provider: event.provider,
+            challenge: event.challenge,
+            warnings: event.warnings,
+          },
+          last: null,
+        },
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "provider_configured":
+      return {
+        ...state,
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "provider_auth_finished":
+      return {
+        ...state,
+        providerAuth: {
+          pending:
+            state.providerAuth.pending?.attemptId === event.attempt_id
+              ? null
+              : state.providerAuth.pending,
+          last: {
+            provider: event.provider,
+            success: event.success,
+            message: event.message,
+            warnings: event.warnings,
+          },
+        },
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
       }
     case "host_shutdown":
       return {
@@ -437,10 +534,15 @@ function applyKnownEvent(
       ]
       const clearsTail =
         event.turn.role === "assistant" && state.streamingTail?.turnId === event.agent_turn
+      const resolvedRoute =
+        event.turn.role === "assistant" ? providerQualifiedRoute(event.turn.meta.model) : null
       return {
         ...state,
         transcript,
         streamingTail: clearsTail ? null : state.streamingTail,
+        ...(resolvedRoute === null
+          ? {}
+          : { model: resolvedRoute.model, provider: resolvedRoute.provider }),
       }
     }
     case "conversation_rewound": {
@@ -827,6 +929,15 @@ function applyKnownEvent(
   }
 }
 
+function providerQualifiedRoute(
+  value: string | null | undefined,
+): { readonly provider: string; readonly model: string } | null {
+  if (value === null || value === undefined) return null
+  const separator = value.indexOf("/")
+  if (separator <= 0 || separator === value.length - 1) return null
+  return { provider: value.slice(0, separator), model: value }
+}
+
 function nextSubagentArchiveKey(
   subagents: RottweilerState["subagents"],
   subagentId: string,
@@ -1101,6 +1212,10 @@ function responseAck(
     | "sessions_search_ready"
     | "command_descriptors_listed"
     | "models_listed"
+    | "settings_listed"
+    | "provider_auth_started"
+    | "provider_configured"
+    | "provider_auth_finished"
     | "workspace_files_found"
     | "workspace_file_preview_ready"
     | "workspace_status_ready"

@@ -1,6 +1,8 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
+    future::Future,
+    pin::Pin,
     sync::{
         Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
@@ -10,18 +12,26 @@ use std::{
 use async_trait::async_trait;
 use rw_types::{
     ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta,
-    CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, ModelAlias, ModelDescriptor,
-    RequestId, SequenceId, SessionDescriptor, SessionId, ShellId, TurnId, WorkspaceDiff,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, ModelAlias,
+    ModelCatalogSnapshot, ProviderAuthAttemptId, ProviderAuthChallenge, RequestId, SequenceId,
+    SessionDescriptor, SessionId, ShellId, TurnId, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceStatus,
 };
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 
-use crate::{AgentLoopError, EventClock, SessionHandle, SystemEventClock};
+use crate::{AgentLoopError, CachedModelCatalog, EventClock, SessionHandle, SystemEventClock};
 
 const HOST_EVENT_CAPACITY: usize = 256;
 const MAX_WIRE_COMMANDS: usize = 512;
 const MAX_WIRE_COMMAND_CATALOG_BYTES: usize = 48 * 1024;
+const PROVIDER_AUTH_BEGIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+const PROVIDER_AUTH_COMPLETE_DEADLINE: std::time::Duration = std::time::Duration::from_mins(10);
+const MAX_PROVIDER_AUTH_URL_BYTES: usize = 4_096;
+const MAX_PROVIDER_AUTH_CODE_BYTES: usize = 256;
+const MAX_PROVIDER_AUTH_WARNINGS: usize = 16;
+const MAX_PROVIDER_AUTH_WARNING_BYTES: usize = 512;
+const MAX_PROVIDER_AUTH_MESSAGE_BYTES: usize = 1_024;
 
 /// Transport-authenticated client identity. The host overwrites every
 /// untrusted wire `CommandMeta.client_id` with this value before authorization.
@@ -109,6 +119,7 @@ pub struct HostedSession {
     descriptor: Arc<RwLock<SessionDescriptor>>,
     handle: SessionHandle,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
+    model_catalog: Option<Arc<CachedModelCatalog>>,
 }
 
 impl fmt::Debug for HostedSession {
@@ -127,7 +138,20 @@ impl HostedSession {
             descriptor: Arc::new(RwLock::new(descriptor)),
             handle,
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            model_catalog: None,
         }
+    }
+
+    /// Attaches the exact provider catalog assembled for this session.
+    #[must_use]
+    pub fn with_model_catalog(mut self, model_catalog: Arc<CachedModelCatalog>) -> Self {
+        self.model_catalog = Some(model_catalog);
+        self
+    }
+
+    #[must_use]
+    pub fn model_catalog(&self) -> Option<Arc<CachedModelCatalog>> {
+        self.model_catalog.clone()
     }
 
     #[must_use]
@@ -275,7 +299,40 @@ pub trait SessionFactory: Send + Sync + 'static {
 #[async_trait]
 pub trait HostQueryService: Send + Sync + 'static {
     async fn command_descriptors(&self) -> Result<Vec<CommandDescriptor>, HostError>;
-    async fn model_descriptors(&self) -> Result<Vec<ModelDescriptor>, HostError>;
+    async fn model_catalog(
+        &self,
+        refresh: bool,
+        selected_model: Option<&str>,
+        resolved_model: Option<&str>,
+    ) -> Result<ModelCatalogSnapshot, HostError>;
+    async fn user_settings(
+        &self,
+        _session: &SessionDescriptor,
+    ) -> Result<Vec<rw_types::UserSettingDescriptor>, HostError> {
+        Err(HostError::Query(
+            "user settings are unavailable on this host".to_owned(),
+        ))
+    }
+    async fn set_user_setting(
+        &self,
+        _session: &SessionDescriptor,
+        _key: &str,
+        _value: &str,
+    ) -> Result<Vec<rw_types::UserSettingDescriptor>, HostError> {
+        Err(HostError::Query(
+            "user settings are unavailable on this host".to_owned(),
+        ))
+    }
+    async fn begin_provider_auth(&self, _provider: &str) -> Result<ProviderAuthAttempt, HostError> {
+        Err(HostError::Query(
+            "provider authentication is unavailable on this host".to_owned(),
+        ))
+    }
+    async fn configure_builtin_provider(&self, _provider: &str) -> Result<(), HostError> {
+        Err(HostError::Query(
+            "built-in provider setup is unavailable on this host".to_owned(),
+        ))
+    }
     async fn search_workspace_files(
         &self,
         session: &SessionDescriptor,
@@ -298,6 +355,63 @@ pub trait HostQueryService: Send + Sync + 'static {
         path: &str,
         max_bytes: u32,
     ) -> Result<WorkspaceDiff, HostError>;
+}
+
+/// One sanitized provider-auth result. Credential values never cross this boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderAuthCompletion {
+    pub provider: String,
+    pub message: String,
+    pub warnings: Vec<String>,
+}
+
+/// Opaque, connection-scoped provider authentication owned by the host until
+/// completion or cancellation. The inner future owns all provider secrets.
+pub struct ProviderAuthAttempt {
+    challenge: ProviderAuthChallenge,
+    warnings: Vec<String>,
+    completion:
+        Pin<Box<dyn Future<Output = Result<ProviderAuthCompletion, HostError>> + Send + 'static>>,
+    cancellation: Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
+impl ProviderAuthAttempt {
+    #[must_use]
+    pub fn new(
+        challenge: ProviderAuthChallenge,
+        warnings: Vec<String>,
+        completion: Pin<
+            Box<dyn Future<Output = Result<ProviderAuthCompletion, HostError>> + Send + 'static>,
+        >,
+        cancellation: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Self {
+        Self {
+            challenge,
+            warnings,
+            completion,
+            cancellation,
+        }
+    }
+
+    fn challenge(&self) -> &ProviderAuthChallenge {
+        &self.challenge
+    }
+
+    fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
+    fn cancellation(&self) -> Arc<dyn Fn() + Send + Sync + 'static> {
+        Arc::clone(&self.cancellation)
+    }
+
+    async fn complete(self) -> Result<ProviderAuthCompletion, HostError> {
+        self.completion.await
+    }
+
+    fn cancel(self) {
+        (self.cancellation)();
+    }
 }
 
 /// A host operation could not be completed safely.
@@ -365,6 +479,121 @@ struct DedupeRegistry {
     order: VecDeque<(ClientId, RequestId)>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ProviderAuthOwner {
+    client_id: ClientId,
+    session_id: SessionId,
+    provider: String,
+}
+
+enum PendingProviderAuth {
+    Opening {
+        attempt_id: ProviderAuthAttemptId,
+    },
+    Ready {
+        attempt_id: ProviderAuthAttemptId,
+        attempt: ProviderAuthAttempt,
+    },
+    Completing {
+        attempt_id: ProviderAuthAttemptId,
+        cancellation: Arc<dyn Fn() + Send + Sync + 'static>,
+        cancelled: watch::Sender<bool>,
+    },
+}
+
+#[derive(Default)]
+struct PendingProviderAuths {
+    entries: Mutex<HashMap<ProviderAuthOwner, PendingProviderAuth>>,
+}
+
+struct ProviderAuthSubscriptionGuard {
+    client_id: ClientId,
+    receiver: broadcast::Receiver<EngineEvent>,
+    sender: broadcast::Sender<EngineEvent>,
+    pending: Arc<PendingProviderAuths>,
+}
+
+impl Drop for ProviderAuthSubscriptionGuard {
+    fn drop(&mut self) {
+        // This receiver is still counted during Drop. Cancel only when it is
+        // the client's final authenticated event subscription.
+        if self.sender.receiver_count() <= 1 {
+            self.pending.cancel_client(&self.client_id);
+        }
+    }
+}
+
+impl PendingProviderAuths {
+    fn cancel_session_client(&self, client_id: &ClientId, session_id: &SessionId) {
+        let attempts = {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owners = entries
+                .keys()
+                .filter(|owner| &owner.client_id == client_id && &owner.session_id == session_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            owners
+                .into_iter()
+                .filter_map(|owner| entries.remove(&owner))
+                .collect::<Vec<_>>()
+        };
+        cancel_provider_auth_attempts(attempts);
+    }
+
+    fn cancel_client(&self, client_id: &ClientId) {
+        let attempts = {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let owners = entries
+                .keys()
+                .filter(|owner| &owner.client_id == client_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            owners
+                .into_iter()
+                .filter_map(|owner| entries.remove(&owner))
+                .collect::<Vec<_>>()
+        };
+        cancel_provider_auth_attempts(attempts);
+    }
+
+    fn cancel_all(&self) {
+        let attempts = {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            entries
+                .drain()
+                .map(|(_, pending)| pending)
+                .collect::<Vec<_>>()
+        };
+        cancel_provider_auth_attempts(attempts);
+    }
+}
+
+fn cancel_provider_auth_attempts(attempts: Vec<PendingProviderAuth>) {
+    for pending in attempts {
+        match pending {
+            PendingProviderAuth::Ready { attempt, .. } => attempt.cancel(),
+            PendingProviderAuth::Completing {
+                cancellation,
+                cancelled,
+                ..
+            } => {
+                cancellation();
+                let _ = cancelled.send(true);
+            }
+            PendingProviderAuth::Opening { .. } => {}
+        }
+    }
+}
+
 /// Process-wide router and supervisor-neutral owner of session actors.
 #[derive(Clone)]
 pub struct EngineHost {
@@ -375,6 +604,7 @@ pub struct EngineHost {
     registry: Arc<tokio::sync::Mutex<HostRegistry>>,
     dedupe: Arc<Mutex<DedupeRegistry>>,
     client_events: Arc<Mutex<HashMap<ClientId, broadcast::Sender<EngineEvent>>>>,
+    provider_auth: Arc<PendingProviderAuths>,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -412,6 +642,7 @@ impl EngineHost {
             registry: Arc::new(tokio::sync::Mutex::new(HostRegistry::default())),
             dedupe: Arc::new(Mutex::new(DedupeRegistry::default())),
             client_events: Arc::new(Mutex::new(HashMap::new())),
+            provider_auth: Arc::new(PendingProviderAuths::default()),
             shutting_down: Arc::new(AtomicBool::new(false)),
         })
     }
@@ -1007,14 +1238,374 @@ impl EngineHost {
                     }],
                 ))
             }
-            ClientCommand::ListModels { meta } => Ok((
-                CommandOutcome::Accepted,
-                None,
-                vec![EngineEvent::ModelsListed {
-                    meta: ack_meta(&meta, &*self.clock),
-                    models: self.queries.model_descriptors().await?,
-                }],
-            )),
+            ClientCommand::ListModels {
+                meta,
+                session_id,
+                refresh,
+            } => {
+                let (session_catalog, selected, resolved) = if let Some(session_id) = &session_id {
+                    let session = self.ready_session(session_id).await?;
+                    let snapshot = session.handle().snapshot().await.map_err(HostError::from)?;
+                    let resolved = snapshot.conversation.iter().rev().find_map(|turn| {
+                        turn.meta
+                            .model
+                            .as_ref()
+                            .filter(|model| model.contains('/'))
+                            .cloned()
+                    });
+                    (
+                        session.model_catalog(),
+                        Some(snapshot.model_alias),
+                        resolved,
+                    )
+                } else {
+                    (None, None, None)
+                };
+                let mut catalog = if let Some(session_catalog) = session_catalog {
+                    session_catalog
+                        .get(refresh)
+                        .await
+                        .map_err(|error| HostError::Query(error.to_string()))?
+                } else {
+                    self.queries.model_catalog(refresh, None, None).await?
+                };
+                overlay_model_catalog_current(
+                    &mut catalog,
+                    selected.as_deref(),
+                    resolved.as_deref(),
+                );
+                Ok((
+                    CommandOutcome::Accepted,
+                    None,
+                    vec![EngineEvent::ModelsListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        models: catalog.models,
+                        aliases: catalog.aliases,
+                        providers: catalog.providers,
+                        cached: catalog.cached,
+                        truncated: catalog.truncated,
+                    }],
+                ))
+            }
+            ClientCommand::ListSettings { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let settings = self.queries.user_settings(&session.descriptor()).await?;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::SettingsListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        settings,
+                    }],
+                ))
+            }
+            ClientCommand::SetSetting {
+                meta,
+                session_id,
+                key,
+                value,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                let snapshot = session.handle().snapshot().await?;
+                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
+                    return Err(HostError::Protocol(
+                        "only the current driver may persist user settings".to_owned(),
+                    ));
+                }
+                let settings = self
+                    .queries
+                    .set_user_setting(&session.descriptor(), &key, &value)
+                    .await?;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::SettingsListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        settings,
+                    }],
+                ))
+            }
+            ClientCommand::BeginProviderAuth {
+                meta,
+                session_id,
+                provider,
+            } => {
+                validate_provider_auth_name(&provider)?;
+                let session = self.ready_session(&session_id).await?;
+                let lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                let snapshot = session.handle().snapshot().await?;
+                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
+                    return Err(HostError::Protocol(
+                        "only the current driver may authenticate providers".to_owned(),
+                    ));
+                }
+                let owner = ProviderAuthOwner {
+                    client_id: meta.client_id.clone(),
+                    session_id: session_id.clone(),
+                    provider: provider.clone(),
+                };
+                let attempt_id = provider_auth_attempt_id(&meta, &session_id, &provider);
+                {
+                    let mut pending = self
+                        .provider_auth
+                        .entries
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if pending.contains_key(&owner) {
+                        return Err(HostError::Protocol(
+                            "provider authentication is already in progress".to_owned(),
+                        ));
+                    }
+                    pending.insert(
+                        owner.clone(),
+                        PendingProviderAuth::Opening {
+                            attempt_id: attempt_id.clone(),
+                        },
+                    );
+                }
+                drop(lifecycle_guard);
+                let attempt = match tokio::time::timeout(
+                    PROVIDER_AUTH_BEGIN_DEADLINE,
+                    self.queries.begin_provider_auth(&provider),
+                )
+                .await
+                {
+                    Ok(Ok(attempt)) => attempt,
+                    Ok(Err(error)) => {
+                        remove_provider_auth_reservation(&self.provider_auth, &owner, &attempt_id);
+                        return Err(HostError::Query(sanitized_provider_auth_error(&error)));
+                    }
+                    Err(_) => {
+                        remove_provider_auth_reservation(&self.provider_auth, &owner, &attempt_id);
+                        return Err(HostError::Query(
+                            "provider authentication setup deadline exceeded".to_owned(),
+                        ));
+                    }
+                };
+                let (challenge, warnings) = bounded_provider_auth_prompt(&attempt)?;
+                let lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                let driver_unchanged = session.handle().snapshot().await?.driver_client_id.as_ref()
+                    == Some(&meta.client_id);
+                let mut attempt = Some(attempt);
+                let retained = {
+                    let mut pending = self
+                        .provider_auth
+                        .entries
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if driver_unchanged
+                        && matches!(
+                            pending.get(&owner),
+                            Some(PendingProviderAuth::Opening { attempt_id: current }) if current == &attempt_id
+                        )
+                    {
+                        if let Some(retained_attempt) = attempt.take() {
+                            pending.insert(
+                                owner,
+                                PendingProviderAuth::Ready {
+                                    attempt_id: attempt_id.clone(),
+                                    attempt: retained_attempt,
+                                },
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+                drop(lifecycle_guard);
+                if !retained {
+                    if let Some(attempt) = attempt {
+                        attempt.cancel();
+                    }
+                    return Err(HostError::Protocol(
+                        "provider authentication was cancelled during setup".to_owned(),
+                    ));
+                }
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::ProviderAuthStarted {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        attempt_id,
+                        provider,
+                        challenge,
+                        warnings,
+                    }],
+                ))
+            }
+            ClientCommand::ConfigureBuiltinProvider {
+                meta,
+                session_id,
+                provider,
+            } => {
+                validate_provider_auth_name(&provider)?;
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                let snapshot = session.handle().snapshot().await?;
+                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
+                    return Err(HostError::Protocol(
+                        "only the current driver may configure built-in providers".to_owned(),
+                    ));
+                }
+                let auth_kind = builtin_provider_auth_kind(&provider)?;
+                self.queries.configure_builtin_provider(&provider).await?;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::ProviderConfigured {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        provider,
+                        auth_kind,
+                    }],
+                ))
+            }
+            ClientCommand::CompleteProviderAuth {
+                meta,
+                session_id,
+                provider,
+                attempt_id,
+            } => {
+                validate_provider_auth_name(&provider)?;
+                let session = self.ready_session(&session_id).await?;
+                let lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                let snapshot = session.handle().snapshot().await?;
+                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
+                    return Err(HostError::Protocol(
+                        "only the current driver may complete provider authentication".to_owned(),
+                    ));
+                }
+                let owner = ProviderAuthOwner {
+                    client_id: meta.client_id.clone(),
+                    session_id: session_id.clone(),
+                    provider: provider.clone(),
+                };
+                let pending = {
+                    let mut entries = self
+                        .provider_auth
+                        .entries
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    entries.remove(&owner)
+                };
+                let attempt = match pending {
+                    Some(PendingProviderAuth::Ready {
+                        attempt_id: current,
+                        attempt,
+                    }) if current == attempt_id => attempt,
+                    Some(other) => {
+                        self.provider_auth
+                            .entries
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(owner, other);
+                        return Err(HostError::Protocol(
+                            "provider authentication attempt is not ready or does not match"
+                                .to_owned(),
+                        ));
+                    }
+                    None => {
+                        return Err(HostError::Protocol(
+                            "provider authentication attempt is no longer active".to_owned(),
+                        ));
+                    }
+                };
+                let cancellation = attempt.cancellation();
+                let (cancelled, cancel_signal) = watch::channel(false);
+                self.provider_auth
+                    .entries
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        owner.clone(),
+                        PendingProviderAuth::Completing {
+                            attempt_id: attempt_id.clone(),
+                            cancellation: Arc::clone(&cancellation),
+                            cancelled,
+                        },
+                    );
+                drop(lifecycle_guard);
+                let host = self.clone();
+                tokio::spawn(async move {
+                    host.complete_provider_auth_task(
+                        owner,
+                        attempt_id,
+                        attempt,
+                        cancel_signal,
+                        meta,
+                        snapshot,
+                    )
+                    .await;
+                });
+                Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()))
+            }
+            ClientCommand::CancelProviderAuth {
+                meta,
+                session_id,
+                provider,
+                attempt_id,
+            } => {
+                validate_provider_auth_name(&provider)?;
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                let snapshot = session.handle().snapshot().await?;
+                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
+                    return Err(HostError::Protocol(
+                        "only the current driver may cancel provider authentication".to_owned(),
+                    ));
+                }
+                let owner = ProviderAuthOwner {
+                    client_id: meta.client_id.clone(),
+                    session_id: session_id.clone(),
+                    provider: provider.clone(),
+                };
+                let pending = {
+                    let mut entries = self
+                        .provider_auth
+                        .entries
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let pending = entries.remove(&owner);
+                    match pending {
+                        Some(pending) if pending_provider_auth_id(&pending) == &attempt_id => {
+                            pending
+                        }
+                        Some(pending) => {
+                            entries.insert(owner, pending);
+                            return Err(HostError::Protocol(
+                                "provider authentication attempt does not match".to_owned(),
+                            ));
+                        }
+                        None => {
+                            return Err(HostError::Protocol(
+                                "provider authentication attempt is no longer active".to_owned(),
+                            ));
+                        }
+                    }
+                };
+                cancel_provider_auth_attempts(vec![pending]);
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::ProviderAuthFinished {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        attempt_id,
+                        provider,
+                        success: false,
+                        message: "provider authentication cancelled".to_owned(),
+                        warnings: Vec::new(),
+                    }],
+                ))
+            }
             ClientCommand::SearchWorkspaceFiles {
                 meta,
                 session_id,
@@ -1093,6 +1684,7 @@ impl EngineHost {
                 ))
             }
             ClientCommand::ShutdownHost { meta } => {
+                self.provider_auth.cancel_all();
                 let opening_waiters = {
                     let mut registry = self.registry.lock().await;
                     // The shutdown flag and registry transition share this
@@ -1139,6 +1731,11 @@ impl EngineHost {
                     Some(lifecycle) => Some(lifecycle.lock_owned().await),
                     None => None,
                 };
+                let previous_driver = if driver.is_some() {
+                    session.handle().snapshot().await?.driver_client_id
+                } else {
+                    None
+                };
                 let outcome = session.handle().dispatch(command).await?;
                 if outcome == CommandOutcome::Accepted {
                     // TakeDriver persists its lease before returning Accepted.
@@ -1146,6 +1743,12 @@ impl EngineHost {
                     // durable event; those descriptor fields are therefore
                     // updated only by `project_durable_descriptor`.
                     if let Some(driver) = driver {
+                        if let Some(previous) =
+                            previous_driver.filter(|previous| previous != &driver)
+                        {
+                            self.provider_auth
+                                .cancel_session_client(&previous, &session_id);
+                        }
                         session.set_driver(Some(driver));
                     }
                 }
@@ -1381,6 +1984,7 @@ impl EngineHost {
     ///
     /// Returns a typed host error when the session is unavailable or the
     /// requested replay cursor is invalid.
+    #[allow(clippy::too_many_lines)]
     pub async fn subscribe(
         &self,
         bound: BoundClient,
@@ -1388,7 +1992,7 @@ impl EngineHost {
         last_seen: Option<SequenceId>,
     ) -> Result<mpsc::Receiver<Result<EngineEvent, HostError>>, HostError> {
         let sender = self.client_sender(&bound.client_id);
-        let mut host_events = sender.subscribe();
+        let host_events = sender.subscribe();
         let (send, receive) = mpsc::channel(HOST_EVENT_CAPACITY);
         let session = if let Some(session_id) = &session_id {
             Some(self.ready_session(session_id).await?)
@@ -1396,7 +2000,14 @@ impl EngineHost {
             None
         };
         let clock = Arc::clone(&self.clock);
+        let provider_auth = Arc::clone(&self.provider_auth);
         tokio::spawn(async move {
+            let mut subscription = ProviderAuthSubscriptionGuard {
+                client_id: bound.client_id.clone(),
+                receiver: host_events,
+                sender,
+                pending: provider_auth,
+            };
             if let Some(session) = session {
                 let captured_tail = match session.handle().last_sequence().await {
                     Ok(tail) => tail,
@@ -1434,7 +2045,7 @@ impl EngineHost {
                 }
                 loop {
                     tokio::select! {
-                        host = host_events.recv() => match host {
+                        host = subscription.receiver.recv() => match host {
                             Ok(event) => if send.send(Ok(event)).await.is_err() { return; },
                             Err(broadcast::error::RecvError::Lagged(_)) => {},
                             Err(broadcast::error::RecvError::Closed) => return,
@@ -1469,7 +2080,7 @@ impl EngineHost {
                 }
             } else {
                 loop {
-                    match host_events.recv().await {
+                    match subscription.receiver.recv().await {
                         Ok(event) => {
                             if send.send(Ok(event)).await.is_err() {
                                 return;
@@ -1504,6 +2115,108 @@ impl EngineHost {
         for event in events {
             let _ = sender.send(event.clone());
         }
+    }
+
+    async fn complete_provider_auth_task(
+        self,
+        owner: ProviderAuthOwner,
+        attempt_id: ProviderAuthAttemptId,
+        attempt: ProviderAuthAttempt,
+        mut cancel_signal: watch::Receiver<bool>,
+        meta: CommandMeta,
+        snapshot: crate::SessionSnapshot,
+    ) {
+        let cancellation = attempt.cancellation();
+        let completion = tokio::select! {
+            result = tokio::time::timeout(PROVIDER_AUTH_COMPLETE_DEADLINE, attempt.complete()) => {
+                result.unwrap_or_else(|_| {
+                    cancellation();
+                    Err(HostError::Query("provider authentication deadline exceeded".to_owned()))
+                })
+            }
+            changed = cancel_signal.changed() => {
+                let _ = changed;
+                Err(HostError::Query("provider authentication was cancelled".to_owned()))
+            }
+        };
+        if !take_provider_auth_reservation(&self.provider_auth, &owner, &attempt_id) {
+            return;
+        }
+        let (mut success, mut message, warnings) = match completion
+            .and_then(|completion| validate_provider_auth_completion(&owner.provider, completion))
+        {
+            Ok(completion) => (true, completion.message, completion.warnings),
+            Err(error) => (false, sanitized_provider_auth_error(&error), Vec::new()),
+        };
+        let mut refreshed_catalog = None;
+        if success {
+            if let Ok(session) = self.ready_session(&owner.session_id).await {
+                if session
+                    .handle()
+                    .activate_provider(&owner.provider)
+                    .await
+                    .is_err()
+                {
+                    success = false;
+                    "authentication completed but provider activation failed"
+                        .clone_into(&mut message);
+                } else if let Some(catalog) = session.model_catalog()
+                    && let Ok(mut catalog) = catalog.get(true).await
+                {
+                    overlay_model_catalog_current(
+                        &mut catalog,
+                        Some(&snapshot.model_alias),
+                        snapshot.conversation.iter().rev().find_map(|turn| {
+                            turn.meta
+                                .model
+                                .as_deref()
+                                .filter(|model| model.contains('/'))
+                        }),
+                    );
+                    refreshed_catalog = Some(catalog);
+                }
+            } else {
+                success = false;
+                "authentication completed but its session is unavailable".clone_into(&mut message);
+            }
+        }
+        let mut events = vec![EngineEvent::ProviderAuthFinished {
+            meta: ack_meta(&meta, &*self.clock),
+            session_id: owner.session_id.clone(),
+            attempt_id,
+            provider: owner.provider.clone(),
+            success,
+            message,
+            warnings,
+        }];
+        if success && refreshed_catalog.is_none() {
+            refreshed_catalog = self
+                .queries
+                .model_catalog(
+                    true,
+                    Some(&snapshot.model_alias),
+                    snapshot.conversation.iter().rev().find_map(|turn| {
+                        turn.meta
+                            .model
+                            .as_deref()
+                            .filter(|model| model.contains('/'))
+                    }),
+                )
+                .await
+                .ok();
+        }
+        if let Some(catalog) = refreshed_catalog {
+            events.push(EngineEvent::ModelsListed {
+                meta: ack_meta(&meta, &*self.clock),
+                session_id: Some(owner.session_id),
+                models: catalog.models,
+                aliases: catalog.aliases,
+                providers: catalog.providers,
+                cached: catalog.cached,
+                truncated: catalog.truncated,
+            });
+        }
+        self.emit_many(&owner.client_id, &events);
     }
 }
 
@@ -1633,12 +2346,201 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::PreviewWorkspaceFile { session_id, .. }
         | ClientCommand::GetWorkspaceStatus { session_id, .. }
         | ClientCommand::GetWorkspaceDiff { session_id, .. }
-        | ClientCommand::ListCommands { session_id, .. } => Some(session_id.clone()),
+        | ClientCommand::ListCommands { session_id, .. }
+        | ClientCommand::ListSettings { session_id, .. }
+        | ClientCommand::SetSetting { session_id, .. }
+        | ClientCommand::BeginProviderAuth { session_id, .. }
+        | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
+        | ClientCommand::CompleteProviderAuth { session_id, .. }
+        | ClientCommand::CancelProviderAuth { session_id, .. } => Some(session_id.clone()),
         ClientCommand::CreateSession { .. }
         | ClientCommand::ListSessions { .. }
         | ClientCommand::SearchSessions { .. }
         | ClientCommand::ListModels { .. }
         | ClientCommand::ShutdownHost { .. } => None,
+    }
+}
+
+fn validate_provider_auth_name(provider: &str) -> Result<(), HostError> {
+    if provider.is_empty()
+        || provider.len() > 128
+        || !provider
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(HostError::Protocol(
+            "provider authentication name is invalid".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn builtin_provider_auth_kind(provider: &str) -> Result<rw_types::ProviderAuthKind, HostError> {
+    match provider {
+        "openai_codex" => Ok(rw_types::ProviderAuthKind::Oauth),
+        "github_copilot" => Ok(rw_types::ProviderAuthKind::DeviceFlow),
+        "openai" | "anthropic" => Ok(rw_types::ProviderAuthKind::ApiKey),
+        _ => Err(HostError::Protocol(
+            "provider is not in the fixed built-in setup allowlist".to_owned(),
+        )),
+    }
+}
+
+fn provider_auth_attempt_id(
+    meta: &CommandMeta,
+    session_id: &SessionId,
+    provider: &str,
+) -> ProviderAuthAttemptId {
+    let digest = blake3::hash(
+        format!(
+            "{}\0{}\0{}\0{}",
+            meta.client_id.0, meta.request_id.0, session_id.0, provider
+        )
+        .as_bytes(),
+    );
+    ProviderAuthAttemptId(digest.to_hex()[..24].to_owned())
+}
+
+fn pending_provider_auth_id(pending: &PendingProviderAuth) -> &ProviderAuthAttemptId {
+    match pending {
+        PendingProviderAuth::Opening { attempt_id }
+        | PendingProviderAuth::Ready { attempt_id, .. }
+        | PendingProviderAuth::Completing { attempt_id, .. } => attempt_id,
+    }
+}
+
+fn remove_provider_auth_reservation(
+    pending: &PendingProviderAuths,
+    owner: &ProviderAuthOwner,
+    attempt_id: &ProviderAuthAttemptId,
+) {
+    let mut entries = pending
+        .entries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if entries
+        .get(owner)
+        .is_some_and(|attempt| pending_provider_auth_id(attempt) == attempt_id)
+    {
+        entries.remove(owner);
+    }
+}
+
+fn take_provider_auth_reservation(
+    pending: &PendingProviderAuths,
+    owner: &ProviderAuthOwner,
+    attempt_id: &ProviderAuthAttemptId,
+) -> bool {
+    let mut entries = pending
+        .entries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if entries
+        .get(owner)
+        .is_some_and(|attempt| pending_provider_auth_id(attempt) == attempt_id)
+    {
+        entries.remove(owner);
+        true
+    } else {
+        false
+    }
+}
+
+fn bounded_provider_auth_prompt(
+    attempt: &ProviderAuthAttempt,
+) -> Result<(ProviderAuthChallenge, Vec<String>), HostError> {
+    let challenge = attempt.challenge();
+    let lengths_valid = match challenge {
+        ProviderAuthChallenge::Oauth {
+            authorization_url,
+            redirect_uri,
+        } => {
+            !authorization_url.is_empty()
+                && authorization_url.len() <= MAX_PROVIDER_AUTH_URL_BYTES
+                && !redirect_uri.is_empty()
+                && redirect_uri.len() <= MAX_PROVIDER_AUTH_URL_BYTES
+        }
+        ProviderAuthChallenge::DeviceFlow {
+            verification_uri,
+            user_code,
+        } => {
+            !verification_uri.is_empty()
+                && verification_uri.len() <= MAX_PROVIDER_AUTH_URL_BYTES
+                && !user_code.is_empty()
+                && user_code.len() <= MAX_PROVIDER_AUTH_CODE_BYTES
+        }
+    };
+    if !lengths_valid {
+        return Err(HostError::Query(
+            "provider authentication prompt exceeded its safety limit".to_owned(),
+        ));
+    }
+    Ok((
+        challenge.clone(),
+        bounded_provider_auth_warnings(attempt.warnings())?,
+    ))
+}
+
+fn bounded_provider_auth_warnings(warnings: &[String]) -> Result<Vec<String>, HostError> {
+    if warnings.len() > MAX_PROVIDER_AUTH_WARNINGS
+        || warnings
+            .iter()
+            .any(|warning| warning.len() > MAX_PROVIDER_AUTH_WARNING_BYTES)
+    {
+        return Err(HostError::Query(
+            "provider authentication warnings exceeded their safety limit".to_owned(),
+        ));
+    }
+    Ok(warnings.to_vec())
+}
+
+fn validate_provider_auth_completion(
+    expected_provider: &str,
+    completion: ProviderAuthCompletion,
+) -> Result<ProviderAuthCompletion, HostError> {
+    if completion.provider != expected_provider
+        || completion.message.is_empty()
+        || completion.message.len() > MAX_PROVIDER_AUTH_MESSAGE_BYTES
+    {
+        return Err(HostError::Query(
+            "provider authentication result was invalid".to_owned(),
+        ));
+    }
+    bounded_provider_auth_warnings(&completion.warnings)?;
+    Ok(completion)
+}
+
+fn sanitized_provider_auth_error(error: &HostError) -> String {
+    match error {
+        HostError::ShuttingDown => "provider authentication stopped during host shutdown",
+        HostError::SessionNotLoaded(_) => "provider authentication session is unavailable",
+        HostError::SessionCapacity => "provider authentication capacity is exhausted",
+        HostError::Persistence(_) => "provider credential storage failed",
+        HostError::Protocol(_) => "provider authentication request was invalid",
+        HostError::Query(_) | HostError::SessionIdentityMismatch | HostError::RequestConflict => {
+            "provider authentication failed"
+        }
+    }
+    .to_owned()
+}
+
+fn overlay_model_catalog_current(
+    catalog: &mut ModelCatalogSnapshot,
+    selected_model: Option<&str>,
+    resolved_model: Option<&str>,
+) {
+    if let Some(current) = resolved_model.or(selected_model) {
+        for model in &mut catalog.models {
+            model.current = model.id == current
+                || catalog.aliases.iter().any(|alias| {
+                    alias.alias.0 == current && alias.candidates.first() == Some(&model.id)
+                });
+        }
+    }
+    if let Some(selected) = selected_model {
+        for alias in &mut catalog.aliases {
+            alias.current = alias.alias.0 == selected;
+        }
     }
 }
 
@@ -1660,6 +2562,15 @@ fn wire_command_catalog(
             name: descriptor.name().to_owned(),
             description: descriptor.description().to_owned(),
             usage: descriptor.argument_hint().unwrap_or_default().to_owned(),
+            source: match descriptor.source() {
+                rw_ext::CommandSource::Builtin => rw_types::CommandSource::Builtin,
+                rw_ext::CommandSource::Project => rw_types::CommandSource::Project,
+                rw_ext::CommandSource::User => rw_types::CommandSource::User,
+                rw_ext::CommandSource::Plugin => rw_types::CommandSource::Plugin,
+                rw_ext::CommandSource::Skill => rw_types::CommandSource::Skill,
+                rw_ext::CommandSource::Workflow => rw_types::CommandSource::Workflow,
+                rw_ext::CommandSource::Mcp => rw_types::CommandSource::Mcp,
+            },
         };
         let Ok(encoded) = serde_json::to_vec(&command) else {
             truncated = true;
@@ -1696,9 +2607,7 @@ mod tests {
         CommandDescriptor as ExtensionCommandDescriptor, CommandExecutionError, CommandHandler,
         CommandInvocation,
     };
-    use rw_types::{
-        AttachmentData, CommandMeta, ModelCacheBehavior, ModelCapabilities, PROTOCOL_VERSION,
-    };
+    use rw_types::{AttachmentData, CommandMeta, PROTOCOL_VERSION};
     use tempfile::TempDir;
 
     use super::*;
@@ -1947,7 +2856,24 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct StubQueries;
+    struct StubQueries {
+        auth: Option<Arc<AuthFixture>>,
+    }
+
+    struct AuthFixture {
+        completion: watch::Sender<bool>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl AuthFixture {
+        fn pending() -> Arc<Self> {
+            let (completion, _) = watch::channel(false);
+            Arc::new(Self {
+                completion,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            })
+        }
+    }
 
     #[async_trait]
     impl HostQueryService for StubQueries {
@@ -1956,20 +2882,60 @@ mod tests {
                 name: "help".to_owned(),
                 description: "Show help".to_owned(),
                 usage: "/help".to_owned(),
+                source: rw_types::CommandSource::default(),
             }])
         }
 
-        async fn model_descriptors(&self) -> Result<Vec<ModelDescriptor>, HostError> {
-            Ok(vec![ModelDescriptor {
-                alias: ModelAlias("fast".to_owned()),
-                providers: vec!["offline".to_owned()],
-                capabilities: ModelCapabilities {
-                    tool_calling: true,
-                    vision: false,
-                    thinking: false,
-                    cache_behavior: ModelCacheBehavior::None,
+        async fn model_catalog(
+            &self,
+            _refresh: bool,
+            _selected_model: Option<&str>,
+            _resolved_model: Option<&str>,
+        ) -> Result<ModelCatalogSnapshot, HostError> {
+            Ok(ModelCatalogSnapshot {
+                aliases: Vec::new(),
+                models: Vec::new(),
+                providers: Vec::new(),
+                cached: false,
+                truncated: false,
+            })
+        }
+
+        async fn begin_provider_auth(
+            &self,
+            provider: &str,
+        ) -> Result<ProviderAuthAttempt, HostError> {
+            let fixture = self.auth.clone().ok_or_else(|| {
+                HostError::Query("provider authentication is unavailable".to_owned())
+            })?;
+            let mut completion = fixture.completion.subscribe();
+            let completion_provider = provider.to_owned();
+            let future = Box::pin(async move {
+                while !*completion.borrow_and_update() {
+                    completion.changed().await.map_err(|_| {
+                        HostError::Query("provider authentication cancelled".to_owned())
+                    })?;
+                }
+                Ok(ProviderAuthCompletion {
+                    provider: completion_provider,
+                    message: "provider authentication completed".to_owned(),
+                    warnings: Vec::new(),
+                })
+            });
+            let cancellation = Arc::clone(&fixture.cancelled);
+            let cancel_signal = fixture.completion.clone();
+            Ok(ProviderAuthAttempt::new(
+                ProviderAuthChallenge::DeviceFlow {
+                    verification_uri: "https://example.test/device".to_owned(),
+                    user_code: "ABCD-1234".to_owned(),
                 },
-            }])
+                Vec::new(),
+                future,
+                Arc::new(move || {
+                    cancellation.store(true, Ordering::Release);
+                    let _ = cancel_signal.send(true);
+                }),
+            ))
         }
 
         async fn search_workspace_files(
@@ -2041,7 +3007,7 @@ mod tests {
                 max_deduplicated_requests: 32,
             },
             factory.clone(),
-            Arc::new(StubQueries),
+            Arc::new(StubQueries::default()),
         )
         .expect("host");
         (host, factory)
@@ -2395,6 +3361,8 @@ mod tests {
                 bound,
                 ClientCommand::ListModels {
                     meta: meta("spoofed-driver", "create-once"),
+                    session_id: None,
+                    refresh: false,
                 },
             )
             .await;
@@ -2502,6 +3470,292 @@ mod tests {
                 .len()
                 <= MAX_WIRE_COMMAND_CATALOG_BYTES
         );
+    }
+
+    #[test]
+    fn wire_command_catalog_preserves_each_runtime_source() {
+        let sources = [
+            (
+                rw_ext::CommandSource::Builtin,
+                rw_types::CommandSource::Builtin,
+            ),
+            (
+                rw_ext::CommandSource::Project,
+                rw_types::CommandSource::Project,
+            ),
+            (rw_ext::CommandSource::User, rw_types::CommandSource::User),
+            (
+                rw_ext::CommandSource::Plugin,
+                rw_types::CommandSource::Plugin,
+            ),
+            (rw_ext::CommandSource::Skill, rw_types::CommandSource::Skill),
+            (
+                rw_ext::CommandSource::Workflow,
+                rw_types::CommandSource::Workflow,
+            ),
+            (rw_ext::CommandSource::Mcp, rw_types::CommandSource::Mcp),
+        ];
+        let descriptors = sources.iter().enumerate().map(|(index, (source, _))| {
+            ExtensionCommandDescriptor::new(format!("source-{index}"), "source test")
+                .with_source(*source)
+        });
+
+        let (commands, truncated) = wire_command_catalog(descriptors);
+
+        assert!(!truncated);
+        assert_eq!(commands.len(), sources.len());
+        for (command, (_, expected)) in commands.iter().zip(sources) {
+            assert_eq!(command.source, expected);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn provider_auth_completion_is_async_and_stale_cancel_keeps_real_attempt() {
+        let fixture = AuthFixture::pending();
+        let factory = Arc::new(StubFactory::new());
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 1,
+                max_deduplicated_requests: 32,
+            },
+            factory,
+            Arc::new(StubQueries {
+                auth: Some(Arc::clone(&fixture)),
+            }),
+        )
+        .expect("host");
+        let session_id = SessionId("provider-auth".to_owned());
+        host.prepare_session(
+            CreateSessionRequest {
+                session_id: session_id.clone(),
+                workspace: "workspace".to_owned(),
+                model: None,
+            },
+            false,
+        )
+        .await
+        .expect("session");
+        let driver = BoundClient {
+            client_id: ClientId("auth-driver".to_owned()),
+        };
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::TakeDriver {
+                    meta: meta("spoofed", "auth-take"),
+                    session_id: session_id.clone(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let mut events = host
+            .subscribe(driver.clone(), Some(session_id.clone()), None)
+            .await
+            .expect("events");
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::BeginProviderAuth {
+                    meta: meta("spoofed", "auth-begin"),
+                    session_id: session_id.clone(),
+                    provider: "github_copilot".to_owned(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let attempt_id = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::ProviderAuthStarted { attempt_id, .. } = events
+                    .recv()
+                    .await
+                    .expect("auth event")
+                    .expect("auth result")
+                {
+                    break attempt_id;
+                }
+            }
+        })
+        .await
+        .expect("auth prompt");
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                host.dispatch(
+                    driver.clone(),
+                    ClientCommand::CompleteProviderAuth {
+                        meta: meta("spoofed", "auth-complete"),
+                        session_id: session_id.clone(),
+                        provider: "github_copilot".to_owned(),
+                        attempt_id: attempt_id.clone(),
+                    },
+                ),
+            )
+            .await
+            .expect("completion command must not await device polling"),
+            CommandOutcome::Accepted
+        );
+        assert!(matches!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::CancelProviderAuth {
+                    meta: meta("spoofed", "auth-stale-cancel"),
+                    session_id: session_id.clone(),
+                    provider: "github_copilot".to_owned(),
+                    attempt_id: ProviderAuthAttemptId("stale".to_owned()),
+                },
+            )
+            .await,
+            CommandOutcome::Rejected { .. }
+        ));
+        assert!(!fixture.cancelled.load(Ordering::Acquire));
+        assert_eq!(
+            host.dispatch(
+                driver,
+                ClientCommand::CancelProviderAuth {
+                    meta: meta("spoofed", "auth-cancel"),
+                    session_id,
+                    provider: "github_copilot".to_owned(),
+                    attempt_id,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        assert!(fixture.cancelled.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn provider_auth_poll_is_cancelled_when_another_driver_takes_over() {
+        let fixture = AuthFixture::pending();
+        let factory = Arc::new(StubFactory::new());
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 1,
+                max_deduplicated_requests: 32,
+            },
+            factory,
+            Arc::new(StubQueries {
+                auth: Some(Arc::clone(&fixture)),
+            }),
+        )
+        .expect("host");
+        let session_id = SessionId("provider-auth-takeover".to_owned());
+        host.prepare_session(
+            CreateSessionRequest {
+                session_id: session_id.clone(),
+                workspace: "workspace".to_owned(),
+                model: None,
+            },
+            false,
+        )
+        .await
+        .expect("session");
+        let original = BoundClient {
+            client_id: ClientId("original-driver".to_owned()),
+        };
+        for command in [
+            ClientCommand::TakeDriver {
+                meta: meta("spoofed", "take-original"),
+                session_id: session_id.clone(),
+            },
+            ClientCommand::BeginProviderAuth {
+                meta: meta("spoofed", "begin-original"),
+                session_id: session_id.clone(),
+                provider: "github_copilot".to_owned(),
+            },
+        ] {
+            assert_eq!(
+                host.dispatch(original.clone(), command).await,
+                CommandOutcome::Accepted
+            );
+        }
+        let attempt_id = {
+            let entries = host
+                .provider_auth
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending_provider_auth_id(entries.values().next().expect("pending auth")).clone()
+        };
+        assert_eq!(
+            host.dispatch(
+                original,
+                ClientCommand::CompleteProviderAuth {
+                    meta: meta("spoofed", "complete-original"),
+                    session_id: session_id.clone(),
+                    provider: "github_copilot".to_owned(),
+                    attempt_id,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        assert_eq!(
+            host.dispatch(
+                BoundClient {
+                    client_id: ClientId("replacement-driver".to_owned()),
+                },
+                ClientCommand::TakeDriver {
+                    meta: meta("spoofed", "take-replacement"),
+                    session_id,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fixture.cancelled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("takeover cancellation");
+    }
+
+    #[test]
+    fn provider_auth_prompts_and_connection_events_are_bounded_and_non_durable() {
+        let oversized = ProviderAuthAttempt::new(
+            ProviderAuthChallenge::Oauth {
+                authorization_url: format!("https://example.test/{}", "x".repeat(4_096)),
+                redirect_uri: "http://127.0.0.1/callback".to_owned(),
+            },
+            Vec::new(),
+            Box::pin(std::future::pending()),
+            Arc::new(|| {}),
+        );
+        assert!(bounded_provider_auth_prompt(&oversized).is_err());
+
+        let warning_flood = ProviderAuthAttempt::new(
+            ProviderAuthChallenge::DeviceFlow {
+                verification_uri: "https://example.test/device".to_owned(),
+                user_code: "ABCD-1234".to_owned(),
+            },
+            vec!["warning".to_owned(); MAX_PROVIDER_AUTH_WARNINGS + 1],
+            Box::pin(std::future::pending()),
+            Arc::new(|| {}),
+        );
+        assert!(bounded_provider_auth_prompt(&warning_flood).is_err());
+
+        let event = EngineEvent::ProviderAuthStarted {
+            meta: CommandAckMeta {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId("client".to_owned()),
+                request_id: RequestId("request".to_owned()),
+                emitted_at: "now".to_owned(),
+            },
+            session_id: SessionId("session".to_owned()),
+            attempt_id: ProviderAuthAttemptId("attempt".to_owned()),
+            provider: "github_copilot".to_owned(),
+            challenge: ProviderAuthChallenge::DeviceFlow {
+                verification_uri: "https://example.test/device".to_owned(),
+                user_code: "ABCD-1234".to_owned(),
+            },
+            warnings: Vec::new(),
+        };
+        assert!(event.meta().is_none());
     }
 
     #[tokio::test]
@@ -2628,7 +3882,7 @@ mod tests {
                 max_deduplicated_requests: 32,
             },
             factory,
-            Arc::new(StubQueries),
+            Arc::new(StubQueries::default()),
         )
         .expect("host");
         let session_id = SessionId("descriptor-state".to_owned());

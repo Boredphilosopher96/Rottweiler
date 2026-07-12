@@ -11,7 +11,7 @@ use rw_core::runtime_support::{
 };
 use rw_core::runtime_support::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandRegistryError, SubagentResult,
+    CommandRegistryError, CommandSource, SubagentResult,
 };
 use rw_core::{
     CommandToolCall, CommandToolOutputKind, OrchestrationError, SessionCommandAction,
@@ -36,7 +36,8 @@ pub(crate) fn register_workflow_command(
     }
     registry.register(
         CommandDescriptor::new("workflow", "Run a discovered declarative workflow")
-            .with_argument_hint("<name>"),
+            .with_argument_hint("<name>")
+            .with_source(CommandSource::Workflow),
         WorkflowCommand {
             names: catalog
                 .workflows()

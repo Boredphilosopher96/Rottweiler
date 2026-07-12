@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rw_types::config::{
     Config, ConfigFile, EngineConfigFile, PermissionDecision, ProviderConfig, ThinkingLevel,
@@ -38,6 +39,9 @@ const ENV_PERMISSION_DEFAULT: &str = "RW_PERMISSION_DEFAULT";
 const ENV_SANDBOX_SAFE_LIST: &str = "RW_SANDBOX_SAFE_LIST";
 const ENV_TELEMETRY_ENABLED: &str = "RW_TELEMETRY_ENABLED";
 const ENV_UPDATE_CHANNEL: &str = "RW_UPDATE_CHANNEL";
+static TUI_SETTING_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(not(unix))]
+static TUI_SETTING_PORTABLE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// A layer that supplied one effective configuration leaf.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +50,8 @@ pub enum ConfigSource {
     BuiltIn,
     /// User-level TOML.
     UserFile(PathBuf),
+    /// User-level TOML last updated through the engine-mediated TUI surface.
+    UserTui(PathBuf),
     /// Trusted project-level TOML.
     ProjectFile(PathBuf),
     /// Environment variable.
@@ -59,6 +65,7 @@ impl fmt::Display for ConfigSource {
         match self {
             Self::BuiltIn => formatter.write_str("built-in"),
             Self::UserFile(path) => write!(formatter, "user:{}", path.display()),
+            Self::UserTui(path) => write!(formatter, "user (set via TUI):{}", path.display()),
             Self::ProjectFile(path) => write!(formatter, "project:{}", path.display()),
             Self::Environment(name) => write!(formatter, "env:{name}"),
             Self::Cli => formatter.write_str("cli"),
@@ -400,6 +407,7 @@ impl LoadedConfig {
             "updates.channel",
             update_channel_name(self.config.updates.channel),
         ));
+        lines.push(self.render_leaf("ui.theme", &quoted(&self.config.ui.theme)));
         lines.join("\n") + "\n"
     }
 
@@ -444,6 +452,16 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    /// A user setting could not be persisted atomically.
+    #[error("could not persist user setting in {path}: {source}")]
+    Write {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A TUI attempted to write a key or value outside the safe allowlist.
+    #[error("invalid TUI setting {key:?}: {reason}")]
+    InvalidUserSetting { key: String, reason: String },
     /// TOML did not match the typed schema.
     #[error("invalid configuration in {path}: {source}")]
     Parse {
@@ -618,6 +636,103 @@ impl ConfigLoader {
         self.user_path.with_file_name("credentials.toml")
     }
 
+    /// Persists one allowlisted user-scoped setting through an atomic private rewrite.
+    ///
+    /// The project file is never a write target, including for security-sensitive
+    /// permission defaults. The complete resulting configuration is reloaded and
+    /// validated before success is returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-allowlisted values, unsafe paths, malformed
+    /// existing TOML, failed atomic persistence, or an invalid merged result.
+    pub fn persist_tui_setting(&self, key: &str, value: &str) -> Result<LoadedConfig, ConfigError> {
+        let effective = self.load()?;
+        validate_tui_setting(&effective.config, key, value)?;
+        let parent = self
+            .user_path
+            .parent()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: key.to_owned(),
+                reason: "user configuration has no parent directory".to_owned(),
+            })?;
+        prepare_tui_config_parent(parent, &self.user_path)?;
+        let _settings_lock = acquire_tui_settings_lock(parent, key)?;
+        validate_tui_config_file(&self.user_path, key)?;
+        let mut document = read_tui_config_document(&self.user_path)?;
+        set_toml_leaf(&mut document, key, value)?;
+        let encoded = format!(
+            "# Rottweiler user settings; last updated via TUI\n{}",
+            toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
+                key: key.to_owned(),
+                reason: error.to_string(),
+            })?
+        );
+        // Record provenance first. If the config rewrite fails, the stale entry
+        // cannot claim a source because loading requires its value to match.
+        // The inverse order could report failure after changing the setting.
+        persist_tui_provenance(parent, &self.user_path, key, value)?;
+        persist_tui_config_atomic(parent, &self.user_path, encoded.as_bytes(), key)?;
+        self.load()
+    }
+
+    /// Adds one built-in provider profile using only its fixed adapter kind.
+    /// Existing profiles are never overwritten and no endpoint, client id, or
+    /// credential value can enter through this path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unknown providers, conflicting existing profiles,
+    /// unsafe paths, or failed atomic persistence.
+    pub fn configure_builtin_provider(&self, provider: &str) -> Result<LoadedConfig, ConfigError> {
+        let kind = match provider {
+            "openai_codex" => "openai_codex",
+            "github_copilot" => "github_copilot",
+            "openai" => "openai",
+            "anthropic" => "anthropic",
+            _ => {
+                return Err(ConfigError::InvalidUserSetting {
+                    key: format!("providers.{provider}"),
+                    reason: "provider is not in the fixed built-in setup allowlist".to_owned(),
+                });
+            }
+        };
+        let effective = self.load()?;
+        if let Some(existing) = effective.config.providers.get(provider) {
+            return if existing.kind == kind {
+                Ok(effective)
+            } else {
+                Err(ConfigError::InvalidUserSetting {
+                    key: format!("providers.{provider}"),
+                    reason: "an existing provider profile uses a different adapter kind".to_owned(),
+                })
+            };
+        }
+        let key = format!("providers.{provider}.kind");
+        let parent = self
+            .user_path
+            .parent()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: key.clone(),
+                reason: "user configuration has no parent directory".to_owned(),
+            })?;
+        prepare_tui_config_parent(parent, &self.user_path)?;
+        let _settings_lock = acquire_tui_settings_lock(parent, &key)?;
+        validate_tui_config_file(&self.user_path, &key)?;
+        let mut document = read_tui_config_document(&self.user_path)?;
+        set_toml_leaf(&mut document, &key, kind)?;
+        let encoded = format!(
+            "# Rottweiler user settings; last updated via TUI\n{}",
+            toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
+                key: key.clone(),
+                reason: error.to_string(),
+            })?
+        );
+        persist_tui_provenance(parent, &self.user_path, &key, kind)?;
+        persist_tui_config_atomic(parent, &self.user_path, encoded.as_bytes(), &key)?;
+        self.load()
+    }
+
     /// Loads, deep-merges, validates, and annotates all configured layers.
     ///
     /// # Errors
@@ -637,6 +752,17 @@ impl ConfigLoader {
         if let Some(file) = read_file(&self.user_path)? {
             let source = ConfigSource::UserFile(self.user_path.clone());
             apply_file(&mut loaded, file, &source, FileScope::User);
+            for (key, value) in read_tui_provenance(&self.user_path)? {
+                if configured_setting_value(&loaded.config, &key).as_deref() == Some(&value)
+                    && matches!(loaded.provenance(&key), Some(ConfigSource::UserFile(_)))
+                {
+                    set_source(
+                        &mut loaded,
+                        &key,
+                        &ConfigSource::UserTui(self.user_path.clone()),
+                    );
+                }
+            }
         }
         let assessment =
             FolderTrustStore::new(self.trust_store_path.clone()).assess(&self.project_root)?;
@@ -712,6 +838,7 @@ fn defaults_with_provenance() -> LoadedConfig {
         "toolchain.rules",
         "telemetry.enabled",
         "updates.channel",
+        "ui.theme",
     ]
     .into_iter()
     .map(|key| (key.to_owned(), ConfigSource::BuiltIn))
@@ -950,6 +1077,10 @@ fn apply_file(
         ] {
             set_source(loaded, key, source);
         }
+    }
+    if let Some(ui) = file.ui.take() {
+        loaded.config.ui = ui;
+        set_source(loaded, "ui.theme", source);
     }
     if scope == FileScope::User {
         if let Some(telemetry) = file.telemetry.take()
@@ -1488,6 +1619,7 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
         .budget
         .validate()
         .map_err(|message| ConfigError::Validation(message.to_owned()))?;
+    validate_ui(config)?;
     validate_websearch(&config.websearch)?;
     for rule in &config.permissions.rules {
         let Some((tool, pattern)) = rule.pattern.split_once('(') else {
@@ -1544,6 +1676,345 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     for (name, provider) in &config.providers {
         validate_provider(name, provider)?;
     }
+    Ok(())
+}
+
+fn validate_ui(config: &Config) -> Result<(), ConfigError> {
+    if matches!(config.ui.theme.as_str(), "kennel-dark" | "daylight") {
+        Ok(())
+    } else {
+        Err(ConfigError::Validation(
+            "ui.theme must be kennel-dark or daylight".to_owned(),
+        ))
+    }
+}
+
+fn validate_tui_setting(config: &Config, key: &str, value: &str) -> Result<(), ConfigError> {
+    let valid = match key {
+        "ui.theme" => matches!(value, "kennel-dark" | "daylight"),
+        "compaction.auto" => matches!(value, "true" | "false"),
+        "permissions.default" => matches!(value, "ask" | "allow" | "deny"),
+        _ if key.starts_with("models.thinking.") => {
+            let alias = key.trim_start_matches("models.thinking.");
+            !alias.is_empty()
+                && alias
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+                && (alias == config.models.default || config.models.aliases.contains_key(alias))
+                && matches!(value, "off" | "low" | "medium" | "high")
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "key or value is outside the safe TUI settings allowlist".to_owned(),
+        })
+    }
+}
+
+fn prepare_tui_config_parent(parent: &Path, user_path: &Path) -> Result<(), ConfigError> {
+    fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+        path: user_path.to_owned(),
+        source,
+    })?;
+    if fs::symlink_metadata(parent).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(ConfigError::InvalidUserSetting {
+            key: "ui".to_owned(),
+            reason: "user configuration parent must not be a symlink".to_owned(),
+        });
+    }
+    #[cfg(unix)]
+    fs::set_permissions(parent, std::os::unix::fs::PermissionsExt::from_mode(0o700)).map_err(
+        |source| ConfigError::Write {
+            path: parent.to_owned(),
+            source,
+        },
+    )?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn acquire_tui_settings_lock(
+    parent: &Path,
+    key: &str,
+) -> Result<std::os::fd::OwnedFd, ConfigError> {
+    let path = parent.join("config.toml.lock");
+    let descriptor = rustix::fs::open(
+        &path,
+        rustix::fs::OFlags::RDWR
+            | rustix::fs::OFlags::CREATE
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::from_raw_mode(0o600),
+    )
+    .map_err(|source| ConfigError::Write {
+        path: path.clone(),
+        source: std::io::Error::from(source),
+    })?;
+    let stat = rustix::fs::fstat(&descriptor).map_err(|source| ConfigError::Write {
+        path: path.clone(),
+        source: std::io::Error::from(source),
+    })?;
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file()
+        || stat.st_nlink != 1
+        || stat.st_mode & 0o077 != 0
+    {
+        return Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "user settings lock is unsafe".to_owned(),
+        });
+    }
+    rustix::fs::flock(&descriptor, rustix::fs::FlockOperation::LockExclusive).map_err(
+        |source| ConfigError::Write {
+            path,
+            source: std::io::Error::from(source),
+        },
+    )?;
+    Ok(descriptor)
+}
+
+#[cfg(not(unix))]
+fn acquire_tui_settings_lock(
+    _parent: &Path,
+    key: &str,
+) -> Result<std::sync::MutexGuard<'static, ()>, ConfigError> {
+    TUI_SETTING_PORTABLE_LOCK
+        .lock()
+        .map_err(|_| ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "user settings lock is unavailable".to_owned(),
+        })
+}
+
+fn validate_tui_config_file(path: &Path, key: &str) -> Result<(), ConfigError> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    let valid = {
+        use std::os::unix::fs::MetadataExt as _;
+        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.nlink() == 1
+    };
+    #[cfg(not(unix))]
+    let valid = metadata.is_file() && !metadata.file_type().is_symlink();
+    if valid {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "user configuration must be a single-link regular file".to_owned(),
+        })
+    }
+}
+
+fn read_tui_config_document(path: &Path) -> Result<toml::Value, ConfigError> {
+    let source = match fs::read_to_string(path) {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    if source.trim().is_empty() {
+        Ok(toml::Value::Table(toml::map::Map::new()))
+    } else {
+        toml::from_str::<toml::Table>(&source)
+            .map(toml::Value::Table)
+            .map_err(|source| ConfigError::Parse {
+                path: path.to_owned(),
+                source,
+            })
+    }
+}
+
+fn persist_tui_config_atomic(
+    parent: &Path,
+    path: &Path,
+    bytes: &[u8],
+    key: &str,
+) -> Result<(), ConfigError> {
+    let (temporary, mut file) = allocate_tui_config_temporary(parent, key)?;
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)?;
+        #[cfg(unix)]
+        fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o600))?;
+        fs::File::open(parent)?.sync_all()
+    })();
+    if let Err(source) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(ConfigError::Write {
+            path: path.to_owned(),
+            source,
+        });
+    }
+    Ok(())
+}
+
+fn allocate_tui_config_temporary(
+    parent: &Path,
+    key: &str,
+) -> Result<(PathBuf, fs::File), ConfigError> {
+    for _ in 0..16 {
+        let nonce = TUI_SETTING_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let temporary = parent.join(format!(".config-{}-{nonce}.tmp", std::process::id()));
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        match options.open(&temporary) {
+            Ok(file) => return Ok((temporary, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(ConfigError::Write {
+                    path: temporary,
+                    source,
+                });
+            }
+        }
+    }
+    Err(ConfigError::InvalidUserSetting {
+        key: key.to_owned(),
+        reason: "could not allocate a private temporary file".to_owned(),
+    })
+}
+
+fn tui_provenance_path(user_path: &Path) -> PathBuf {
+    user_path.with_file_name("config-tui-provenance.json")
+}
+
+fn read_tui_provenance(user_path: &Path) -> Result<BTreeMap<String, String>, ConfigError> {
+    let path = tui_provenance_path(user_path);
+    validate_tui_provenance_file(&path)?;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(source) => return Err(ConfigError::Read { path, source }),
+    };
+    if bytes.len() > 64 * 1024 {
+        return Err(ConfigError::InvalidUserSetting {
+            key: "provenance".to_owned(),
+            reason: "TUI provenance exceeded its size limit".to_owned(),
+        });
+    }
+    serde_json::from_slice(&bytes).map_err(|error| ConfigError::InvalidUserSetting {
+        key: "provenance".to_owned(),
+        reason: error.to_string(),
+    })
+}
+
+fn validate_tui_provenance_file(path: &Path) -> Result<(), ConfigError> {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    #[cfg(unix)]
+    let valid = {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        metadata.is_file()
+            && !metadata.file_type().is_symlink()
+            && metadata.nlink() == 1
+            && metadata.permissions().mode().trailing_zeros() >= 6
+    };
+    #[cfg(not(unix))]
+    let valid = metadata.is_file() && !metadata.file_type().is_symlink();
+    if valid {
+        Ok(())
+    } else {
+        Err(ConfigError::InvalidUserSetting {
+            key: "provenance".to_owned(),
+            reason: "TUI provenance must be a private single-link regular file".to_owned(),
+        })
+    }
+}
+
+fn persist_tui_provenance(
+    parent: &Path,
+    user_path: &Path,
+    key: &str,
+    value: &str,
+) -> Result<(), ConfigError> {
+    let mut provenance = read_tui_provenance(user_path)?;
+    provenance.insert(key.to_owned(), value.to_owned());
+    let bytes = serde_json::to_vec_pretty(&provenance).map_err(|error| {
+        ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: error.to_string(),
+        }
+    })?;
+    persist_tui_config_atomic(parent, &tui_provenance_path(user_path), &bytes, key)
+}
+
+fn configured_setting_value(config: &Config, key: &str) -> Option<String> {
+    match key {
+        "ui.theme" => Some(config.ui.theme.clone()),
+        "compaction.auto" => Some(config.compaction.auto.to_string()),
+        "permissions.default" => Some(permission_name(config.permissions.default).to_owned()),
+        _ if key.starts_with("models.thinking.") => config
+            .models
+            .thinking
+            .get(key.trim_start_matches("models.thinking."))
+            .map(|level| thinking_level_name(*level).to_owned()),
+        _ if key.starts_with("providers.") => {
+            let mut segments = key.split('.');
+            match (
+                segments.next(),
+                segments.next(),
+                segments.next(),
+                segments.next(),
+            ) {
+                (Some("providers"), Some(provider), Some("kind"), None) => config
+                    .providers
+                    .get(provider)
+                    .map(|entry| entry.kind.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn set_toml_leaf(document: &mut toml::Value, key: &str, value: &str) -> Result<(), ConfigError> {
+    let segments = key.split('.').collect::<Vec<_>>();
+    let Some((leaf, parents)) = segments.split_last() else {
+        return Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "setting key is empty".to_owned(),
+        });
+    };
+    let mut cursor = document;
+    for segment in parents {
+        let Some(table) = cursor.as_table_mut() else {
+            return Err(ConfigError::InvalidUserSetting {
+                key: key.to_owned(),
+                reason: "setting parent is not a TOML table".to_owned(),
+            });
+        };
+        cursor = table
+            .entry((*segment).to_owned())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    }
+    let stored = match key {
+        "compaction.auto" => toml::Value::Boolean(value == "true"),
+        _ => toml::Value::String(value.to_owned()),
+    };
+    let Some(table) = cursor.as_table_mut() else {
+        return Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "setting parent is not a TOML table".to_owned(),
+        });
+    };
+    table.insert((*leaf).to_owned(), stored);
     Ok(())
 }
 
@@ -1996,6 +2467,202 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{ConfigError, ConfigLoader, ConfigSource, read_assessed_project_file};
+
+    #[test]
+    fn tui_settings_persist_user_only_with_provenance_and_merge_concurrently() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(&project, "[compaction]\nauto = true\n").expect("project config");
+        let loader = ConfigLoader::new(user.clone(), project.clone());
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::write(
+            &user,
+            "[providers.manual]\nkind = \"openai\"\nbase_url = \"https://api.openai.com/v1\"\napi_key_env = \"MANUAL_KEY\"\n",
+        )
+        .expect("manual user provider");
+        fs::write(
+            user.parent().expect("user parent").join(".config-old.tmp"),
+            "stale",
+        )
+        .expect("crash temporary");
+
+        let first = loader.clone();
+        let second = loader.clone();
+        let theme = std::thread::spawn(move || first.persist_tui_setting("ui.theme", "daylight"));
+        let compact =
+            std::thread::spawn(move || second.persist_tui_setting("compaction.auto", "false"));
+        theme.join().expect("theme worker").expect("theme setting");
+        compact
+            .join()
+            .expect("compaction worker")
+            .expect("compaction setting");
+        loader
+            .persist_tui_setting("models.thinking.fast", "high")
+            .expect("thinking setting");
+        let effective = loader
+            .persist_tui_setting("permissions.default", "deny")
+            .expect("permission setting");
+
+        assert_eq!(effective.config.ui.theme, "daylight");
+        assert!(!effective.config.compaction.auto);
+        assert_eq!(
+            effective.config.models.thinking["fast"],
+            rw_types::config::ThinkingLevel::High
+        );
+        assert_eq!(
+            effective.config.permissions.default,
+            PermissionDecision::Deny
+        );
+        assert!(
+            matches!(effective.provenance("permissions.default"), Some(ConfigSource::UserTui(path)) if path == &user)
+        );
+        assert!(matches!(
+            effective.provenance("providers.manual.kind"),
+            Some(ConfigSource::UserFile(path)) if path == &user
+        ));
+        assert!(
+            effective
+                .render_with_provenance()
+                .contains("user (set via TUI)")
+        );
+        assert_eq!(
+            fs::read_to_string(project).expect("project unchanged"),
+            "[compaction]\nauto = true\n"
+        );
+        let persisted = fs::read_to_string(&user).expect("user config");
+        assert!(persisted.contains("last updated via TUI"));
+        assert!(persisted.contains("theme = \"daylight\""));
+        assert!(persisted.contains("default = \"deny\""));
+    }
+
+    #[test]
+    fn tui_settings_reject_non_allowlisted_security_keys() {
+        let root = tempdir().expect("root");
+        let loader = ConfigLoader::new(
+            root.path().join("user/config.toml"),
+            root.path().join("repo/.rottweiler/config.toml"),
+        );
+        fs::create_dir_all(root.path().join("repo/.rottweiler")).expect("project root");
+        let error = loader
+            .persist_tui_setting("providers.openai.base_url", "https://attacker.invalid")
+            .expect_err("provider mutation must be rejected");
+        assert!(
+            matches!(error, ConfigError::InvalidUserSetting { .. }),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn tui_builtin_provider_setup_is_fixed_user_scoped_and_idempotent() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(&project, "[providers.project]\nkind = \"openai\"\n").expect("project config");
+        let loader = ConfigLoader::new(user.clone(), project.clone());
+
+        for provider in ["openai_codex", "github_copilot"] {
+            let effective = loader
+                .configure_builtin_provider(provider)
+                .expect("built-in setup");
+            assert_eq!(effective.config.providers[provider].kind, provider);
+            assert!(matches!(
+                effective.provenance(&format!("providers.{provider}.kind")),
+                Some(ConfigSource::UserTui(path)) if path == &user
+            ));
+            loader
+                .configure_builtin_provider(provider)
+                .expect("idempotent setup");
+        }
+        assert_eq!(
+            fs::read_to_string(project).expect("project unchanged"),
+            "[providers.project]\nkind = \"openai\"\n"
+        );
+        let persisted = fs::read_to_string(user).expect("user config");
+        assert!(persisted.contains("[providers.openai_codex]"));
+        assert!(persisted.contains("[providers.github_copilot]"));
+    }
+
+    #[test]
+    fn tui_settings_reject_malformed_and_oversized_provenance_without_changing_config() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(&user, "[ui]\ntheme = \"kennel-dark\"\n").expect("user config");
+        let provenance = user.with_file_name("config-tui-provenance.json");
+        fs::write(&provenance, b"not-json").expect("malformed provenance");
+        make_private(&provenance);
+        let loader = ConfigLoader::new(user.clone(), project);
+
+        assert!(loader.persist_tui_setting("ui.theme", "daylight").is_err());
+        assert_eq!(
+            fs::read_to_string(&user).expect("unchanged user config"),
+            "[ui]\ntheme = \"kennel-dark\"\n"
+        );
+
+        fs::write(&provenance, vec![b'x'; 64 * 1024 + 1]).expect("oversized provenance");
+        make_private(&provenance);
+        assert!(loader.persist_tui_setting("ui.theme", "daylight").is_err());
+        assert_eq!(
+            fs::read_to_string(&user).expect("unchanged user config"),
+            "[ui]\ntheme = \"kennel-dark\"\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_settings_reject_symlink_and_hardlink_targets() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        let outside = root.path().join("outside.toml");
+        fs::write(&outside, "").expect("outside");
+        symlink(&outside, &user).expect("symlink");
+        let loader = ConfigLoader::new(user.clone(), root.path().join("project.toml"));
+        assert!(loader.persist_tui_setting("ui.theme", "daylight").is_err());
+        fs::remove_file(&user).expect("remove symlink");
+        fs::hard_link(&outside, &user).expect("hardlink");
+        assert!(loader.persist_tui_setting("ui.theme", "daylight").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_settings_reject_unsafe_provenance_targets() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::write(&user, "[ui]\ntheme = \"kennel-dark\"\n").expect("user config");
+        let provenance = user.with_file_name("config-tui-provenance.json");
+        let outside = root.path().join("outside.json");
+        fs::write(&outside, "{}").expect("outside");
+        symlink(&outside, &provenance).expect("provenance symlink");
+        let loader = ConfigLoader::new(user.clone(), root.path().join("project.toml"));
+
+        assert!(loader.persist_tui_setting("ui.theme", "daylight").is_err());
+        assert_eq!(
+            fs::read_to_string(&user).expect("unchanged user config"),
+            "[ui]\ntheme = \"kennel-dark\"\n"
+        );
+        fs::remove_file(&provenance).expect("remove provenance symlink");
+        fs::hard_link(&outside, &provenance).expect("provenance hardlink");
+        assert!(loader.persist_tui_setting("ui.theme", "daylight").is_err());
+    }
+
+    fn make_private(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("private fixture");
+        }
+    }
 
     #[test]
     fn assessed_project_config_rejects_bytes_swapped_after_inventory() {

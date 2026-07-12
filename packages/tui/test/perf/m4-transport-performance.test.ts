@@ -91,6 +91,8 @@ describe("M4 transport performance gate", () => {
     for (let index = 0; index < engine.eventCount; index += 1) {
       await client.postCommand({
         type: "list_models",
+        session_id: attach.session_id,
+        refresh: false,
         meta: {
           protocol_version: PROTOCOL_VERSION,
           client_id: "m4-perf-client",

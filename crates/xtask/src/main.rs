@@ -10,18 +10,20 @@ use rw_types::config::UpdateChannel;
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
-    ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CompactionReason,
-    ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost,
-    CostSnapshot, DiffArtifact, EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef,
-    ModeId, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor, PlanArtifact,
-    PlanDecision, PlanStep, PromptDump, PromptTool, Question, QuestionId, QuestionOption,
+    ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CommandSource,
+    CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState,
+    ContextSnapshot, Cost, CostSnapshot, DiffArtifact, EngineError, EngineErrorCategory,
+    EngineEvent, EventMeta, ImageRef, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
+    ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, PlanArtifact, PlanDecision, PlanStep,
+    PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind,
+    ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget, Role,
     SequenceId, SessionDescriptor, SessionId, SessionReview, SessionReviewFile, ShellId,
     StoredAttachment, SubagentId, SubagentIsolation, SubagentResult, SubagentStatus, ToolCallId,
     ToolCapability, ToolOutput, ToolOutputPart, ToolOutputStream, TouchedFile, TouchedFileStatus,
     Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
-    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
-    WorkspaceStatus,
+    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use semver::Version;
@@ -1707,9 +1709,18 @@ fn generate_typescript() -> String {
     declaration!(StoredAttachment);
     declaration!(SessionDescriptor);
     declaration!(CommandDescriptor);
+    declaration!(CommandSource);
     declaration!(ModelCacheBehavior);
     declaration!(ModelCapabilities);
     declaration!(ModelDescriptor);
+    declaration!(ModelAliasDescriptor);
+    declaration!(ProviderDescriptor);
+    declaration!(ProviderAuthKind);
+    declaration!(ProviderAuthAttemptId);
+    declaration!(ProviderAuthChallenge);
+    declaration!(ProviderNextAction);
+    declaration!(ModelCatalogSnapshot);
+    declaration!(UserSettingDescriptor);
     declaration!(WorkspaceFileMatch);
     declaration!(WorkspaceFilePreview);
     declaration!(WorkspaceStatus);

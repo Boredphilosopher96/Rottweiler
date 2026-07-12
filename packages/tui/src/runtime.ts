@@ -517,7 +517,8 @@ export class TuiEngineRuntime {
       { type: "get_context", meta: this.#meta(), session_id: sessionId },
       { type: "get_cost", meta: this.#meta(), session_id: sessionId },
       { type: "get_workspace_status", meta: this.#meta(), session_id: sessionId },
-      { type: "list_models", meta: this.#meta() },
+      { type: "list_models", meta: this.#meta(), session_id: sessionId, refresh: false },
+      { type: "list_settings", meta: this.#meta(), session_id: sessionId },
       { type: "list_commands", meta: this.#meta(), session_id: sessionId },
     ]
     for (const command of commands) {

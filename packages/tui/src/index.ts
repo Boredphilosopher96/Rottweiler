@@ -87,6 +87,8 @@ async function main(): Promise<void> {
   const keybindings = await parseKeybindingsFromEnvironment(
     process.env.ROTTWEILER_TUI_KEYBINDINGS,
   )
+  const { daylightTheme, kennelTheme } = await import("./theme")
+  const theme = process.env.ROTTWEILER_TUI_THEME === "daylight" ? daylightTheme : kennelTheme
   const terminalHandover = {
     suspend: () => renderer.suspend(),
     resume: () => renderer.resume(),
@@ -99,6 +101,7 @@ async function main(): Promise<void> {
       ? {}
       : { replaySessionId: replaySession }),
     ...(keybindings === undefined ? {} : { keybindings }),
+    theme,
     onCommand: async (command) => {
       const bootstrap = await runtimeBootstrap
       return (await bootstrap.runtime?.sendCommand(command)) ?? null

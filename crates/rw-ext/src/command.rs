@@ -5,11 +5,24 @@ use futures_util::FutureExt;
 use thiserror::Error;
 
 /// User-visible metadata for a slash command.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CommandSource {
+    #[default]
+    Builtin,
+    Project,
+    User,
+    Plugin,
+    Skill,
+    Workflow,
+    Mcp,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommandDescriptor {
     name: String,
     description: String,
     argument_hint: Option<String>,
+    source: CommandSource,
 }
 
 impl CommandDescriptor {
@@ -20,6 +33,7 @@ impl CommandDescriptor {
             name: name.into(),
             description: description.into(),
             argument_hint: None,
+            source: CommandSource::Builtin,
         }
     }
 
@@ -27,6 +41,12 @@ impl CommandDescriptor {
     #[must_use]
     pub fn with_argument_hint(mut self, argument_hint: impl Into<String>) -> Self {
         self.argument_hint = Some(argument_hint.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn with_source(mut self, source: CommandSource) -> Self {
+        self.source = source;
         self
     }
 
@@ -46,6 +66,11 @@ impl CommandDescriptor {
     #[must_use]
     pub fn argument_hint(&self) -> Option<&str> {
         self.argument_hint.as_deref()
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> CommandSource {
+        self.source
     }
 }
 

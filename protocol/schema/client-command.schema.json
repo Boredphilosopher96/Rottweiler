@@ -713,6 +713,20 @@
         "meta": {
           "$ref": "#/$defs/CommandMeta"
         },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refresh": {
+          "type": "boolean",
+          "default": false
+        },
         "type": {
           "type": "string",
           "const": "list_models"
@@ -721,6 +735,158 @@
       "required": [
         "type",
         "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_settings"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "set_setting"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "key",
+        "value"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "begin_provider_auth"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "configure_builtin_provider"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/ProviderAuthAttemptId"
+        },
+        "type": {
+          "type": "string",
+          "const": "complete_provider_auth"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider",
+        "attempt_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/ProviderAuthAttemptId"
+        },
+        "type": {
+          "type": "string",
+          "const": "cancel_provider_auth"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider",
+        "attempt_id"
       ]
     },
     {
@@ -1088,6 +1254,10 @@
         "accept",
         "revert"
       ]
+    },
+    "ProviderAuthAttemptId": {
+      "description": "Connection-scoped identifier of one provider authentication attempt.",
+      "type": "string"
     }
   }
 }

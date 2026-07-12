@@ -79,6 +79,10 @@ string_id!(
     ModeId,
     "Open identifier of a built-in or extension-provided mode."
 );
+string_id!(
+    ProviderAuthAttemptId,
+    "Connection-scoped identifier of one provider authentication attempt."
+);
 
 /// Monotonic per-session sequence encoded as a decimal string on the wire.
 #[derive(
@@ -175,11 +179,38 @@ pub struct SessionDescriptor {
 }
 
 /// One slash command exposed to fuzzy pickers without UI-private metadata.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum CommandSource {
+    #[default]
+    Builtin,
+    Project,
+    User,
+    Plugin,
+    Skill,
+    Workflow,
+    Mcp,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct CommandDescriptor {
     pub name: String,
     pub description: String,
     pub usage: String,
+    #[serde(default)]
+    pub source: CommandSource,
+}
+
+/// One engine-mediated user setting exposed to interactive clients.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct UserSettingDescriptor {
+    pub key: String,
+    pub label: String,
+    pub value: String,
+    pub choices: Vec<String>,
+    pub provenance: String,
+    pub applies_immediately: bool,
 }
 
 /// Prompt-cache behavior exposed without leaking a provider implementation.
@@ -199,17 +230,113 @@ pub struct ModelCapabilities {
     pub vision: bool,
     pub thinking: bool,
     pub cache_behavior: ModelCacheBehavior,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub max_context_tokens: Option<u64>,
+    #[serde(default, with = "decimal_option_u64")]
+    #[schemars(with = "Option<String>")]
+    #[ts(type = "string | null")]
+    pub max_output_tokens: Option<u64>,
 }
 
-/// One configured model alias and its offline-known capabilities.
+/// One concrete provider/model discovered from a live authenticated catalog.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct ModelDescriptor {
+    /// Backward-compatible selection key. This is the concrete `provider/model`
+    /// id, not a role alias.
     pub alias: ModelAlias,
-    /// Locally configured provider names referenced by this alias, in
-    /// deterministic fallback order. Provider credentials are never exposed.
+    /// Concrete provider-qualified model id.
+    pub id: String,
+    pub display_name: String,
+    /// Sanitized logical provider name. Adapter kind, endpoint, and auth
+    /// material remain behind the provider boundary.
+    pub provider: String,
+    /// One-item compatibility projection for older clients.
     #[serde(default)]
     pub providers: Vec<String>,
+    /// Configured role aliases which currently include this concrete model.
+    #[serde(default)]
+    pub aliases: Vec<ModelAlias>,
+    pub current: bool,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<String>,
     pub capabilities: ModelCapabilities,
+}
+
+/// Small provider-blind role mapping shown separately from the live catalog.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ModelAliasDescriptor {
+    pub alias: ModelAlias,
+    pub candidates: Vec<String>,
+    pub current: bool,
+}
+
+/// Sanitized provider inventory row. Credentials, endpoints, and adapter
+/// implementation details never cross this boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ProviderAuthKind {
+    ApiKey,
+    Oauth,
+    DeviceFlow,
+    None,
+}
+
+/// Exact safe action offered for one provider inventory row.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ProviderNextAction {
+    Configure,
+    Authenticate,
+    SelectModels,
+    ApiKeyCli,
+    None,
+}
+
+/// Sanitized, connection-scoped authentication prompt. This is never a
+/// durable session event and contains no token or credential value.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[ts(tag = "kind", rename_all = "snake_case", optional_fields = nullable)]
+pub enum ProviderAuthChallenge {
+    Oauth {
+        authorization_url: String,
+        redirect_uri: String,
+    },
+    DeviceFlow {
+        verification_uri: String,
+        user_code: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ProviderDescriptor {
+    pub name: String,
+    pub auth_kind: ProviderAuthKind,
+    pub next_action: ProviderNextAction,
+    pub configured: bool,
+    pub authenticated: bool,
+    pub reachable: bool,
+    pub model_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub status: Option<String>,
+}
+
+/// One bounded live-catalog projection shared by the host and CLI.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ModelCatalogSnapshot {
+    pub aliases: Vec<ModelAliasDescriptor>,
+    pub models: Vec<ModelDescriptor>,
+    pub providers: Vec<ProviderDescriptor>,
+    pub cached: bool,
+    pub truncated: bool,
 }
 
 /// Relative workspace path returned by fuzzy file search.
@@ -763,6 +890,43 @@ pub enum ClientCommand {
     },
     ListModels {
         meta: CommandMeta,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        session_id: Option<SessionId>,
+        #[serde(default)]
+        refresh: bool,
+    },
+    ListSettings {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    SetSetting {
+        meta: CommandMeta,
+        session_id: SessionId,
+        key: String,
+        value: String,
+    },
+    BeginProviderAuth {
+        meta: CommandMeta,
+        session_id: SessionId,
+        provider: String,
+    },
+    ConfigureBuiltinProvider {
+        meta: CommandMeta,
+        session_id: SessionId,
+        provider: String,
+    },
+    CompleteProviderAuth {
+        meta: CommandMeta,
+        session_id: SessionId,
+        provider: String,
+        attempt_id: ProviderAuthAttemptId,
+    },
+    CancelProviderAuth {
+        meta: CommandMeta,
+        session_id: SessionId,
+        provider: String,
+        attempt_id: ProviderAuthAttemptId,
     },
     SearchWorkspaceFiles {
         meta: CommandMeta,
@@ -825,6 +989,12 @@ impl ClientCommand {
             | Self::SearchSessions { meta, .. }
             | Self::ListCommands { meta, .. }
             | Self::ListModels { meta, .. }
+            | Self::ListSettings { meta, .. }
+            | Self::SetSetting { meta, .. }
+            | Self::BeginProviderAuth { meta, .. }
+            | Self::ConfigureBuiltinProvider { meta, .. }
+            | Self::CompleteProviderAuth { meta, .. }
+            | Self::CancelProviderAuth { meta, .. }
             | Self::SearchWorkspaceFiles { meta, .. }
             | Self::PreviewWorkspaceFile { meta, .. }
             | Self::GetWorkspaceStatus { meta, .. }
@@ -865,6 +1035,12 @@ impl ClientCommand {
             | Self::SearchSessions { meta, .. }
             | Self::ListCommands { meta, .. }
             | Self::ListModels { meta, .. }
+            | Self::ListSettings { meta, .. }
+            | Self::SetSetting { meta, .. }
+            | Self::BeginProviderAuth { meta, .. }
+            | Self::ConfigureBuiltinProvider { meta, .. }
+            | Self::CompleteProviderAuth { meta, .. }
+            | Self::CancelProviderAuth { meta, .. }
             | Self::SearchWorkspaceFiles { meta, .. }
             | Self::PreviewWorkspaceFile { meta, .. }
             | Self::GetWorkspaceStatus { meta, .. }
@@ -1198,7 +1374,46 @@ pub enum EngineEvent {
     },
     ModelsListed {
         meta: CommandAckMeta,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        session_id: Option<SessionId>,
         models: Vec<ModelDescriptor>,
+        #[serde(default)]
+        aliases: Vec<ModelAliasDescriptor>,
+        #[serde(default)]
+        providers: Vec<ProviderDescriptor>,
+        #[serde(default)]
+        cached: bool,
+        #[serde(default)]
+        truncated: bool,
+    },
+    SettingsListed {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        settings: Vec<UserSettingDescriptor>,
+    },
+    ProviderAuthStarted {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        attempt_id: ProviderAuthAttemptId,
+        provider: String,
+        challenge: ProviderAuthChallenge,
+        warnings: Vec<String>,
+    },
+    ProviderConfigured {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        provider: String,
+        auth_kind: ProviderAuthKind,
+    },
+    ProviderAuthFinished {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        attempt_id: ProviderAuthAttemptId,
+        provider: String,
+        success: bool,
+        message: String,
+        warnings: Vec<String>,
     },
     WorkspaceFilesFound {
         meta: CommandAckMeta,
@@ -1566,6 +1781,10 @@ impl EngineEvent {
             | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
             | Self::ModelsListed { .. }
+            | Self::SettingsListed { .. }
+            | Self::ProviderAuthStarted { .. }
+            | Self::ProviderConfigured { .. }
+            | Self::ProviderAuthFinished { .. }
             | Self::WorkspaceFilesFound { .. }
             | Self::WorkspaceFilePreviewReady { .. }
             | Self::WorkspaceStatusReady { .. }
@@ -1632,6 +1851,10 @@ impl EngineEvent {
             | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
             | Self::ModelsListed { .. }
+            | Self::SettingsListed { .. }
+            | Self::ProviderAuthStarted { .. }
+            | Self::ProviderConfigured { .. }
+            | Self::ProviderAuthFinished { .. }
             | Self::WorkspaceFilesFound { .. }
             | Self::WorkspaceFilePreviewReady { .. }
             | Self::WorkspaceStatusReady { .. }

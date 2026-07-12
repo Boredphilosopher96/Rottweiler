@@ -5,6 +5,7 @@ import { createRottweilerApp } from "../src/app"
 import type { ClientCommand, EngineEvent } from "../src/protocol"
 import { PROTOCOL_VERSION } from "../../../protocol/types"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
+import { daylightTheme } from "../src/theme"
 
 const initialEvent = {
   type: "text_delta",
@@ -46,6 +47,20 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(cells.cols).toBe(72)
     expect(cells.rows).toBe(12)
     expect(cells.lines).toHaveLength(12)
+  })
+
+  test("constructs the complete app with the persisted startup theme", async () => {
+    const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
+    renderer = setup.renderer
+    renderer.root.add(createRottweilerApp(renderer, { theme: daylightTheme }))
+
+    await setup.renderOnce()
+
+    const backgrounds = setup.captureSpans().lines.flatMap((line) =>
+      line.spans.map((span) => span.bg.toInts()),
+    )
+    expect(backgrounds).toContainEqual([247, 245, 239, 255])
+    expect(backgrounds).not.toContainEqual([11, 13, 18, 255])
   })
 
   test("submits with plain Enter while modified Enter and Ctrl+J insert newlines", async () => {
@@ -706,6 +721,225 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(await app.composer.submit()).toBeTrue()
     expect(app.picker.title).toContain("Models")
     expect(app.picker.select.options.map((option) => option.value)).toEqual(["fast", "steady"])
+  })
+
+  test("uses provider inventory, concrete models, command sources, and persisted settings", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        commands: [{
+          name: "deploy",
+          description: "Deploy project",
+          usage: "/deploy",
+          source: "project",
+        }],
+        models: [{
+          alias: "copilot/gpt-5",
+          id: "copilot/gpt-5",
+          displayName: "GPT-5",
+          provider: "copilot",
+          providers: ["copilot"],
+          aliases: ["fast"],
+          current: true,
+          available: true,
+          status: null,
+          vision: true,
+          thinking: true,
+          toolCalling: true,
+        }],
+        providers: [{
+          name: "copilot",
+          authKind: "device_flow",
+          nextAction: "select_models",
+          configured: true,
+          authenticated: false,
+          reachable: false,
+          modelCount: 0,
+          status: "login required",
+        }],
+        settings: [{
+          key: "ui.theme",
+          label: "Theme",
+          value: "kennel-dark",
+          choices: ["kennel-dark", "daylight"],
+          provenance: "built-in",
+          appliesImmediately: false,
+        }],
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openProviderPicker()
+    expect(app.picker.select.options.map((option) => option.value)).toEqual(["copilot"])
+    expect(app.picker.select.options[0]?.description).toContain("login required")
+
+    app.openModelPicker()
+    app.picker.select.selectCurrent()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "switch_model",
+      model: "copilot/gpt-5",
+      provider: "copilot",
+    }))
+    app.handleEvent({
+      type: "model_changed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      model: "copilot/gpt-5",
+      provider: "copilot",
+    })
+    expect(app.statusLine.plainText).toContain("model copilot/gpt-5")
+    expect(app.statusLine.plainText).not.toContain("copilot/copilot")
+
+    app.openSettingsPicker()
+    const daylight = app.picker.select.options.findIndex(
+      (option) => option.value === "ui.theme:daylight",
+    )
+    app.picker.select.setSelectedIndex(daylight)
+    app.picker.select.selectCurrent()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "set_setting",
+      key: "ui.theme",
+      value: "daylight",
+    }))
+
+    app.closePicker()
+    await setup.mockInput.typeText("/")
+    const projectCommand = app.picker.select.options.find(
+      (option) => option.value === "deploy",
+    )
+    expect(projectCommand?.description).toContain("Project · Deploy project")
+    app.closePicker()
+    app.openCommandPicker()
+    const paletteCommand = app.picker.select.options.find(
+      (option) => option.value === "slash.deploy",
+    )
+    expect(paletteCommand?.description).toContain("Project · Deploy project")
+  })
+
+  test("quick-connects fresh built-in providers through connection-scoped auth prompts", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        providers: [
+          {
+            name: "github_copilot",
+            authKind: "device_flow",
+            nextAction: "configure",
+            configured: false,
+            authenticated: false,
+            reachable: false,
+            modelCount: 0,
+            status: "setup required",
+          },
+          {
+            name: "openai_codex",
+            authKind: "oauth",
+            nextAction: "configure",
+            configured: false,
+            authenticated: false,
+            reachable: false,
+            modelCount: 0,
+            status: "setup required",
+          },
+        ],
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openProviderPicker()
+    app.picker.select.selectCurrent()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "configure_builtin_provider",
+      provider: "github_copilot",
+    }))
+    app.handleEvent({
+      type: "provider_configured",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: "configure-copilot",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      provider: "github_copilot",
+      auth_kind: "device_flow",
+    })
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "begin_provider_auth",
+      provider: "github_copilot",
+    }))
+    app.handleEvent({
+      type: "provider_auth_started",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: "begin-copilot",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      attempt_id: "attempt-1",
+      provider: "github_copilot",
+      challenge: {
+        kind: "device_flow",
+        verification_uri: "https://github.com/login/device",
+        user_code: "ABCD-1234",
+      },
+      warnings: [],
+    })
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "complete_provider_auth",
+      provider: "github_copilot",
+      attempt_id: "attempt-1",
+    }))
+    expect(app.picker.title).toContain("Authenticate github_copilot")
+    expect(app.picker.select.options[0]?.description).toContain("ABCD-1234")
+
+    app.handleEvent({
+      type: "provider_auth_finished",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: "complete-copilot",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      attempt_id: "attempt-1",
+      provider: "github_copilot",
+      success: true,
+      message: "provider authentication completed",
+      warnings: [],
+    })
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "list_models",
+      refresh: true,
+    }))
+
+    app.openProviderPicker()
+    const codex = app.picker.select.options.findIndex((option) => option.value === "openai_codex")
+    app.picker.select.setSelectedIndex(codex)
+    app.picker.select.selectCurrent()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "configure_builtin_provider",
+      provider: "openai_codex",
+    }))
   })
 
   test("surfaces a correlated rejected model switch as a bounded visible error", async () => {

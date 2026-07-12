@@ -453,6 +453,20 @@ enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 enum ModelsCommand {
+    /// List concrete models from each configured provider's live catalog.
+    List {
+        /// Bypass the short process-local discovery cache.
+        #[arg(long)]
+        refresh: bool,
+    },
+    /// Show one exact live `provider/model` record.
+    Show {
+        /// Concrete provider-qualified model id.
+        id: String,
+        /// Bypass the short process-local discovery cache.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Fetch, validate, and atomically install the latest model table.
     Refresh {
         /// Catalog URL. Remote sources must use HTTPS; loopback HTTP is allowed for tests.
@@ -582,6 +596,92 @@ async fn main() -> Result<()> {
                 report.source_url,
                 report.path.display()
             );
+        }
+        Some(Command::Models {
+            command: ModelsCommand::List { refresh },
+        }) => {
+            let catalog = runtime::discover_model_catalog(refresh).await?;
+            if cli.output_format == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&catalog).into_diagnostic()?
+                );
+            } else {
+                println!("Aliases:");
+                for alias in &catalog.aliases {
+                    println!("  {} -> {}", alias.alias.0, alias.candidates.join(", "));
+                }
+                println!("Models:");
+                for model in &catalog.models {
+                    let marker = if model.current { "*" } else { " " };
+                    let state = if model.available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    };
+                    println!("{marker} {}  {}  {state}", model.id, model.display_name);
+                    if let Some(status) = &model.status {
+                        println!("    {status}");
+                    }
+                }
+                println!("Providers:");
+                for provider in &catalog.providers {
+                    println!(
+                        "  {}  {:?}  models={}  {}",
+                        provider.name,
+                        provider.auth_kind,
+                        provider.model_count,
+                        provider.status.as_deref().unwrap_or("ready")
+                    );
+                }
+            }
+        }
+        Some(Command::Models {
+            command: ModelsCommand::Show { id, refresh },
+        }) => {
+            let catalog = runtime::discover_model_catalog(refresh).await?;
+            let model = catalog
+                .models
+                .iter()
+                .find(|model| model.id == id)
+                .ok_or_else(|| miette!("model {id:?} is not present in the live catalog"))?;
+            if cli.output_format == OutputFormat::Json {
+                println!("{}", serde_json::to_string_pretty(model).into_diagnostic()?);
+            } else {
+                println!("id: {}", model.id);
+                println!("name: {}", model.display_name);
+                println!("provider: {}", model.provider);
+                println!("available: {}", model.available);
+                println!(
+                    "aliases: {}",
+                    model
+                        .aliases
+                        .iter()
+                        .map(|alias| alias.0.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                println!("tool_calling: {}", model.capabilities.tool_calling);
+                println!("vision: {}", model.capabilities.vision);
+                println!("thinking: {}", model.capabilities.thinking);
+                println!(
+                    "max_context_tokens: {}",
+                    model
+                        .capabilities
+                        .max_context_tokens
+                        .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+                );
+                println!(
+                    "max_output_tokens: {}",
+                    model
+                        .capabilities
+                        .max_output_tokens
+                        .map_or_else(|| "unknown".to_owned(), |value| value.to_string())
+                );
+                if let Some(status) = &model.status {
+                    println!("status: {status}");
+                }
+            }
         }
         Some(Command::Auth {
             command: AuthCommand::Login { provider },
@@ -1060,6 +1160,14 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
         &user_rottweiler,
     )
     .map_err(|error| miette!(error.to_string()))?;
+    let tui_theme = rw_store::config::ConfigLoader::from_environment()
+        .into_diagnostic()?
+        .with_project_trust(cli.dangerously_trust || project_assessment.project_execution_enabled())
+        .load()
+        .into_diagnostic()?
+        .config
+        .ui
+        .theme;
     let session_id = runtime::select_interactive_session(
         &storage_root,
         &workspace,
@@ -1083,6 +1191,7 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
             fork_operation_directory: storage_root.join("control/pending-forks"),
             session_id,
             tui_keybindings,
+            tui_theme,
             permission_mode: cli.permission_mode,
             max_turns: cli.max_turns,
             model: cli.model.clone(),

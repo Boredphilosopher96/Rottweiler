@@ -23,7 +23,7 @@ use rw_core::runtime_support::plugin::{
 };
 use rw_core::runtime_support::{
     Block, CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation,
-    CommandRegistry, CommandRegistryError, Role, Turn, TurnMeta,
+    CommandRegistry, CommandRegistryError, CommandSource, Role, Turn, TurnMeta,
 };
 use rw_core::runtime_support::{SandboxedProtocolLauncher, Tool, UpstreamProxy};
 use rw_core::{
@@ -646,7 +646,7 @@ fn plugin_command_descriptor(
     description: &str,
     argument_hint: Option<&str>,
 ) -> CommandDescriptor {
-    let descriptor = CommandDescriptor::new(name, description);
+    let descriptor = CommandDescriptor::new(name, description).with_source(CommandSource::Plugin);
     match argument_hint {
         Some(hint) => descriptor.with_argument_hint(hint),
         None => descriptor,
@@ -838,7 +838,7 @@ pub(crate) async fn register_mcp_command(
     registry.register(
         CommandDescriptor::new("mcp", "Inspect or control MCP servers").with_argument_hint(
             "[status|enable <server>|disable <server>|approve <server> [displayed-fingerprint]]",
-        ),
+        ).with_source(CommandSource::Mcp),
         McpCommand {
             manager: Arc::clone(&manager),
             approvals,
@@ -849,7 +849,8 @@ pub(crate) async fn register_mcp_command(
             "mcp.prompt",
             "Load one currently available MCP prompt as untrusted context",
         )
-        .with_argument_hint("<server> <prompt> [JSON object]"),
+        .with_argument_hint("<server> <prompt> [JSON object]")
+        .with_source(CommandSource::Mcp),
         DynamicMcpPromptCommand {
             manager: Arc::clone(&manager),
         },
@@ -865,7 +866,8 @@ pub(crate) async fn register_mcp_command(
                 name,
                 format!("MCP prompt {} from {}", prompt.name, prompt.server),
             )
-            .with_argument_hint("[JSON object]"),
+            .with_argument_hint("[JSON object]")
+            .with_source(CommandSource::Mcp),
             McpPromptCommand {
                 manager: Arc::clone(&manager),
                 server: prompt.server,

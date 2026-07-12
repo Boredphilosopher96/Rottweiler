@@ -658,6 +658,7 @@ describe("OpenTUI engine runtime", () => {
       "get_cost",
       "get_workspace_status",
       "list_models",
+      "list_settings",
       "list_commands",
     ])
     expect(client.subscription?.attach.role).toBe("driver")
@@ -775,6 +776,7 @@ describe("OpenTUI engine runtime", () => {
       "get_cost",
       "get_workspace_status",
       "list_models",
+      "list_settings",
       "list_commands",
       "send_message",
     ])

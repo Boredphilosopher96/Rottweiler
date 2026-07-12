@@ -13,14 +13,15 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use rw_core::{ModelAccounting, ModelDriver, ProviderFactory};
 use rw_providers::{
-    BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason, ModelPricing,
-    NetworkPolicy, PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent,
-    ProviderModelMetadata, ProviderRequest, ProxyEnvironment, Recorder, ReplayProvider,
-    RetryPolicy, ThinkingLevel, ToolChoice, ToolDefinition, UsageAccounting, WireMode,
+    BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, DiscoveredModel,
+    DiscoveredProviderCatalog, FinishReason, ModelPricing, NetworkPolicy, PricingTable, Provider,
+    ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest,
+    ProxyEnvironment, Recorder, ReplayProvider, RetryPolicy, ThinkingLevel, ToolChoice,
+    ToolDefinition, UsageAccounting, WireMode,
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
-    KEYCHAIN_VAULT_ID, KeychainUnavailable, Secret,
+    CredentialReference, KEYCHAIN_VAULT_ID, KeychainUnavailable, Secret,
 };
 use rw_types::{
     Block, Cost, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta,
@@ -57,6 +58,31 @@ impl Provider for ExtensionFixtureProvider {
 
     fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
         self.metadata.clone()
+    }
+
+    async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
+        Ok(Some(DiscoveredProviderCatalog {
+            provider: "private-extension".to_owned(),
+            models: vec![
+                DiscoveredModel {
+                    id: "model-a".to_owned(),
+                    display_name: Some("Model A".to_owned()),
+                    description: None,
+                    capabilities: Some(self.capabilities.clone()),
+                    pricing: self
+                        .metadata
+                        .as_ref()
+                        .and_then(|value| value.pricing.clone()),
+                },
+                DiscoveredModel {
+                    id: "new-model".to_owned(),
+                    display_name: Some("New Model".to_owned()),
+                    description: None,
+                    capabilities: Some(self.capabilities.clone()),
+                    pricing: None,
+                },
+            ],
+        }))
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
@@ -359,6 +385,183 @@ fn config(endpoint: &str, candidates: &[&str]) -> rw_types::config::Config {
     config
 }
 
+#[tokio::test]
+async fn configured_unaliased_concrete_model_rebinds_after_runtime_restart_and_dispatches() {
+    let models = json_response(r#"{"data":[{"id":"new-model"}]}"#);
+    let server = spawn_server(
+        "/v1/chat/completions",
+        vec![models.clone(), models, sse_response("dynamic-ok")],
+    );
+    let mut config = config(
+        "http://127.0.0.1:1/v1/chat/completions",
+        &["fixture/model-a"],
+    );
+    config.providers.insert(
+        "extra".to_owned(),
+        ProviderConfig {
+            kind: "openai_compatible".to_owned(),
+            base_url: Some(server.endpoint.clone()),
+            ..ProviderConfig::default()
+        },
+    );
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestKeychain::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        pricing([("fixture/model-a", false), ("extra/new-model", false)]),
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("factory must build: {error}"));
+
+    runtime
+        .prepare_concrete_model("extra/new-model")
+        .await
+        .unwrap_or_else(|error| panic!("concrete model must bind: {error}"));
+    drop(runtime);
+
+    let resumed = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestKeychain::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        pricing([("fixture/model-a", false), ("extra/new-model", false)]),
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("resumed factory must build: {error}"));
+    resumed
+        .prepare_concrete_model("extra/new-model")
+        .await
+        .unwrap_or_else(|error| panic!("persisted concrete model must rebind: {error}"));
+    let events = ModelDriver::stream(&resumed, "extra/new-model", request("ignored"))
+        .unwrap_or_else(|error| panic!("concrete stream must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(Result::is_ok));
+    assert!(events.iter().any(|event| {
+        matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "dynamic-ok")
+    }));
+    let requests = server
+        .task
+        .join()
+        .unwrap_or_else(|_| panic!("dynamic server must join"));
+    assert!(requests[0].starts_with("GET /v1/models "));
+    assert!(requests[1].starts_with("GET /v1/models "));
+    assert!(requests[2].starts_with("POST /v1/chat/completions "));
+}
+
+#[tokio::test]
+async fn newly_stored_provider_credential_activates_catalog_selection_and_dispatch() {
+    let models = json_response(r#"{"data":[{"id":"new-model"}]}"#);
+    let server = spawn_server(
+        "/v1/chat/completions",
+        vec![models.clone(), models, sse_response("activated-ok")],
+    );
+    let mut config = extension_config("local/model-a");
+    config.providers.insert(
+        "extra".to_owned(),
+        ProviderConfig {
+            kind: "openai_compatible".to_owned(),
+            base_url: Some(server.endpoint.clone()),
+            api_key_credential: Some("extra-api-key".to_owned()),
+            ..ProviderConfig::default()
+        },
+    );
+    let credentials = manager(TestEnvironment::default(), TestKeychain::default());
+    let runtime = ProviderFactory::with_backends(
+        Arc::clone(&credentials),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        pricing([("extra/new-model", false)]),
+    )
+    .with_extension_providers([("local/", extension_provider("local-private", None))])
+    .build(&config)
+    .unwrap_or_else(|error| panic!("runtime must start without optional credential: {error}"));
+
+    let before = rw_core::ModelCatalogSource::discover(&runtime)
+        .await
+        .unwrap_or_else(|error| panic!("initial catalog must remain usable: {error}"));
+    assert!(
+        !before
+            .providers
+            .iter()
+            .any(|provider| provider.name == "extra")
+    );
+
+    credentials
+        .store(
+            &CredentialReference::new("extra-api-key"),
+            &Secret::new("newly-stored-secret".to_owned()),
+        )
+        .unwrap_or_else(|error| panic!("credential must store: {error}"));
+    runtime
+        .activate_provider("extra")
+        .unwrap_or_else(|error| panic!("provider must hot-activate: {error}"));
+    let catalog = rw_core::ModelCatalogSource::discover(&runtime)
+        .await
+        .unwrap_or_else(|error| panic!("refreshed catalog must discover: {error}"));
+    assert!(
+        catalog
+            .models
+            .iter()
+            .any(|model| { model.id == "extra/new-model" && model.available })
+    );
+    runtime
+        .prepare_concrete_model("extra/new-model")
+        .await
+        .unwrap_or_else(|error| panic!("activated concrete model must bind: {error}"));
+    let events = ModelDriver::stream(&runtime, "extra/new-model", request("ignored"))
+        .unwrap_or_else(|error| panic!("activated stream must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(|event| {
+        matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "activated-ok")
+    }));
+    let requests = server
+        .task
+        .join()
+        .unwrap_or_else(|_| panic!("activation server must join"));
+    assert!(requests[0].starts_with("GET /v1/models "));
+    assert!(requests[1].starts_with("GET /v1/models "));
+    assert!(requests[2].starts_with("POST /v1/chat/completions "));
+}
+
+#[tokio::test]
+async fn stalled_concrete_discovery_is_bounded_and_existing_alias_remains_usable() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .unwrap_or_else(|error| panic!("stall listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("stall address: {error}"));
+    let mut config = config(
+        "http://127.0.0.1:1/v1/chat/completions",
+        &["fixture/model-a"],
+    );
+    config.providers.insert(
+        "extra".to_owned(),
+        ProviderConfig {
+            kind: "openai_compatible".to_owned(),
+            base_url: Some(format!("http://{address}/v1/chat/completions")),
+            ..ProviderConfig::default()
+        },
+    );
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestKeychain::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        pricing([("fixture/model-a", false)]),
+    )
+    .with_model_discovery_timeout(Duration::from_millis(25))
+    .build(&config)
+    .unwrap_or_else(|error| panic!("factory must build: {error}"));
+    let started = Instant::now();
+    let Err(error) = runtime.prepare_concrete_model("extra/new-model").await else {
+        panic!("stalled discovery must reject");
+    };
+    assert!(error.to_string().contains("timed out"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(ModelDriver::has_model_alias(&runtime, "fast"));
+    drop(listener);
+}
+
 fn subscription_config(model: &str) -> rw_types::config::Config {
     let mut config = rw_types::config::Config::default();
     "fast".clone_into(&mut config.models.default);
@@ -575,6 +778,44 @@ async fn approved_extension_alias_stream_is_model_bound_and_replay_compatible() 
         .collect::<Vec<_>>()
         .await;
     assert_eq!(live, replayed);
+}
+
+#[tokio::test]
+async fn approved_unaliased_extension_is_catalogued_bindable_and_dispatchable() {
+    let runtime = extension_factory()
+        .with_extension_providers([
+            ("alpha/", extension_provider("alpha-private", None)),
+            ("custom/", extension_provider("custom-private", None)),
+        ])
+        .build(&extension_config("alpha/model-a"))
+        .unwrap_or_else(|error| panic!("extension runtime must build: {error}"));
+
+    let catalog = rw_core::ModelCatalogSource::discover(&runtime)
+        .await
+        .unwrap_or_else(|error| panic!("session catalog must discover: {error}"));
+    assert!(catalog.providers.iter().any(|provider| {
+        provider.name == "custom" && provider.reachable && provider.model_count == 2
+    }));
+    assert!(catalog.models.iter().any(|model| {
+        model.id == "custom/new-model" && model.available && model.aliases.is_empty()
+    }));
+    assert!(
+        !serde_json::to_string(&catalog)
+            .unwrap_or_else(|error| panic!("catalog must encode: {error}"))
+            .contains("custom-private")
+    );
+
+    runtime
+        .prepare_concrete_model("custom/new-model")
+        .await
+        .unwrap_or_else(|error| panic!("live extension model must bind: {error}"));
+    let events = ModelDriver::stream(&runtime, "custom/new-model", request("ignored"))
+        .unwrap_or_else(|error| panic!("concrete extension stream must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(|event| {
+        matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "extension:new-model")
+    }));
 }
 
 #[tokio::test]

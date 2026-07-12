@@ -25,13 +25,15 @@ use std::{
 use async_trait::async_trait;
 #[cfg(unix)]
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use rw_core::runtime_support::{PricingTable, default_models_path};
+use rw_core::runtime_support::PricingTable;
 use rw_core::{
-    AttachmentData, CommandDescriptor, CompletedForkOperation, Config, CreateSessionRequest,
-    EngineEvent, ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError,
-    HostQueryService, HostedSession, ModelAlias, ModelCacheBehavior, ModelCapabilities,
-    ModelDescriptor, PreparedForkOperation, SessionDescriptor, SessionFactory, SessionId,
-    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    AttachmentData, CachedModelCatalog, CommandDescriptor, CompletedForkOperation, Config,
+    CreateSessionRequest, EngineEvent, ForkOperationKey, ForkOperationState, ForkSessionRequest,
+    HostError, HostQueryService, HostedSession, ModelAlias, ModelCatalogSnapshot,
+    PermissionDecision, PreparedForkOperation, ProviderAuthAttempt, ProviderAuthChallenge,
+    ProviderAuthCompletion, ProviderLogin, ProviderLoginCancellation, ProviderModelCatalogSource,
+    SessionDescriptor, SessionFactory, SessionId, ThinkingLevel, UserSettingDescriptor,
+    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus, begin_provider_login,
     builtin_command_registry, project_session_events,
 };
 use rw_store::config::ConfigLoader;
@@ -215,6 +217,7 @@ impl CliHostOptions {
 pub(crate) struct CliSessionFactory {
     options: Arc<CliHostOptions>,
     allowed_workspaces: Arc<Vec<PathBuf>>,
+    model_catalog: Arc<CachedModelCatalog>,
 }
 
 impl CliSessionFactory {
@@ -237,9 +240,28 @@ impl CliSessionFactory {
         options.allowed_workspaces.clone_from(&allowed);
         crate::runtime::initialize_private_storage_root(&options.storage_root)
             .map_err(|_| HostError::Persistence("host storage could not initialize".to_owned()))?;
+        let pricing_path = options.storage_root.join("models.toml");
+        let pricing = if pricing_path.is_file() {
+            let contents = fs::read_to_string(&pricing_path).map_err(|_| {
+                HostError::Persistence("refreshed model catalog could not be read".to_owned())
+            })?;
+            PricingTable::from_toml(&contents).map_err(|_| {
+                HostError::Persistence("refreshed model catalog is invalid".to_owned())
+            })?
+        } else {
+            PricingTable::bundled().map_err(|_| {
+                HostError::Persistence("bundled model catalog is invalid".to_owned())
+            })?
+        };
+        let source = Arc::new(ProviderModelCatalogSource::system(
+            options.credentials_path.clone(),
+            pricing,
+            options.config.clone(),
+        ));
         let factory = Self {
             options: Arc::new(options),
             allowed_workspaces: Arc::new(allowed),
+            model_catalog: Arc::new(CachedModelCatalog::new(source)),
         };
         factory.recover_fork_operations()?;
         Ok(factory)
@@ -250,6 +272,73 @@ impl CliSessionFactory {
             .storage_root
             .join("control")
             .join("fork-operations")
+    }
+
+    fn settings_loader(&self) -> rw_store::config::ConfigLoader {
+        rw_store::config::ConfigLoader::new(
+            self.options.credentials_path.with_file_name("config.toml"),
+            self.allowed_workspaces[0].join(".rottweiler/config.toml"),
+        )
+    }
+
+    fn setting_descriptors(
+        loaded: &rw_store::config::LoadedConfig,
+        session: &SessionDescriptor,
+    ) -> Vec<UserSettingDescriptor> {
+        let alias = if loaded.config.models.aliases.contains_key(&session.model.0) {
+            &session.model.0
+        } else {
+            &loaded.config.models.default
+        };
+        let thinking_key = format!("models.thinking.{alias}");
+        let provenance = |key: &str| {
+            loaded
+                .provenance(key)
+                .map_or_else(|| "built-in".to_owned(), ToString::to_string)
+        };
+        vec![
+            UserSettingDescriptor {
+                key: "ui.theme".to_owned(),
+                label: "Theme".to_owned(),
+                value: loaded.config.ui.theme.clone(),
+                choices: vec!["kennel-dark".to_owned(), "daylight".to_owned()],
+                provenance: provenance("ui.theme"),
+                applies_immediately: false,
+            },
+            UserSettingDescriptor {
+                key: thinking_key.clone(),
+                label: format!("Thinking · {alias}"),
+                value: thinking_level_name(
+                    loaded
+                        .config
+                        .models
+                        .thinking
+                        .get(alias)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+                .to_owned(),
+                choices: ["off", "low", "medium", "high"].map(str::to_owned).to_vec(),
+                provenance: provenance(&thinking_key),
+                applies_immediately: false,
+            },
+            UserSettingDescriptor {
+                key: "compaction.auto".to_owned(),
+                label: "Automatic compaction".to_owned(),
+                value: loaded.config.compaction.auto.to_string(),
+                choices: vec!["true".to_owned(), "false".to_owned()],
+                provenance: provenance("compaction.auto"),
+                applies_immediately: false,
+            },
+            UserSettingDescriptor {
+                key: "permissions.default".to_owned(),
+                label: "Default permission".to_owned(),
+                value: permission_decision_name(loaded.config.permissions.default).to_owned(),
+                choices: ["ask", "allow", "deny"].map(str::to_owned).to_vec(),
+                provenance: provenance("permissions.default"),
+                applies_immediately: false,
+            },
+        ]
     }
 
     fn fork_operation_id(key: &ForkOperationKey) -> String {
@@ -1238,7 +1327,7 @@ impl CliSessionFactory {
             tracing::error!(session_id = %session_id.0, reason = %error, "hosted session composition failed");
             HostError::Persistence("session runtime could not be composed".to_owned())
         })?;
-        Ok(HostedSession::new(
+        let session = HostedSession::new(
             SessionDescriptor {
                 session_id,
                 workspace_name: workspace_name(&workspace),
@@ -1247,7 +1336,12 @@ impl CliSessionFactory {
                 shell_active: runtime.shell_active,
             },
             runtime.handle,
-        ))
+        );
+        Ok(if let Some(model_catalog) = runtime.model_catalog {
+            session.with_model_catalog(model_catalog)
+        } else {
+            session
+        })
     }
 
     fn persisted_descriptor(&self, session_id: &str) -> Result<SessionDescriptor, HostError> {
@@ -1611,37 +1705,123 @@ impl HostQueryService for CliSessionFactory {
                 name: descriptor.name().to_owned(),
                 description: descriptor.description().to_owned(),
                 usage: descriptor.argument_hint().unwrap_or_default().to_owned(),
+                source: rw_core::CommandSource::default(),
             })
             .collect())
     }
 
-    async fn model_descriptors(&self) -> Result<Vec<ModelDescriptor>, HostError> {
-        let pricing = match default_models_path() {
-            Ok(path) if path.is_file() => PricingTable::load(&path).await.ok(),
-            Ok(_) | Err(_) => PricingTable::bundled().ok(),
-        };
-        let mut descriptors = BTreeMap::new();
-        for (alias, candidates) in &self.options.config.models.aliases {
-            let capabilities =
-                conservative_alias_capabilities(candidates, &self.options.config, pricing.as_ref());
-            let providers = configured_alias_providers(candidates);
-            descriptors.insert(
-                alias.clone(),
-                ModelDescriptor {
-                    alias: ModelAlias(alias.clone()),
-                    providers,
-                    capabilities,
-                },
-            );
+    async fn model_catalog(
+        &self,
+        refresh: bool,
+        selected_model: Option<&str>,
+        resolved_model: Option<&str>,
+    ) -> Result<ModelCatalogSnapshot, HostError> {
+        let mut catalog = self
+            .model_catalog
+            .get(refresh)
+            .await
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        overlay_catalog_current(&mut catalog, selected_model, resolved_model);
+        Ok(catalog)
+    }
+
+    async fn user_settings(
+        &self,
+        session: &SessionDescriptor,
+    ) -> Result<Vec<UserSettingDescriptor>, HostError> {
+        let config_loader = self.settings_loader();
+        let effective = tokio::task::spawn_blocking(move || config_loader.load())
+            .await
+            .map_err(|_| HostError::Query("user settings worker failed".to_owned()))?
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        Ok(Self::setting_descriptors(&effective, session))
+    }
+
+    async fn set_user_setting(
+        &self,
+        session: &SessionDescriptor,
+        key: &str,
+        value: &str,
+    ) -> Result<Vec<UserSettingDescriptor>, HostError> {
+        let config_loader = self.settings_loader();
+        let key = key.to_owned();
+        let value = value.to_owned();
+        let effective =
+            tokio::task::spawn_blocking(move || config_loader.persist_tui_setting(&key, &value))
+                .await
+                .map_err(|_| HostError::Persistence("user setting worker failed".to_owned()))?
+                .map_err(|error| HostError::Persistence(error.to_string()))?;
+        Ok(Self::setting_descriptors(&effective, session))
+    }
+
+    async fn begin_provider_auth(&self, provider: &str) -> Result<ProviderAuthAttempt, HostError> {
+        match begin_provider_login(provider)
+            .await
+            .map_err(|error| HostError::Query(error.to_string()))?
+        {
+            ProviderLogin::OAuth(login) => {
+                let challenge = ProviderAuthChallenge::Oauth {
+                    authorization_url: login.authorization_url().to_owned(),
+                    redirect_uri: login.redirect_uri().to_owned(),
+                };
+                let warnings = login.warnings().to_vec();
+                let completion = Box::pin(async move {
+                    let result = login
+                        .complete()
+                        .await
+                        .map_err(|error| HostError::Query(error.to_string()))?;
+                    Ok(ProviderAuthCompletion {
+                        provider: result.provider,
+                        message: "provider authentication completed".to_owned(),
+                        warnings: result.warnings,
+                    })
+                });
+                Ok(ProviderAuthAttempt::new(
+                    challenge,
+                    warnings,
+                    completion,
+                    Arc::new(|| {}),
+                ))
+            }
+            ProviderLogin::GitHubCopilot(login) => {
+                let challenge = ProviderAuthChallenge::DeviceFlow {
+                    verification_uri: login.verification_uri().to_owned(),
+                    user_code: login.user_code().to_owned(),
+                };
+                let warnings = login.warnings().to_vec();
+                let cancellation = ProviderLoginCancellation::default();
+                let poll_cancellation = cancellation.clone();
+                let completion = Box::pin(async move {
+                    let result = login
+                        .complete(&poll_cancellation)
+                        .await
+                        .map_err(|error| HostError::Query(error.to_string()))?;
+                    Ok(ProviderAuthCompletion {
+                        provider: result.provider,
+                        message: "provider authentication completed".to_owned(),
+                        warnings: result.warnings,
+                    })
+                });
+                Ok(ProviderAuthAttempt::new(
+                    challenge,
+                    warnings,
+                    completion,
+                    Arc::new(move || cancellation.cancel()),
+                ))
+            }
         }
-        descriptors
-            .entry(self.options.config.models.default.clone())
-            .or_insert_with(|| ModelDescriptor {
-                alias: ModelAlias(self.options.config.models.default.clone()),
-                providers: Vec::new(),
-                capabilities: unknown_capabilities(),
-            });
-        Ok(descriptors.into_values().collect())
+    }
+
+    async fn configure_builtin_provider(&self, provider: &str) -> Result<(), HostError> {
+        let config_loader = self.settings_loader();
+        let provider = provider.to_owned();
+        tokio::task::spawn_blocking(move || config_loader.configure_builtin_provider(&provider))
+            .await
+            .map_err(|_| {
+                HostError::Persistence("built-in provider setup worker failed".to_owned())
+            })?
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        Ok(())
     }
 
     async fn search_workspace_files(
@@ -1748,6 +1928,43 @@ impl HostQueryService for CliSessionFactory {
     }
 }
 
+fn overlay_catalog_current(
+    catalog: &mut ModelCatalogSnapshot,
+    selected_model: Option<&str>,
+    resolved_model: Option<&str>,
+) {
+    if let Some(current) = resolved_model.or(selected_model) {
+        for model in &mut catalog.models {
+            model.current = model.id == current
+                || catalog.aliases.iter().any(|alias| {
+                    alias.alias.0 == current && alias.candidates.first() == Some(&model.id)
+                });
+        }
+    }
+    if let Some(selected) = selected_model {
+        for alias in &mut catalog.aliases {
+            alias.current = alias.alias.0 == selected;
+        }
+    }
+}
+
+const fn thinking_level_name(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Off => "off",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+    }
+}
+
+const fn permission_decision_name(decision: PermissionDecision) -> &'static str {
+    match decision {
+        PermissionDecision::Ask => "ask",
+        PermissionDecision::Allow => "allow",
+        PermissionDecision::Deny => "deny",
+    }
+}
+
 fn workspace_name(workspace: &Path) -> String {
     workspace
         .file_name()
@@ -1755,15 +1972,6 @@ fn workspace_name(workspace: &Path) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or("workspace")
         .to_owned()
-}
-
-fn unknown_capabilities() -> ModelCapabilities {
-    ModelCapabilities {
-        tool_calling: false,
-        vision: false,
-        thinking: false,
-        cache_behavior: ModelCacheBehavior::None,
-    }
 }
 
 fn configured_alias_providers(candidates: &[String]) -> Vec<String> {
@@ -1779,65 +1987,6 @@ fn configured_alias_providers(candidates: &[String]) -> Vec<String> {
         .filter(|provider| seen.insert((*provider).to_owned()))
         .map(str::to_owned)
         .collect()
-}
-
-fn conservative_alias_capabilities(
-    candidates: &[String],
-    config: &Config,
-    pricing: Option<&PricingTable>,
-) -> ModelCapabilities {
-    if candidates.is_empty() {
-        return unknown_capabilities();
-    }
-    let mut tool_calling = true;
-    let mut thinking = true;
-    let mut cache_behavior = None;
-    for candidate in candidates {
-        let Some((provider_name, model)) = candidate.split_once('/') else {
-            return unknown_capabilities();
-        };
-        let Some(provider) = config.providers.get(provider_name) else {
-            return unknown_capabilities();
-        };
-        let catalog_provider = match provider.kind.as_str() {
-            "anthropic" => "anthropic",
-            "openai"
-            | "openai_responses"
-            | "openai_chat"
-            | "openai_codex"
-            | "openai_subscription" => "openai",
-            // Compatible and dynamically discovered providers are unknown
-            // until their own metadata has been fetched.
-            _ => return unknown_capabilities(),
-        };
-        let key = format!("{catalog_provider}/{model}");
-        let Some(model) = pricing.and_then(|table| table.models.get(&key)) else {
-            return unknown_capabilities();
-        };
-        tool_calling &= model.supports_tools;
-        thinking &= model.supports_thinking && !model.reasoning_efforts.is_empty();
-        let candidate_cache = match provider.kind.as_str() {
-            "anthropic" => ModelCacheBehavior::Explicit,
-            "openai"
-            | "openai_responses"
-            | "openai_chat"
-            | "openai_codex"
-            | "openai_subscription" => ModelCacheBehavior::ProviderManaged,
-            _ => ModelCacheBehavior::None,
-        };
-        cache_behavior = match cache_behavior {
-            None => Some(candidate_cache),
-            Some(existing) if existing == candidate_cache => Some(existing),
-            Some(_) => Some(ModelCacheBehavior::None),
-        };
-    }
-    ModelCapabilities {
-        tool_calling,
-        // The current pricing catalog has no authoritative vision field.
-        vision: false,
-        thinking,
-        cache_behavior: cache_behavior.unwrap_or(ModelCacheBehavior::None),
-    }
 }
 
 fn safe_relative_path(value: &str) -> Result<PathBuf, HostError> {
@@ -2987,9 +3136,52 @@ mod tests {
     #[cfg(unix)]
     use std::time::Instant;
 
+    use rw_core::{ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities, ModelDescriptor};
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn catalog_current_keeps_selected_alias_and_marks_actual_fallback_route() {
+        let capabilities = ModelCapabilities {
+            tool_calling: true,
+            vision: false,
+            thinking: false,
+            cache_behavior: ModelCacheBehavior::None,
+            max_context_tokens: None,
+            max_output_tokens: None,
+        };
+        let model = |id: &str| ModelDescriptor {
+            alias: ModelAlias(id.to_owned()),
+            id: id.to_owned(),
+            display_name: id.to_owned(),
+            provider: id
+                .split_once('/')
+                .map_or("", |(provider, _)| provider)
+                .to_owned(),
+            providers: Vec::new(),
+            aliases: vec![ModelAlias("fast".to_owned())],
+            current: false,
+            available: true,
+            status: None,
+            capabilities: capabilities.clone(),
+        };
+        let mut catalog = ModelCatalogSnapshot {
+            aliases: vec![ModelAliasDescriptor {
+                alias: ModelAlias("fast".to_owned()),
+                candidates: vec!["primary/model".to_owned(), "fallback/model".to_owned()],
+                current: false,
+            }],
+            models: vec![model("primary/model"), model("fallback/model")],
+            providers: Vec::new(),
+            cached: false,
+            truncated: false,
+        };
+        overlay_catalog_current(&mut catalog, Some("fast"), Some("fallback/model"));
+        assert!(catalog.aliases[0].current);
+        assert!(!catalog.models[0].current);
+        assert!(catalog.models[1].current);
+    }
 
     fn factory(root: &Path, workspace: &Path) -> CliSessionFactory {
         factory_with_allowed_workspaces(root, vec![workspace.to_path_buf()])
@@ -4298,5 +4490,42 @@ mod tests {
         fs::write(&oversized, vec![b'x'; MAX_FORK_JOURNAL_BYTES + 1]).expect("oversized");
         fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).expect("private file");
         assert!(CliSessionFactory::new(options).is_err());
+    }
+
+    #[test]
+    fn thinking_setting_uses_configured_alias_after_concrete_model_selection() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(
+            &user,
+            "[models]\ndefault = \"fast\"\n[models.aliases]\nfast = [\"openai/gpt-5-mini\"]\n",
+        )
+        .expect("user config");
+        let loaded = ConfigLoader::new(user, project)
+            .load()
+            .expect("loaded config");
+        let session = SessionDescriptor {
+            session_id: SessionId("concrete".to_owned()),
+            workspace_name: "repo".to_owned(),
+            model: ModelAlias("openai/gpt-5-mini".to_owned()),
+            driver_client_id: None,
+            shell_active: false,
+        };
+
+        let settings = CliSessionFactory::setting_descriptors(&loaded, &session);
+
+        assert!(
+            settings
+                .iter()
+                .any(|setting| setting.key == "models.thinking.fast")
+        );
+        assert!(
+            settings
+                .iter()
+                .all(|setting| !setting.key.contains("openai/gpt-5-mini"))
+        );
     }
 }

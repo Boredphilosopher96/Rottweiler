@@ -142,7 +142,10 @@ async fn chatgpt_discovers_visible_models_from_tolerant_envelope() {
     let requests = server
         .await
         .unwrap_or_else(|error| panic!("fixture server must finish: {error}"));
-    assert!(requests[0].starts_with("get /backend-api/codex/models http/1.1"));
+    assert!(requests[0].starts_with(&format!(
+        "get /backend-api/codex/models?client_version={} http/1.1",
+        env!("CARGO_PKG_VERSION")
+    )));
     assert!(requests[0].contains("chatgpt-account-id: private-account"));
 }
 

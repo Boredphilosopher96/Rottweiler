@@ -232,6 +232,7 @@ impl SecretRedactor for NoopSecretRedactor {
 }
 
 /// Provider-neutral model streaming boundary used by the actor loop.
+#[async_trait]
 pub trait ModelDriver: Send + Sync {
     /// Starts one provider iteration for an already-resolved model alias.
     ///
@@ -274,6 +275,26 @@ pub trait ModelDriver: Send + Sync {
     /// Whether an alias is configured without making a provider request.
     fn has_model_alias(&self, alias: &str) -> bool {
         !alias.trim().is_empty()
+    }
+
+    /// Resolves a concrete live-catalog model before an idle session commits
+    /// the selection. Static/replay drivers keep their synchronous behavior.
+    async fn prepare_model(&self, alias: &str) -> Result<(), AgentLoopError> {
+        if self.has_model_alias(alias) {
+            Ok(())
+        } else {
+            Err(AgentLoopError::InvalidConfiguration(format!(
+                "model {alias:?} is unavailable"
+            )))
+        }
+    }
+
+    /// Activates a provider whose credentials became available after this
+    /// session runtime was assembled.
+    async fn activate_provider(&self, provider: &str) -> Result<(), AgentLoopError> {
+        Err(AgentLoopError::InvalidConfiguration(format!(
+            "provider {provider:?} cannot be activated by this model runtime"
+        )))
     }
 
     /// Whether one exact provider route is configured for an alias.
@@ -324,6 +345,17 @@ pub trait ModelDriver: Send + Sync {
     ) -> Cost {
         self.cost_for_reported_model(alias, reported_model, usage)
     }
+
+    /// Provider-qualified concrete model that served an iteration, when the
+    /// router can resolve its opaque route identity.
+    fn qualified_model_for_route(
+        &self,
+        _alias: &str,
+        _route: Option<&str>,
+        reported_model: Option<&str>,
+    ) -> Option<String> {
+        reported_model.map(str::to_owned)
+    }
 }
 
 /// Synchronous context metadata consumed by the provider-neutral assembler.
@@ -334,6 +366,7 @@ pub struct ModelContextMetadata {
     pub cache_breakpoints: Option<CacheBreakpointSupport>,
 }
 
+#[async_trait]
 impl ModelDriver for ProviderRuntime {
     fn stream(
         &self,
@@ -370,6 +403,20 @@ impl ModelDriver for ProviderRuntime {
 
     fn has_model_alias(&self, alias: &str) -> bool {
         self.resolved_alias_capabilities(alias).is_some()
+    }
+
+    async fn prepare_model(&self, alias: &str) -> Result<(), AgentLoopError> {
+        if self.has_model_alias(alias) {
+            return Ok(());
+        }
+        self.prepare_concrete_model(alias)
+            .await
+            .map_err(|error| AgentLoopError::Provider(error.to_string()))
+    }
+
+    async fn activate_provider(&self, provider: &str) -> Result<(), AgentLoopError> {
+        ProviderRuntime::activate_provider(self, provider)
+            .map_err(|error| AgentLoopError::Provider(error.to_string()))
     }
 
     fn has_provider_for_alias(&self, alias: &str, provider: &str) -> bool {
@@ -410,6 +457,24 @@ impl ModelDriver for ProviderRuntime {
         usage: TokenUsage,
     ) -> Cost {
         self.accounting_for_route(route, usage)
+    }
+
+    fn qualified_model_for_route(
+        &self,
+        alias: &str,
+        route: Option<&str>,
+        reported_model: Option<&str>,
+    ) -> Option<String> {
+        if self.resolved_model(alias).is_some()
+            || self
+                .resolved_alias_capabilities(alias)
+                .is_some_and(|_| alias.contains('/'))
+        {
+            return Some(alias.to_owned());
+        }
+        route
+            .and_then(|route| self.route_candidate(route).map(str::to_owned))
+            .or_else(|| reported_model.map(str::to_owned))
     }
 }
 
@@ -1396,6 +1461,10 @@ fn recovered_pending_event(
         | EngineEvent::SessionReviewUpdated { .. }
         | EngineEvent::CommandDescriptorsListed { .. }
         | EngineEvent::ModelsListed { .. }
+        | EngineEvent::SettingsListed { .. }
+        | EngineEvent::ProviderAuthStarted { .. }
+        | EngineEvent::ProviderConfigured { .. }
+        | EngineEvent::ProviderAuthFinished { .. }
         | EngineEvent::WorkspaceFilesFound { .. }
         | EngineEvent::WorkspaceFilePreviewReady { .. }
         | EngineEvent::WorkspaceStatusReady { .. }
@@ -3753,6 +3822,7 @@ impl SessionActor {
             local_attached: Arc::new(AtomicBool::new(false)),
             local_last_seen: config.recovered.last_sequence,
             command_descriptors: Arc::clone(&command_descriptors),
+            model: Arc::clone(&config.model),
         };
         tokio::spawn(run_actor(
             config,
@@ -3902,6 +3972,7 @@ pub struct SessionHandle {
     local_attached: Arc<AtomicBool>,
     local_last_seen: Option<SequenceId>,
     command_descriptors: Arc<RwLock<Arc<[CommandDescriptor]>>>,
+    model: Arc<dyn ModelDriver>,
 }
 
 /// Opaque, plugin-scoped machine capability for one session actor.
@@ -4035,6 +4106,16 @@ impl SessionHandle {
     #[must_use]
     pub const fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    /// Activates newly stored provider credentials in the running model
+    /// runtime without restarting the actor or application.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized model-runtime error if activation fails.
+    pub async fn activate_provider(&self, provider: &str) -> Result<(), AgentLoopError> {
+        self.model.activate_provider(provider).await
     }
 
     /// Mints the narrow machine capability for one approved logical plugin.
@@ -4933,6 +5014,12 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::SearchSessions { meta, .. }
         | ClientCommand::ListCommands { meta, .. }
         | ClientCommand::ListModels { meta, .. }
+        | ClientCommand::ListSettings { meta, .. }
+        | ClientCommand::SetSetting { meta, .. }
+        | ClientCommand::BeginProviderAuth { meta, .. }
+        | ClientCommand::ConfigureBuiltinProvider { meta, .. }
+        | ClientCommand::CompleteProviderAuth { meta, .. }
+        | ClientCommand::CancelProviderAuth { meta, .. }
         | ClientCommand::SearchWorkspaceFiles { meta, .. }
         | ClientCommand::PreviewWorkspaceFile { meta, .. }
         | ClientCommand::GetWorkspaceStatus { meta, .. }
@@ -4974,7 +5061,13 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::PreviewWorkspaceFile { session_id, .. }
         | ClientCommand::GetWorkspaceStatus { session_id, .. }
         | ClientCommand::GetWorkspaceDiff { session_id, .. }
-        | ClientCommand::ListCommands { session_id, .. } => Some(session_id),
+        | ClientCommand::ListCommands { session_id, .. }
+        | ClientCommand::ListSettings { session_id, .. }
+        | ClientCommand::SetSetting { session_id, .. }
+        | ClientCommand::BeginProviderAuth { session_id, .. }
+        | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
+        | ClientCommand::CompleteProviderAuth { session_id, .. }
+        | ClientCommand::CancelProviderAuth { session_id, .. } => Some(session_id),
     }
 }
 
@@ -6225,32 +6318,29 @@ async fn handle_actor_command(
                     let _ = respond.send(outcome);
                     return;
                 }
-                ClientCommand::SwitchModel { model, .. }
-                    if !config.model.has_model_alias(&model.0) =>
-                {
-                    let outcome = protocol_rejection(
-                        "unknown_model_alias",
-                        format!("model alias {:?} is not configured", model.0),
-                    );
-                    send_ack(state, events, &meta, session, outcome.clone());
-                    let _ = respond.send(outcome);
-                    return;
-                }
                 ClientCommand::SwitchModel {
-                    model,
-                    provider: Some(provider),
-                    ..
-                } if !config.model.has_provider_for_alias(&model.0, provider) => {
-                    let outcome = protocol_rejection(
-                        "unknown_provider_route",
-                        format!(
-                            "model alias {:?} has no configured route through provider {:?}",
-                            model.0, provider
-                        ),
-                    );
-                    send_ack(state, events, &meta, session, outcome.clone());
-                    let _ = respond.send(outcome);
-                    return;
+                    model, provider, ..
+                } => {
+                    if let Err(error) = config.model.prepare_model(&model.0).await {
+                        let outcome = protocol_rejection("unknown_model_alias", error.to_string());
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
+                    if let Some(provider) = provider
+                        && !config.model.has_provider_for_alias(&model.0, provider)
+                    {
+                        let outcome = protocol_rejection(
+                            "unknown_provider_route",
+                            format!(
+                                "model alias {:?} has no configured route through provider {:?}",
+                                model.0, provider
+                            ),
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
                 }
                 ClientCommand::SwitchMode { mode, .. } if parse_session_mode(&mode.0).is_none() => {
                     let outcome = protocol_rejection(
@@ -7241,6 +7331,12 @@ async fn handle_actor_command(
                 | ClientCommand::SearchSessions { .. }
                 | ClientCommand::ListCommands { .. }
                 | ClientCommand::ListModels { .. }
+                | ClientCommand::ListSettings { .. }
+                | ClientCommand::SetSetting { .. }
+                | ClientCommand::BeginProviderAuth { .. }
+                | ClientCommand::ConfigureBuiltinProvider { .. }
+                | ClientCommand::CompleteProviderAuth { .. }
+                | ClientCommand::CancelProviderAuth { .. }
                 | ClientCommand::SearchWorkspaceFiles { .. }
                 | ClientCommand::PreviewWorkspaceFile { .. }
                 | ClientCommand::GetWorkspaceStatus { .. }
@@ -11979,6 +12075,13 @@ async fn run_turn(
             assistant.meta.model.as_deref(),
             normalized_iteration_usage,
         );
+        if let Some(qualified) = config.model.qualified_model_for_route(
+            &config.model_alias,
+            selected_route.as_deref(),
+            assistant.meta.model.as_deref(),
+        ) {
+            assistant.meta.model = Some(qualified);
+        }
         turn_cost = Some(combine_cost(turn_cost.take(), iteration_cost.clone()));
         let (cost_micros, credit_micros) = cost_units(&iteration_cost);
         current_turn_cost_micros = current_turn_cost_micros.saturating_add(cost_micros);

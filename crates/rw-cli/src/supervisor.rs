@@ -26,6 +26,7 @@ const LAST_SEEN_FILE_ENV: &str = "ROTTWEILER_LAST_SEEN_FILE";
 const FORK_OPERATION_DIRECTORY_ENV: &str = "ROTTWEILER_FORK_OPERATION_DIRECTORY";
 const WAIT_FOR_EXECUTION_LEASE_ARG: &str = "--wait-for-execution-lease";
 const TUI_KEYBINDINGS_ENV: &str = "ROTTWEILER_TUI_KEYBINDINGS";
+const TUI_THEME_ENV: &str = "ROTTWEILER_TUI_THEME";
 const ENGINE_STDERR_TAIL_BYTES: usize = 16 * 1024;
 
 type ShellBrokerResult = Result<(), crate::shell_broker::ShellBrokerError>;
@@ -58,6 +59,7 @@ pub struct SupervisorConfig {
     pub fork_operation_directory: PathBuf,
     pub session_id: String,
     pub tui_keybindings: Option<String>,
+    pub tui_theme: String,
     pub permission_mode: Option<crate::PermissionMode>,
     pub max_turns: usize,
     pub model: Option<String>,
@@ -352,6 +354,7 @@ fn command_from_spec(spec: &ChildSpec) -> Command {
     command
         .args(&spec.args)
         .env_remove(TUI_KEYBINDINGS_ENV)
+        .env_remove(TUI_THEME_ENV)
         .envs(&spec.env);
     command
 }
@@ -799,6 +802,10 @@ fn tui_spec(config: &SupervisorConfig, last_seen: Option<SequenceId>) -> ChildSp
             OsString::from(keybindings),
         );
     }
+    env.insert(
+        OsString::from(TUI_THEME_ENV),
+        OsString::from(&config.tui_theme),
+    );
     ChildSpec {
         program: config.tui_executable.clone(),
         args: Vec::new(),
@@ -936,6 +943,7 @@ mod tests {
             fork_operation_directory: PathBuf::from("/private/control/pending-forks"),
             session_id: "session-1".to_owned(),
             tui_keybindings: None,
+            tui_theme: "kennel-dark".to_owned(),
             permission_mode: Some(crate::PermissionMode::Strict),
             max_turns: 32,
             model: None,
@@ -985,9 +993,10 @@ mod tests {
     }
 
     #[test]
-    fn keybindings_are_forwarded_only_to_the_tui() {
+    fn keybindings_and_theme_are_forwarded_only_to_the_tui() {
         let mut config = fixture_config();
         config.tui_keybindings = Some("preset = 'vim'".to_owned());
+        config.tui_theme = "daylight".to_owned();
 
         let key = OsString::from(TUI_KEYBINDINGS_ENV);
         assert_eq!(
@@ -995,6 +1004,12 @@ mod tests {
             Some(&OsString::from("preset = 'vim'"))
         );
         assert!(!engine_spec(&config).env.contains_key(&key));
+        let theme_key = OsString::from(TUI_THEME_ENV);
+        assert_eq!(
+            tui_spec(&config, None).env.get(&theme_key),
+            Some(&OsString::from("daylight"))
+        );
+        assert!(!engine_spec(&config).env.contains_key(&theme_key));
 
         let engine = command_from_spec(&engine_spec(&config));
         let engine_value = engine

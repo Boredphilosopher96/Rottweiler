@@ -731,7 +731,11 @@ export class StatusLineRenderable extends TextRenderable {
       ...(state.replay.active ? ["◉ replay"] : []),
       ...(state.replay.active ? [] : [`◉ ${state.mode ?? "execute"}`]),
       ...(waitingApproval === undefined ? [] : [`approval ${waitingApproval.name}`]),
-      `model ${state.provider === null ? (state.model ?? "fast") : `${state.provider}/${state.model ?? "fast"}`}`,
+      `model ${
+        state.provider === null || state.model?.includes("/") === true
+          ? (state.model ?? "fast")
+          : `${state.provider}/${state.model ?? "fast"}`
+      }`,
       context,
       formatSessionCost(state.cost, state.context?.used_tokens ?? null),
       cache,

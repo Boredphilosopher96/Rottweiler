@@ -7,6 +7,7 @@ mod host;
 mod init;
 mod instructions;
 mod mcp;
+mod model_catalog;
 mod orchestration;
 mod permission;
 mod provider_factory;
@@ -14,14 +15,17 @@ mod subscription_credentials;
 mod update;
 
 pub use rw_types::config::{
-    BudgetConfig, CompactionConfig, Config, PermissionConfig, ProviderConfig, UpdateChannel,
+    BudgetConfig, CompactionConfig, Config, PermissionConfig, PermissionDecision, ProviderConfig,
+    ThinkingLevel, UpdateChannel,
 };
 pub use rw_types::{
-    AccountingAttribution, AttachmentData, CommandDescriptor, ContextItemId, ContextSnapshot,
-    CostSnapshot, ModeId, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor,
-    PlanDecision, PromptDump, ReviewFileDecision, ReviewFileStatus, SessionReview,
-    SessionReviewFile, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceRootDescriptor, WorkspaceStatus,
+    AccountingAttribution, AttachmentData, CommandDescriptor, CommandSource, ContextItemId,
+    ContextSnapshot, CostSnapshot, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
+    ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, PlanDecision, PromptDump,
+    ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor, ProviderNextAction,
+    ReviewFileDecision, ReviewFileStatus, SessionReview, SessionReviewFile, UserSettingDescriptor,
+    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
+    WorkspaceStatus,
 };
 
 pub use admin::{
@@ -49,7 +53,8 @@ pub use engine::{
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
     ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostQueryService,
-    HostedSession, PreparedForkOperation, SessionFactory,
+    HostedSession, PreparedForkOperation, ProviderAuthAttempt, ProviderAuthCompletion,
+    SessionFactory,
 };
 pub use init::{
     DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,
@@ -67,6 +72,7 @@ pub use mcp::{
     ProductionMcpHttpError, ToonMcpEncoder, VaultMcpTokenProvider, begin_mcp_oauth_login,
     encode_mcp_oauth_credential, register_mcp_tools,
 };
+pub use model_catalog::{CachedModelCatalog, ModelCatalogError, ModelCatalogSource};
 pub use orchestration::{
     ActorSubagentSessionFactory, DEFAULT_SUBAGENT_CONCURRENCY, DEFAULT_SUBAGENT_MAX_DEPTH,
     DEFAULT_SUBAGENT_MAX_DURATION, DEFAULT_SUBAGENT_MAX_TURNS, NoopSubagentMetadataStore,
@@ -84,8 +90,8 @@ pub use permission::{
     PermissionOutcome, PermissionRequest,
 };
 pub use provider_factory::{
-    ProviderFactory, ProviderFactoryError, ProviderNativeWebSearcher, ProviderRuntime,
-    ResolvedModel, cost_from_model_metadata,
+    ProviderFactory, ProviderFactoryError, ProviderModelCatalogSource, ProviderNativeWebSearcher,
+    ProviderRuntime, ResolvedModel, cost_from_model_metadata,
 };
 pub use rw_providers::{
     ProviderModelMetadata, TokenUsage as ModelTokenUsage, UsageAccounting as ModelAccounting,
@@ -143,14 +149,14 @@ pub mod runtime_support {
         AgentDefinition, AgentPermissionMode, AgentPromptSource, AgentRegistry, AgentRegistryError,
         ArtifactLocation, ArtifactOrigin, ArtifactScope, CLAUDE_FRONTMATTER_MIGRATION,
         CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation,
-        CommandRegistry, CommandRegistryError, CommandTemplate, DiscoveredAgent, DiscoveredCommand,
-        DiscoveredShellHook, DiscoveredSkill, DiscoveredWorkflow, ExtensionCatalog,
-        ExtensionDiscoveryConfig, ExtensionDiscoveryError, HookDirective, HookDispatchStatus,
-        HookDispatcher, HookEffect, HookError, HookEvent, HookFailurePolicy, HookHandler,
-        HookInvocation, HookRegistration, LoadedAgent, TemplatePart, WorkflowCondition,
-        WorkflowOnFail, WorkflowRunError, WorkflowRunReport, WorkflowRunner, WorkflowStep,
-        WorkflowStepArtifact, WorkflowStepExecutionError, WorkflowStepExecutor, WorkflowStepReport,
-        WorkflowStepRequest, WorkflowStepTarget, compose_agent_registry,
+        CommandRegistry, CommandRegistryError, CommandSource, CommandTemplate, DiscoveredAgent,
+        DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill, DiscoveredWorkflow,
+        ExtensionCatalog, ExtensionDiscoveryConfig, ExtensionDiscoveryError, HookDirective,
+        HookDispatchStatus, HookDispatcher, HookEffect, HookError, HookEvent, HookFailurePolicy,
+        HookHandler, HookInvocation, HookRegistration, LoadedAgent, TemplatePart,
+        WorkflowCondition, WorkflowOnFail, WorkflowRunError, WorkflowRunReport, WorkflowRunner,
+        WorkflowStep, WorkflowStepArtifact, WorkflowStepExecutionError, WorkflowStepExecutor,
+        WorkflowStepReport, WorkflowStepRequest, WorkflowStepTarget, compose_agent_registry,
     };
     pub use rw_providers::{
         BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,

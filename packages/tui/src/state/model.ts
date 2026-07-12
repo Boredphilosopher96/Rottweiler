@@ -5,12 +5,16 @@ import type {
   BudgetScope,
   BudgetUnit,
   CommandOutcome,
+  CommandSource,
   ContextSnapshot,
   Cost,
   CostSnapshot,
   EngineError,
   PlanArtifact,
   PromptDump,
+  ProviderAuthKind,
+  ProviderAuthChallenge,
+  ProviderNextAction,
   Question,
   SubagentStatus as SubagentTerminalStatus,
   ToolCapability,
@@ -151,6 +155,10 @@ export interface CommandAcknowledgement {
     | "sessions_search_ready"
     | "command_descriptors_listed"
     | "models_listed"
+    | "settings_listed"
+    | "provider_auth_started"
+    | "provider_configured"
+    | "provider_auth_finished"
     | "workspace_files_found"
     | "workspace_file_preview_ready"
     | "workspace_status_ready"
@@ -235,14 +243,63 @@ export interface CommandChoice {
   readonly name: string
   readonly description: string
   readonly usage: string
+  readonly source?: CommandSource
 }
 
 export interface ModelChoice {
   readonly alias: string
+  readonly id?: string
+  readonly displayName?: string
+  readonly provider?: string
   readonly providers: readonly string[]
+  readonly aliases?: readonly string[]
+  readonly current?: boolean
+  readonly available?: boolean
+  readonly status?: string | null
   readonly vision: boolean
   readonly thinking: boolean
   readonly toolCalling: boolean
+}
+
+export interface ModelAliasChoice {
+  readonly alias: string
+  readonly candidates: readonly string[]
+  readonly current: boolean
+}
+
+export interface ProviderChoice {
+  readonly name: string
+  readonly authKind: ProviderAuthKind
+  readonly nextAction: ProviderNextAction
+  readonly configured: boolean
+  readonly authenticated: boolean
+  readonly reachable: boolean
+  readonly modelCount: number
+  readonly status: string | null
+}
+
+export interface ProviderAuthProjection {
+  readonly pending: {
+    readonly attemptId: string
+    readonly provider: string
+    readonly challenge: ProviderAuthChallenge
+    readonly warnings: readonly string[]
+  } | null
+  readonly last: {
+    readonly provider: string
+    readonly success: boolean
+    readonly message: string
+    readonly warnings: readonly string[]
+  } | null
+}
+
+export interface UserSettingChoice {
+  readonly key: string
+  readonly label: string
+  readonly value: string
+  readonly choices: readonly string[]
+  readonly provenance: string
+  readonly appliesImmediately: boolean
 }
 
 export interface WorkspaceFileChoice {
@@ -323,6 +380,11 @@ export interface RottweilerState {
   readonly commands: readonly CommandChoice[]
   readonly commandsTruncated: boolean
   readonly models: readonly ModelChoice[]
+  readonly modelAliases: readonly ModelAliasChoice[]
+  readonly providers: readonly ProviderChoice[]
+  readonly providerAuth: ProviderAuthProjection
+  readonly modelCatalogCached: boolean
+  readonly settings: readonly UserSettingChoice[]
   readonly workspaceFiles: readonly WorkspaceFileChoice[]
   readonly workspacePreview: WorkspacePreviewProjection | null
   readonly workspaceStatus: WorkspaceStatusProjection | null
@@ -383,6 +445,11 @@ export function createInitialState(): RottweilerState {
     commands: [],
     commandsTruncated: false,
     models: [],
+    modelAliases: [],
+    providers: [],
+    providerAuth: { pending: null, last: null },
+    modelCatalogCached: false,
+    settings: [],
     workspaceFiles: [],
     workspacePreview: null,
     workspaceStatus: null,

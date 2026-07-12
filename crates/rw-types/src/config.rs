@@ -37,6 +37,25 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     /// Self-update channel configuration.
     pub updates: UpdateConfig,
+    /// Safe presentation preferences managed by the TUI or user config.
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+/// User-facing presentation preferences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    /// Built-in theme name.
+    pub theme: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "kennel-dark".to_owned(),
+        }
+    }
 }
 
 /// Provider-blind context compaction settings.
@@ -413,6 +432,8 @@ pub struct ConfigFile {
     pub telemetry: Option<TelemetryConfigFile>,
     /// Optional update settings.
     pub updates: Option<UpdateConfigFile>,
+    /// Optional presentation preferences.
+    pub ui: Option<UiConfig>,
 }
 
 /// Partial compaction configuration.

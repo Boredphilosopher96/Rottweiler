@@ -310,11 +310,43 @@
         "meta": {
           "$ref": "#/$defs/CommandAckMeta"
         },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "models": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/ModelDescriptor"
           }
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelAliasDescriptor"
+          },
+          "default": []
+        },
+        "providers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProviderDescriptor"
+          },
+          "default": []
+        },
+        "cached": {
+          "type": "boolean",
+          "default": false
+        },
+        "truncated": {
+          "type": "boolean",
+          "default": false
         },
         "type": {
           "type": "string",
@@ -325,6 +357,143 @@
         "type",
         "meta",
         "models"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "settings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/UserSettingDescriptor"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "settings_listed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "settings"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/ProviderAuthAttemptId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "challenge": {
+          "$ref": "#/$defs/ProviderAuthChallenge"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "provider_auth_started"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "attempt_id",
+        "provider",
+        "challenge",
+        "warnings"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "auth_kind": {
+          "$ref": "#/$defs/ProviderAuthKind"
+        },
+        "type": {
+          "type": "string",
+          "const": "provider_configured"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider",
+        "auth_kind"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/ProviderAuthAttemptId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "provider_auth_finished"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "attempt_id",
+        "provider",
+        "success",
+        "message",
+        "warnings"
       ]
     },
     {
@@ -2778,7 +2947,6 @@
       ]
     },
     "CommandDescriptor": {
-      "description": "One slash command exposed to fuzzy pickers without UI-private metadata.",
       "type": "object",
       "properties": {
         "name": {
@@ -2789,6 +2957,10 @@
         },
         "usage": {
           "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/CommandSource",
+          "default": "builtin"
         }
       },
       "required": [
@@ -2797,20 +2969,65 @@
         "usage"
       ]
     },
+    "CommandSource": {
+      "description": "One slash command exposed to fuzzy pickers without UI-private metadata.",
+      "type": "string",
+      "enum": [
+        "builtin",
+        "project",
+        "user",
+        "plugin",
+        "skill",
+        "workflow",
+        "mcp"
+      ]
+    },
     "ModelDescriptor": {
-      "description": "One configured model alias and its offline-known capabilities.",
+      "description": "One concrete provider/model discovered from a live authenticated catalog.",
       "type": "object",
       "properties": {
         "alias": {
+          "description": "Backward-compatible selection key. This is the concrete `provider/model`\nid, not a role alias.",
           "$ref": "#/$defs/ModelAlias"
         },
+        "id": {
+          "description": "Concrete provider-qualified model id.",
+          "type": "string"
+        },
+        "display_name": {
+          "type": "string"
+        },
+        "provider": {
+          "description": "Sanitized logical provider name. Adapter kind, endpoint, and auth\nmaterial remain behind the provider boundary.",
+          "type": "string"
+        },
         "providers": {
-          "description": "Locally configured provider names referenced by this alias, in\ndeterministic fallback order. Provider credentials are never exposed.",
+          "description": "One-item compatibility projection for older clients.",
           "type": "array",
           "items": {
             "type": "string"
           },
           "default": []
+        },
+        "aliases": {
+          "description": "Configured role aliases which currently include this concrete model.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModelAlias"
+          },
+          "default": []
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "capabilities": {
           "$ref": "#/$defs/ModelCapabilities"
@@ -2818,6 +3035,11 @@
       },
       "required": [
         "alias",
+        "id",
+        "display_name",
+        "provider",
+        "current",
+        "available",
         "capabilities"
       ]
     },
@@ -2836,6 +3058,20 @@
         },
         "cache_behavior": {
           "$ref": "#/$defs/ModelCacheBehavior"
+        },
+        "max_context_tokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "max_output_tokens": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2852,6 +3088,177 @@
         "none",
         "explicit",
         "provider_managed"
+      ]
+    },
+    "ModelAliasDescriptor": {
+      "description": "Small provider-blind role mapping shown separately from the live catalog.",
+      "type": "object",
+      "properties": {
+        "alias": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "current": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "alias",
+        "candidates",
+        "current"
+      ]
+    },
+    "ProviderDescriptor": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "auth_kind": {
+          "$ref": "#/$defs/ProviderAuthKind"
+        },
+        "next_action": {
+          "$ref": "#/$defs/ProviderNextAction"
+        },
+        "configured": {
+          "type": "boolean"
+        },
+        "authenticated": {
+          "type": "boolean"
+        },
+        "reachable": {
+          "type": "boolean"
+        },
+        "model_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "auth_kind",
+        "next_action",
+        "configured",
+        "authenticated",
+        "reachable",
+        "model_count"
+      ]
+    },
+    "ProviderAuthKind": {
+      "description": "Sanitized provider inventory row. Credentials, endpoints, and adapter\nimplementation details never cross this boundary.",
+      "type": "string",
+      "enum": [
+        "api_key",
+        "oauth",
+        "device_flow",
+        "none"
+      ]
+    },
+    "ProviderNextAction": {
+      "description": "Exact safe action offered for one provider inventory row.",
+      "type": "string",
+      "enum": [
+        "configure",
+        "authenticate",
+        "select_models",
+        "api_key_cli",
+        "none"
+      ]
+    },
+    "UserSettingDescriptor": {
+      "description": "One engine-mediated user setting exposed to interactive clients.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "provenance": {
+          "type": "string"
+        },
+        "applies_immediately": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "label",
+        "value",
+        "choices",
+        "provenance",
+        "applies_immediately"
+      ]
+    },
+    "ProviderAuthAttemptId": {
+      "description": "Connection-scoped identifier of one provider authentication attempt.",
+      "type": "string"
+    },
+    "ProviderAuthChallenge": {
+      "description": "Sanitized, connection-scoped authentication prompt. This is never a\ndurable session event and contains no token or credential value.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "authorization_url": {
+              "type": "string"
+            },
+            "redirect_uri": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "oauth"
+            }
+          },
+          "required": [
+            "kind",
+            "authorization_url",
+            "redirect_uri"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "verification_uri": {
+              "type": "string"
+            },
+            "user_code": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "device_flow"
+            }
+          },
+          "required": [
+            "kind",
+            "verification_uri",
+            "user_code"
+          ]
+        }
       ]
     },
     "WorkspaceFileMatch": {

@@ -373,7 +373,7 @@ describe("pure TUI state reducer", () => {
     const turn: Turn = {
       role: "assistant",
       blocks: [{ type: "text", text: "hello" }],
-      meta: { synthetic: false, summary: false },
+      meta: { model: "copilot/gpt-5-mini", synthetic: false, summary: false },
     }
     state = reduce(state, {
       type: "conversation_turn_committed",
@@ -383,6 +383,8 @@ describe("pure TUI state reducer", () => {
     })
     expect(state.transcript).toEqual([{ sequenceId: "4", agentTurn: "7", turn }])
     expect(state.streamingTail).toBeNull()
+    expect(state.model).toBe("copilot/gpt-5-mini")
+    expect(state.provider).toBe("copilot")
   })
 
   test("projects subagent lifecycle in deterministic spawn order and retains turn history", () => {
