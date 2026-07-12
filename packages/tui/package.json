@@ -7,8 +7,8 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "bun run build.ts",
-    "test": "bun test test/*.test.ts test/goldens",
-    "test:perf": "bun test test/perf",
+    "test": "bun test --path-ignore-patterns='test/perf/**'",
+    "test:perf": "bun test test/perf/m4-transport-performance.test.ts && bun test test/perf/performance.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -7,7 +7,8 @@ must not be handwritten in this package.
 ```sh
 bun install
 bun run dev
-bun run test
+bun run test       # deterministic functional suite
+bun run test:perf  # isolated latency and frame-compute gates
 bun run typecheck
 ```
 
