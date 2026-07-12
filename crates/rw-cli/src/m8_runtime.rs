@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use miette::{IntoDiagnostic, Result, miette};
 use rw_core::runtime_support::mcp::{
     FilesystemSpool, McpClient, McpConnectionApprovalPolicy, McpConnector, McpError, McpLimits,
-    McpManager, McpServerConfig, McpTransportConfig, OverflowSpool, ServerId,
+    McpManager, McpServerConfig, McpTransportConfig, OverflowSpool, ServerId, ServerState,
 };
 use rw_core::runtime_support::plugin::{
     ApprovalRequirement, ApprovalStore, ApprovalStoreError, CapabilityEnforcer, HookHandler,
@@ -1360,7 +1360,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
         let message = match words.as_slice() {
             [] | ["status"] => {
                 let statuses = self.manager.statuses().await;
-                bounded_json(&statuses)?
+                render_mcp_statuses(&statuses)
             }
             ["enable", server] => {
                 let id = server_id(server)?;
@@ -1368,7 +1368,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
                     .set_enabled(&id, true)
                     .await
                     .map_err(|error| mcp_command_error(&error))?;
-                bounded_json(&self.manager.statuses().await)?
+                render_mcp_statuses(&self.manager.statuses().await)
             }
             ["disable", server] => {
                 let id = server_id(server)?;
@@ -1376,7 +1376,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
                     .set_enabled(&id, false)
                     .await
                     .map_err(|error| mcp_command_error(&error))?;
-                bounded_json(&self.manager.statuses().await)?
+                render_mcp_statuses(&self.manager.statuses().await)
             }
             ["approve", server] => {
                 let id = server_id(server)?;
@@ -1394,11 +1394,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
                         CommandExecutionError::new("mcp_approval_failed", error.to_string())
                     })?;
                 let confirm_with = format!("/mcp approve {} {}", id.0, summary.new_fingerprint);
-                bounded_json(&serde_json::json!({
-                    "confirmation_required":true,
-                    "summary":summary,
-                    "confirm_with":confirm_with,
-                }))?
+                render_mcp_approval(&summary, &confirm_with)
             }
             ["approve", server, confirmation] => {
                 let id = server_id(server)?;
@@ -1441,13 +1437,19 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for McpCommand 
                     .approve_pending_tools(&id)
                     .await
                     .map_err(|error| mcp_command_error(&error))?;
-                bounded_json(&serde_json::json!({
-                    "server":id,
-                    "config_approved":config_approval_changed,
-                    "config_is_approved":true,
-                    "config_approval_changed":config_approval_changed,
-                    "schema_approved":schema_approved,
-                }))?
+                format!(
+                    "MCP server {id} is approved.\nConfiguration: {}\nTool schema: {}",
+                    if config_approval_changed {
+                        "new approval saved"
+                    } else {
+                        "already approved"
+                    },
+                    if schema_approved {
+                        "approved"
+                    } else {
+                        "unchanged"
+                    },
+                )
             }
             _ => return Err(invalid_mcp_command()),
         };
@@ -1473,17 +1475,44 @@ fn mcp_command_error(error: &rw_core::runtime_support::mcp::McpError) -> Command
         error.to_string().chars().take(512).collect::<String>(),
     )
 }
-fn bounded_json(value: &impl Serialize) -> std::result::Result<String, CommandExecutionError> {
-    let encoded = serde_json::to_string(value).map_err(|_| {
-        CommandExecutionError::new("mcp_encoding_failed", "MCP status could not be encoded")
-    })?;
-    if encoded.len() > MAX_CONTROL_OUTPUT {
-        return Err(CommandExecutionError::new(
-            "mcp_output_too_large",
-            "MCP control output exceeded its size cap",
+
+fn render_mcp_statuses(statuses: &[rw_core::runtime_support::mcp::ServerStatus]) -> String {
+    if statuses.is_empty() {
+        return "MCP servers: none configured".to_owned();
+    }
+    let mut lines = vec![format!("MCP servers: {}", statuses.len())];
+    for status in statuses {
+        let state = match &status.state {
+            ServerState::Disabled => "disabled".to_owned(),
+            ServerState::Connecting => "connecting".to_owned(),
+            ServerState::Ready => "ready".to_owned(),
+            ServerState::ApprovalRequired => "approval required".to_owned(),
+            ServerState::Failed { message } => format!("failed · {message}"),
+            ServerState::Stopping => "stopping".to_owned(),
+        };
+        lines.push(format!(
+            "- {} · {state} · {} tools · {} resources · {} prompts",
+            status.id, status.tool_count, status.resource_count, status.prompt_count
         ));
     }
-    Ok(encoded)
+    let rendered = lines.join("\n");
+    rendered.chars().take(MAX_CONTROL_OUTPUT).collect()
+}
+
+fn render_mcp_approval(summary: &McpApprovalSummary, confirm_with: &str) -> String {
+    let mut lines = vec![
+        format!("Review MCP server {} before approving it.", summary.server),
+        format!("Fingerprint: {}", summary.new_fingerprint),
+        format!(
+            "Tools load on demand: {}",
+            if summary.defer_tools { "yes" } else { "no" }
+        ),
+    ];
+    if let Some(previous) = summary.old_fingerprint.as_deref() {
+        lines.push(format!("Previous fingerprint: {previous}"));
+    }
+    lines.push(format!("To approve: {confirm_with}"));
+    lines.join("\n")
 }
 
 fn escape_untrusted_json(value: &str) -> String {
@@ -1826,6 +1855,9 @@ mod tests {
             .expect("status");
         assert!(status.message.len() < MAX_CONTROL_OUTPUT);
         assert!(status.message.contains("fixture"));
+        assert!(status.message.contains("disabled"));
+        assert!(!status.message.contains(['{', '}']));
+        assert!(!status.message.contains("tool_count"));
         assert!(
             registry
                 .dispatch_line(&mut context, "/mcp approve fixture")
@@ -2198,9 +2230,9 @@ mod tests {
             .dispatch_line(&mut context, &command)
             .await
             .expect("same exact confirmation must reconnect");
-        assert!(second.message.contains("\"config_approved\":false"));
-        assert!(second.message.contains("\"config_is_approved\":true"));
-        assert!(second.message.contains("\"config_approval_changed\":false"));
+        assert!(second.message.contains("Configuration: already approved"));
+        assert!(second.message.contains("Tool schema:"));
+        assert!(!second.message.contains("config_approval"));
         assert!(matches!(
             runtime.manager.statuses().await[0].state,
             ServerState::Ready
@@ -2213,8 +2245,9 @@ mod tests {
         assert!(
             already_ready
                 .message
-                .contains("\"config_approval_changed\":false")
+                .contains("Configuration: already approved")
         );
+        assert!(already_ready.message.contains("Tool schema: unchanged"));
         assert_eq!(
             connection_attempts.load(std::sync::atomic::Ordering::SeqCst),
             2,
@@ -2252,7 +2285,7 @@ mod tests {
             .dispatch_line(&mut context, &command)
             .await
             .expect("approve pending schema without respawn");
-        assert!(pending.message.contains("\"schema_approved\":true"));
+        assert!(pending.message.contains("Tool schema: approved"));
         assert_eq!(
             connection_attempts.load(std::sync::atomic::Ordering::SeqCst),
             3,

@@ -1930,6 +1930,7 @@ fn contract_fixture() -> ContractFixture {
     };
     let session_descriptor = SessionDescriptor {
         session_id: SessionId("session-fork".to_owned()),
+        title: "Session fork".to_owned(),
         workspace_name: "workspace".to_owned(),
         model: ModelAlias("fast".to_owned()),
         driver_client_id: Some(ClientId("client-fixture".to_owned())),

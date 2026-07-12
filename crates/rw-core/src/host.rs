@@ -233,6 +233,7 @@ impl HostedSession {
                         driver_client_id, ..
                     } => descriptor.driver_client_id = Some(driver_client_id),
                     EngineEvent::ModelChanged { model, .. } => descriptor.model = model,
+                    EngineEvent::SessionTitleUpdated { title, .. } => descriptor.title = title,
                     EngineEvent::UserShellStateChanged { active, .. } => {
                         descriptor.shell_active = active;
                     }
@@ -965,12 +966,136 @@ impl EngineHost {
         request: CreateSessionRequest,
         resume: bool,
     ) -> Result<SessionDescriptor, HostError> {
+        self.prepare_session_after_reservation(request, resume, || {})
+            .await
+    }
+
+    /// Opens the supervisor-selected initial session and invokes `on_reserved`
+    /// after its exact identity is present in the host registry but before
+    /// potentially blocking factory work begins. Supervisors use this boundary
+    /// to publish authenticated readiness without allowing an initial client
+    /// resume to race a second open of the same durable session.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed host error when capacity, persistence, recovery, or
+    /// session identity validation fails.
+    pub async fn prepare_session_after_reservation<F>(
+        &self,
+        request: CreateSessionRequest,
+        resume: bool,
+        on_reserved: F,
+    ) -> Result<SessionDescriptor, HostError>
+    where
+        F: FnOnce(),
+    {
         let session = if resume {
-            self.resume_session(&request.session_id).await?
+            self.resume_session_after_reservation(&request.session_id, Some(on_reserved))
+                .await?
         } else {
-            self.create_session(request).await?
+            self.prepare_fresh_session_after_reservation(request, Some(on_reserved))
+                .await?
         };
         Ok(session.descriptor())
+    }
+
+    /// Reserves the supervisor-selected fresh identity before asynchronous
+    /// factory work begins. Clients that connect after authenticated health is
+    /// ready but before provider composition finishes join the same opening.
+    async fn prepare_fresh_session_after_reservation<F>(
+        &self,
+        request: CreateSessionRequest,
+        mut on_reserved: Option<F>,
+    ) -> Result<Arc<HostedSession>, HostError>
+    where
+        F: FnOnce(),
+    {
+        loop {
+            let (ready, wait, owns_opening) = {
+                let mut registry = self.registry.lock().await;
+                if self.shutting_down.load(Ordering::Acquire) {
+                    return Err(HostError::ShuttingDown);
+                }
+                match registry.sessions.get(&request.session_id) {
+                    Some(SessionSlot::Ready(session)) => (Some(Arc::clone(session)), None, false),
+                    Some(SessionSlot::Opening(completed)) => {
+                        (None, Some(completed.subscribe()), false)
+                    }
+                    None => {
+                        if registry
+                            .sessions
+                            .len()
+                            .saturating_add(registry.anonymous_openings)
+                            >= self.config.max_sessions
+                        {
+                            return Err(HostError::SessionCapacity);
+                        }
+                        let (completed, receiver) = watch::channel(false);
+                        drop(receiver);
+                        registry
+                            .sessions
+                            .insert(request.session_id.clone(), SessionSlot::Opening(completed));
+                        (None, None, true)
+                    }
+                }
+            };
+            if let Some(on_reserved) = on_reserved.take() {
+                on_reserved();
+            }
+            if let Some(session) = ready {
+                return Ok(session);
+            }
+            if let Some(mut completed) = wait {
+                if !*completed.borrow_and_update() {
+                    let _ = completed.changed().await;
+                }
+                continue;
+            }
+            if owns_opening {
+                break;
+            }
+        }
+
+        let created = match self.factory.create(request.clone()).await {
+            Ok(session)
+                if session.descriptor().session_id == request.session_id
+                    && session.handle().session_id() == &request.session_id =>
+            {
+                let session = Arc::new(session);
+                session.project_durable_descriptor().await.map(|()| session)
+            }
+            Ok(_) => Err(HostError::SessionIdentityMismatch),
+            Err(error) => Err(error),
+        };
+        let mut registry = self.registry.lock().await;
+        let completed = match registry.sessions.remove(&request.session_id) {
+            Some(SessionSlot::Opening(completed)) => Some(completed),
+            Some(SessionSlot::Ready(session)) => {
+                registry
+                    .sessions
+                    .insert(request.session_id.clone(), SessionSlot::Ready(session));
+                None
+            }
+            None => None,
+        };
+        let result = if self.shutting_down.load(Ordering::Acquire) {
+            Err(HostError::ShuttingDown)
+        } else {
+            match created {
+                Ok(session) => {
+                    registry
+                        .sessions
+                        .insert(request.session_id, SessionSlot::Ready(Arc::clone(&session)));
+                    Ok(session)
+                }
+                Err(error) => Err(error),
+            }
+        };
+        drop(registry);
+        if let Some(completed) = completed {
+            completed.send_replace(true);
+        }
+        result
     }
 
     /// Dispatches a command under a transport-authenticated identity. Duplicate
@@ -2349,15 +2474,29 @@ impl EngineHost {
         &self,
         session_id: &SessionId,
     ) -> Result<Arc<HostedSession>, HostError> {
+        self.resume_session_after_reservation::<fn()>(session_id, None)
+            .await
+    }
+
+    async fn resume_session_after_reservation<F>(
+        &self,
+        session_id: &SessionId,
+        mut on_reserved: Option<F>,
+    ) -> Result<Arc<HostedSession>, HostError>
+    where
+        F: FnOnce(),
+    {
         loop {
-            let wait = {
+            let (ready, wait, owns_opening) = {
                 let mut registry = self.registry.lock().await;
                 if self.shutting_down.load(Ordering::Acquire) {
                     return Err(HostError::ShuttingDown);
                 }
                 match registry.sessions.get(session_id) {
-                    Some(SessionSlot::Ready(session)) => return Ok(Arc::clone(session)),
-                    Some(SessionSlot::Opening(completed)) => Some(completed.subscribe()),
+                    Some(SessionSlot::Ready(session)) => (Some(Arc::clone(session)), None, false),
+                    Some(SessionSlot::Opening(completed)) => {
+                        (None, Some(completed.subscribe()), false)
+                    }
                     None => {
                         if registry
                             .sessions
@@ -2372,14 +2511,24 @@ impl EngineHost {
                         registry
                             .sessions
                             .insert(session_id.clone(), SessionSlot::Opening(completed));
-                        None
+                        (None, None, true)
                     }
                 }
             };
+            if let Some(on_reserved) = on_reserved.take() {
+                on_reserved();
+            }
+            if let Some(session) = ready {
+                return Ok(session);
+            }
             if let Some(mut completed) = wait {
                 if !*completed.borrow_and_update() {
                     let _ = completed.changed().await;
                 }
+                continue;
+            }
+
+            if !owns_opening {
                 continue;
             }
 
@@ -3345,6 +3494,7 @@ mod tests {
             HostedSession::new(
                 SessionDescriptor {
                     session_id: session_id.clone(),
+                    title: "New session".to_owned(),
                     workspace_name: session_id.0.clone(),
                     model: ModelAlias("fast".to_owned()),
                     driver_client_id: None,
@@ -4861,6 +5011,165 @@ mod tests {
         assert!(host.session(&session_id).await.is_none());
         assert!(host.registry.lock().await.sessions.is_empty());
         assert_eq!(factory.shutdowns.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn initial_preparation_reserves_identity_before_blocking_factory_work() {
+        let (host, factory) = host(2);
+        factory.block_create.store(true, Ordering::Release);
+        let session_id = SessionId("blocked-authorized-vault".to_owned());
+        let readiness_published = Arc::new(AtomicBool::new(false));
+        let preparation = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            let readiness_published = Arc::clone(&readiness_published);
+            async move {
+                let inspection_host = host.clone();
+                let inspection_session = session_id.clone();
+                host.prepare_session_after_reservation(
+                    CreateSessionRequest {
+                        session_id,
+                        workspace: "workspace".to_owned(),
+                        model: None,
+                    },
+                    false,
+                    move || {
+                        let registry = inspection_host
+                            .registry
+                            .try_lock()
+                            .expect("reservation callback runs outside the registry lock");
+                        assert!(matches!(
+                            registry.sessions.get(&inspection_session),
+                            Some(SessionSlot::Opening(_))
+                        ));
+                        readiness_published.store(true, Ordering::Release);
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), factory.create_started.notified())
+            .await
+            .expect("session preparation entered the blocking credential/composition boundary");
+        assert!(
+            readiness_published.load(Ordering::Acquire),
+            "authenticated readiness must publish after the initial reservation and before factory work"
+        );
+
+        let opening = {
+            let registry = host.registry.lock().await;
+            match registry.sessions.get(&session_id) {
+                Some(SessionSlot::Opening(completed)) => completed.clone(),
+                Some(SessionSlot::Ready(_)) | None => panic!("exact opening reservation"),
+            }
+        };
+        let reconnect = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            async move { host.resume_session(&session_id).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while opening.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("early reconnect joined the initial opening");
+        assert_eq!(
+            factory.resumes.load(Ordering::Acquire),
+            0,
+            "the reconnect must not start a competing session resume"
+        );
+
+        factory.create_release.notify_one();
+        preparation
+            .await
+            .expect("preparation task")
+            .expect("prepared session");
+        reconnect
+            .await
+            .expect("reconnect task")
+            .expect("reconnect joined prepared session");
+        assert!(host.session(&session_id).await.is_some());
+        assert_eq!(factory.resumes.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn initial_resume_publishes_readiness_only_after_reserving_reconnect_identity() {
+        let (host, factory) = host(2);
+        factory.block_resume.store(true, Ordering::Release);
+        let session_id = SessionId("blocked-initial-resume".to_owned());
+        let readiness_published = Arc::new(AtomicBool::new(false));
+        let preparation = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            let readiness_published = Arc::clone(&readiness_published);
+            async move {
+                let inspection_host = host.clone();
+                let inspection_session = session_id.clone();
+                host.prepare_session_after_reservation(
+                    CreateSessionRequest {
+                        session_id,
+                        workspace: "workspace".to_owned(),
+                        model: None,
+                    },
+                    true,
+                    move || {
+                        let registry = inspection_host
+                            .registry
+                            .try_lock()
+                            .expect("reservation callback runs outside the registry lock");
+                        assert!(matches!(
+                            registry.sessions.get(&inspection_session),
+                            Some(SessionSlot::Opening(_))
+                        ));
+                        readiness_published.store(true, Ordering::Release);
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), factory.resume_started.notified())
+            .await
+            .expect("initial resume entered the blocking credential/composition boundary");
+        assert!(readiness_published.load(Ordering::Acquire));
+
+        let reconnect = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            async move { host.resume_session(&session_id).await }
+        });
+        let opening = {
+            let registry = host.registry.lock().await;
+            match registry.sessions.get(&session_id) {
+                Some(SessionSlot::Opening(completed)) => completed.clone(),
+                Some(SessionSlot::Ready(_)) | None => panic!("initial resume reservation"),
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while opening.receiver_count() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reconnect joined the initial resume reservation");
+        assert_eq!(
+            factory.resumes.load(Ordering::Acquire),
+            1,
+            "the reconnect must join the initial resume instead of opening a competitor"
+        );
+
+        factory.resume_release.notify_one();
+        preparation
+            .await
+            .expect("preparation task")
+            .expect("prepared resumed session");
+        reconnect
+            .await
+            .expect("reconnect task")
+            .expect("reconnect joined resumed session");
+        assert!(host.session(&session_id).await.is_some());
+        assert_eq!(factory.resumes.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]

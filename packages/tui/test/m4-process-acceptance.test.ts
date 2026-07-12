@@ -179,7 +179,7 @@ describe("M4 transport and process acceptance", () => {
     const stderr = await new Response(child.stderr).text()
     expect(exitCode, stderr).toBe(0)
     expect(JSON.parse(await readFile(reportFile, "utf8"))).toEqual({
-      waitingBanner: "Waiting for approval · write",
+      waitingBanner: "Waiting for approval · Write file",
       panelVisibleAfterCompletion: false,
       turnStatus: "completed",
       errors: [],

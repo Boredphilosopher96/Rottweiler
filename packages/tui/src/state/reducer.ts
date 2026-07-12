@@ -16,6 +16,7 @@ export const MAX_TODO_ITEMS = 128
 export const MAX_TODO_ID_BYTES = 256
 export const MAX_TODO_CONTENT_BYTES = 4_096
 export const MAX_TODO_TOTAL_BYTES = 64 * 1_024
+export const MAX_COMMAND_ACKS = 256
 const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "command_acknowledged",
   "context_snapshot_ready",
@@ -46,6 +47,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "driver_changed",
   "message_queued",
   "user_message_accepted",
+  "session_title_updated",
   "plugin_message_injected",
   "plugin_status_changed",
   "ui_notification",
@@ -247,15 +249,12 @@ function applyKnownEvent(
     case "command_acknowledged":
       return {
         ...state,
-        commandAcks: {
-          ...state.commandAcks,
-          [event.meta.request_id]: {
+        commandAcks: boundedCommandAcks(state.commandAcks, event.meta.request_id, {
             requestId: event.meta.request_id,
             responseType: event.type,
             outcome: event.outcome,
             sessionId: event.session_id ?? null,
-          },
-        },
+          }),
       }
     case "context_snapshot_ready":
       return {
@@ -319,6 +318,7 @@ function applyKnownEvent(
         ...state,
         sessions: event.sessions.map((session) => ({
           sessionId: session.session_id,
+          ...(session.title ? { title: session.title } : {}),
           workspaceName: session.workspace_name,
           model: session.model,
           driverClientId: session.driver_client_id ?? null,
@@ -549,6 +549,7 @@ function applyKnownEvent(
         },
       }
     case "user_message_accepted":
+      return { ...state, errors: [] }
     case "plugin_message_injected":
       return state
     case "plugin_status_changed":
@@ -617,6 +618,7 @@ function applyKnownEvent(
     case "turn_started":
       return {
         ...state,
+        errors: [],
         turns: {
           ...state.turns,
           [event.turn_id]: {
@@ -777,6 +779,7 @@ function applyKnownEvent(
       }
       return {
         ...state,
+        errors: [],
         tools: { ...state.tools, [event.tool_call_id]: tool },
         streamingTail: updateTail(state.streamingTail, event.turn_id, (tail) => ({
           ...tail,
@@ -863,6 +866,7 @@ function applyKnownEvent(
     case "question_asked":
       return {
         ...state,
+        errors: [],
         questions: {
           ...state.questions,
           [event.question_id]: {
@@ -976,9 +980,10 @@ function applyKnownEvent(
       return { ...state, errors: [...state.errors.slice(-63), event.error] }
     case "command_finished": {
       const commandSequence = sequenceId ?? state.lastSequence ?? "0"
-      const message = event.message.trim()
+      const message = formatCommandMessage(event.message)
       return {
         ...state,
+        errors: [],
         transcript: [
           ...state.transcript,
           {
@@ -989,16 +994,36 @@ function applyKnownEvent(
               blocks: [
                 {
                   type: "text",
-                  text: `/${event.name}\n\n${message.length === 0 ? "Command completed." : message}`,
+                  text: message.length === 0 ? "Command completed." : message,
                 },
               ],
               meta: { synthetic: true, summary: false },
             },
+            presentation: "command_result",
+            title: `/${event.name}`,
           },
         ],
       }
     }
     case "context_usage_updated":
+      return {
+        ...state,
+        context: {
+          turn_id: event.turn_id,
+          stable_prefix_hash: event.stable_prefix_hash,
+          used_tokens: event.used_tokens,
+          usable_tokens: event.usable_tokens,
+          reserved_tokens: event.reserved_tokens,
+          context_window_known: event.context_window_known,
+          ...(event.context_window_reason === undefined
+            ? {}
+            : { context_window_reason: event.context_window_reason }),
+          cache_breakpoints: state.context?.cache_breakpoints ?? [],
+          items: state.context?.items ?? [],
+        },
+      }
+    case "session_title_updated":
+      return state
     case "compaction_attempt_finished":
     case "tool_output_pruned":
     case "context_item_pinned":
@@ -1007,6 +1032,81 @@ function applyKnownEvent(
     case "guard_triggered":
       return state
   }
+}
+
+const HIDDEN_COMMAND_RESULT_FIELDS = new Set([
+  "protocol_version",
+  "request_id",
+  "session_id",
+  "turn_id",
+  "item_id",
+  "stable_prefix_hash",
+  "machine_local_path",
+  "original_hash",
+  "current_hash",
+  "base_hash",
+  "diff_hash",
+  "truncated",
+])
+
+/** Keep extension command payloads structured on the wire without exposing wire JSON in the UI. */
+function formatCommandMessage(source: string): string {
+  const trimmed = source.trim()
+  if (trimmed.length === 0 || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
+    return trimmed
+  }
+  try {
+    const parsed: unknown = JSON.parse(trimmed)
+    const lines = humanResultLines(parsed, 0).slice(0, 80)
+    return lines.length === 0 ? "Command completed." : lines.join("\n")
+  } catch {
+    return trimmed
+  }
+}
+
+function humanResultLines(value: unknown, depth: number, label?: string): string[] {
+  if (depth > 5) return label === undefined ? [] : [`${label}: details omitted`]
+  if (value === null || value === undefined) {
+    return label === undefined ? [] : [`${label}: none`]
+  }
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    const rendered = typeof value === "string" ? humanEnum(value) : String(value)
+    return label === undefined ? [rendered] : [`${label}: ${rendered}`]
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return label === undefined ? ["None"] : [`${label}: none`]
+    const heading = label === undefined ? [] : [`${label}:`]
+    return [
+      ...heading,
+      ...value.flatMap((item) =>
+        humanResultLines(item, depth + 1).map((line, index) =>
+          `${index === 0 ? "- " : "  "}${line}`,
+        ),
+      ),
+    ]
+  }
+  if (typeof value !== "object") return []
+  const record = value as Record<string, unknown>
+  const entries = Object.entries(record).filter(
+    ([key, item]) =>
+      !HIDDEN_COMMAND_RESULT_FIELDS.has(key) &&
+      !(key === "data" && item !== null && typeof item === "object"),
+  )
+  const unwrapped = record.data
+  const lines =
+    unwrapped !== null && typeof unwrapped === "object"
+      ? humanResultLines(unwrapped, depth + 1)
+      : entries.flatMap(([key, item]) => humanResultLines(item, depth + 1, humanLabel(key)))
+  return label === undefined || lines.length === 0 ? lines : [`${label}:`, ...lines.map((line) => `  ${line}`)]
+}
+
+function humanLabel(value: string): string {
+  const words = value.replaceAll("_", " ").replaceAll("-", " ")
+  return `${words.slice(0, 1).toUpperCase()}${words.slice(1)}`
+}
+
+function humanEnum(value: string): string {
+  return value.includes("_") && !value.includes(" ") ? value.replaceAll("_", " ") : value
 }
 
 function providerQualifiedRoute(
@@ -1092,6 +1192,7 @@ function boundedSummary(value: string): string {
 
 function projectSession(session: {
   readonly session_id: string
+  readonly title?: string
   readonly workspace_name: string
   readonly model: string
   readonly driver_client_id?: string | null
@@ -1099,6 +1200,7 @@ function projectSession(session: {
 }): RottweilerState["sessions"][number] {
   return {
     sessionId: session.session_id,
+    ...(session.title ? { title: session.title } : {}),
     workspaceName: session.workspace_name,
     model: session.model,
     driverClientId: session.driver_client_id ?? null,
@@ -1306,15 +1408,27 @@ function responseAck(
     | "host_shutdown",
   sessionId: string | null,
 ): RottweilerState["commandAcks"] {
-  return {
-    ...state.commandAcks,
-    [requestId]: {
+  return boundedCommandAcks(state.commandAcks, requestId, {
       requestId,
       responseType,
       outcome: null,
       sessionId,
-    },
+    })
+}
+
+function boundedCommandAcks(
+  current: RottweilerState["commandAcks"],
+  requestId: string,
+  acknowledgement: RottweilerState["commandAcks"][string],
+): RottweilerState["commandAcks"] {
+  const next = { ...current }
+  delete (next as Record<string, unknown>)[requestId]
+  ;(next as Record<string, unknown>)[requestId] = acknowledgement
+  const overflow = Object.keys(next).length - MAX_COMMAND_ACKS
+  for (const key of Object.keys(next).slice(0, Math.max(0, overflow))) {
+    delete (next as Record<string, unknown>)[key]
   }
+  return next
 }
 
 function updateTail(

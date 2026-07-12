@@ -1,12 +1,4 @@
-import {
-  chmod,
-  lstat,
-  mkdir,
-  open,
-  readFile,
-  rename,
-  rm,
-} from "node:fs/promises"
+import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join } from "node:path"
 
 import type { ClientCommand, CommandOutcome } from "./protocol"
@@ -39,6 +31,7 @@ const MAX_U64 = 18_446_744_073_709_551_615n
 const SESSION_PREPARE_ATTEMPTS = 24
 const SESSION_PREPARE_INITIAL_DELAY_MS = 10
 const SESSION_PREPARE_MAXIMUM_DELAY_MS = 250
+const HOST_SHUTDOWN_TIMEOUT_MS = 1_500
 
 export interface EngineRuntimeEnvironment {
   readonly [name: string]: string | undefined
@@ -73,7 +66,11 @@ export interface RuntimeEngineClient {
     provider: string,
     apiKey: string,
     signal?: AbortSignal,
-  ): Promise<{ readonly stored: true; readonly activated: boolean; readonly warnings: readonly string[] }>
+  ): Promise<{
+    readonly stored: true
+    readonly activated: boolean
+    readonly warnings: readonly string[]
+  }>
   activateProvider?(sessionId: string, provider: string, signal?: AbortSignal): Promise<void>
   subscribe(options: EngineSubscriptionOptions): Promise<void>
 }
@@ -273,11 +270,9 @@ export class TuiEngineRuntime {
       if (fork) {
         if (
           outcome?.type === "rejected" &&
-          [
-            "host_protocol_failure",
-            "session_not_loaded",
-            "invalid_fork_operation_id",
-          ].includes(outcome.error.code)
+          ["host_protocol_failure", "session_not_loaded", "invalid_fork_operation_id"].includes(
+            outcome.error.code,
+          )
         ) {
           await this.#forkOperations?.complete(command.session_id)
           this.#forkRequests.delete(command.meta.request_id)
@@ -291,7 +286,10 @@ export class TuiEngineRuntime {
     } catch (error) {
       if (!this.#controller.signal.aborted) {
         this.#apply(
-          transportDisconnected(this.#requiredApp().state.connection.attempt, safeErrorMessage(error)),
+          transportDisconnected(
+            this.#requiredApp().state.connection.attempt,
+            safeErrorMessage(error),
+          ),
         )
       }
       return null
@@ -301,7 +299,11 @@ export class TuiEngineRuntime {
   async submitProviderApiKey(
     provider: string,
     apiKey: string,
-  ): Promise<{ readonly stored: true; readonly activated: boolean; readonly warnings: readonly string[] }> {
+  ): Promise<{
+    readonly stored: true
+    readonly activated: boolean
+    readonly warnings: readonly string[]
+  }> {
     await this.#ready
     if (!this.#driverReady || this.#subscriptionController === null) {
       throw new EngineRuntimeError("the session driver is not ready")
@@ -319,11 +321,19 @@ export class TuiEngineRuntime {
 
   async activateProvider(provider: string): Promise<void> {
     await this.#ready
-    if (!this.#driverReady || this.#subscriptionController === null
-      || this.#client.activateProvider === undefined || this.#config.replayMode) {
+    if (
+      !this.#driverReady ||
+      this.#subscriptionController === null ||
+      this.#client.activateProvider === undefined ||
+      this.#config.replayMode
+    ) {
       throw new EngineRuntimeError("provider activation is unavailable")
     }
-    await this.#client.activateProvider(this.#sessionId, provider, this.#subscriptionController.signal)
+    await this.#client.activateProvider(
+      this.#sessionId,
+      provider,
+      this.#subscriptionController.signal,
+    )
   }
 
   async stop(): Promise<void> {
@@ -334,6 +344,33 @@ export class TuiEngineRuntime {
     this.#transitionController?.abort(this.#controller.signal.reason)
     this.#subscriptionController?.abort(this.#controller.signal.reason)
     await this.#handoff?.close()
+  }
+
+  /**
+   * Ask the authenticated host to shut down before the renderer releases its
+   * process. This deliberately does not wait for session-driver readiness:
+   * closing Rottweiler must also work while the initial session is still
+   * opening. The independent deadline preserves the supervisor's process-exit
+   * fallback when the transport is unavailable.
+   */
+  async shutdownHost(timeoutMs = HOST_SHUTDOWN_TIMEOUT_MS): Promise<boolean> {
+    if (this.#config.replayMode || this.#controller.signal.aborted) return false
+    const controller = new AbortController()
+    const timer = setTimeout(
+      () => controller.abort(new DOMException("host shutdown timed out", "TimeoutError")),
+      timeoutMs,
+    )
+    try {
+      const outcome = await this.#client.postCommand(
+        { type: "shutdown_host", meta: this.#meta() },
+        controller.signal,
+      )
+      return outcome?.type === "accepted"
+    } catch {
+      return false
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   /**
@@ -392,7 +429,9 @@ export class TuiEngineRuntime {
     const transition = new AbortController()
     this.#transitionController = transition
     const abortTransition = () => transition.abort(this.#controller.signal.reason)
-    this.#controller.signal.addEventListener("abort", abortTransition, { once: true })
+    this.#controller.signal.addEventListener("abort", abortTransition, {
+      once: true,
+    })
     try {
       // Historical replay must never run recovery or take a driver lease: both
       // can append events or update session/index state. The observer attach
@@ -401,15 +440,38 @@ export class TuiEngineRuntime {
         await this.#prepareSession(sessionId, transition.signal)
       }
       if (generation !== this.#sessionGeneration || transition.signal.aborted) {
-        throw transition.signal.reason ?? new DOMException("session transition superseded", "AbortError")
+        throw (
+          transition.signal.reason ??
+          new DOMException("session transition superseded", "AbortError")
+        )
       }
 
       const subscriptionController = new AbortController()
-      const abortSubscription = () =>
-        subscriptionController.abort(this.#controller.signal.reason)
-      this.#controller.signal.addEventListener("abort", abortSubscription, { once: true })
+      const abortSubscription = () => subscriptionController.abort(this.#controller.signal.reason)
+      this.#controller.signal.addEventListener("abort", abortSubscription, {
+        once: true,
+      })
       this.#subscriptionController = subscriptionController
       this.#sessionId = sessionId
+
+      let subscriptionReady = false
+      let resolveSubscriptionReady!: () => void
+      let rejectSubscriptionReady!: (error: unknown) => void
+      const ready = new Promise<void>((resolve, reject) => {
+        resolveSubscriptionReady = () => {
+          subscriptionReady = true
+          resolve()
+        }
+        rejectSubscriptionReady = reject
+      })
+      const abortReady = () =>
+        rejectSubscriptionReady(
+          subscriptionController.signal.reason ??
+            new DOMException("session transition superseded", "AbortError"),
+        )
+      subscriptionController.signal.addEventListener("abort", abortReady, {
+        once: true,
+      })
 
       const subscription = this.#client
         .subscribe({
@@ -445,6 +507,7 @@ export class TuiEngineRuntime {
             if (generation === this.#sessionGeneration) {
               this.#onConnection(update)
             }
+            if (update.phase === "connected") resolveSubscriptionReady()
           },
           onEvent: (event) => {
             if (
@@ -471,10 +534,8 @@ export class TuiEngineRuntime {
           },
         })
         .catch((error: unknown) => {
-          if (
-            generation === this.#sessionGeneration &&
-            !subscriptionController.signal.aborted
-          ) {
+          if (!subscriptionReady) rejectSubscriptionReady(error)
+          if (generation === this.#sessionGeneration && !subscriptionController.signal.aborted) {
             this.#apply(
               transportDisconnected(
                 this.#requiredApp().state.connection.attempt,
@@ -483,10 +544,26 @@ export class TuiEngineRuntime {
             )
           }
         })
+        .finally(() => {
+          if (!subscriptionReady && !subscriptionController.signal.aborted) {
+            rejectSubscriptionReady(
+              new EngineRuntimeError("engine event stream closed before becoming ready"),
+            )
+          }
+        })
       this.#subscription = subscription
 
-      // Starting the stream precedes exposing the new session id to command
-      // construction. Commands remain gated until both operations complete.
+      // Projection replies are connection-scoped events. Do not expose driver
+      // readiness or request initial state until the SSE stream can receive
+      // those replies; otherwise a slow first GET loses models/status/context.
+      await ready
+      subscriptionController.signal.removeEventListener("abort", abortReady)
+      if (generation !== this.#sessionGeneration || subscriptionController.signal.aborted) {
+        throw (
+          subscriptionController.signal.reason ??
+          new DOMException("session transition superseded", "AbortError")
+        )
+      }
       this.#requiredApp().setSessionId(sessionId)
       this.#driverReady = true
       this.#onDriverReady?.(sessionId)
@@ -531,9 +608,7 @@ export class TuiEngineRuntime {
           return
         }
         if (!isTransientSessionPreparationRejection(takeover)) {
-          throw new EngineRuntimeError(
-            `engine rejected driver takeover: ${takeover.error.message}`,
-          )
+          throw new EngineRuntimeError(`engine rejected driver takeover: ${takeover.error.message}`)
         }
       } else if (!isTransientSessionPreparationRejection(resume)) {
         throw new EngineRuntimeError(`engine rejected session resume: ${resume.error.message}`)
@@ -551,8 +626,17 @@ export class TuiEngineRuntime {
     const commands: ClientCommand[] = [
       { type: "get_context", meta: this.#meta(), session_id: sessionId },
       { type: "get_cost", meta: this.#meta(), session_id: sessionId },
-      { type: "get_workspace_status", meta: this.#meta(), session_id: sessionId },
-      { type: "list_models", meta: this.#meta(), session_id: sessionId, refresh: false },
+      {
+        type: "get_workspace_status",
+        meta: this.#meta(),
+        session_id: sessionId,
+      },
+      {
+        type: "list_models",
+        meta: this.#meta(),
+        session_id: sessionId,
+        refresh: false,
+      },
       { type: "list_settings", meta: this.#meta(), session_id: sessionId },
       { type: "list_commands", meta: this.#meta(), session_id: sessionId },
     ]
@@ -678,7 +762,8 @@ async function loadEngineRuntimeConfigWithHandoffRetry(
 function isTransientSessionPreparationRejection(outcome: CommandOutcome): boolean {
   return (
     outcome.type === "rejected" &&
-    outcome.error.code === "session_not_loaded"
+    (outcome.error.code === "session_not_loaded" ||
+      outcome.error.code === "session_requires_recovery")
   )
 }
 
@@ -714,9 +799,9 @@ export async function loadEngineRuntimeConfig(
     "ROTTWEILER_LAST_SEEN_SEQUENCE",
   )
 
-  const configured = [socketPath, tokenFile, sessionId, lastSeenFile].some(
-    (value) => value !== null,
-  ) || lastSeenFromEnvironment !== null
+  const configured =
+    [socketPath, tokenFile, sessionId, lastSeenFile].some((value) => value !== null) ||
+    lastSeenFromEnvironment !== null
   if (!configured) {
     return null
   }
@@ -760,10 +845,7 @@ function replayModeFromEnvironment(value: string | undefined): boolean {
   throw new EngineRuntimeError("ROTTWEILER_REPLAY_MODE must be 0 or 1")
 }
 
-async function readBootstrapToken(
-  tokenFile: string,
-  files: RuntimeFileSystem,
-): Promise<string> {
+async function readBootstrapToken(tokenFile: string, files: RuntimeFileSystem): Promise<string> {
   const token = (await files.readText(tokenFile, TOKEN_FILE_LIMIT))?.trim() ?? ""
   if (token.length === 0) {
     throw new EngineRuntimeError("engine bootstrap token file is missing or empty")
@@ -868,11 +950,7 @@ class ForkOperationHandoff {
   }
 
   #path(sessionId: string): string {
-    if (
-      sessionId.length === 0 ||
-      sessionId.length > 128 ||
-      !/^[A-Za-z0-9._-]+$/.test(sessionId)
-    ) {
+    if (sessionId.length === 0 || sessionId.length > 128 || !/^[A-Za-z0-9._-]+$/.test(sessionId)) {
       throw new EngineRuntimeError("fork session id is unsafe for durable handoff")
     }
     return join(this.#directory, `${sessionId}.json`)
@@ -959,7 +1037,9 @@ function eventBelongsToSession(event: WireEngineEvent, sessionId: string): boole
   if (event.type === "subagent_progress") {
     return event.parent_session_id === sessionId
   }
-  return !("session_id" in event) || event.session_id === undefined || event.session_id === sessionId
+  return (
+    !("session_id" in event) || event.session_id === undefined || event.session_id === sessionId
+  )
 }
 
 function isAbortError(error: unknown): boolean {

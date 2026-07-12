@@ -747,6 +747,9 @@ impl ConfigLoader {
         let _settings_lock = acquire_tui_settings_lock(parent, &key)?;
         validate_tui_config_file(&self.user_path, &key)?;
         let mut document = read_tui_config_document(&self.user_path)?;
+        if provider == "openai" {
+            migrate_legacy_openai_subscription_document(&mut document);
+        }
         set_toml_leaf(&mut document, &key, kind)?;
         let encoded = format!(
             "# Rottweiler user settings; last updated via TUI\n{}",
@@ -1101,9 +1104,129 @@ impl ConfigLoader {
         for cli_override in &self.cli_overrides {
             apply_override(&mut loaded, cli_override, &ConfigSource::Cli)?;
         }
+        migrate_legacy_openai_subscription(&mut loaded);
         validate(&loaded.config)?;
         Ok(loaded)
     }
+}
+
+fn migrate_legacy_openai_subscription_document(document: &mut toml::Value) {
+    let Some(root) = document.as_table_mut() else {
+        return;
+    };
+    let legacy = {
+        let Some(providers) = root
+            .get_mut("providers")
+            .and_then(toml::Value::as_table_mut)
+        else {
+            return;
+        };
+        let legacy_is_subscription = providers
+            .get("openai")
+            .and_then(toml::Value::as_table)
+            .and_then(|provider| provider.get("kind"))
+            .and_then(toml::Value::as_str)
+            .is_some_and(|kind| matches!(kind, "openai_codex" | "openai_subscription"));
+        if !legacy_is_subscription {
+            return;
+        }
+        let canonical_is_compatible = providers
+            .get("openai_codex")
+            .and_then(toml::Value::as_table)
+            .and_then(|provider| provider.get("kind"))
+            .and_then(toml::Value::as_str)
+            .is_none_or(|kind| matches!(kind, "openai_codex" | "openai_subscription"));
+        if !canonical_is_compatible {
+            return;
+        }
+        providers.remove("openai")
+    };
+    if let Some(legacy) = legacy
+        && let Some(providers) = root
+            .get_mut("providers")
+            .and_then(toml::Value::as_table_mut)
+    {
+        providers.entry("openai_codex".to_owned()).or_insert(legacy);
+    }
+    if let Some(aliases) = root
+        .get_mut("models")
+        .and_then(toml::Value::as_table_mut)
+        .and_then(|models| models.get_mut("aliases"))
+        .and_then(toml::Value::as_table_mut)
+    {
+        for candidates in aliases
+            .iter_mut()
+            .filter_map(|(_, value)| value.as_array_mut())
+        {
+            for candidate in candidates {
+                let Some(value) = candidate.as_str() else {
+                    continue;
+                };
+                if let Some(model) = value.strip_prefix("openai/") {
+                    *candidate = toml::Value::String(format!("openai_codex/{model}"));
+                }
+            }
+        }
+    }
+}
+
+fn migrate_legacy_openai_subscription(loaded: &mut LoadedConfig) {
+    let Some(legacy) = loaded.config.providers.get("openai").cloned() else {
+        return;
+    };
+    if !matches!(legacy.kind.as_str(), "openai_codex" | "openai_subscription") {
+        return;
+    }
+    if loaded
+        .config
+        .providers
+        .get("openai_codex")
+        .is_some_and(|provider| {
+            !matches!(
+                provider.kind.as_str(),
+                "openai_codex" | "openai_subscription"
+            )
+        })
+    {
+        loaded.warnings.push(ConfigWarning {
+            message: "legacy ChatGPT profile [providers.openai] could not migrate because [providers.openai_codex] is already used by a different adapter".to_owned(),
+        });
+        return;
+    }
+
+    loaded.config.providers.remove("openai");
+    loaded
+        .config
+        .providers
+        .entry("openai_codex".to_owned())
+        .or_insert(legacy);
+    let legacy_sources = loaded
+        .provenance
+        .iter()
+        .filter_map(|(key, source)| {
+            key.strip_prefix("providers.openai.").map(|field| {
+                (
+                    key.clone(),
+                    format!("providers.openai_codex.{field}"),
+                    source.clone(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    for (legacy_key, canonical_key, source) in legacy_sources {
+        loaded.provenance.remove(&legacy_key);
+        loaded.provenance.entry(canonical_key).or_insert(source);
+    }
+    for candidates in loaded.config.models.aliases.values_mut() {
+        for candidate in candidates {
+            if let Some(model) = candidate.strip_prefix("openai/") {
+                *candidate = format!("openai_codex/{model}");
+            }
+        }
+    }
+    loaded.warnings.push(ConfigWarning {
+        message: "migrated legacy ChatGPT profile [providers.openai] to [providers.openai_codex]; OpenAI API remains a separate provider".to_owned(),
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3021,6 +3144,68 @@ mod tests {
         let persisted = fs::read_to_string(user).expect("user config");
         assert!(persisted.contains("[providers.openai_codex]"));
         assert!(persisted.contains("[providers.github_copilot]"));
+    }
+
+    #[test]
+    fn legacy_chatgpt_profile_migrates_before_openai_api_setup() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(
+            &user,
+            r#"
+[models]
+default = "fast"
+
+[models.aliases]
+fast = ["openai/gpt-5.4-mini"]
+
+[providers.openai]
+kind = "openai_codex"
+"#,
+        )
+        .expect("legacy user config");
+        let loader = ConfigLoader::new(user.clone(), project);
+
+        let migrated = loader.load().expect("effective migration");
+        assert!(!migrated.config.providers.contains_key("openai"));
+        assert_eq!(
+            migrated.config.providers["openai_codex"].kind,
+            "openai_codex"
+        );
+        assert!(matches!(
+            migrated.provenance("providers.openai_codex.kind"),
+            Some(ConfigSource::UserFile(path)) if path == &user
+        ));
+        assert_eq!(
+            migrated.config.models.aliases["fast"],
+            vec!["openai_codex/gpt-5.4-mini"]
+        );
+
+        loader
+            .configure_builtin_provider("openai")
+            .expect("separate OpenAI API setup");
+        let reloaded = ConfigLoader::new(
+            user.clone(),
+            root.path().join("repo/.rottweiler/config.toml"),
+        )
+        .load()
+        .expect("restart load");
+        assert_eq!(reloaded.config.providers["openai"].kind, "openai");
+        assert_eq!(
+            reloaded.config.providers["openai_codex"].kind,
+            "openai_codex"
+        );
+        assert_eq!(
+            reloaded.config.models.aliases["fast"],
+            vec!["openai_codex/gpt-5.4-mini"]
+        );
+        let persisted = fs::read_to_string(user).expect("persisted user config");
+        assert!(persisted.contains("[providers.openai]"));
+        assert!(persisted.contains("[providers.openai_codex]"));
+        assert!(persisted.contains("openai_codex/gpt-5.4-mini"));
     }
 
     #[test]

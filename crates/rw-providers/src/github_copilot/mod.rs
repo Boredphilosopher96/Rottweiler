@@ -3,10 +3,10 @@ mod models;
 mod provider;
 
 pub use device_flow::{
-    DeviceFlowCancellation, GITHUB_COPILOT_ACCESS_TOKEN_ENDPOINT,
-    GITHUB_COPILOT_COMPILED_CLIENT_ID, GITHUB_COPILOT_DEVICE_CODE_ENDPOINT,
-    GitHubCopilotAccessToken, GitHubCopilotDeviceAuthorization, GitHubCopilotDeviceFlow,
-    GitHubCopilotDeviceSession, GitHubDeviceFlowTransport, GitHubDevicePoll,
+    DeviceFlowCancellation, GITHUB_COPILOT_ACCESS_TOKEN_ENDPOINT, GITHUB_COPILOT_CLIENT_ID,
+    GITHUB_COPILOT_DEVICE_CODE_ENDPOINT, GitHubCopilotAccessToken,
+    GitHubCopilotDeviceAuthorization, GitHubCopilotDeviceFlow, GitHubCopilotDeviceSession,
+    GitHubDeviceFlowTransport, GitHubDevicePoll,
 };
 pub use models::{
     GitHubCopilotCatalog, GitHubCopilotEndpoint, GitHubCopilotModel, GitHubCopilotPricing,

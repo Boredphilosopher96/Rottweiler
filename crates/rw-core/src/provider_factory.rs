@@ -1,15 +1,20 @@
 //! Production composition boundary for provider adapters and model routing.
 
-use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, AuthProvider,
     BoxEventStream, CacheBreakpointSupport, Capabilities, FixtureRedactor,
-    GITHUB_COPILOT_COMPILED_CLIENT_ID, GitHubCopilotProvider, GitHubCopilotProviderConfig,
-    GitHubCopilotRuntime, ModelPricing, NativeWebSearchCapability, NativeWebSearchRequest,
-    NetworkPolicy, OAuthRefreshConfig, OPENAI_SUBSCRIPTION_CLIENT_ID,
+    GITHUB_COPILOT_CLIENT_ID, GitHubCopilotProvider, GitHubCopilotProviderConfig,
+    GitHubCopilotRuntime, ModelCandidate, ModelPricing, NativeWebSearchCapability,
+    NativeWebSearchRequest, NetworkPolicy, OAuthRefreshConfig, OPENAI_SUBSCRIPTION_CLIENT_ID,
     OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT,
     OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiSubscriptionAuth,
     OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink, OpenAiWireMode, PricingTable,
@@ -174,6 +179,8 @@ pub struct ProviderRuntime {
     model_discovery_timeout: std::time::Duration,
     alias_thinking: BTreeMap<String, ThinkingLevel>,
     alias_candidates: BTreeMap<String, Vec<String>>,
+    validated_alias_routes: std::sync::RwLock<BTreeMap<String, Vec<ModelCandidate>>>,
+    validated_concrete_models: std::sync::RwLock<std::collections::BTreeSet<String>>,
     route_candidates: BTreeMap<String, String>,
     default_alias: String,
     redactor: FixtureRedactor,
@@ -182,6 +189,12 @@ pub struct ProviderRuntime {
     config: Config,
     compaction: CompactionConfig,
     budget: BudgetConfig,
+}
+
+enum CatalogAuthority {
+    Unavailable(String),
+    NotExposed,
+    Models(BTreeSet<String>),
 }
 
 impl fmt::Debug for ProviderRuntime {
@@ -507,6 +520,15 @@ impl ProviderRuntime {
         if let Some(thinking) = self.alias_thinking.get(alias) {
             request.thinking = *thinking;
         }
+        if let Some(candidates) = self
+            .validated_alias_routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(alias)
+            .cloned()
+        {
+            return self.router.stream_candidates(alias, candidates, request);
+        }
         self.router.stream_alias(alias, request)
     }
 
@@ -539,9 +561,15 @@ impl ProviderRuntime {
         if let Some(thinking) = self.alias_thinking.get(alias) {
             request.thinking = *thinking;
         }
-        let candidates = self
-            .router
-            .resolve(alias)?
+        let validated = self
+            .validated_alias_routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(alias)
+            .cloned();
+        let candidates = validated
+            .as_deref()
+            .unwrap_or(self.router.resolve(alias)?)
             .iter()
             .filter(|candidate| {
                 self.route_candidates
@@ -575,6 +603,19 @@ impl ProviderRuntime {
         {
             return true;
         }
+        if let Some(routes) = self
+            .validated_alias_routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(alias)
+        {
+            return routes.iter().any(|candidate| {
+                self.route_candidates
+                    .get(&candidate.provider)
+                    .and_then(|route| route.split_once('/'))
+                    .is_some_and(|(route_provider, _)| route_provider == provider)
+            });
+        }
         self.alias_candidates.get(alias).is_some_and(|candidates| {
             candidates.iter().any(|candidate| {
                 candidate
@@ -582,6 +623,151 @@ impl ProviderRuntime {
                     .is_some_and(|(route_provider, _)| route_provider == provider)
             })
         })
+    }
+
+    /// Resolves every live-catalog-backed route for an alias before its first
+    /// inference. A successful provider catalog is authoritative: configured
+    /// candidates omitted by it are not retained as router fallbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized discovery or routing error when the selection has
+    /// no candidate authorized by its provider's current live catalog.
+    pub async fn prepare_model_selection(
+        &self,
+        selection: &str,
+    ) -> Result<(), ProviderFactoryError> {
+        match self.alias_candidates.get(selection).cloned() {
+            Some(configured) => self.prepare_alias_selection(selection, &configured).await,
+            None => self.prepare_concrete_selection(selection).await,
+        }
+    }
+
+    async fn prepare_concrete_selection(
+        &self,
+        selection: &str,
+    ) -> Result<(), ProviderFactoryError> {
+        if !self.models.contains_key(selection) {
+            return self.prepare_concrete_model(selection).await;
+        }
+        if self
+            .validated_concrete_models
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains(selection)
+        {
+            return Ok(());
+        }
+        let (provider, model) = parse_candidate(selection)?;
+        match self.catalog_authority(provider).await {
+            CatalogAuthority::Unavailable(reason) => {
+                return Err(ProviderFactoryError::new(provider, reason));
+            }
+            CatalogAuthority::Models(models) if !models.contains(model) => {
+                return Err(ProviderFactoryError::new(
+                    provider,
+                    "model is not in the live catalog",
+                ));
+            }
+            CatalogAuthority::NotExposed | CatalogAuthority::Models(_) => {}
+        }
+        self.validated_concrete_models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(selection.to_owned());
+        Ok(())
+    }
+
+    async fn prepare_alias_selection(
+        &self,
+        selection: &str,
+        configured: &[String],
+    ) -> Result<(), ProviderFactoryError> {
+        if self
+            .validated_alias_routes
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(selection)
+        {
+            return Ok(());
+        }
+        let mut authorities = BTreeMap::<String, CatalogAuthority>::new();
+        for candidate in configured {
+            let (provider, _) = parse_candidate(candidate)?;
+            if authorities.contains_key(provider) {
+                continue;
+            }
+            authorities.insert(provider.to_owned(), self.catalog_authority(provider).await);
+        }
+        let mut excluded_reason = None;
+        let allowed = configured
+            .iter()
+            .filter_map(|candidate| {
+                let (provider, model) = candidate.split_once('/')?;
+                match authorities.get(provider)? {
+                    CatalogAuthority::NotExposed => Some(candidate.as_str()),
+                    CatalogAuthority::Models(models) if models.contains(model) => {
+                        Some(candidate.as_str())
+                    }
+                    CatalogAuthority::Models(_) => {
+                        excluded_reason = Some("model is not in the live catalog".to_owned());
+                        None
+                    }
+                    CatalogAuthority::Unavailable(reason) => {
+                        excluded_reason = Some(reason.clone());
+                        None
+                    }
+                }
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let routes = self
+            .router
+            .resolve(selection)
+            .map_err(|error| ProviderFactoryError::new("models", error.to_string()))?
+            .iter()
+            .filter(|route| {
+                self.route_candidates
+                    .get(&route.provider)
+                    .is_some_and(|candidate| allowed.contains(candidate.as_str()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if routes.is_empty() {
+            return Err(ProviderFactoryError::new(
+                "models",
+                excluded_reason.unwrap_or_else(|| {
+                    format!("model alias {selection:?} has no live provider route")
+                }),
+            ));
+        }
+        self.validated_alias_routes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(selection.to_owned(), routes);
+        Ok(())
+    }
+
+    async fn catalog_authority(&self, provider: &str) -> CatalogAuthority {
+        let discovery = self
+            .discovery_providers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(provider)
+            .cloned();
+        let Some(discovery) = discovery else {
+            return CatalogAuthority::NotExposed;
+        };
+        match tokio::time::timeout(self.model_discovery_timeout, discovery.discover_models()).await
+        {
+            Err(_) => CatalogAuthority::Unavailable("model discovery timed out".to_owned()),
+            Ok(Err(error)) => {
+                CatalogAuthority::Unavailable(provider_discovery_status(&error).to_owned())
+            }
+            Ok(Ok(None)) => CatalogAuthority::NotExposed,
+            Ok(Ok(Some(catalog))) => {
+                CatalogAuthority::Models(catalog.models.into_iter().map(|model| model.id).collect())
+            }
+        }
     }
 
     fn stream_concrete(
@@ -741,7 +927,31 @@ impl ProviderRuntime {
                     .split_once('/')
                     .is_none_or(|(owner, _)| owner != provider)
             });
+        self.invalidate_catalog_authority(provider);
         Ok(())
+    }
+
+    fn invalidate_catalog_authority(&self, provider: &str) {
+        self.validated_concrete_models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|candidate| {
+                candidate
+                    .split_once('/')
+                    .is_none_or(|(owner, _)| owner != provider)
+            });
+        self.validated_alias_routes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|alias, _| {
+                self.alias_candidates.get(alias).is_none_or(|candidates| {
+                    candidates.iter().all(|candidate| {
+                        candidate
+                            .split_once('/')
+                            .is_none_or(|(owner, _)| owner != provider)
+                    })
+                })
+            });
     }
 
     fn bind_extension_discovered_model(
@@ -1614,6 +1824,8 @@ where
             model_discovery_timeout: self.model_discovery_timeout,
             alias_thinking,
             alias_candidates,
+            validated_alias_routes: std::sync::RwLock::new(BTreeMap::new()),
+            validated_concrete_models: std::sync::RwLock::new(std::collections::BTreeSet::new()),
             route_candidates,
             default_alias: config.models.default.clone(),
             redactor,
@@ -1637,53 +1849,52 @@ where
         &self,
         config: &Config,
     ) -> Result<ModelCatalogSnapshot, ProviderFactoryError> {
-        let provider_names = config
-            .providers
-            .keys()
-            .filter(|provider| !is_shadowed_legacy_subscription_profile(config, provider))
-            .cloned()
-            .collect::<Vec<_>>();
-        let discoveries = futures_util::stream::iter(provider_names.into_iter().map(
-            |provider_name| async move {
-                let candidate = discovery_candidate(config, &provider_name);
-                let mut isolated = config.clone();
-                isolated.providers.retain(|name, _| name == &provider_name);
-                isolated.models.aliases =
-                    BTreeMap::from([("__catalog".to_owned(), vec![candidate.clone()])]);
-                "__catalog".clone_into(&mut isolated.models.default);
-                isolated.models.thinking.clear();
-                let runtime = match self.build(&isolated) {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        return (provider_name, candidate, false, Err(error.to_string()));
-                    }
-                };
-                let Some(provider) = runtime.provider(&candidate) else {
-                    return (
-                        provider_name,
-                        candidate,
-                        true,
-                        Err("catalog provider was not composed".to_owned()),
-                    );
-                };
-                let discovered =
-                    tokio::time::timeout(self.model_discovery_timeout, provider.discover_models())
-                        .await
-                        .map_err(|_| "model discovery timed out".to_owned())
-                        .and_then(|result| {
-                            result.map_err(|error| provider_discovery_status(&error).to_owned())
+        let provider_names = config.providers.keys().cloned().collect::<Vec<_>>();
+        let discoveries =
+            futures_util::stream::iter(provider_names.into_iter().map(|provider_name| {
+                let discovery_factory = self.clone();
+                async move {
+                    let candidate = discovery_candidate(config, &provider_name);
+                    let mut isolated = config.clone();
+                    isolated.providers.retain(|name, _| name == &provider_name);
+                    isolated.models.aliases =
+                        BTreeMap::from([("__catalog".to_owned(), vec![candidate.clone()])]);
+                    "__catalog".clone_into(&mut isolated.models.default);
+                    isolated.models.thinking.clear();
+                    let runtime = match discovery_factory.build(&isolated) {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            return (provider_name, candidate, false, Err(error.to_string()));
+                        }
+                    };
+                    let Some(provider) = runtime.provider(&candidate) else {
+                        return (
+                            provider_name,
+                            candidate,
+                            true,
+                            Err("catalog provider was not composed".to_owned()),
+                        );
+                    };
+                    let discovered = tokio::time::timeout(
+                        self.model_discovery_timeout,
+                        provider.discover_models(),
+                    )
+                    .await
+                    .map_err(|_| "model discovery timed out".to_owned())
+                    .and_then(|result| {
+                        result.map_err(|error| provider_discovery_status(&error).to_owned())
+                    })
+                    .and_then(|catalog| {
+                        catalog.ok_or_else(|| {
+                            "provider does not expose live model discovery".to_owned()
                         })
-                        .and_then(|catalog| {
-                            catalog.ok_or_else(|| {
-                                "provider does not expose live model discovery".to_owned()
-                            })
-                        });
-                (provider_name, candidate, true, discovered)
-            },
-        ))
-        .buffer_unordered(4)
-        .collect::<Vec<_>>()
-        .await;
+                    });
+                    (provider_name, candidate, true, discovered)
+                }
+            }))
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
 
         Ok(project_model_catalog(config, &self.pricing, discoveries))
     }
@@ -1907,7 +2118,20 @@ where
             ));
         }
         let reference = CredentialReference::new(openai_subscription_credential_id(provider_name));
-        let resolved = self.resolve_required(provider_name, &reference)?;
+        let resolved = match self.resolve_credential(&reference) {
+            Ok(resolved) => resolved,
+            Err(CredentialError::NotFound { .. } | CredentialError::KeychainUnavailable { .. })
+                if provider_name == "openai_codex" =>
+            {
+                self.resolve_credential(&CredentialReference::new(
+                    openai_subscription_credential_id("openai"),
+                ))
+                .map_err(|error| ProviderFactoryError::new(provider_name, error.to_string()))?
+            }
+            Err(error) => {
+                return Err(ProviderFactoryError::new(provider_name, error.to_string()));
+            }
+        };
         warnings.extend(resolved.warnings().iter().map(ToString::to_string));
         let bundle =
             OpenAiSubscriptionCredentialBundle::parse(resolved.secret().expose_secret())
@@ -1975,12 +2199,7 @@ where
         let expected_client_id = if let Some(test_origin) = test_origin {
             test_origin.oauth_client_id.as_str()
         } else {
-            GITHUB_COPILOT_COMPILED_CLIENT_ID.ok_or_else(|| {
-                ProviderFactoryError::new(
-                    provider_name,
-                    "this build has no Rottweiler GitHub Copilot OAuth client identity",
-                )
-            })?
+            GITHUB_COPILOT_CLIENT_ID
         };
         if credential.oauth_client_id() != expected_client_id {
             return Err(ProviderFactoryError::new(
@@ -2009,8 +2228,7 @@ where
         provider: &str,
         reference: &CredentialReference,
     ) -> Result<rw_store::credentials::ResolvedCredential, ProviderFactoryError> {
-        self.credentials
-            .resolve(reference)
+        self.resolve_credential(reference)
             .map_err(|error| ProviderFactoryError::new(provider, error.to_string()))
     }
 
@@ -2019,13 +2237,20 @@ where
         provider: &str,
         reference: &CredentialReference,
     ) -> Result<Option<rw_store::credentials::ResolvedCredential>, ProviderFactoryError> {
-        match self.credentials.resolve(reference) {
+        match self.resolve_credential(reference) {
             Ok(value) => Ok(Some(value)),
             Err(CredentialError::NotFound { .. } | CredentialError::KeychainUnavailable { .. }) => {
                 Ok(None)
             }
             Err(error) => Err(ProviderFactoryError::new(provider, error.to_string())),
         }
+    }
+
+    fn resolve_credential(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<rw_store::credentials::ResolvedCredential, CredentialError> {
+        self.credentials.resolve_authorized(reference)
     }
 }
 
@@ -2705,16 +2930,9 @@ fn project_model_catalog(
                 current_candidate,
                 &mut models,
             ),
-            Err(error) => project_unavailable_provider(
-                config,
-                pricing,
-                &provider_name,
-                authenticated,
-                error,
-                &reverse_aliases,
-                current_candidate,
-                &mut models,
-            ),
+            Err(error) => {
+                project_unavailable_provider(config, &provider_name, authenticated, error)
+            }
         };
         providers.push(provider);
     }
@@ -2760,9 +2978,6 @@ fn project_model_catalog(
         }
     }
     for name in ["anthropic", "openai", "openai_codex", "github_copilot"] {
-        if name == "openai_codex" && has_openai_named_subscription(config) {
-            continue;
-        }
         if !providers.iter().any(|provider| provider.name == name) {
             providers.push(ProviderDescriptor {
                 name: name.to_owned(),
@@ -2852,25 +3067,6 @@ fn project_available_provider(
     }
 }
 
-fn has_openai_named_subscription(config: &Config) -> bool {
-    config.providers.get("openai").is_some_and(|provider| {
-        AdapterKind::parse("openai", &provider.kind) == Ok(AdapterKind::OpenAiSubscription)
-    })
-}
-
-fn is_shadowed_legacy_subscription_profile(config: &Config, provider: &str) -> bool {
-    provider == "openai_codex"
-        && has_openai_named_subscription(config)
-        && config.providers.get(provider).is_some_and(|entry| {
-            AdapterKind::parse(provider, &entry.kind) == Ok(AdapterKind::OpenAiSubscription)
-        })
-        && !config.models.aliases.values().flatten().any(|candidate| {
-            candidate
-                .split_once('/')
-                .is_some_and(|(candidate_provider, _)| candidate_provider == provider)
-        })
-}
-
 fn bound_catalog_snapshot(mut snapshot: ModelCatalogSnapshot) -> ModelCatalogSnapshot {
     if snapshot.models.len() > MAX_CATALOG_MODELS {
         snapshot.models.truncate(MAX_CATALOG_MODELS);
@@ -2930,88 +3126,21 @@ fn bounded_catalog_text(mut value: String) -> String {
     value
 }
 
-#[allow(clippy::too_many_arguments)]
 fn project_unavailable_provider(
     config: &Config,
-    pricing: &PricingTable,
     provider_name: &str,
     authenticated: bool,
     error: String,
-    reverse_aliases: &BTreeMap<String, Vec<ModelAlias>>,
-    current_candidate: Option<&String>,
-    models: &mut BTreeMap<String, ModelDescriptor>,
 ) -> ProviderDescriptor {
-    let configured_subscription_fallback = authenticated
-        && error == "provider model discovery request was rejected"
-        && config.providers.get(provider_name).is_some_and(|provider| {
-            AdapterKind::parse(provider_name, &provider.kind) == Ok(AdapterKind::OpenAiSubscription)
-        });
-    let fallback_status =
-        "Live ChatGPT model discovery is unavailable; using configured model routes";
-    let mut fallback_model_count = 0_u32;
-    for candidate in config
-        .models
-        .aliases
-        .values()
-        .flatten()
-        .filter(|candidate| {
-            candidate
-                .split_once('/')
-                .is_some_and(|(name, _)| name == provider_name)
-        })
-    {
-        let Some((_, model)) = candidate.split_once('/') else {
-            continue;
-        };
-        if configured_subscription_fallback && !subscription_model_allowed(model) {
-            continue;
-        }
-        let enriched = enrich_discovered_capabilities(config, pricing, provider_name, model, None);
-        if configured_subscription_fallback {
-            fallback_model_count = fallback_model_count.saturating_add(1);
-        }
-        models
-            .entry(candidate.clone())
-            .or_insert_with(|| ModelDescriptor {
-                alias: ModelAlias(candidate.clone()),
-                id: candidate.clone(),
-                display_name: subscription_model_display_name(model).to_owned(),
-                provider: provider_name.to_owned(),
-                providers: vec![provider_name.to_owned()],
-                aliases: reverse_aliases.get(candidate).cloned().unwrap_or_default(),
-                current: current_candidate == Some(candidate),
-                available: configured_subscription_fallback,
-                status: Some(if configured_subscription_fallback {
-                    fallback_status.to_owned()
-                } else {
-                    error.clone()
-                }),
-                capabilities: protocol_capabilities(&enriched),
-            });
-    }
     ProviderDescriptor {
         auth_kind: provider_auth_kind(config, provider_name),
         next_action: provider_next_action(provider_auth_kind(config, provider_name), authenticated),
         name: provider_name.to_owned(),
         configured: true,
         authenticated,
-        reachable: configured_subscription_fallback,
-        model_count: fallback_model_count,
-        status: Some(if configured_subscription_fallback {
-            fallback_status.to_owned()
-        } else {
-            error
-        }),
-    }
-}
-
-fn subscription_model_display_name(model: &str) -> &str {
-    match model {
-        "gpt-5.5" => "GPT-5.5",
-        "gpt-5.3-codex-spark" => "GPT-5.3 Codex Spark",
-        "gpt-5.4" => "GPT-5.4",
-        "gpt-5.4-mini" => "GPT-5.4 Mini",
-        _ => model,
+        reachable: false,
+        model_count: 0,
+        status: Some(error),
     }
 }
 
@@ -3455,6 +3584,110 @@ mod native_search_tests {
 
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct EmptyEnvironment;
+
+    impl CredentialEnvironment for EmptyEnvironment {
+        fn get(&self, _name: &str) -> Result<Option<String>, CredentialError> {
+            Ok(None)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CountingKeychain(Arc<Mutex<(usize, usize)>>);
+
+    impl CredentialKeychain for CountingKeychain {
+        fn get(
+            &self,
+            _identifier: &str,
+        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::KeychainUnavailable>
+        {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0 += 1;
+            Ok(Some(StoredSecret::new(
+                "version = 1\n[credentials]\n'providers.work.api_key' = 'fixture-key'\n".to_owned(),
+            )))
+        }
+
+        fn get_authorized(
+            &self,
+            _identifier: &str,
+        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::KeychainUnavailable>
+        {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .1 += 1;
+            Ok(Some(StoredSecret::new(
+                "version = 1\n[credentials]\n'providers.work.api_key' = 'fixture-key'\n".to_owned(),
+            )))
+        }
+
+        fn set(
+            &self,
+            _identifier: &str,
+            _secret: &StoredSecret<String>,
+        ) -> Result<(), rw_store::credentials::KeychainUnavailable> {
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct LegacySubscriptionKeychain(Arc<Mutex<usize>>);
+
+    impl CredentialKeychain for LegacySubscriptionKeychain {
+        fn get(
+            &self,
+            _identifier: &str,
+        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::KeychainUnavailable>
+        {
+            Ok(None)
+        }
+
+        fn get_authorized(
+            &self,
+            _identifier: &str,
+        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::KeychainUnavailable>
+        {
+            *self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+            Ok(Some(StoredSecret::new(
+                "version = 1\n[credentials]\n'providers.openai.openai_subscription' = '''{\"version\":1,\"access_token\":\"subscription-access\",\"refresh_token\":\"subscription-refresh\",\"account_id\":\"acct-fixture\"}'''\n".to_owned(),
+            )))
+        }
+
+        fn set(
+            &self,
+            _identifier: &str,
+            _secret: &StoredSecret<String>,
+        ) -> Result<(), rw_store::credentials::KeychainUnavailable> {
+            Ok(())
+        }
+    }
+
+    fn configured_work_provider() -> Config {
+        let mut config = Config::default();
+        config.providers.insert(
+            "work".to_owned(),
+            ProviderConfig {
+                kind: "openai".to_owned(),
+                base_url: Some("http://127.0.0.1:9/v1/responses".to_owned()),
+                api_key_credential: Some("providers.work.api_key".to_owned()),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.default = "fast".to_owned();
+        config
+            .models
+            .aliases
+            .insert("fast".to_owned(), vec!["work/fixture".to_owned()]);
+        config
+    }
+
     fn capability_pricing() -> ModelPricing {
         ModelPricing {
             display_name: "Fixture".to_owned(),
@@ -3567,7 +3800,7 @@ mod native_search_tests {
     }
 
     #[test]
-    fn one_provider_failure_remains_visible_without_hiding_known_options() {
+    fn one_provider_failure_remains_visible_without_fabricating_models() {
         let mut config = Config::default();
         config.providers.insert(
             "broken".to_owned(),
@@ -3591,8 +3824,10 @@ mod native_search_tests {
                 Err("network unavailable".to_owned()),
             )],
         );
-        assert_eq!(catalog.models.len(), 1);
-        assert!(!catalog.models[0].available);
+        assert!(
+            catalog.models.is_empty(),
+            "configured aliases must never masquerade as a live model catalog"
+        );
         assert!(catalog.providers.iter().any(|provider| {
             provider.name == "broken" && !provider.reachable && provider.status.is_some()
         }));
@@ -3605,58 +3840,146 @@ mod native_search_tests {
     }
 
     #[test]
-    fn chatgpt_invalid_catalog_uses_configured_routes_without_duplicate_profile() {
+    fn rejected_chatgpt_catalog_does_not_claim_reachability() {
         let mut config = Config::default();
         config.providers.clear();
-        for provider in ["openai", "openai_codex"] {
-            config.providers.insert(
-                provider.to_owned(),
-                ProviderConfig {
-                    kind: "openai_codex".to_owned(),
-                    ..ProviderConfig::default()
-                },
-            );
-        }
+        config.providers.insert(
+            "openai_codex".to_owned(),
+            ProviderConfig {
+                kind: "openai_codex".to_owned(),
+                ..ProviderConfig::default()
+            },
+        );
         config.models.default = "fast".to_owned();
-        config.models.aliases = BTreeMap::from([
-            ("fast".to_owned(), vec!["openai/gpt-5.4-mini".to_owned()]),
-            ("plan".to_owned(), vec!["openai/gpt-5.4".to_owned()]),
-        ]);
-
-        assert!(is_shadowed_legacy_subscription_profile(
-            &config,
-            "openai_codex"
-        ));
+        config.models.aliases = BTreeMap::from([(
+            "fast".to_owned(),
+            vec!["openai_codex/gpt-5.4-mini".to_owned()],
+        )]);
         let catalog = project_model_catalog(
             &config,
             &PricingTable::bundled().expect("pricing"),
             vec![(
-                "openai".to_owned(),
-                "openai/gpt-5.4-mini".to_owned(),
+                "openai_codex".to_owned(),
+                "openai_codex/gpt-5.4-mini".to_owned(),
                 true,
                 Err("provider model discovery request was rejected".to_owned()),
             )],
         );
 
+        let provider = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.name == "openai_codex")
+            .expect("ChatGPT provider");
+        assert_eq!(provider.auth_kind, ProviderAuthKind::Oauth);
+        assert!(provider.authenticated);
+        assert!(!provider.reachable);
+        assert_eq!(provider.model_count, 0);
+        assert!(
+            catalog.models.is_empty(),
+            "a rejected live catalog must not expose configured fallback model rows"
+        );
         assert!(
             catalog
                 .providers
                 .iter()
-                .all(|provider| provider.name != "openai_codex")
+                .any(|provider| { provider.name == "openai" && !provider.configured })
         );
-        let provider = catalog
-            .providers
-            .iter()
-            .find(|provider| provider.name == "openai")
-            .expect("ChatGPT provider");
-        assert_eq!(provider.auth_kind, ProviderAuthKind::Oauth);
-        assert!(provider.authenticated);
-        assert!(provider.reachable);
-        assert_eq!(provider.model_count, 2);
-        assert!(catalog.models.iter().all(|model| model.available));
-        assert!(catalog.models.iter().any(|model| {
-            model.id == "openai/gpt-5.4-mini" && model.display_name == "GPT-5.4 Mini"
+    }
+
+    #[tokio::test]
+    async fn production_catalog_uses_one_authorized_vault_read() {
+        let keychain = CountingKeychain::default();
+        let manager = Arc::new(CredentialManager::with_backends(
+            EmptyEnvironment,
+            keychain.clone(),
+            std::path::PathBuf::from("/nonexistent/rottweiler-test-credentials.toml"),
+        ));
+        let factory = ProviderFactory::with_backends(
+            manager,
+            ProxyEnvironment::default(),
+            NetworkPolicy::Allow,
+            PricingTable::bundled().expect("pricing"),
+        )
+        .with_model_discovery_timeout(std::time::Duration::from_millis(5));
+
+        let catalog = factory
+            .discover_model_catalog(&configured_work_provider())
+            .await
+            .expect("catalog failures remain visible rows");
+        let calls = *keychain
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(calls, (0, 1));
+        assert!(catalog.providers.iter().any(|provider| {
+            provider.name == "work" && provider.authenticated && !provider.reachable
         }));
+    }
+
+    #[test]
+    fn active_provider_build_uses_authorized_credentials() {
+        let keychain = CountingKeychain::default();
+        let manager = Arc::new(CredentialManager::with_backends(
+            EmptyEnvironment,
+            keychain.clone(),
+            std::path::PathBuf::from("/nonexistent/rottweiler-test-credentials.toml"),
+        ));
+        let factory = ProviderFactory::with_backends(
+            manager,
+            ProxyEnvironment::default(),
+            NetworkPolicy::Allow,
+            PricingTable::bundled().expect("pricing"),
+        );
+
+        factory
+            .build(&configured_work_provider())
+            .expect("active provider composition");
+        let calls = *keychain
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(calls, (0, 1));
+    }
+
+    #[test]
+    fn canonical_chatgpt_profile_resolves_legacy_logical_credential() {
+        let keychain = LegacySubscriptionKeychain::default();
+        let manager = Arc::new(CredentialManager::with_backends(
+            EmptyEnvironment,
+            keychain.clone(),
+            std::path::PathBuf::from("/nonexistent/rottweiler-test-credentials.toml"),
+        ));
+        let factory = ProviderFactory::with_backends(
+            manager,
+            ProxyEnvironment::default(),
+            NetworkPolicy::Allow,
+            PricingTable::bundled().expect("pricing"),
+        );
+        let mut config = Config::default();
+        config.providers.insert(
+            "openai_codex".to_owned(),
+            ProviderConfig {
+                kind: "openai_codex".to_owned(),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.default = "fast".to_owned();
+        config.models.aliases.insert(
+            "fast".to_owned(),
+            vec!["openai_codex/gpt-5.4-mini".to_owned()],
+        );
+
+        factory
+            .build(&config)
+            .expect("legacy credential should compose canonical ChatGPT provider");
+        assert_eq!(
+            *keychain
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            1
+        );
     }
 
     #[test]

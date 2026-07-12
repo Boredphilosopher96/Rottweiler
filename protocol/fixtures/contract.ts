@@ -947,6 +947,7 @@ export const contractFixture = {
       "parent_session_id": "session-fixture",
       "child": {
         "session_id": "session-fork",
+        "title": "Session fork",
         "workspace_name": "workspace",
         "model": "fast",
         "driver_client_id": "client-fixture",
@@ -966,6 +967,7 @@ export const contractFixture = {
       "sessions": [
         {
           "session_id": "session-fork",
+          "title": "Session fork",
           "workspace_name": "workspace",
           "model": "fast",
           "driver_client_id": "client-fixture",

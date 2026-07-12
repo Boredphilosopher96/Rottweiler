@@ -824,6 +824,47 @@
       ]
     },
     {
+      "description": "Human-facing title selected asynchronously after the first successful\nassistant turn. This is durable so replay and session lists agree.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "title": {
+          "type": "string"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cost": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Cost"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "session_title_updated"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "title"
+      ]
+    },
+    {
       "description": "A plugin-originated user message was admitted through the bounded\nmachine boundary. The ordinary message/turn events remain authoritative\nfor conversation reconstruction.",
       "type": "object",
       "properties": {
@@ -2375,7 +2416,8 @@
       "enum": [
         "main",
         "compaction",
-        "subagent"
+        "subagent",
+        "title"
       ]
     },
     "Usage": {
@@ -3004,6 +3046,11 @@
       "properties": {
         "session_id": {
           "$ref": "#/$defs/SessionId"
+        },
+        "title": {
+          "description": "Human-facing session title. Empty only when reading an older peer.",
+          "type": "string",
+          "default": ""
         },
         "workspace_name": {
           "type": "string"

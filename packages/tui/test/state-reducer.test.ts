@@ -839,6 +839,27 @@ describe("pure TUI state reducer", () => {
     })
   })
 
+  test("bounds command acknowledgement history to the newest requests", () => {
+    let state = createInitialState()
+    for (let index = 0; index < 300; index += 1) {
+      state = reduce(state, {
+        type: "command_acknowledged",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          client_id: "client",
+          request_id: `request-${index}`,
+          emitted_at: "2026-01-01T00:00:00Z",
+        },
+        session_id: "session-state",
+        outcome: { type: "accepted" },
+      })
+    }
+    expect(Object.keys(state.commandAcks)).toHaveLength(256)
+    expect(state.commandAcks["request-43"]).toBeUndefined()
+    expect(state.commandAcks["request-44"]).toBeDefined()
+    expect(state.commandAcks["request-299"]).toBeDefined()
+  })
+
   test("projects cumulative review replacements and bounded session search replies", () => {
     const replyMeta = (requestId: string) => ({
       protocol_version: PROTOCOL_VERSION,
@@ -952,6 +973,37 @@ describe("pure TUI state reducer", () => {
       responseType: "permissions_listed",
       sessionId: "session-1",
     })
+  })
+
+  test("renders structured command payloads as human copy without protocol fields", () => {
+    const state = reduce(createInitialState(), {
+      type: "command_finished",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-private",
+        sequence_id: "4",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      name: "context",
+      message: JSON.stringify({
+        turn_id: "turn-private",
+        stable_prefix_hash: "hash-private",
+        data: { paths: ["src/main.rs"], count: 1, approval_state: "approval_required" },
+        truncated: false,
+      }),
+      unrestorable_paths: [],
+    })
+    const block = state.transcript.at(-1)?.turn.blocks[0]
+    expect(block?.type).toBe("text")
+    const text = block?.type === "text" ? block.text : ""
+    expect(text).toContain("Paths:")
+    expect(text).toContain("src/main.rs")
+    expect(text).toContain("Approval state: approval required")
+    expect(text).not.toContain("{")
+    expect(text).not.toContain("turn_id")
+    expect(text).not.toContain("stable_prefix_hash")
+    expect(text).not.toContain("hash-private")
+    expect(text).not.toContain("session-private")
   })
 
   test("projects turns, tools, questions, snapshots, mode, model, and shell state", () => {

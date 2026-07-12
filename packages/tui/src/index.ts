@@ -1,7 +1,10 @@
 import { writeStartupSplash } from "./startup"
 
 type RuntimeBootstrap =
-  | { readonly runtime: import("./runtime").TuiEngineRuntime | null; readonly error: null }
+  | {
+      readonly runtime: import("./runtime").TuiEngineRuntime | null
+      readonly error: null
+    }
   | { readonly runtime: null; readonly error: unknown }
 
 function markFirstPaint(): void {
@@ -22,7 +25,11 @@ async function main(): Promise<void> {
   // apparent splash wait on the native backend it is meant to cover.
   const { loadOpenTui } = await import("./opentui")
   const openTui = await loadOpenTui()
-  let runtimeForShutdown: { stop(): Promise<void> } | null = null
+  let runtimeForShutdown: {
+    shutdownHost(): Promise<boolean>
+    stop(): Promise<void>
+  } | null = null
+  let exitRequested = false
   const renderer = await openTui.createCliRenderer({
     exitOnCtrlC: true,
     targetFps: 60,
@@ -84,11 +91,8 @@ async function main(): Promise<void> {
   )
 
   const configuredSession = process.env.ROTTWEILER_SESSION_ID
-  const replaySession =
-    process.env.ROTTWEILER_REPLAY_MODE === "1" ? configuredSession : undefined
-  const keybindings = await parseKeybindingsFromEnvironment(
-    process.env.ROTTWEILER_TUI_KEYBINDINGS,
-  )
+  const replaySession = process.env.ROTTWEILER_REPLAY_MODE === "1" ? configuredSession : undefined
+  const keybindings = await parseKeybindingsFromEnvironment(process.env.ROTTWEILER_TUI_KEYBINDINGS)
   const { kennelTheme, themeByName } = await import("./theme")
   const theme = themeByName(process.env.ROTTWEILER_TUI_THEME ?? "") ?? kennelTheme
   const terminalHandover = {
@@ -110,8 +114,7 @@ async function main(): Promise<void> {
     },
     onProviderApiKey: async (provider, apiKey) => {
       const bootstrap = await runtimeBootstrap
-      if (bootstrap.runtime === null)
-        throw new Error("engine runtime is unavailable")
+      if (bootstrap.runtime === null) throw new Error("engine runtime is unavailable")
       return await bootstrap.runtime.submitProviderApiKey(provider, apiKey)
     },
     onProviderActivate: async (provider) => {
@@ -129,6 +132,20 @@ async function main(): Promise<void> {
     notifications: createDesktopNotificationAdapter(),
     imagePaste: createImagePasteAdapter(),
     textClipboard: createTextClipboardAdapter(),
+    // Let Composer finish clearing the accepted slash command, then ask the
+    // authenticated host to stop before releasing the renderer. Process exit
+    // remains a bounded supervisor fallback when the control plane is down.
+    onExit: () => {
+      if (exitRequested) return
+      exitRequested = true
+      queueMicrotask(() => {
+        void (async () => {
+          const runtime = runtimeForShutdown ?? (await runtimeWithin(runtimeBootstrap, 250))
+          await runtime?.shutdownHost()
+          renderer.destroy()
+        })()
+      })
+    },
   })
   startupFrame.destroy()
   renderer.root.add(app)
@@ -156,6 +173,24 @@ async function main(): Promise<void> {
       })
     }
   })
+}
+
+async function runtimeWithin(
+  bootstrap: Promise<RuntimeBootstrap>,
+  timeoutMs: number,
+): Promise<import("./runtime").TuiEngineRuntime | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    const result = await Promise.race([
+      bootstrap,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs)
+      }),
+    ])
+    return result === null ? null : result.runtime
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
 }
 
 async function parseKeybindingsFromEnvironment(source: string | undefined) {

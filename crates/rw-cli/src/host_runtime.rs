@@ -14,7 +14,11 @@ use std::{
     io::Read as _,
     os::{
         fd::OwnedFd,
-        unix::{ffi::OsStrExt as _, fs::PermissionsExt as _, process::CommandExt as _},
+        unix::{
+            ffi::OsStrExt as _,
+            fs::{MetadataExt as _, PermissionsExt as _},
+            process::CommandExt as _,
+        },
     },
     process::{Command, ExitStatus, Stdio},
     sync::mpsc,
@@ -1386,6 +1390,7 @@ impl CliSessionFactory {
         let session = HostedSession::new(
             SessionDescriptor {
                 session_id,
+                title: "New session".to_owned(),
                 workspace_name: workspace_name(&workspace),
                 model: ModelAlias(runtime.model_alias),
                 driver_client_id: runtime.driver_client_id,
@@ -1411,6 +1416,12 @@ impl CliSessionFactory {
         let workspace = self.authorize_workspace_path(&metadata.workspace)?;
         Ok(SessionDescriptor {
             session_id: SessionId(session_id.to_owned()),
+            title: SessionIndex::open(&self.options.storage_root)
+                .ok()
+                .and_then(|index| index.get(session_id).ok().flatten())
+                .map(|summary| summary.title)
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| "New session".to_owned()),
             workspace_name: workspace_name(&workspace),
             model: ModelAlias(metadata.model_alias),
             // Persisted sessions are inactive until resumed. Live descriptors
@@ -2771,24 +2782,33 @@ struct GitCommandOutput {
 }
 
 #[cfg(unix)]
-fn resolve_git_executable_from_path(path: &OsStr, workspace: &Path) -> Option<PathBuf> {
-    let canonical_workspace = fs::canonicalize(workspace).ok()?;
-    std::env::split_paths(path)
-        .filter(|directory| directory.is_absolute())
-        .filter_map(|directory| fs::canonicalize(directory.join("git")).ok())
-        .find(|candidate| {
-            candidate.is_absolute()
-                && !candidate.starts_with(&canonical_workspace)
-                && fs::metadata(candidate).is_ok_and(|metadata| {
-                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
-                })
-        })
+fn resolve_git_executable_from_candidates<'a>(
+    candidates: impl IntoIterator<Item = &'a Path>,
+) -> Option<PathBuf> {
+    candidates.into_iter().find_map(|candidate| {
+        let canonical = fs::canonicalize(candidate).ok()?;
+        let metadata = fs::metadata(&canonical).ok()?;
+        // Automatic status queries run without a user gesture. Only accept a
+        // root-owned, executable system binary that cannot be replaced by an
+        // unprivileged user. In particular, never execute a `git` selected
+        // from the caller's user-writable PATH.
+        (metadata.is_file()
+            && metadata.uid() == 0
+            && metadata.mode() & 0o022 == 0
+            && metadata.permissions().mode() & 0o111 != 0)
+            .then_some(canonical)
+    })
 }
 
 #[cfg(unix)]
-fn resolve_git_executable(workspace: &Path) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    resolve_git_executable_from_path(&path, workspace)
+fn resolve_git_executable_for_caller_path(_caller_path: Option<&OsStr>) -> Option<PathBuf> {
+    resolve_git_executable_from_candidates([Path::new("/usr/bin/git"), Path::new("/bin/git")])
+}
+
+#[cfg(unix)]
+fn resolve_git_executable(_workspace: &Path) -> Option<PathBuf> {
+    let caller_path = std::env::var_os("PATH");
+    resolve_git_executable_for_caller_path(caller_path.as_deref())
 }
 
 #[cfg(unix)]
@@ -2824,7 +2844,12 @@ fn run_bounded_git(
         .args(["-c", "submodule.recurse=false"])
         .args(["-c", "diff.external="])
         .args(arguments)
+        // Git itself is absolute and trusted. Restrict any helper lookup to
+        // system locations as defense in depth against a hostile caller PATH.
+        .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_PAGER", "cat")
         .env_remove("GIT_EXTERNAL_DIFF")
         .env_remove("GIT_DIR")
@@ -3208,50 +3233,50 @@ fn bounded_diff_text(mut text: String, maximum: usize, mut truncated: bool) -> (
 
 #[cfg(unix)]
 fn read_git_branch(workspace: &Path) -> Result<Option<String>, HostError> {
-    let root = open_workspace_directory(workspace)?;
-    let Ok(git) = rustix::fs::openat(
-        &root,
-        ".git",
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::DIRECTORY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    ) else {
+    open_workspace_directory(workspace)?;
+    let Some(git) = resolve_git_executable(workspace) else {
         return Ok(None);
     };
-    let Ok(head) = rustix::fs::openat(
-        &git,
-        "HEAD",
-        rustix::fs::OFlags::RDONLY
-            | rustix::fs::OFlags::NOFOLLOW
-            | rustix::fs::OFlags::NONBLOCK
-            | rustix::fs::OFlags::CLOEXEC,
-        rustix::fs::Mode::empty(),
-    ) else {
-        return Ok(None);
-    };
-    let stat = rustix::fs::fstat(&head)
-        .map_err(|_| HostError::Query("git HEAD metadata is unavailable".to_owned()))?;
-    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() || stat.st_size > 4_096 {
-        return Ok(None);
+    let symbolic = [
+        OsStr::new("symbolic-ref"),
+        OsStr::new("--quiet"),
+        OsStr::new("--short"),
+        OsStr::new("HEAD"),
+    ];
+    if let Some(output) = run_bounded_git(&git, workspace, &symbolic, 512, GIT_STATUS_DEADLINE)
+        && output.status.success()
+        && !output.overflow
+        && let Some(branch) = safe_git_label(&output.stdout)
+    {
+        return Ok(Some(branch));
     }
-    let mut content = String::new();
-    fs::File::from(head)
-        .take(4_097)
-        .read_to_string(&mut content)
-        .map_err(|_| HostError::Query("git HEAD could not be read".to_owned()))?;
-    let Some(branch) = content.trim().strip_prefix("ref: refs/heads/") else {
-        return Ok(None);
-    };
-    if branch.is_empty()
-        || branch
+    let detached = [
+        OsStr::new("rev-parse"),
+        OsStr::new("--short=12"),
+        OsStr::new("HEAD"),
+    ];
+    if let Some(output) = run_bounded_git(&git, workspace, &detached, 64, GIT_STATUS_DEADLINE)
+        && output.status.success()
+        && !output.overflow
+        && let Some(revision) = safe_git_label(&output.stdout)
+    {
+        return Ok(Some(format!("detached@{revision}")));
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn safe_git_label(bytes: &[u8]) -> Option<String> {
+    let value = std::str::from_utf8(bytes).ok()?.trim();
+    if value.is_empty()
+        || value.len() > 256
+        || value
             .bytes()
             .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
     {
-        return Ok(None);
+        return None;
     }
-    Ok(Some(branch.to_owned()))
+    Some(value.to_owned())
 }
 
 #[cfg(not(unix))]
@@ -3409,6 +3434,7 @@ mod tests {
     fn descriptor(workspace: &Path) -> SessionDescriptor {
         SessionDescriptor {
             session_id: SessionId("session-query".to_owned()),
+            title: "Session query".to_owned(),
             workspace_name: workspace_name(workspace),
             model: ModelAlias("fast".to_owned()),
             driver_client_id: None,
@@ -3634,6 +3660,46 @@ mod tests {
         assert!(!status.truncated);
         assert_eq!(status.changed_paths, ["tracked.rs", "untracked.rs"]);
         assert!(status.branch.is_some());
+
+        fs::create_dir(workspace.join("nested")).expect("nested workspace");
+        assert_eq!(
+            read_git_branch(&workspace.join("nested")).expect("nested branch"),
+            status.branch
+        );
+
+        let worktree = root.path().join("linked-worktree");
+        git(
+            &workspace,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "linked-branch",
+                worktree.to_str().expect("worktree path"),
+            ],
+        );
+        assert_eq!(
+            read_git_branch(&worktree).expect("linked branch"),
+            Some("linked-branch".to_owned())
+        );
+
+        git(&workspace, &["checkout", "--quiet", "--detach"]);
+        let revision = Command::new("/usr/bin/git")
+            .current_dir(&workspace)
+            .args(["rev-parse", "--short=12", "HEAD"])
+            .output()
+            .expect("detached revision");
+        assert!(revision.status.success());
+        assert_eq!(
+            read_git_branch(&workspace).expect("detached branch"),
+            Some(format!(
+                "detached@{}",
+                String::from_utf8(revision.stdout)
+                    .expect("UTF-8 revision")
+                    .trim()
+            ))
+        );
     }
 
     #[cfg(unix)]
@@ -3703,33 +3769,25 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn git_resolution_rejects_relative_path_entries_and_workspace_executables() {
-        use std::{env, ffi::OsString, os::unix::fs::PermissionsExt as _};
+    fn git_resolution_rejects_user_owned_executables_and_uses_a_system_identity() {
+        use std::os::unix::fs::PermissionsExt as _;
 
         let root = tempdir().expect("root");
-        let workspace = root.path().join("workspace");
-        let trusted = root.path().join("trusted");
-        fs::create_dir(&workspace).expect("workspace");
-        fs::create_dir(&trusted).expect("trusted bin");
-        fs::write(trusted.join("git"), "#!/bin/sh\nexit 0\n").expect("fake git");
-        fs::set_permissions(trusted.join("git"), fs::Permissions::from_mode(0o700))
-            .expect("fake git mode");
+        let hostile = root.path().join("git");
+        fs::write(&hostile, "#!/bin/sh\nexit 0\n").expect("fake git");
+        fs::set_permissions(&hostile, fs::Permissions::from_mode(0o700)).expect("fake git mode");
 
-        assert!(resolve_git_executable_from_path(OsStr::new("relative-bin"), &workspace).is_none());
-        let mixed =
-            env::join_paths([PathBuf::from("relative-bin"), trusted.clone()]).expect("mixed PATH");
-        assert_eq!(
-            resolve_git_executable_from_path(&mixed, &workspace),
-            Some(fs::canonicalize(trusted.join("git")).expect("canonical git"))
+        assert!(resolve_git_executable_from_candidates([hostile.as_path()]).is_none());
+        let hostile_path = std::env::join_paths([root.path()]).expect("hostile PATH");
+        let resolved_for_hostile_path = resolve_git_executable_for_caller_path(Some(&hostile_path))
+            .expect("system Git with hostile PATH");
+        let system = resolve_git_executable(root.path()).expect("system Git identity");
+        assert_eq!(resolved_for_hostile_path, system);
+        assert_ne!(
+            system,
+            fs::canonicalize(hostile).expect("canonical hostile executable")
         );
-
-        let workspace_bin = workspace.join("bin");
-        fs::create_dir(&workspace_bin).expect("workspace bin");
-        fs::write(workspace_bin.join("git"), "#!/bin/sh\nexit 0\n").expect("workspace git");
-        fs::set_permissions(workspace_bin.join("git"), fs::Permissions::from_mode(0o700))
-            .expect("workspace git mode");
-        let workspace_path = OsString::from(workspace_bin);
-        assert!(resolve_git_executable_from_path(&workspace_path, &workspace).is_none());
+        assert!(system.starts_with("/usr/bin") || system.starts_with("/bin"));
     }
 
     #[cfg(unix)]
@@ -4694,6 +4752,7 @@ mod tests {
             .expect("loaded config");
         let session = SessionDescriptor {
             session_id: SessionId("concrete".to_owned()),
+            title: "Concrete model".to_owned(),
             workspace_name: "repo".to_owned(),
             model: ModelAlias("openai/gpt-5-mini".to_owned()),
             driver_client_id: None,

@@ -144,7 +144,8 @@ pub mod runtime_support {
             McpConnectionApprovalPolicy, McpConnector, McpError, McpLimits, McpManager,
             McpServerAuthority, McpServerConfig, McpStdioSandboxPolicy, McpToolCapabilityOverrides,
             McpTransportConfig, OverflowReference, OverflowSpool, RottweilerMcpServerFactory,
-            SandboxedStdioConnector, ServerId, ServerState, SessionSummary, serve_stdio,
+            SandboxedStdioConnector, ServerId, ServerState, ServerStatus, SessionSummary,
+            serve_stdio,
         };
     }
 

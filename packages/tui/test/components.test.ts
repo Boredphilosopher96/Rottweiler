@@ -8,13 +8,14 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ContextPanelRenderable, ImageAttachmentRenderable, fuzzyScore } from "../src/components"
+import { ContextPanelRenderable, ImageAttachmentRenderable, ToolBlockRenderable, fuzzyScore } from "../src/components"
 import {
   PROTOCOL_VERSION,
   type ClientCommand,
   type CommandOutcome,
   type EngineEvent,
 } from "../src/protocol"
+import { formatToolArguments } from "../src/render"
 import { createInitialState, type RottweilerState } from "../src/state"
 import { kennelTheme } from "../src/theme"
 
@@ -37,6 +38,79 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
 
 describe("M4 retained components", () => {
   let renderer: TestRenderer | undefined
+
+  test("keeps one tool card through streaming and commit while preserving expansion", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+    const eventMeta = (sequence: string) => ({
+      protocol_version: PROTOCOL_VERSION,
+      session_id: "session-components",
+      sequence_id: sequence,
+      emitted_at: "2026-01-01T00:00:00Z",
+    })
+    app.handleEvent({ type: "turn_started", meta: eventMeta("1"), turn_id: "1" })
+    app.handleEvent({
+      type: "tool_call_started",
+      meta: eventMeta("2"),
+      turn_id: "1",
+      tool_call_id: "tool-lifecycle",
+      name: "read",
+      args: { path: "README.md" },
+      call_index: 0,
+    })
+    app.handleEvent({
+      type: "tool_output_delta",
+      meta: eventMeta("3"),
+      turn_id: "1",
+      tool_call_id: "tool-lifecycle",
+      stream: "stdout",
+      chunk: "canary output",
+    })
+    app.handleEvent({
+      type: "tool_call_finished",
+      meta: eventMeta("4"),
+      turn_id: "1",
+      tool_call_id: "tool-lifecycle",
+      output: { type: "text", text: "canary output" },
+      is_error: false,
+      call_index: 0,
+    })
+    await setup.renderOnce()
+    let cards = app.transcript.streamingCard
+      .getChildren()
+      .flatMap((child) => child.getChildren())
+      .filter((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    expect(cards).toHaveLength(1)
+    expect(cards[0]?.header.plainText.match(/canary output/g)?.length).toBe(1)
+    cards[0]?.toggle()
+    expect(cards[0]?.body.visible).toBeTrue()
+
+    app.handleEvent({
+      type: "conversation_turn_committed",
+      meta: eventMeta("5"),
+      agent_turn: "1",
+      turn: {
+        role: "tool",
+        blocks: [{
+          type: "tool_result",
+          id: "tool-lifecycle",
+          output: { type: "text", text: "canary output" },
+          is_error: false,
+        }],
+        meta: { synthetic: false, summary: false },
+      },
+    })
+    await setup.renderOnce()
+    cards = [...app.transcript.mountedCards.values()]
+      .flatMap((card) => card.getChildren())
+      .filter((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    expect(cards).toHaveLength(1)
+    expect(cards[0]?.body.visible).toBeTrue()
+    const visibleToolText = `${cards[0]?.header.plainText ?? ""}\n${cards[0]?.body.plainText ?? ""}`
+    expect(visibleToolText.match(/canary output/g)?.length).toBe(1)
+  })
   let treeSitter: MockTreeSitterClient | undefined
 
   afterEach(async () => {
@@ -44,6 +118,18 @@ describe("M4 retained components", () => {
     renderer = undefined
     await treeSitter?.destroy()
     treeSitter = undefined
+  })
+
+  test("bounds tool arguments and redacts credential-shaped fields", () => {
+    const rendered = formatToolArguments({
+      path: "approval.txt",
+      api_key: "must-not-render",
+      content: "x".repeat(1_000),
+    }, 120)
+    expect(rendered).toContain("approval.txt")
+    expect(rendered).toContain("[redacted]")
+    expect(rendered).not.toContain("must-not-render")
+    expect(rendered.length).toBeLessThanOrEqual(120)
   })
 
   test("mounts only visible transcript rows and preserves the streaming markdown instance", async () => {
@@ -131,6 +217,21 @@ describe("M4 retained components", () => {
     expect(setup.captureCharFrame()).toContain("Running tools")
     expect(setup.captureCharFrame()).toContain("Thinking · checking the workspace")
     expect(setup.captureCharFrame()).toContain("glob")
+    expect(setup.captureCharFrame()).toContain("**/*.rs")
+    expect(setup.captureCharFrame()).toContain("Running…")
+
+    app.setState({
+      ...initial,
+      tools: {
+        [runningTool.toolCallId]: {
+          ...runningTool,
+          status: "awaiting_approval",
+        },
+      },
+    })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("? glob")
+    expect(setup.captureCharFrame()).toContain("Awaiting approval…")
 
     app.setState({
       ...initial,
@@ -145,6 +246,7 @@ describe("M4 retained components", () => {
     })
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("src/lib.rs")
+    expect(setup.captureCharFrame()).toContain("**/*.rs")
   })
 
   test("routes diff approval through generated commands", async () => {
@@ -189,6 +291,7 @@ describe("M4 retained components", () => {
     })
     renderer.root.add(app)
     await setup.renderOnce()
+    expect(app.interactionPanel.prompt.plainText).toContain("src/main.rs")
     app.interactionPanel.select.selectCurrent()
 
     expect(commands).toContainEqual({
@@ -307,8 +410,10 @@ describe("M4 retained components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
 
-    expect(app.banner.plainText).toContain("Waiting for approval · bash")
-    expect(app.statusLine.plainText).toContain("approval bash")
+    expect(app.banner.plainText).toContain("Waiting for approval · Terminal command")
+    expect(app.statusLine.plainText).toContain("approval · Terminal command")
+    expect(app.interactionPanel.prompt.plainText).toContain("wants to run a command")
+    expect(app.interactionPanel.prompt.plainText).not.toContain("execute")
 
     app.interactionPanel.select.selectCurrent()
     await Bun.sleep(0)

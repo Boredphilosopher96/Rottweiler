@@ -1238,6 +1238,11 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         &storage_root.join("trust.json"),
         options.dangerously_trust,
     )?;
+    let trusted_read_roots = workspace_roots
+        .iter()
+        .zip(&trusted_lsp_roots)
+        .filter_map(|(root, trusted)| trusted.then_some(root.clone()))
+        .collect::<Vec<_>>();
     let derived_project_trusted = trusted_lsp_roots.first().copied().unwrap_or(false);
     let mut built_tools = tokio::task::spawn_blocking(move || {
         build_tools(BuildToolsInput {
@@ -1565,7 +1570,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         None => PermissionGate::from_config(loaded_config.config.permissions.clone()),
     }
     .with_workspace_roots(&workspace_roots)
-    .with_trusted_project_read_only(derived_project_trusted || options.dangerously_trust)
+    .with_trusted_read_roots(&trusted_read_roots)
     .with_command_safety(Arc::clone(&command_safety))
     .with_project_approval_file(project_approvals.clone());
     let permissions = Arc::new(permissions);
@@ -1634,7 +1639,6 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         extension_user_home,
         extension_user_rottweiler,
         dangerously_trust: options.dangerously_trust,
-        derived_project_trusted,
         instruction_workspace_roots: Arc::clone(&instruction_workspace_roots),
         active_nested_instruction_sources,
         pending_instruction_roots: Mutex::new(HashMap::new()),
@@ -2115,6 +2119,11 @@ pub(crate) async fn compose_hosted_actor(
         &options.storage_root.join("trust.json"),
         options.dangerously_trust,
     )?;
+    let trusted_read_roots = workspace_roots
+        .iter()
+        .zip(&trusted_lsp_roots)
+        .filter_map(|(root, trusted)| trusted.then_some(root.clone()))
+        .collect::<Vec<_>>();
     let derived_project_trusted = trusted_lsp_roots.first().copied().unwrap_or(false);
     let mut built_tools = tokio::task::spawn_blocking(move || {
         build_tools(BuildToolsInput {
@@ -2406,7 +2415,7 @@ pub(crate) async fn compose_hosted_actor(
         None => PermissionGate::from_config(options.config.permissions.clone()),
     }
     .with_workspace_roots(&workspace_roots)
-    .with_trusted_project_read_only(derived_project_trusted || options.dangerously_trust)
+    .with_trusted_read_roots(&trusted_read_roots)
     .with_command_safety(Arc::clone(&command_safety))
     .with_project_approval_file(project_approvals.clone());
     let permissions = Arc::new(permissions);
@@ -2475,7 +2484,6 @@ pub(crate) async fn compose_hosted_actor(
         extension_user_home,
         extension_user_rottweiler,
         dangerously_trust: options.dangerously_trust,
-        derived_project_trusted,
         instruction_workspace_roots: Arc::clone(&instruction_workspace_roots),
         active_nested_instruction_sources,
         pending_instruction_roots: Mutex::new(HashMap::new()),
@@ -4640,7 +4648,6 @@ struct RuntimeWorkspaceRootController {
     extension_user_home: PathBuf,
     extension_user_rottweiler: PathBuf,
     dangerously_trust: bool,
-    derived_project_trusted: bool,
     instruction_workspace_roots: Arc<RwLock<Vec<PathBuf>>>,
     active_nested_instruction_sources: Arc<RwLock<BTreeSet<PathBuf>>>,
     pending_instruction_roots: Mutex<HashMap<u64, Vec<PathBuf>>>,
@@ -4691,9 +4698,18 @@ impl RuntimeWorkspaceRootController {
         max_turns: usize,
     ) -> std::result::Result<SessionActorConfig, AgentLoopError> {
         let roots = vec![workspace_root.to_path_buf()];
+        let trusted_roots =
+            trusted_lsp_roots(&roots, &self.trust_store_path, self.dangerously_trust).map_err(
+                |_error| {
+                    AgentLoopError::InvalidConfiguration(
+                        "child workspace trust could not be assessed".to_owned(),
+                    )
+                },
+            )?;
+        let child_project_trusted = trusted_roots.first().copied().unwrap_or(false);
         let built = build_tools(BuildToolsInput {
             workspace_roots: &roots,
-            trusted_lsp_roots: &[self.derived_project_trusted],
+            trusted_lsp_roots: &trusted_roots,
             question_asker: Arc::clone(&self.question_asker),
             offline: self.offline,
             global_proxy: self.global_proxy.as_ref(),
@@ -4720,7 +4736,7 @@ impl RuntimeWorkspaceRootController {
             workspace_root,
             &self.extension_user_home,
             &self.extension_user_rottweiler,
-            self.derived_project_trusted,
+            child_project_trusted,
         )
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let instruction_roots = Arc::new(RwLock::new(roots.clone()));
@@ -4761,6 +4777,14 @@ impl RuntimeWorkspaceRootController {
         }
         let permissions = parent_permissions
             .fork_for_workspace_roots(&roots)
+            .map(|gate| {
+                gate.with_trusted_read_roots(
+                    roots
+                        .iter()
+                        .zip(&trusted_roots)
+                        .filter_map(|(root, trusted)| trusted.then_some(root)),
+                )
+            })
             .map(Arc::new)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
@@ -4783,8 +4807,7 @@ impl RuntimeWorkspaceRootController {
             toolchain_runtime,
             extension_user_home: self.extension_user_home.clone(),
             extension_user_rottweiler: self.extension_user_rottweiler.clone(),
-            dangerously_trust: self.derived_project_trusted,
-            derived_project_trusted: self.derived_project_trusted,
+            dangerously_trust: self.dangerously_trust,
             instruction_workspace_roots: instruction_roots,
             active_nested_instruction_sources: active_sources,
             pending_instruction_roots: Mutex::new(HashMap::new()),
@@ -4924,13 +4947,28 @@ impl RuntimeWorkspaceRootController {
             .map(|instructions| vec![instructions.as_system_turn()])
             .unwrap_or_default();
         let built = self.prepare_tools(&roots)?;
-        let permissions = Arc::new(permissions.fork_for_workspace_roots(&roots).map_err(
-            |_error| {
+        let trusted_roots =
+            trusted_lsp_roots(&roots, &self.trust_store_path, self.dangerously_trust).map_err(
+                |_error| {
+                    AgentLoopError::InvalidConfiguration(
+                        "workspace permission trust could not be assessed".to_owned(),
+                    )
+                },
+            )?;
+        let permissions = permissions
+            .fork_for_workspace_roots(&roots)
+            .map_err(|_error| {
                 AgentLoopError::Persistence(
                     "workspace permission generation could not prepare".to_owned(),
                 )
-            },
-        )?);
+            })?
+            .with_trusted_read_roots(
+                roots
+                    .iter()
+                    .zip(&trusted_roots)
+                    .filter_map(|(root, trusted)| trusted.then_some(root)),
+            );
+        let permissions = Arc::new(permissions);
         let mut extensions = self.prepare_extensions(&roots, &built)?;
         if let Some(index) = extensions.skill_index.take() {
             supplemental_context.push(index);
@@ -5976,6 +6014,10 @@ impl ModelDriver for RecomposableHostedModel {
         self.current().has_model_alias(alias)
     }
 
+    fn title_model_alias(&self) -> Option<String> {
+        self.current().title_model_alias()
+    }
+
     async fn prepare_model(&self, alias: &str) -> std::result::Result<(), AgentLoopError> {
         self.current().prepare_model(alias).await
     }
@@ -6209,6 +6251,10 @@ impl ModelDriver for PromptRecordingModel {
         self.inner.has_model_alias(alias)
     }
 
+    fn title_model_alias(&self) -> Option<String> {
+        self.inner.title_model_alias()
+    }
+
     async fn prepare_model(&self, alias: &str) -> std::result::Result<(), AgentLoopError> {
         self.inner.prepare_model(alias).await
     }
@@ -6347,6 +6393,10 @@ impl ModelDriver for NestedInstructionsModel {
 
     fn has_model_alias(&self, alias: &str) -> bool {
         self.inner.has_model_alias(alias)
+    }
+
+    fn title_model_alias(&self) -> Option<String> {
+        self.inner.title_model_alias()
     }
 
     async fn prepare_model(&self, alias: &str) -> std::result::Result<(), AgentLoopError> {
@@ -9088,6 +9138,10 @@ impl ModelDriver for AliasAwareWebSearchModel {
         self.inner.has_model_alias(alias)
     }
 
+    fn title_model_alias(&self) -> Option<String> {
+        self.inner.title_model_alias()
+    }
+
     async fn prepare_model(&self, alias: &str) -> std::result::Result<(), AgentLoopError> {
         self.inner.prepare_model(alias).await
     }
@@ -10439,7 +10493,13 @@ fn project_accounting(
                 usage,
                 cost,
                 ..
-            } => Some((meta, turn_id, usage, cost, AccountingAttribution::Main)),
+            } => Some((
+                meta,
+                turn_id.clone(),
+                usage,
+                cost,
+                AccountingAttribution::Main,
+            )),
             EngineEvent::CompactionFinished {
                 meta,
                 summary_turn_id,
@@ -10454,10 +10514,22 @@ fn project_accounting(
                 cost,
             } => Some((
                 meta,
-                summary_turn_id,
+                summary_turn_id.clone(),
                 usage,
                 cost,
                 AccountingAttribution::Compaction,
+            )),
+            EngineEvent::SessionTitleUpdated {
+                meta,
+                usage: Some(usage),
+                cost: Some(cost),
+                ..
+            } => Some((
+                meta,
+                rw_core::TurnId("title".to_owned()),
+                usage,
+                cost,
+                AccountingAttribution::Title,
             )),
             _ => None,
         })
@@ -10470,7 +10542,7 @@ fn project_accounting(
             })?;
             Ok(TurnAccountingEntry {
                 session_id: session_id.to_owned(),
-                turn_id: turn_id.clone(),
+                turn_id,
                 sequence_id: meta.sequence_id,
                 utc_day: emitted_at_utc.utc_day(),
                 emitted_at_utc,
@@ -10485,9 +10557,16 @@ fn project_accounting(
 fn project_session(session_id: &str, events: &[EngineEvent], path: &Path) -> SessionProjection {
     let title = events
         .iter()
+        .rev()
         .find_map(|event| match event {
-            EngineEvent::UserMessageAccepted { content, .. } => Some(compact_title(content)),
+            EngineEvent::SessionTitleUpdated { title, .. } => Some(title.clone()),
             _ => None,
+        })
+        .or_else(|| {
+            events.iter().find_map(|event| match event {
+                EngineEvent::UserMessageAccepted { content, .. } => Some(compact_title(content)),
+                _ => None,
+            })
         })
         .unwrap_or_else(|| "New session".to_owned());
     let mut transcript = String::new();
@@ -14314,6 +14393,53 @@ mod tests {
     }
 
     #[test]
+    fn durable_generated_title_overrides_prompt_fallback_in_the_session_index() {
+        let fixture = tempdir().expect("fixture");
+        let storage = fixture.path().join("storage");
+        initialize_private_storage_root(&storage).expect("storage");
+        let session_id = "session-generated-title";
+        let event_meta = |sequence| EventMeta {
+            protocol_version: SESSION_EVENT_VERSION,
+            session_id: SessionId(session_id.to_owned()),
+            sequence_id: SequenceId(sequence),
+            emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+            caused_by: None,
+        };
+        let events = vec![
+            EngineEvent::UserMessageAccepted {
+                meta: event_meta(0),
+                agent_turn: 1,
+                content: "please inspect everything in this repo".to_owned(),
+                attachments: Vec::new(),
+            },
+            EngineEvent::SessionTitleUpdated {
+                meta: event_meta(1),
+                title: "Repository Architecture Review".to_owned(),
+                usage: None,
+                cost: None,
+            },
+        ];
+        let path = fixture.path().join("events.jsonl");
+        std::fs::write(&path, b"fixture").expect("event file");
+        let projection = project_session(session_id, &events, &path);
+        assert_eq!(projection.summary.title, "Repository Architecture Review");
+
+        SessionIndex::open(&storage)
+            .expect("index")
+            .upsert(&projection)
+            .expect("upsert");
+        assert_eq!(
+            SessionIndex::open(&storage)
+                .expect("index")
+                .get(session_id)
+                .expect("query")
+                .expect("session")
+                .title,
+            "Repository Architecture Review"
+        );
+    }
+
+    #[test]
     #[allow(clippy::too_many_lines)]
     fn fork_storage_starts_empty_review_and_skips_inherited_accounting() {
         let fixture = tempdir().expect("fixture");
@@ -15486,6 +15612,14 @@ mod tests {
             "fn uniquely_parent_bound_symbol() {}\n",
         )
         .expect("parent symbol");
+        let child_command = added.join(".agents/commands/child-only.md");
+        std::fs::create_dir_all(child_command.parent().expect("child command parent"))
+            .expect("child command directory");
+        std::fs::write(
+            &child_command,
+            "---\ndescription: Child-only trusted command\n---\nInspect the child workspace",
+        )
+        .expect("child command");
         let primary = std::fs::canonicalize(primary).expect("canonical primary");
         let added = std::fs::canonicalize(added).expect("canonical added");
         let checkpoint_root = private.join("checkpoint");
@@ -15527,7 +15661,8 @@ mod tests {
             extension_user_home: private.clone(),
             extension_user_rottweiler: private.join(".rottweiler"),
             dangerously_trust: false,
-            derived_project_trusted: false,
+            // Simulate a trusted parent. Child extension discovery must still
+            // use the child's independently assessed trust state.
             instruction_workspace_roots: Arc::new(RwLock::new(vec![primary.clone()])),
             active_nested_instruction_sources: Arc::new(RwLock::new(BTreeSet::new())),
             pending_instruction_roots: Mutex::new(HashMap::new()),
@@ -15549,6 +15684,40 @@ mod tests {
             .expect("lease-root child runtime");
         assert_eq!(child.workspace_root, added);
         assert!(child.additional_workspace_roots.is_empty());
+        assert!(
+            child
+                .commands
+                .descriptors()
+                .all(|command| command.name() != "child-only"),
+            "a trusted parent must not authorize executable child extensions"
+        );
+        let child_assessment = FolderTrustStore::new(private.join("trust.json"))
+            .assess(&added)
+            .expect("assess child trust");
+        FolderTrustStore::new(private.join("trust.json"))
+            .grant(&child_assessment)
+            .expect("trust child");
+        let trusted_child = controller
+            .child_config(
+                &private,
+                &SessionId("trusted-lease-child".to_owned()),
+                &added,
+                "fast",
+                Arc::new(CapturingModel {
+                    request: Arc::new(Mutex::new(None)),
+                }),
+                Arc::new(rw_core::NoopSecretRedactor),
+                permissions.as_ref(),
+                4,
+            )
+            .expect("trusted child runtime");
+        assert!(
+            trusted_child
+                .commands
+                .descriptors()
+                .any(|command| command.name() == "child-only"),
+            "an independently trusted child must load its project extensions"
+        );
         let child_context = ToolContext::new(&added).expect("child tool context");
         let symbols = child
             .tools
@@ -15754,7 +15923,6 @@ mod tests {
             extension_user_home: private.clone(),
             extension_user_rottweiler: private.join(".rottweiler"),
             dangerously_trust: false,
-            derived_project_trusted: false,
             instruction_workspace_roots: Arc::new(RwLock::new(generation.roots.clone())),
             active_nested_instruction_sources: Arc::new(RwLock::new(BTreeSet::new())),
             pending_instruction_roots: Mutex::new(HashMap::new()),

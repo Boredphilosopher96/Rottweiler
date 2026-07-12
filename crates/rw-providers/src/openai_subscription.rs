@@ -30,6 +30,13 @@ pub const OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT: &str =
 /// Authenticated model catalog backed by a `ChatGPT` Codex subscription.
 pub const OPENAI_SUBSCRIPTION_MODELS_ENDPOINT: &str =
     "https://chatgpt.com/backend-api/codex/models";
+/// Codex protocol version advertised only to the `ChatGPT` model-catalog endpoint.
+///
+/// The service uses this value for catalog-schema compatibility. It is not
+/// Rottweiler's application identity and must not replace Rottweiler's own
+/// User-Agent on inference or authentication requests. Update this alongside
+/// the captured subscription catalog fixture when Codex changes that schema.
+pub const OPENAI_SUBSCRIPTION_MODELS_COMPATIBILITY_VERSION: &str = "0.144.1";
 /// Exact callback required by the public native-client registration.
 pub const OPENAI_SUBSCRIPTION_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 

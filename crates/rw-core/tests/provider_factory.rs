@@ -44,6 +44,49 @@ struct ExtensionFixtureProvider {
 
 struct StartFailProvider;
 
+struct AuthoritativeCatalogProvider {
+    streamed_models: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Provider for AuthoritativeCatalogProvider {
+    fn name(&self) -> &'static str {
+        "authoritative-catalog-fixture"
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        extension_capabilities()
+    }
+
+    async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
+        Ok(Some(DiscoveredProviderCatalog {
+            provider: "live".to_owned(),
+            models: vec![DiscoveredModel {
+                id: "current".to_owned(),
+                display_name: Some("Current".to_owned()),
+                description: None,
+                capabilities: Some(extension_capabilities()),
+                pricing: None,
+            }],
+        }))
+    }
+
+    async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
+        self.streamed_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request.model.clone());
+        Ok(Box::pin(futures_util::stream::iter([
+            Ok(ProviderEvent::MessageStart {
+                model: request.model,
+            }),
+            Ok(ProviderEvent::Finished {
+                reason: FinishReason::Stop,
+            }),
+        ])))
+    }
+}
+
 #[async_trait]
 impl Provider for StartFailProvider {
     fn name(&self) -> &'static str {
@@ -187,6 +230,101 @@ fn opaque_router_route_prices_the_actual_failover_candidate() {
             amount_micros: 100,
             currency: "USD".to_owned(),
         }
+    );
+}
+
+#[tokio::test]
+async fn live_catalog_excludes_stale_alias_candidate_before_inference() {
+    let streamed_models = Arc::new(Mutex::new(Vec::new()));
+    let provider: Arc<dyn Provider> = Arc::new(AuthoritativeCatalogProvider {
+        streamed_models: Arc::clone(&streamed_models),
+    });
+    let mut config = rw_types::config::Config::default();
+    config.providers.clear();
+    config.models.default = "fast".to_owned();
+    config.models.aliases = BTreeMap::from([(
+        "fast".to_owned(),
+        vec!["live/retired".to_owned(), "live/current".to_owned()],
+    )]);
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestKeychain::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Deny,
+        PricingTable::default(),
+    )
+    .with_extension_providers([("live/", provider)])
+    .build(&config)
+    .unwrap_or_else(|error| panic!("runtime must compose: {error}"));
+
+    ModelDriver::prepare_model(&runtime, "fast")
+        .await
+        .unwrap_or_else(|error| panic!("live alias must validate: {error}"));
+    let events = ModelDriver::stream(&runtime, "fast", request("ignored"))
+        .unwrap_or_else(|error| panic!("validated stream must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(events.iter().all(Result::is_ok));
+    assert_eq!(
+        streamed_models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_slice(),
+        ["current"],
+        "the configured-but-undiscovered retired model must never receive inference"
+    );
+}
+
+#[tokio::test]
+async fn provider_reactivation_revalidates_cached_alias_and_concrete_catalog_authority() {
+    let current = json_response(r#"{"data":[{"id":"model-a"}]}"#);
+    let retired = json_response(r#"{"data":[{"id":"replacement"}]}"#);
+    let server = spawn_server(
+        "/v1/chat/completions",
+        vec![current.clone(), current, retired.clone(), retired],
+    );
+    let config = config(&server.endpoint, &["fixture/model-a"]);
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestKeychain::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        pricing([("fixture/model-a", false)]),
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("runtime must compose: {error}"));
+
+    ModelDriver::prepare_model(&runtime, "fixture/model-a")
+        .await
+        .unwrap_or_else(|error| panic!("initial concrete route must validate: {error}"));
+    ModelDriver::prepare_model(&runtime, "fast")
+        .await
+        .unwrap_or_else(|error| panic!("initial alias route must validate: {error}"));
+
+    runtime
+        .activate_provider("fixture")
+        .unwrap_or_else(|error| panic!("provider must reactivate: {error}"));
+    let Err(concrete_error) = ModelDriver::prepare_model(&runtime, "fixture/model-a").await else {
+        panic!("reactivation must invalidate concrete catalog authority");
+    };
+    assert!(
+        concrete_error
+            .to_string()
+            .contains("not in the live catalog")
+    );
+    let Err(alias_error) = ModelDriver::prepare_model(&runtime, "fast").await else {
+        panic!("reactivation must invalidate alias catalog authority");
+    };
+    assert!(alias_error.to_string().contains("not in the live catalog"));
+
+    let requests = server
+        .task
+        .join()
+        .unwrap_or_else(|_| panic!("catalog server must join"));
+    assert_eq!(requests.len(), 4);
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.starts_with("GET /v1/models "))
     );
 }
 

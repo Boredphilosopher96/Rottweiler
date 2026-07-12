@@ -113,6 +113,7 @@ pub(crate) fn collect(storage_root: &Path, query: &StatsQuery) -> Result<StatsRe
         empty_attribution(AccountingAttribution::Main),
         empty_attribution(AccountingAttribution::Compaction),
         empty_attribution(AccountingAttribution::Subagent),
+        empty_attribution(AccountingAttribution::Title),
     ];
     for entry in entries {
         if !selected_sessions.contains(&entry.session_id) {
@@ -494,13 +495,14 @@ fn empty_attribution(attribution: AccountingAttribution) -> AttributionTotals {
 }
 
 fn attribution_bucket<'a>(
-    buckets: &'a mut [AttributionTotals; 3],
+    buckets: &'a mut [AttributionTotals; 4],
     attribution: &AccountingAttribution,
 ) -> &'a mut AttributionTotals {
     let index = match attribution {
         AccountingAttribution::Main => 0,
         AccountingAttribution::Compaction => 1,
         AccountingAttribution::Subagent => 2,
+        AccountingAttribution::Title => 3,
     };
     &mut buckets[index]
 }
@@ -656,6 +658,7 @@ fn attribution_name(attribution: &AccountingAttribution) -> &'static str {
         AccountingAttribution::Main => "main",
         AccountingAttribution::Compaction => "compaction",
         AccountingAttribution::Subagent => "subagents",
+        AccountingAttribution::Title => "titles",
     }
 }
 

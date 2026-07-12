@@ -26,9 +26,13 @@ pub const GITHUB_COPILOT_DEVICE_CODE_ENDPOINT: &str = "https://github.com/login/
 /// Public GitHub device-token endpoint used by released clients.
 pub const GITHUB_COPILOT_ACCESS_TOKEN_ENDPOINT: &str =
     "https://github.com/login/oauth/access_token";
-/// Compile-time hook for a Rottweiler-owned public GitHub OAuth app client id.
-pub const GITHUB_COPILOT_COMPILED_CLIENT_ID: Option<&str> =
-    option_env!("ROTTWEILER_GITHUB_COPILOT_CLIENT_ID");
+/// Public client id for Rottweiler's GitHub OAuth application.
+///
+/// OAuth device-flow client ids identify the application and are not secrets.
+/// Keeping the first-party id in the binary makes Copilot subscription login
+/// work in every Cargo and Homebrew build without a release-only environment
+/// variable.
+pub const GITHUB_COPILOT_CLIENT_ID: &str = "Ov23li0EIrAqgRskCzlG";
 
 const DEVICE_SCOPE: &str = "read:user";
 const POLLING_SAFETY_MARGIN: Duration = Duration::from_secs(3);
@@ -195,17 +199,16 @@ impl GitHubCopilotDeviceFlow {
         ))
     }
 
-    /// Uses the optional build-time Rottweiler GitHub OAuth app id.
+    /// Uses Rottweiler's built-in public GitHub OAuth app id.
     ///
     /// # Errors
     ///
-    /// Fails closed when the release was not built with its own client id.
+    /// Fails closed if the built-in client id is malformed.
     pub fn from_compiled(
         proxy: Option<&Url>,
         proxy_authentication: Option<&ProxyAuthentication>,
     ) -> Result<Self, ProviderError> {
-        let client_id = GITHUB_COPILOT_COMPILED_CLIENT_ID.ok_or_else(missing_client_id)?;
-        Self::new(client_id, proxy, proxy_authentication)
+        Self::new(GITHUB_COPILOT_CLIENT_ID, proxy, proxy_authentication)
     }
 
     /// Builds a flow around injected I/O, time, and delay boundaries.

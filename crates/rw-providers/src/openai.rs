@@ -310,9 +310,10 @@ fn discovery_endpoint(endpoint: &Url, subscription: bool) -> Result<Url, Provide
     discovered.set_query(None);
     discovered.set_fragment(None);
     if subscription {
-        discovered
-            .query_pairs_mut()
-            .append_pair("client_version", env!("CARGO_PKG_VERSION"));
+        discovered.query_pairs_mut().append_pair(
+            "client_version",
+            crate::OPENAI_SUBSCRIPTION_MODELS_COMPATIBILITY_VERSION,
+        );
     }
     Ok(discovered)
 }

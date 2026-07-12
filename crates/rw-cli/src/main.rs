@@ -4,7 +4,7 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -1139,10 +1139,21 @@ fn render_session_search(
 }
 
 async fn run_local_tui(cli: &Cli) -> Result<()> {
-    let workspace =
+    let launch_directory =
         fs::canonicalize(std::env::current_dir().into_diagnostic()?).into_diagnostic()?;
-    let storage_root = configuration_root()?;
+    let workspace = discover_local_workspace(&launch_directory);
+    // Resolve every user-supplied relative path while the process still has
+    // the invocation directory as its cwd. Repository discovery may select an
+    // ancestor as the effective workspace, but that must not silently change
+    // what a relative `--add-dir` names.
     let workspace_roots = canonical_workspace_roots(&workspace, &cli.add_dirs)?;
+    // The supervised engine inherits its working directory. Anchor it at the
+    // discovered project root so relative read/glob/tool paths remain stable
+    // when `rw` is launched from a repository subdirectory.
+    if workspace != launch_directory {
+        std::env::set_current_dir(&workspace).into_diagnostic()?;
+    }
+    let storage_root = configuration_root()?;
     prompt_for_folder_trust(&storage_root, &workspace_roots, cli.dangerously_trust)?;
     let project_assessment =
         rw_store::trust::FolderTrustStore::new(storage_root.join("trust.json"))
@@ -1217,22 +1228,36 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
     result
 }
 
+fn discover_local_workspace(launch_directory: &Path) -> PathBuf {
+    launch_directory
+        .ancestors()
+        .find(|directory| {
+            fs::symlink_metadata(directory.join(".git"))
+                .is_ok_and(|metadata| metadata.is_dir() || metadata.is_file())
+        })
+        .unwrap_or(launch_directory)
+        .to_path_buf()
+}
+
 #[derive(Clone, Default)]
 struct DeferredHostedEngine {
-    inner: Arc<tokio::sync::RwLock<Option<server::HostedEngine>>>,
+    inner: Arc<RwLock<Option<server::HostedEngine>>>,
     ready: Arc<AtomicBool>,
 }
 
 impl DeferredHostedEngine {
-    async fn install(&self, engine: server::HostedEngine) {
-        *self.inner.write().await = Some(engine);
+    fn install(&self, engine: server::HostedEngine) {
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(engine);
         self.ready.store(true, Ordering::Release);
     }
 
-    async fn loaded(&self) -> std::result::Result<server::HostedEngine, String> {
+    fn loaded(&self) -> std::result::Result<server::HostedEngine, String> {
         self.inner
             .read()
-            .await
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
             .ok_or_else(|| "engine session runtime is still starting".to_owned())
     }
@@ -1943,7 +1968,7 @@ impl server::ServerEngine for DeferredHostedEngine {
         bound_client: ClientId,
         command: ClientCommand,
     ) -> std::result::Result<CommandOutcome, String> {
-        self.loaded().await?.dispatch(bound_client, command).await
+        self.loaded()?.dispatch(bound_client, command).await
     }
 
     async fn subscribe(
@@ -1955,8 +1980,7 @@ impl server::ServerEngine for DeferredHostedEngine {
         tokio::sync::mpsc::Receiver<std::result::Result<EngineEvent, String>>,
         String,
     > {
-        self.loaded()
-            .await?
+        self.loaded()?
             .subscribe(bound_client, session_id, last_seen)
             .await
     }
@@ -1968,8 +1992,7 @@ impl server::ServerEngine for DeferredHostedEngine {
         status: i32,
         captured_output: Option<String>,
     ) -> std::result::Result<(), String> {
-        self.loaded()
-            .await?
+        self.loaded()?
             .complete_shell(session_id, shell_id, status, captured_output)
             .await
     }
@@ -2057,23 +2080,23 @@ async fn run_serve(
             factory,
         )
         .map_err(|error| miette!(error.to_string()))?;
+        // The authenticated control plane is usable as soon as the host and
+        // its bounded registries exist. Session composition may wait for an
+        // explicit OS-keychain authorization, so it must never gate health or
+        // make the supervisor kill an otherwise healthy engine after 30s.
         let resume = session_metadata_path(&storage_root, &session_id).is_file();
-        host.prepare_session(
+        let hosted = server::HostedEngine::new(host.clone());
+        host.prepare_session_after_reservation(
             CreateSessionRequest {
                 session_id: SessionId(session_id),
                 workspace: workspace.display().to_string(),
                 model: model.map(rw_core::ModelAlias),
             },
             resume,
+            || deferred.install(hosted),
         )
         .await
         .map_err(|error| miette!(error.to_string()))?;
-        // The transport socket is created before host composition so health
-        // probes can distinguish "starting" from "not running". Do not expose
-        // the hosted engine as ready until its supervisor-selected session is
-        // actually loaded: an early TUI resume can otherwise reserve the same
-        // fresh session id and permanently race initial creation.
-        deferred.install(server::HostedEngine::new(host)).await;
         Ok(())
     }
     .await;
@@ -3446,9 +3469,9 @@ mod tests {
 
     use super::{
         Cli, Command, DetachedServerReady, RuntimeDirectoryGuard, TrustCommand, UpgradeChannel,
-        append_execution_lease_restart_flag, create_guarded_server_runtime, resolve_tui_executable,
-        sync_install_paths, valid_bootstrap_token, write_github_device_prompt,
-        write_private_file_atomic,
+        append_execution_lease_restart_flag, create_guarded_server_runtime,
+        discover_local_workspace, resolve_tui_executable, sync_install_paths,
+        valid_bootstrap_token, write_github_device_prompt, write_private_file_atomic,
     };
     #[cfg(unix)]
     use super::{rustix_device_id, rustix_mode_bits};
@@ -3798,5 +3821,20 @@ mod tests {
                 .unwrap_or_else(|read_error| panic!("outside must remain readable: {read_error}")),
             "unchanged"
         );
+    }
+
+    #[test]
+    fn local_tui_discovers_the_repository_root_from_a_nested_launch_directory() {
+        let root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary directory must exist: {error}"));
+        let repository = root.path().join("project");
+        let nested = repository.join("scripts/tests");
+        std::fs::create_dir_all(repository.join(".git"))
+            .unwrap_or_else(|error| panic!("git marker must exist: {error}"));
+        std::fs::create_dir_all(&nested)
+            .unwrap_or_else(|error| panic!("nested directory must exist: {error}"));
+
+        assert_eq!(discover_local_workspace(&nested), repository);
+        assert_eq!(discover_local_workspace(root.path()), root.path());
     }
 }

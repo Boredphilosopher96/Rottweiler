@@ -8,7 +8,7 @@ import {
   type TreeSitterClient,
 } from "@opentui/core"
 
-import { estimateEntryHeight, entryKey, formatCost, toolOutputText, TranscriptVirtualizer, turnMarkdown } from "../render"
+import { estimateEntryHeight, entryKey, formatCost, formatToolArguments, toolOutputText, TranscriptVirtualizer, turnMarkdown } from "../render"
 import type {
   RottweilerState,
   SubagentProjection,
@@ -31,8 +31,15 @@ export class ToolBlockRenderable extends BoxRenderable {
   #collapsed: boolean
   #tool: ToolProjection
   #theme: RottweilerTheme
+  #onExpansionChange: ((expanded: boolean) => void) | undefined
 
-  constructor(ctx: RenderContext, theme: RottweilerTheme, tool: ToolProjection) {
+  constructor(
+    ctx: RenderContext,
+    theme: RottweilerTheme,
+    tool: ToolProjection,
+    expanded?: boolean,
+    onExpansionChange?: (expanded: boolean) => void,
+  ) {
     super(ctx, {
       id: `tool-${tool.toolCallId}`,
       width: "100%",
@@ -49,7 +56,8 @@ export class ToolBlockRenderable extends BoxRenderable {
     })
     this.#theme = theme
     this.#tool = tool
-    this.#collapsed = tool.status === "finished"
+    this.#collapsed = expanded === undefined ? tool.status === "finished" : !expanded
+    this.#onExpansionChange = onExpansionChange
     this.header = new TextRenderable(ctx, { content: "", fg: theme.foreground, height: 1 })
     this.body = new TextRenderable(ctx, {
       content: "",
@@ -71,11 +79,14 @@ export class ToolBlockRenderable extends BoxRenderable {
 
   update(tool: ToolProjection): void {
     this.#tool = tool
-    const glyph = tool.status === "running" ? "◌" : tool.isError === true ? "✕" : "✓"
+    const glyph = tool.status === "awaiting_approval" ? "?" : tool.status === "running" ? "◌" : tool.isError === true ? "✕" : "✓"
     const approval = tool.status === "awaiting_approval" ? " · approval needed" : ""
+    const args = formatToolArguments(tool.args, 96)
     const result =
-      tool.status === "finished" ? singleLine(toolOutputText(tool.output), 72) : ""
-    this.header.content = `${this.#collapsed ? "▸" : "▾"} ${glyph} ${tool.name}${approval}${result === "" ? "" : ` · ${result}`}`
+      tool.status === "finished" && this.#collapsed
+        ? singleLine(toolOutputText(tool.output), 72)
+        : ""
+    this.header.content = `${this.#collapsed ? "▸" : "▾"} ${glyph} ${tool.name}${args === "" ? "" : ` · ${args}`}${approval}${result === "" ? "" : ` · ${result}`}`
     this.header.fg =
       tool.status === "awaiting_approval"
         ? this.#theme.warning
@@ -90,19 +101,39 @@ export class ToolBlockRenderable extends BoxRenderable {
       this.height = 2
       return
     }
-    const live = tool.chunks.map((chunk) => chunk.chunk).join("")
-    const final = toolOutputText(tool.output)
-    this.body.content = [tool.rationale, live, final].filter(Boolean).join("\n") || "Working…"
+    this.body.content = toolBodyContent(tool)
     const bodyRows = Math.min(8, Math.max(1, this.body.plainText.split("\n").length))
     this.body.height = bodyRows
-    this.height = this.#collapsed ? 2 : bodyRows + 2
+    this.height = bodyRows + 3
   }
 
   toggle(): void {
     this.#collapsed = !this.#collapsed
+    this.#onExpansionChange?.(!this.#collapsed)
     this.body.visible = !this.#collapsed
     this.update(this.#tool)
   }
+}
+
+function toolBodyContent(tool: ToolProjection): string {
+  const live = tool.chunks.map((chunk) => chunk.chunk).join("")
+  const final = toolOutputText(tool.output)
+  const output = tool.status === "finished" && final !== "" ? final : live
+  const activity = tool.status === "awaiting_approval"
+    ? "Awaiting approval…"
+    : tool.status === "running"
+      ? "Running…"
+      : final === "" && live === ""
+        ? "Completed with no output."
+        : ""
+  return [`Arguments · ${formatToolArguments(tool.args)}`, tool.rationale, output, activity]
+    .filter(Boolean)
+    .join("\n")
+}
+
+function toolBlockRows(tool: ToolProjection): number {
+  if (tool.status === "finished") return 2
+  return Math.min(8, Math.max(1, toolBodyContent(tool).split("\n").length)) + 3
 }
 
 export class SubagentPanelRenderable extends BoxRenderable {
@@ -237,9 +268,16 @@ class TurnCardRenderable extends BoxRenderable {
     tools: readonly ToolProjection[],
     subagents: readonly SubagentProjection[],
     subagentTotal: number,
+    toolExpansion: Map<string, boolean>,
     treeSitterClient?: TreeSitterClient,
   ) {
-    const role = entry.turn.role === "assistant" ? "Rottweiler" : entry.turn.role
+    const role = entry.presentation === "command_result"
+      ? "Command result"
+      : entry.turn.role === "assistant"
+        ? "Rottweiler"
+        : entry.turn.role === "user"
+          ? "You"
+          : "Notice"
     super(ctx, {
       id: `turn-${entryKey(entry)}`,
       width: "100%",
@@ -255,7 +293,9 @@ class TurnCardRenderable extends BoxRenderable {
       paddingY: 1,
     })
     this.header = new TextRenderable(ctx, {
-      content: `${role} · ${cost}`,
+      content: entry.presentation === "command_result"
+        ? `${role} · ${entry.title ?? "completed"}`
+        : `${role} · ${cost}`,
       fg: entry.turn.role === "assistant" ? theme.accentStrong : theme.info,
       height: 1,
       flexShrink: 0,
@@ -277,7 +317,13 @@ class TurnCardRenderable extends BoxRenderable {
     this.add(this.header)
     this.add(this.markdown)
     for (const tool of tools) {
-      this.add(new ToolBlockRenderable(ctx, theme, tool))
+      this.add(new ToolBlockRenderable(
+        ctx,
+        theme,
+        tool,
+        toolExpansion.get(tool.toolCallId),
+        (expanded) => toolExpansion.set(tool.toolCallId, expanded),
+      ))
     }
     if (subagents.length > 0) {
       const panel = new SubagentPanelRenderable(ctx, theme)
@@ -303,6 +349,7 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #theme: RottweilerTheme
   readonly #syntaxStyle: SyntaxStyle
   readonly #treeSitterClient: TreeSitterClient | undefined
+  readonly #toolExpansion = new Map<string, boolean>()
   #state: RottweilerState | null = null
   #transcript: readonly TranscriptEntry[] | null = null
   #tools: RottweilerState["tools"] | null = null
@@ -450,13 +497,14 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#virtualizedSubagents !== state.subagents ||
       this.#virtualizedWidth !== width
     ) {
-      const extraRowsByTurn = new Map<string, number>()
+      const toolRowsByTurn = new Map<string, number>()
       for (const tool of Object.values(state.tools)) {
-        extraRowsByTurn.set(
+        toolRowsByTurn.set(
           tool.turnId,
-          (extraRowsByTurn.get(tool.turnId) ?? 0) + (tool.status === "finished" ? 2 : 4),
+          (toolRowsByTurn.get(tool.turnId) ?? 0) + (tool.status === "finished" ? 2 : 4),
         )
       }
+      const subagentRowsByTurn = new Map<string, number>()
       const subagentsByTurn = new Map<string, SubagentProjection[]>()
       for (const subagent of Object.values(state.subagents)) {
         const group = subagentsByTurn.get(subagent.parentTurnId) ?? []
@@ -466,16 +514,20 @@ export class TranscriptRenderable extends BoxRenderable {
       for (const [turnId, subagents] of subagentsByTurn) {
         const visible = boundedSubagents(subagents)
         if (visible.length > 0) {
-          extraRowsByTurn.set(
+          subagentRowsByTurn.set(
             turnId,
-            (extraRowsByTurn.get(turnId) ?? 0) + visible.length + 3,
+            visible.length + 3,
           )
         }
       }
+      const toolEntryKeys = projectionEntryKeys(state.transcript, "tool")
+      const subagentEntryKeys = projectionEntryKeys(state.transcript, "assistant")
       this.#virtualizer.update(
         state.transcript,
         width,
-        (entry) => extraRowsByTurn.get(entry.agentTurn) ?? 0,
+        (entry) =>
+          (toolEntryKeys.has(entryKey(entry)) ? (toolRowsByTurn.get(entry.agentTurn) ?? 0) : 0) +
+          (subagentEntryKeys.has(entryKey(entry)) ? (subagentRowsByTurn.get(entry.agentTurn) ?? 0) : 0),
       )
       this.#virtualizedTranscript = state.transcript
       this.#virtualizedTools = state.tools
@@ -493,6 +545,8 @@ export class TranscriptRenderable extends BoxRenderable {
       card.destroyRecursively()
     }
     this.mountedCards.clear()
+    const toolEntryKeys = projectionEntryKeys(state.transcript, "tool")
+    const subagentEntryKeys = projectionEntryKeys(state.transcript, "assistant")
     for (let index = window.start; index < window.end; index += 1) {
       const entry = state.transcript[index]
       if (entry === undefined) {
@@ -502,8 +556,12 @@ export class TranscriptRenderable extends BoxRenderable {
       if (this.mountedCards.has(key)) {
         continue
       }
-      const tools = Object.values(state.tools).filter((tool) => tool.turnId === entry.agentTurn)
-      const turnSubagents = subagentsForTurn(state, entry.agentTurn)
+      const tools = toolEntryKeys.has(key)
+        ? Object.values(state.tools).filter((tool) => tool.turnId === entry.agentTurn)
+        : []
+      const turnSubagents = subagentEntryKeys.has(key)
+        ? subagentsForTurn(state, entry.agentTurn)
+        : []
       const visibleSubagents = boundedSubagents(turnSubagents)
       const card = new TurnCardRenderable(
         this.ctx,
@@ -518,6 +576,7 @@ export class TranscriptRenderable extends BoxRenderable {
         tools,
         visibleSubagents,
         turnSubagents.length,
+        this.#toolExpansion,
         this.#treeSitterClient,
       )
       this.scroller.insertBefore(card, this.#bottomSpacer)
@@ -558,7 +617,7 @@ export class TranscriptRenderable extends BoxRenderable {
       ? "_Waiting for tool approval…_"
       : tools.some((tool) => tool.status === "running")
         ? "_Running tools…_"
-        : "_Waiting for response…_"
+        : "_Working…_"
     this.streamingMarkdown.visible = true
     this.streamingMarkdown.content = tail.text.length === 0 ? emptyActivity : tail.text
     this.streamingMarkdown.streaming = tail.finished === null
@@ -575,10 +634,7 @@ export class TranscriptRenderable extends BoxRenderable {
     this.#replaceTailTools(tools)
     const textRows = Math.max(1, tail.text.split("\n").length)
     this.streamingMarkdown.height = Math.min(20, textRows)
-    const toolRows = tools.reduce(
-      (rows, tool) => rows + (tool.status === "finished" ? 2 : 4),
-      0,
-    )
+    const toolRows = tools.reduce((rows, tool) => rows + toolBlockRows(tool), 0)
     this.#tailTools.height = toolRows
     this.streamingCard.height = Math.min(
       32,
@@ -597,9 +653,30 @@ export class TranscriptRenderable extends BoxRenderable {
       child.destroyRecursively()
     }
     for (const tool of tools) {
-      this.#tailTools.add(new ToolBlockRenderable(this.ctx, this.#theme, tool))
+      this.#tailTools.add(new ToolBlockRenderable(
+        this.ctx,
+        this.#theme,
+        tool,
+        this.#toolExpansion.get(tool.toolCallId),
+        (expanded) => this.#toolExpansion.set(tool.toolCallId, expanded),
+      ))
     }
   }
+}
+
+function projectionEntryKeys(
+  transcript: readonly TranscriptEntry[],
+  preferredRole: TranscriptEntry["turn"]["role"],
+): Set<string> {
+  const fallback = new Map<string, TranscriptEntry>()
+  const preferred = new Map<string, TranscriptEntry>()
+  for (const entry of transcript) {
+    fallback.set(entry.agentTurn, entry)
+    if (entry.turn.role === preferredRole) preferred.set(entry.agentTurn, entry)
+  }
+  return new Set(
+    [...fallback.keys()].map((turnId) => entryKey(preferred.get(turnId) ?? fallback.get(turnId)!)),
+  )
 }
 
 function subagentsForTurn(state: RottweilerState, turnId: string): SubagentProjection[] {

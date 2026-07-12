@@ -437,6 +437,153 @@ fn print_mode_slash_command_finishes_without_waiting_for_a_turn() {
     )));
 }
 
+#[cfg(unix)]
+#[test]
+fn local_tui_launch_anchors_relative_added_roots_before_repository_discovery() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::Builder::new()
+        .prefix("rw-launch-roots-")
+        .tempdir_in("/tmp")
+        .expect("short root");
+    let run = TestRun::new(&root, "repository");
+    init_git_repository(&run.workspace);
+    let nested = run.workspace.join("src/nested");
+    let added = root.path().join("added-root");
+    fs::create_dir_all(&nested).expect("nested launch directory");
+    fs::create_dir(&added).expect("additional workspace root");
+    let script = root.path().join("offline.json");
+    write_script(&script, Vec::new());
+    let report = root.path().join("launch-cwd");
+    let wrapper = root.path().join("cwd-tui");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\npwd > \"$ROTTWEILER_TEST_REPORT_FILE\"\nexit 0\n",
+    )
+    .expect("TUI wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("wrapper mode");
+
+    let output = base_command(&nested, &run.home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ROTTWEILER_TUI_BIN", &wrapper)
+        .env("ROTTWEILER_TEST_REPORT_FILE", &report)
+        .args([
+            "--add-dir",
+            "../../../added-root",
+            "--in-memory-replay-script",
+            script.to_str().expect("script path"),
+        ])
+        .output()
+        .expect("supervised TUI process");
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    assert_eq!(
+        fs::canonicalize(fs::read_to_string(&report).expect("TUI cwd report").trim())
+            .expect("canonical reported cwd"),
+        fs::canonicalize(&run.workspace).expect("canonical repository"),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&format!(
+            "workspace: {}",
+            fs::canonicalize(&added)
+                .expect("canonical additional root")
+                .display()
+        )),
+        "relative --add-dir must resolve from the nested invocation cwd"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn supervised_tui_crosses_the_real_host_for_commands_and_tool_approval() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::Builder::new()
+        .prefix("rw-host-ui-")
+        .tempdir_in("/tmp")
+        .expect("short root");
+    let run = TestRun::new(&root, "full-host-tui-roundtrip");
+    let script = root.path().join("tool-roundtrip.json");
+    write_script(
+        &script,
+        vec![
+            vec![
+                ProviderEvent::ToolCallStart {
+                    id: "write-canary".to_owned(),
+                    name: "write".to_owned(),
+                },
+                ProviderEvent::ToolCallEnd {
+                    id: "write-canary".to_owned(),
+                    arguments: json!({
+                        "path": "approval.txt",
+                        "content": "ROTTWEILER_FULL_HOST_CANARY\n",
+                    }),
+                },
+                ProviderEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                },
+            ],
+            text_events("The approved write completed."),
+        ],
+    );
+    let worker = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/tui/test/full-host-roundtrip-worker.ts")
+        .canonicalize()
+        .expect("roundtrip worker");
+    let wrapper = root.path().join("roundtrip-tui");
+    fs::write(
+        &wrapper,
+        format!("#!/bin/sh\nexec bun '{}'\n", worker.display()),
+    )
+    .expect("TUI wrapper");
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).expect("wrapper mode");
+    let report = root.path().join("roundtrip-report.json");
+
+    let output = base_command(&run.workspace, &run.home)
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("ROTTWEILER_TUI_BIN", &wrapper)
+        .env("ROTTWEILER_TEST_REPORT_FILE", &report)
+        .args([
+            "--dangerously-trust",
+            "--in-memory-replay-script",
+            script.to_str().expect("script path"),
+        ])
+        .output()
+        .expect("supervised TUI process");
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&fs::read(&report).expect("roundtrip report"))
+            .expect("valid roundtrip report");
+    assert!(
+        report["commandResult"]
+            .as_str()
+            .is_some_and(|value| value.contains("Agent: idle"))
+    );
+    assert!(report["approvalBanner"].as_str().is_some_and(|value| {
+        value.contains("Waiting for approval") && value.contains("Write file")
+    }));
+    assert!(
+        report["approvalPanel"]
+            .as_str()
+            .is_some_and(|value| value.contains("approval.txt"))
+    );
+    assert_eq!(report["toolStatus"], "finished");
+    assert_eq!(report["errors"], json!([]));
+    assert_eq!(
+        fs::read_to_string(run.workspace.join("approval.txt")).expect("approved write output"),
+        "ROTTWEILER_FULL_HOST_CANARY\n",
+    );
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn m3_context_cost_compaction_and_prompt_dump_use_the_headless_protocol() {
@@ -535,10 +682,7 @@ fn m3_context_cost_compaction_and_prompt_dump_use_the_headless_protocol() {
     let snapshot = context_events
         .iter()
         .find_map(|event| match event {
-            EngineEvent::CommandFinished { name, message, .. } if name == "context" => Some(
-                serde_json::from_str::<rw_core::ContextSnapshot>(message)
-                    .expect("registered context command JSON"),
-            ),
+            EngineEvent::ContextSnapshotReady { snapshot, .. } => Some(snapshot.clone()),
             _ => None,
         })
         .expect("context snapshot");
@@ -607,10 +751,7 @@ fn m3_context_cost_compaction_and_prompt_dump_use_the_headless_protocol() {
     let costs = cost_events
         .iter()
         .find_map(|event| match event {
-            EngineEvent::CommandFinished { name, message, .. } if name == "cost" => Some(
-                serde_json::from_str::<rw_core::CostSnapshot>(message)
-                    .expect("registered cost command JSON"),
-            ),
+            EngineEvent::CostSnapshotReady { snapshot, .. } => Some(snapshot.clone()),
             _ => None,
         })
         .expect("cost snapshot");

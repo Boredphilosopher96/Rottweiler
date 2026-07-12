@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import type { ClientCommand, EngineEvent } from "../src/protocol"
+import type { ClientCommand, CommandOutcome, EngineEvent } from "../src/protocol"
 import { PROTOCOL_VERSION } from "../../../protocol/types"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
 import { daylightTheme, kennelTheme, themeCatalog, type RottweilerTheme } from "../src/theme"
@@ -62,7 +62,7 @@ describe("Rottweiler OpenTUI shell", () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Rottweiler")
     expect(frame).toContain("hello")
-    expect(frame).toContain("model fast")
+    expect(frame).toContain("model —")
 
     const cells = setup.captureSpans()
     expect(cells.cols).toBe(72)
@@ -458,6 +458,8 @@ describe("Rottweiler OpenTUI shell", () => {
 
     // Exercise the real first-input path before OpenTUI has completed a prior frame.
     await setup.mockInput.typeText("/")
+    const firstConfiguredTop = app.picker.top
+    expect(firstConfiguredTop).toBe(2)
     await setup.renderOnce()
     const first = { y: app.picker.y, height: app.picker.height }
     expect(first.y + first.height).toBeLessThanOrEqual(app.composer.y)
@@ -468,6 +470,49 @@ describe("Rottweiler OpenTUI shell", () => {
     await setup.renderOnce()
     expect({ y: app.picker.y, height: app.picker.height }).toEqual(first)
     expect(app.picker.y + app.picker.height).toBeLessThanOrEqual(app.composer.y)
+  })
+
+  test("keeps the composer pasteable while recovery rejects a submit and accepts its retry", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    let resolveRecovery!: (outcome: CommandOutcome) => void
+    const recovery = new Promise<CommandOutcome>((resolve) => {
+      resolveRecovery = resolve
+    })
+    let attempts = 0
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        if (command.type !== "send_message") return { type: "accepted" }
+        attempts += 1
+        return attempts === 1 ? recovery : { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    await setup.mockInput.pasteBracketedText("draft before recovery")
+    setup.mockInput.pressEnter()
+    await Promise.resolve()
+    await setup.mockInput.pasteBracketedText(" and during recovery")
+    expect(app.composer.value).toBe("draft before recovery and during recovery")
+
+    resolveRecovery({
+      type: "rejected",
+      error: {
+        category: "protocol",
+        code: "session_requires_recovery",
+        message: "session is fail-closed until checkpoint journal recovery completes",
+        retryable: true,
+      },
+    })
+    await Bun.sleep(0)
+    expect(app.composer.value).toBe("draft before recovery and during recovery")
+    expect(app.state.errors.at(-1)?.code).toBe("session_requires_recovery")
+
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    expect(attempts).toBe(2)
+    expect(app.composer.value).toBe("")
   })
 
   test("moves anchored slash selection to the closest match as the query changes", async () => {
@@ -528,9 +573,135 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     await setup.renderOnce()
 
-    expect(app.state.transcript.at(-1)?.turn.role).toBe("system")
+    expect(app.state.transcript.at(-1)?.presentation).toBe("command_result")
     const commandCard = [...app.transcript.mountedCards.values()].at(-1)
+    expect(commandCard?.header.plainText).toBe("Command result · /status")
     expect(commandCard?.markdown.content).toContain("actor idle · queue empty")
+  })
+
+  test("answers free-text questions through the multiline composer without changing pasted text", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.handleEvent({
+      type: "question_asked",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      turn_id: "1",
+      question_id: "question-text",
+      questions: [{
+        id: "question-text",
+        prompt: "What should change?",
+        response_kind: "text",
+        options: [],
+      }],
+    })
+
+    expect(app.interactionPanel.select.visible).toBeFalse()
+    expect(app.interactionPanel.prompt.plainText).toContain("Type your answer below")
+    const exact = "  first line\nsecond line  "
+    await setup.mockInput.pasteBracketedText(exact)
+    expect(app.composer.value).toBe(exact)
+    expect(await app.composer.submit()).toBeTrue()
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({
+      type: "answer_question",
+      question_id: "question-text",
+      answers: [{ question_id: "question-text", values: [exact] }],
+    }))
+  })
+
+  test("shows unknown status until confirmed and clears a friendly recovery banner on success", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "disconnected", attempt: 7, error: null, gap: null },
+      },
+    })
+    renderer.root.add(app)
+
+    expect(app.banner.plainText).toBe("Connection lost · retrying…")
+    expect(app.banner.plainText).not.toContain("attempt")
+    expect(app.banner.plainText).not.toContain("disconnected")
+    expect(app.statusLine.plainText).toContain("◉ —")
+    expect(app.statusLine.plainText).toContain("model —")
+    expect(app.statusLine.plainText).toContain("cache —")
+    app.handleEvent({
+      type: "error",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      error: {
+        category: "internal",
+        code: "session_requires_recovery",
+        message: "session is fail-closed until checkpoint journal recovery completes",
+        retryable: true,
+      },
+    })
+    expect(app.banner.plainText).toBe("Restoring this session · input will be available shortly")
+    expect(app.banner.plainText).not.toContain("fail-closed")
+    expect(app.banner.plainText).not.toContain("checkpoint journal")
+
+    app.handleEvent({
+      type: "turn_started",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "2",
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      turn_id: "1",
+    })
+    expect(app.banner.plainText).toBe("Connection lost · retrying…")
+    expect(app.banner.plainText).not.toContain("recovery")
+    expect(app.state.errors).toHaveLength(0)
+  })
+
+  test("lists exit commands and closes the supervised app without sending protocol text", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let exits = 0
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+      onExit() {
+        exits += 1
+      },
+    })
+    renderer.root.add(app)
+
+    await setup.mockInput.typeText("/ex")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("exit")
+    emitted.length = 0
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+
+    expect(exits).toBe(1)
+    expect(emitted).toEqual([])
+    expect(app.composer.value).toBe("")
+
+    app.composer.value = "/quit"
+    expect(await app.composer.submit()).toBeTrue()
+    expect(exits).toBe(2)
+    expect(emitted).toEqual([])
   })
 
   test("prefills slash commands with required arguments instead of running invalid input", async () => {
@@ -750,23 +921,26 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options[0]?.description).toContain("provider discovery timed out")
   })
 
-  test("explains empty provider and model configuration instead of opening blank pickers", async () => {
+  test("presents model and provider loading as non-selectable picker status", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer)
     renderer.root.add(app)
 
     app.openProviderPicker()
-    expect(app.picker.select.options.map((option) => option.value)).toEqual([
-      "providers.empty",
-    ])
+    expect(app.picker.status.plainText).toContain("Loading provider connections")
+    expect(app.picker.status.visible).toBeTrue()
+    expect(app.picker.select.visible).toBeFalse()
+    expect(app.picker.select.options).toHaveLength(0)
     app.picker.select.selectCurrent()
-    expect(app.state.errors.at(-1)?.code).toBe("providers_unavailable")
+    expect(app.state.errors).toHaveLength(0)
 
     app.openModelPicker()
-    expect(app.picker.select.options.map((option) => option.value)).toEqual(["models.empty"])
+    expect(app.picker.status.plainText).toContain("Loading available models")
+    expect(app.picker.select.visible).toBeFalse()
+    expect(app.picker.select.options).toHaveLength(0)
     app.picker.select.selectCurrent()
-    expect(app.state.errors.at(-1)?.code).toBe("models_unavailable")
+    expect(app.state.errors).toHaveLength(0)
   })
 
   test("clears a partial anchored trigger before opening a local slash action", async () => {
@@ -1005,7 +1179,7 @@ describe("Rottweiler OpenTUI shell", () => {
 
     app.openProviderPicker()
     expect(app.picker.select.options.map((option) => option.value)).toEqual(["copilot"])
-    expect(app.picker.select.options[0]?.description).toContain("login required")
+    expect(app.picker.select.options[0]?.description).toContain("Sign in with GitHub")
 
     app.openModelPicker()
     expect(app.picker.select.options.map((option) => option.value)).toEqual([
@@ -1138,7 +1312,7 @@ describe("Rottweiler OpenTUI shell", () => {
         name: "docs.remote",
         enabled: false,
         approved: false,
-        state: { type: "disabled" },
+        state: { type: "approval_required" },
         tool_count: 0,
         resource_count: 0,
         prompt_count: 0,
@@ -1147,6 +1321,8 @@ describe("Rottweiler OpenTUI shell", () => {
     const reviewIndex = app.picker.select.options.findIndex(
       (option) => option.value === "mcp.review.docs.remote",
     )
+    expect(app.picker.select.options[reviewIndex]?.description).toContain("Approval needed")
+    expect(app.picker.select.options[reviewIndex]?.description).not.toContain("approval_required")
     app.picker.select.setSelectedIndex(reviewIndex)
     app.picker.select.selectCurrent()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
@@ -1178,6 +1354,8 @@ describe("Rottweiler OpenTUI shell", () => {
       (option) => option.value === "mcp.approve.docs.remote",
     )
     expect(app.picker.select.options[approveIndex]?.description).toContain(fingerprint)
+    expect(app.picker.select.options[approveIndex]?.description).toContain("Remote HTTPS")
+    expect(app.picker.select.options[approveIndex]?.description).not.toContain("streamable_http")
     app.picker.select.setSelectedIndex(approveIndex)
     app.picker.select.selectCurrent()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
@@ -1232,11 +1410,20 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     setup.renderer.root.add(app)
 
+    app.composer.value = "preserved draft"
     app.openPermissionPicker()
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "list_permissions",
       session_id: "session-permissions",
     }))
+    expect(app.picker.status.plainText).toContain("Loading permission rules")
+    expect(app.picker.select.visible).toBeFalse()
+    expect(app.picker.select.options).toHaveLength(0)
+    setup.mockInput.pressEnter()
+    await setup.mockInput.typeText("hidden input")
+    await setup.mockInput.pasteBracketedText("hidden paste")
+    expect(app.composer.value).toBe("preserved draft")
+    expect(emitted.filter((command) => command.type === "list_permissions")).toHaveLength(1)
     app.handleEvent({
       type: "permissions_listed",
       meta: {
@@ -1263,6 +1450,14 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options.map((option) => option.value)).toContain(
       "permissions.effective.effective:one",
     )
+    expect(app.picker.status.visible).toBeFalse()
+    expect(app.picker.select.visible).toBeTrue()
+    const permissionCopy = app.picker.select.options
+      .flatMap((option) => [option.name, option.description])
+      .join("\n")
+    expect(permissionCopy).not.toContain("Session-scoped")
+    expect(permissionCopy).not.toContain("tool(argument")
+    expect(permissionCopy).not.toContain("exact-invocation")
 
     const removeIndex = app.picker.select.options.findIndex(
       (option) => option.value === "permissions.remove.session:one",
@@ -1465,6 +1660,44 @@ describe("Rottweiler OpenTUI shell", () => {
     }))
   })
 
+  test("keeps OpenAI API distinct from ChatGPT and shows session workspaces", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        providers: [{
+          name: "openai",
+          authKind: "oauth",
+          nextAction: "authenticate",
+          configured: true,
+          authenticated: false,
+          reachable: false,
+          modelCount: 0,
+          status: null,
+        }],
+        sessions: [{
+          sessionId: "session-workspace",
+          title: "Fix login",
+          workspaceName: "payments-service",
+          model: "gpt-5",
+          driverClientId: null,
+          shellActive: false,
+        }],
+      },
+      onCommand: () => ({ type: "accepted" }),
+    })
+    renderer.root.add(app)
+
+    app.openProviderPicker()
+    expect(app.picker.select.options[0]?.name).toBe("OpenAI API")
+    expect(app.picker.select.options[0]?.name).not.toContain("ChatGPT")
+    expect(app.picker.select.options[0]?.description).not.toContain("ChatGPT")
+    app.openSessionPicker()
+    expect(app.picker.select.options[0]?.name).toBe("Fix login")
+    expect(app.picker.select.options[0]?.description).toContain("payments-service")
+  })
+
   test("offers activation retry and credential replacement for unreachable providers", async () => {
     const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
     renderer = setup.renderer
@@ -1496,6 +1729,8 @@ describe("Rottweiler OpenTUI shell", () => {
 
     app.openProviderPicker()
     app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("OpenAI · ChatGPT")
+    expect(app.picker.title).not.toContain("openai_codex")
     expect(app.picker.select.options.map((option) => option.value)).toEqual([
       "provider-recovery.activate",
       "provider-recovery.reauthenticate",
@@ -1860,6 +2095,82 @@ describe("Rottweiler OpenTUI shell", () => {
     app.handleEvent(review(newReviewRequest, "src/second.rs"))
     expect(app.state.review?.files[0]?.path).toBe("src/second.rs")
     expect(app.reviewPanel.diff.diff).toContain("+new")
+  })
+
+  test("keeps context and git status live after a completed turn", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 20, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.handleEvent({
+      type: "workspace_status_ready",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: "initial-workspace",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      status: {
+        workspace_name: "Rottweiler",
+        branch: "feature/live-status",
+        changed_paths: [],
+        truncated: false,
+      },
+    })
+    app.handleEvent({
+      type: "context_usage_updated",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "10",
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      turn_id: "1",
+      used_tokens: "500",
+      usable_tokens: "1000",
+      reserved_tokens: "100",
+      context_window_known: true,
+      stable_prefix_hash: "not-presented",
+      cache_hit_basis_points: 0,
+      estimated_input_tokens: "500",
+      provider_input_tokens: "500",
+      correction_millionths: "1000000",
+    })
+    await setup.renderOnce()
+    expect(app.statusLine.plainText).toContain("ctx 50%")
+    expect(app.statusLine.plainText).toContain("git feature/live-status")
+
+    app.handleEvent({
+      type: "turn_finished",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "11",
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      turn_id: "1",
+      status: "completed",
+      usage: {
+        input_tokens: "500",
+        output_tokens: "20",
+        cache_read_tokens: "0",
+        cache_write_tokens: "0",
+        reasoning_tokens: "0",
+      },
+      cost: { type: "unavailable", reason: "fixture" },
+    })
+    expect(commands.slice(-3).map((command) => command.type)).toEqual([
+      "get_workspace_status",
+      "get_context",
+      "get_cost",
+    ])
   })
 
   test("preserves picker selection and visible window across unrelated state events", async () => {

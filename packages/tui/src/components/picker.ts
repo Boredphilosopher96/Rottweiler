@@ -4,6 +4,7 @@ import {
   InputRenderableEvents,
   SelectRenderable,
   SelectRenderableEvents,
+  TextRenderable,
   type KeyEvent,
   type RenderContext,
 } from "@opentui/core"
@@ -20,6 +21,7 @@ export interface PickerItem<T> {
 
 export class FuzzyPickerRenderable<T> extends BoxRenderable {
   readonly input: InputRenderable
+  readonly status: TextRenderable
   readonly select: SelectRenderable
   #items: readonly PickerItem<T>[] = []
   #filtered: readonly PickerItem<T>[] = []
@@ -37,6 +39,14 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   #onKey = (key: KeyEvent) => {
     if (!this.visible) return
 
+    if (this.status.visible && !this.#anchored) {
+      // A status surface is deliberately not an action list. Keep all input
+      // except Escape from leaking into the composer behind the modal.
+      if (key.name === "escape") return
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
 
     if (this.#textMode && !key.ctrl && !key.meta && !key.option) {
       if (key.name === "return" || key.name === "kpenter") {
@@ -118,6 +128,11 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     }
   }
   #onPaste = (event: { bytes: Uint8Array; preventDefault(): void; stopPropagation(): void }) => {
+    if (this.visible && this.status.visible && !this.#anchored) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
     if (!this.visible || (!this.#secretMode && !this.#textMode)) return
     let pasted: string
     try {
@@ -194,7 +209,16 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       wrapSelection: true,
       fastScrollStep: 10,
     })
+    this.status = new TextRenderable(ctx, {
+      id: "picker-status",
+      width: "100%",
+      flexGrow: 1,
+      content: "",
+      fg: theme.muted,
+      visible: false,
+    })
     this.add(this.input)
+    this.add(this.status)
     this.add(this.select)
     this.input.on(InputRenderableEvents.INPUT, (query: string) => {
       this.#filter(query, false)
@@ -241,6 +265,9 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     onSelect: (item: PickerItem<T>) => void,
   ): void {
     this.#clearInputModes()
+    this.status.visible = false
+    this.input.visible = true
+    this.select.visible = true
     this.#configurePresentation(false, items.length)
     this.title = ` ${title} `
     this.#items = items
@@ -262,6 +289,8 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#filtered = []
     this.select.options = []
     this.select.visible = false
+    this.status.visible = false
+    this.input.visible = true
     this.input.placeholder = "API key (hidden)"
     this.input.value = ""
     this.visible = true
@@ -280,11 +309,36 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#filtered = []
     this.select.options = []
     this.select.visible = false
+    this.status.visible = false
+    this.input.visible = true
     this.input.placeholder = placeholder
     this.input.value = ""
     this.visible = true
     this.height = 5
     this.input.focus()
+  }
+
+  /** Present transient or empty state without masquerading as a selectable row. */
+  showStatus(title: string, message: string, description = "", anchored = false): void {
+    this.#clearInputModes()
+    this.#anchored = anchored
+    this.title = ` ${title} `
+    this.#items = []
+    this.#filtered = []
+    this.#onSelect = undefined
+    this.input.blur()
+    this.select.options = []
+    this.input.visible = false
+    this.select.visible = false
+    this.status.content = description.length === 0 ? message : `${message}\n${description}`
+    this.status.visible = true
+    this.visible = true
+    this.#desiredHeight = description.length === 0 ? 5 : 6
+    this.height = this.#desiredHeight
+  }
+
+  showLoading(title: string, message: string, anchored = false): void {
+    this.showStatus(title, `◌ ${message}`, "This panel will update automatically.", anchored)
   }
 
   /** Replace remote results without clearing the query or moving focus. */
@@ -298,6 +352,9 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       return
     }
     this.#configurePresentation(false, items.length)
+    this.status.visible = false
+    this.input.visible = true
+    this.select.visible = true
     this.title = ` ${title} `
     this.#items = items
     this.#onSelect = onSelect
@@ -313,6 +370,8 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     onSelect: (item: PickerItem<T>) => void,
   ): void {
     this.#configurePresentation(true, items.length)
+    this.status.visible = false
+    this.select.visible = true
     this.title = ` ${title} `
     this.#items = items
     this.#onSelect = onSelect
@@ -333,6 +392,8 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       return
     }
     this.#configurePresentation(true, items.length)
+    this.status.visible = false
+    this.select.visible = true
     this.title = ` ${title} `
     this.#items = items
     this.#onSelect = onSelect
@@ -345,9 +406,10 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     return this.#anchored
   }
 
-  constrainAnchoredHeight(availableRows: number): void {
-    if (!this.#anchored) return
-    this.height = Math.max(1, Math.min(this.#desiredHeight, Math.floor(availableRows)))
+  constrainAnchoredHeight(availableRows: number): number {
+    const height = Math.max(1, Math.min(this.#desiredHeight, Math.floor(availableRows)))
+    if (this.#anchored) this.height = height
+    return height
   }
 
   /** OpenCode-style keyboard navigation keeps the active result centered. */
@@ -373,6 +435,8 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.input.blur()
     this.input.visible = true
     this.select.visible = true
+    this.status.visible = false
+    this.status.content = ""
     this.input.placeholder = "type to filter…"
     this.#anchored = false
     this.#onSelect = undefined

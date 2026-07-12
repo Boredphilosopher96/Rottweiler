@@ -122,8 +122,8 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   async submit(): Promise<boolean> {
-    const content = this.editor.plainText.trim()
-    if ((content.length === 0 && this.#attachments.length === 0) || this.#submitting) {
+    const content = this.editor.plainText
+    if ((content.trim().length === 0 && this.#attachments.length === 0) || this.#submitting) {
       return false
     }
     const submittedAttachments = this.#attachments
@@ -132,7 +132,7 @@ export class ComposerRenderable extends BoxRenderable {
       const accepted = await this.#options.onSubmit(content, submittedAttachments)
       if (
         accepted &&
-        this.editor.plainText.trim() === content &&
+        this.editor.plainText === content &&
         this.#attachments === submittedAttachments
       ) {
         this.editor.clear()

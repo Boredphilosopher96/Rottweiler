@@ -8,6 +8,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+#[cfg(target_os = "macos")]
+use std::sync::Condvar;
+
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
@@ -363,6 +366,23 @@ pub trait CredentialKeychain {
     /// Returns [`KeychainUnavailable`] without exposing backend diagnostics.
     fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable>;
 
+    /// Reads one keychain item for an explicit, user-initiated operation.
+    ///
+    /// Passive inventory may impose a short deadline so that a status screen
+    /// never hangs on an authorization dialog. Active provider composition uses
+    /// this boundary instead and may wait for the user to authorize the vault.
+    /// Test backends that do not distinguish those modes may use the default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeychainUnavailable`] without exposing backend diagnostics.
+    fn get_authorized(
+        &self,
+        identifier: &str,
+    ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+        self.get(identifier)
+    }
+
     /// Creates or replaces a credential.
     ///
     /// # Errors
@@ -395,6 +415,20 @@ pub trait CredentialKeychain {
     fn get_legacy(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
         self.get(identifier)
     }
+
+    /// Performs an explicitly user-authorized legacy read during one-time
+    /// migration. Backends without a passive/authorized distinction delegate
+    /// to [`Self::get_legacy`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeychainUnavailable`] without exposing backend diagnostics.
+    fn get_legacy_authorized(
+        &self,
+        identifier: &str,
+    ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+        self.get_legacy(identifier)
+    }
 }
 
 /// Operating-system keychain backed by the current `keyring` crate.
@@ -403,8 +437,95 @@ pub struct OsKeychain;
 
 enum ProcessVaultCache {
     Unloaded,
+    #[cfg(target_os = "macos")]
+    Reading(Arc<ProcessVaultRead>),
     Loaded(Option<String>),
     Unavailable,
+}
+
+#[cfg(target_os = "macos")]
+struct ProcessVaultRead {
+    result: Mutex<Option<Result<Option<String>, KeychainUnavailable>>>,
+    ready: Condvar,
+}
+
+#[cfg(target_os = "macos")]
+impl ProcessVaultRead {
+    fn start<F>(read: F) -> Result<Arc<Self>, KeychainUnavailable>
+    where
+        F: FnOnce() -> Result<Option<Secret<String>>, KeychainUnavailable> + Send + 'static,
+    {
+        let operation = Arc::new(Self {
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        });
+        let background = Arc::clone(&operation);
+        std::thread::Builder::new()
+            .name("rottweiler-keychain-read".to_owned())
+            .spawn(move || {
+                let result = read().map(|value| value.map(Secret::into_inner));
+                if let Ok(mut slot) = background.result.lock() {
+                    *slot = Some(result);
+                    background.ready.notify_all();
+                }
+            })
+            .map_err(|_| KeychainUnavailable)?;
+        Ok(operation)
+    }
+
+    fn wait(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Option<String>, KeychainUnavailable> {
+        let guard = self.result.lock().map_err(|_| KeychainUnavailable)?;
+        let guard = if let Some(timeout) = timeout {
+            self.ready
+                .wait_timeout_while(guard, timeout, |result| result.is_none())
+                .map_err(|_| KeychainUnavailable)?
+                .0
+        } else {
+            self.ready
+                .wait_while(guard, |result| result.is_none())
+                .map_err(|_| KeychainUnavailable)?
+        };
+        guard.clone().unwrap_or(Err(KeychainUnavailable))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_process_vault_explicit<F>(
+    cache: &Mutex<ProcessVaultCache>,
+    reuse_loaded: bool,
+    read: F,
+) -> Result<Option<Secret<String>>, KeychainUnavailable>
+where
+    F: FnOnce() -> Result<Option<Secret<String>>, KeychainUnavailable> + Send + 'static,
+{
+    let operation = {
+        let mut cache = cache.lock().map_err(|_| KeychainUnavailable)?;
+        match &*cache {
+            ProcessVaultCache::Loaded(value) if reuse_loaded => {
+                return Ok(value.clone().map(Secret::new));
+            }
+            ProcessVaultCache::Reading(operation) => Arc::clone(operation),
+            ProcessVaultCache::Unloaded
+            | ProcessVaultCache::Unavailable
+            | ProcessVaultCache::Loaded(_) => {
+                let operation = ProcessVaultRead::start(read)?;
+                *cache = ProcessVaultCache::Reading(Arc::clone(&operation));
+                operation
+            }
+        }
+    };
+    let result = operation.wait(None);
+    let mut cache = cache.lock().map_err(|_| KeychainUnavailable)?;
+    if matches!(&*cache, ProcessVaultCache::Reading(active) if Arc::ptr_eq(active, &operation)) {
+        *cache = match &result {
+            Ok(value) => ProcessVaultCache::Loaded(value.clone()),
+            Err(_) => ProcessVaultCache::Unavailable,
+        };
+    }
+    result.map(|value| value.map(Secret::new))
 }
 
 fn process_vault_cache() -> &'static Mutex<ProcessVaultCache> {
@@ -492,28 +613,93 @@ impl CredentialKeychain for OsKeychain {
             return Err(KeychainUnavailable);
         }
 
-        let mut cache = process_vault_cache()
-            .lock()
-            .map_err(|_| KeychainUnavailable)?;
-        match &*cache {
-            ProcessVaultCache::Loaded(value) => {
-                return Ok(value.clone().map(Secret::new));
+        #[cfg(target_os = "macos")]
+        {
+            let operation = {
+                let mut cache = process_vault_cache()
+                    .lock()
+                    .map_err(|_| KeychainUnavailable)?;
+                match &*cache {
+                    ProcessVaultCache::Loaded(value) => {
+                        return Ok(value.clone().map(Secret::new));
+                    }
+                    ProcessVaultCache::Unavailable => return Err(KeychainUnavailable),
+                    ProcessVaultCache::Reading(operation) => Arc::clone(operation),
+                    ProcessVaultCache::Unloaded => {
+                        let operation = ProcessVaultRead::start(|| {
+                            read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, KEYCHAIN_VAULT_ID)
+                        })?;
+                        *cache = ProcessVaultCache::Reading(Arc::clone(&operation));
+                        operation
+                    }
+                }
+            };
+            let result = operation.wait(Some(PASSIVE_KEYCHAIN_READ_TIMEOUT));
+            if let Ok(mut cache) = process_vault_cache().lock()
+                && matches!(&*cache, ProcessVaultCache::Reading(active) if Arc::ptr_eq(active, &operation))
+                && let Ok(value) = &result
+            {
+                *cache = ProcessVaultCache::Loaded(value.clone());
             }
-            ProcessVaultCache::Unavailable => return Err(KeychainUnavailable),
-            ProcessVaultCache::Unloaded => {}
+            result.map(|value| value.map(Secret::new))
         }
 
-        match read_keychain_item(KEYCHAIN_VAULT_SERVICE, identifier) {
-            Ok(value) => {
-                *cache = ProcessVaultCache::Loaded(
-                    value.as_ref().map(|secret| secret.expose_secret().clone()),
-                );
-                Ok(value)
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut cache = process_vault_cache()
+                .lock()
+                .map_err(|_| KeychainUnavailable)?;
+            match &*cache {
+                ProcessVaultCache::Loaded(value) => {
+                    return Ok(value.clone().map(Secret::new));
+                }
+                ProcessVaultCache::Unavailable => return Err(KeychainUnavailable),
+                ProcessVaultCache::Unloaded => {}
             }
-            Err(error) => {
-                *cache = ProcessVaultCache::Unavailable;
-                Err(error)
+
+            match read_keychain_item(KEYCHAIN_VAULT_SERVICE, identifier) {
+                Ok(value) => {
+                    *cache = ProcessVaultCache::Loaded(
+                        value.as_ref().map(|secret| secret.expose_secret().clone()),
+                    );
+                    Ok(value)
+                }
+                Err(error) => {
+                    *cache = ProcessVaultCache::Unavailable;
+                    Err(error)
+                }
             }
+        }
+    }
+
+    fn get_authorized(
+        &self,
+        identifier: &str,
+    ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+        if identifier != KEYCHAIN_VAULT_ID || os_keychain_disabled() {
+            return Err(KeychainUnavailable);
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            read_process_vault_explicit(process_vault_cache(), true, || {
+                read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, KEYCHAIN_VAULT_ID)
+            })
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut cache = process_vault_cache()
+                .lock()
+                .map_err(|_| KeychainUnavailable)?;
+            if let ProcessVaultCache::Loaded(value) = &*cache {
+                return Ok(value.clone().map(Secret::new));
+            }
+            let value = read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, identifier)?;
+            *cache = ProcessVaultCache::Loaded(
+                value.as_ref().map(|secret| secret.expose_secret().clone()),
+            );
+            Ok(value)
         }
     }
 
@@ -541,6 +727,15 @@ impl CredentialKeychain for OsKeychain {
         if identifier != KEYCHAIN_VAULT_ID || os_keychain_disabled() {
             return Err(KeychainUnavailable);
         }
+
+        #[cfg(target_os = "macos")]
+        {
+            read_process_vault_explicit(process_vault_cache(), false, || {
+                read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, KEYCHAIN_VAULT_ID)
+            })
+        }
+
+        #[cfg(not(target_os = "macos"))]
         read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, identifier)
     }
 
@@ -549,6 +744,16 @@ impl CredentialKeychain for OsKeychain {
             return Err(KeychainUnavailable);
         }
         read_keychain_item(LEGACY_KEYCHAIN_SERVICE, identifier)
+    }
+
+    fn get_legacy_authorized(
+        &self,
+        identifier: &str,
+    ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+        if os_keychain_disabled() {
+            return Err(KeychainUnavailable);
+        }
+        read_keychain_item_blocking(LEGACY_KEYCHAIN_SERVICE, identifier)
     }
 }
 
@@ -777,6 +982,30 @@ where
         &self,
         reference: &CredentialReference,
     ) -> Result<ResolvedCredential, CredentialError> {
+        self.resolve_with_mode(reference, false)
+    }
+
+    /// Resolves a credential for an explicit active operation.
+    ///
+    /// On macOS this path may wait for the user to authorize the single
+    /// Rottweiler vault. It also retries after a prior passive inventory timed
+    /// out, so a two-second status probe cannot poison the subsequent model run.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same sanitized errors as [`Self::resolve`].
+    pub fn resolve_authorized(
+        &self,
+        reference: &CredentialReference,
+    ) -> Result<ResolvedCredential, CredentialError> {
+        self.resolve_with_mode(reference, true)
+    }
+
+    fn resolve_with_mode(
+        &self,
+        reference: &CredentialReference,
+        authorized: bool,
+    ) -> Result<ResolvedCredential, CredentialError> {
         reference.validate()?;
 
         if let Some(variable) = reference.environment_variable()
@@ -790,7 +1019,12 @@ where
             });
         }
 
-        let keychain_unavailable = match self.resolve_from_vault(reference.identifier()) {
+        let keychain = if authorized {
+            self.resolve_from_vault_authorized(reference.identifier())
+        } else {
+            self.resolve_from_vault(reference.identifier())
+        };
+        let keychain_unavailable = match keychain {
             Ok(Some(secret)) => {
                 return Ok(ResolvedCredential {
                     secret,
@@ -825,6 +1059,48 @@ where
             Err(CredentialError::NotFound {
                 identifier: reference.identifier().to_owned(),
             })
+        }
+    }
+
+    fn resolve_from_vault_authorized(
+        &self,
+        identifier: &str,
+    ) -> Result<Option<Secret<String>>, VaultAccessError> {
+        let mut cache = self
+            .vault_cache
+            .lock()
+            .map_err(|_| VaultAccessError::Unavailable)?;
+        match &cache.vault {
+            CachedVault::Loaded(vault) => {
+                let value = vault.credentials.get(identifier).cloned().map(Secret::new);
+                let legacy_bootstrap_pending = cache.legacy_bootstrap_pending;
+                drop(cache);
+                return if value.is_none() && legacy_bootstrap_pending {
+                    self.resolve_from_vault_with_legacy_mode(identifier, true)
+                } else {
+                    Ok(value)
+                };
+            }
+            CachedVault::Malformed => return Err(VaultAccessError::Malformed),
+            CachedVault::Unloaded | CachedVault::Unavailable => {}
+        }
+        let encoded = self
+            .keychain
+            .get_authorized(KEYCHAIN_VAULT_ID)
+            .map_err(|_| VaultAccessError::Unavailable)?;
+        let vault_was_missing = encoded.is_none();
+        let vault = match encoded {
+            Some(encoded) => decode_vault(&encoded).map_err(|()| VaultAccessError::Malformed)?,
+            None => CredentialVault::default(),
+        };
+        let value = vault.credentials.get(identifier).cloned().map(Secret::new);
+        cache.vault = CachedVault::Loaded(vault);
+        cache.legacy_bootstrap_pending = vault_was_missing;
+        drop(cache);
+        if value.is_none() && vault_was_missing {
+            self.resolve_from_vault_with_legacy_mode(identifier, true)
+        } else {
+            Ok(value)
         }
     }
 
@@ -872,6 +1148,14 @@ where
     fn resolve_from_vault(
         &self,
         identifier: &str,
+    ) -> Result<Option<Secret<String>>, VaultAccessError> {
+        self.resolve_from_vault_with_legacy_mode(identifier, false)
+    }
+
+    fn resolve_from_vault_with_legacy_mode(
+        &self,
+        identifier: &str,
+        authorized_legacy: bool,
     ) -> Result<Option<Secret<String>>, VaultAccessError> {
         let mut cache = self
             .vault_cache
@@ -927,12 +1211,14 @@ where
             return Ok(resolved);
         }
 
-        let migrated_value = self
-            .keychain
-            .get_legacy(identifier)
-            .ok()
-            .flatten()
-            .map(Secret::into_inner);
+        let migrated_value = if authorized_legacy {
+            self.keychain.get_legacy_authorized(identifier)
+        } else {
+            self.keychain.get_legacy(identifier)
+        }
+        .ok()
+        .flatten()
+        .map(Secret::into_inner);
         let mut migrated = CredentialVault::default();
         if let Some(value) = &migrated_value {
             migrated
@@ -1359,7 +1645,9 @@ mod tests {
     };
 
     #[cfg(target_os = "macos")]
-    use super::bounded_keychain_read;
+    use super::{
+        ProcessVaultCache, ProcessVaultRead, bounded_keychain_read, read_process_vault_explicit,
+    };
 
     #[derive(Debug, Default, Clone)]
     struct TestEnvironment(BTreeMap<String, String>);
@@ -1419,6 +1707,104 @@ mod tests {
 
         assert!(result.is_err());
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn authorized_wait_joins_the_in_flight_passive_keychain_read() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let background_calls = Arc::clone(&calls);
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        let operation = ProcessVaultRead::start(move || {
+            background_calls.fetch_add(1, Ordering::AcqRel);
+            released.recv().map_err(|_| KeychainUnavailable)?;
+            Ok(Some(Secret::new("shared-result".to_owned())))
+        })
+        .expect("start shared read");
+
+        assert!(
+            operation
+                .wait(Some(std::time::Duration::from_millis(5)))
+                .is_err(),
+            "passive inventory should remain bounded"
+        );
+        let authorized = Arc::clone(&operation);
+        let waiter = std::thread::spawn(move || authorized.wait(None));
+        release.send(()).expect("release keychain fixture");
+        assert_eq!(
+            waiter
+                .join()
+                .expect("authorized waiter")
+                .expect("shared keychain result"),
+            Some("shared-result".to_owned())
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fresh_store_read_joins_a_blocked_passive_read_without_a_second_prompt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let passive_calls = Arc::new(AtomicUsize::new(0));
+        let background_calls = Arc::clone(&passive_calls);
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        let passive = ProcessVaultRead::start(move || {
+            background_calls.fetch_add(1, Ordering::AcqRel);
+            released.recv().map_err(|_| KeychainUnavailable)?;
+            Ok(Some(Secret::new("vault-before-store".to_owned())))
+        })
+        .expect("start blocked passive read");
+        assert!(
+            passive
+                .wait(Some(std::time::Duration::from_millis(5)))
+                .is_err(),
+            "the passive read should still be blocked when storage starts"
+        );
+
+        let cache = Arc::new(Mutex::new(ProcessVaultCache::Reading(passive)));
+        let fresh_starts = Arc::new(AtomicUsize::new(0));
+        let waiter_cache = Arc::clone(&cache);
+        let waiter_starts = Arc::clone(&fresh_starts);
+        let store_read = std::thread::spawn(move || {
+            read_process_vault_explicit(&waiter_cache, false, move || {
+                waiter_starts.fetch_add(1, Ordering::AcqRel);
+                Ok(Some(Secret::new("unexpected-second-read".to_owned())))
+            })
+        });
+
+        release.send(()).expect("release passive keychain fixture");
+        let value = store_read
+            .join()
+            .expect("fresh store waiter")
+            .expect("shared keychain result")
+            .expect("vault should exist");
+        assert_eq!(value.expose_secret(), "vault-before-store");
+        assert_eq!(passive_calls.load(Ordering::Acquire), 1);
+        assert_eq!(fresh_starts.load(Ordering::Acquire), 0);
+
+        let refresh_starts = Arc::clone(&fresh_starts);
+        let refreshed = read_process_vault_explicit(&cache, false, move || {
+            refresh_starts.fetch_add(1, Ordering::AcqRel);
+            Ok(Some(Secret::new("vault-after-other-writer".to_owned())))
+        })
+        .expect("loaded state must still receive a fresh store read")
+        .expect("refreshed vault should exist");
+        assert_eq!(refreshed.expose_secret(), "vault-after-other-writer");
+        assert_eq!(fresh_starts.load(Ordering::Acquire), 1);
+
+        *cache.lock().expect("test process cache should lock") = ProcessVaultCache::Unavailable;
+        let retry_starts = Arc::clone(&fresh_starts);
+        let retried = read_process_vault_explicit(&cache, false, move || {
+            retry_starts.fetch_add(1, Ordering::AcqRel);
+            Ok(Some(Secret::new("vault-after-retry".to_owned())))
+        })
+        .expect("a failed explicit read must remain retryable")
+        .expect("retried vault should exist");
+        assert_eq!(retried.expose_secret(), "vault-after-retry");
+        assert_eq!(fresh_starts.load(Ordering::Acquire), 2);
     }
 
     #[derive(Clone, Default)]
@@ -1500,6 +1886,15 @@ mod tests {
             Ok(())
         }
 
+        fn get_authorized(
+            &self,
+            identifier: &str,
+        ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+            let mut state = self.0.lock().map_err(|_| KeychainUnavailable)?;
+            state.calls.push(format!("get-authorized:{identifier}"));
+            Ok(state.vault.clone().map(Secret::new))
+        }
+
         fn get_fresh(
             &self,
             identifier: &str,
@@ -1518,6 +1913,20 @@ mod tests {
         ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
             let mut state = self.0.lock().map_err(|_| KeychainUnavailable)?;
             state.calls.push(format!("get-legacy:{identifier}"));
+            if state.legacy_get_unavailable {
+                return Err(KeychainUnavailable);
+            }
+            Ok(state.legacy.get(identifier).cloned().map(Secret::new))
+        }
+
+        fn get_legacy_authorized(
+            &self,
+            identifier: &str,
+        ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+            let mut state = self.0.lock().map_err(|_| KeychainUnavailable)?;
+            state
+                .calls
+                .push(format!("get-legacy-authorized:{identifier}"));
             if state.legacy_get_unavailable {
                 return Err(KeychainUnavailable);
             }
@@ -1593,6 +2002,78 @@ mod tests {
                 .all(|item| matches!(item, CredentialInventoryItem::Missing))
         );
         assert_eq!(keychain.calls(), vec![format!("get:{KEYCHAIN_VAULT_ID}")]);
+    }
+
+    #[test]
+    fn authorized_resolution_retries_once_after_passive_vault_failure() {
+        let root = tempdir().expect("temporary root should be created");
+        let mut vault = CredentialVault::default();
+        vault
+            .credentials
+            .insert("first".to_owned(), "secret-one".to_owned());
+        vault
+            .credentials
+            .insert("second".to_owned(), "secret-two".to_owned());
+        let keychain = RecordingKeychain::with_vault(&vault);
+        keychain
+            .0
+            .lock()
+            .expect("recording keychain should lock")
+            .vault_get_unavailable = true;
+        let manager = CredentialManager::with_backends(
+            TestEnvironment::default(),
+            keychain.clone(),
+            root.path().join("credentials.toml"),
+        );
+
+        assert!(matches!(
+            manager.resolve(&CredentialReference::new("first")),
+            Err(CredentialError::KeychainUnavailable { .. })
+        ));
+        let first = manager
+            .resolve_authorized(&CredentialReference::new("first"))
+            .expect("authorized resolution should retry the vault");
+        let second = manager
+            .resolve_authorized(&CredentialReference::new("second"))
+            .expect("loaded vault should satisfy another logical credential");
+
+        assert_eq!(first.secret().expose_secret(), "secret-one");
+        assert_eq!(second.secret().expose_secret(), "secret-two");
+        assert_eq!(
+            keychain.calls(),
+            vec![
+                format!("get:{KEYCHAIN_VAULT_ID}"),
+                format!("get-authorized:{KEYCHAIN_VAULT_ID}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn authorized_resolution_preserves_one_time_legacy_vault_migration() {
+        let root = tempdir().expect("temporary root should be created");
+        let keychain = RecordingKeychain::default();
+        keychain.insert_legacy("provider-token", "legacy-provider-secret");
+        let manager = CredentialManager::with_backends(
+            TestEnvironment::default(),
+            keychain.clone(),
+            root.path().join("credentials.toml"),
+        );
+
+        let resolved = manager
+            .resolve_authorized(&CredentialReference::new("provider-token"))
+            .expect("authorized active resolution should migrate a legacy credential");
+
+        assert_eq!(resolved.secret().expose_secret(), "legacy-provider-secret");
+        assert_eq!(resolved.source(), &CredentialSource::OsKeychain);
+        assert_eq!(
+            keychain.calls(),
+            vec![
+                format!("get-authorized:{KEYCHAIN_VAULT_ID}"),
+                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
+                "get-legacy-authorized:provider-token".to_owned(),
+                format!("set:{KEYCHAIN_VAULT_ID}"),
+            ]
+        );
     }
 
     #[test]

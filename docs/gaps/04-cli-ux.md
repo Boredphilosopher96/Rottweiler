@@ -4,7 +4,7 @@ Each of these is a paper-cut a real user hits in the first session.
 
 ## GAP-04-01 — Session titling never runs; every session is "New session" — **P1 [verified]**
 
-**Resolved with a cost-efficient default (2026-07-12).** Session projection immediately derives a bounded single-line title from the first user message. This fixes discovery without spending an additional model call on every session; a future optional title-model refinement must not make basic indexing provider- or network-dependent.
+**Resolved with a cost-efficient default (2026-07-12).** After the first successful assistant turn, Rottweiler asks the configured `title` model (falling back to `fast`) for a bounded 3–7 word title, with tools disabled, thinking disabled, a short timeout, and separately attributed usage/cost. Hard budget caps skip the extra call, and provider failure falls back to a deterministic title so session indexing never depends on the network.
 
 `rw sessions search <anything>` returns rows all titled `New session` (13 sessions at review time). The `title` model alias is configured and the store has a `title` column + FTS index (`rw-store/src/session.rs:423,1428`), but nothing generates a title from the first turn. Session discovery is therefore badly degraded. **Fix:** after the first assistant turn, generate a title via the `title` alias and update the session record.
 

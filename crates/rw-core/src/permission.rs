@@ -92,6 +92,7 @@ pub struct PermissionGenerationUpdate {
 #[derive(Default)]
 struct PermissionMemory {
     workspace_roots: Vec<PathBuf>,
+    trusted_read_roots: Vec<PathBuf>,
     workspace_namespace: Vec<String>,
     generation: u64,
     session_allows: BTreeSet<RememberedApproval>,
@@ -102,7 +103,6 @@ struct PermissionMemory {
 pub struct PermissionGate {
     policy: PermissionPolicy,
     restrictive_rules: Option<Vec<PermissionRule>>,
-    trusted_project_read_only: bool,
     memory: RwLock<PermissionMemory>,
     session_rules: RwLock<Vec<PermissionRule>>,
     project_store: Option<Arc<ProjectApprovalStore>>,
@@ -134,7 +134,6 @@ impl PermissionGate {
         Self {
             policy: PermissionPolicy::Configured(config),
             restrictive_rules: None,
-            trusted_project_read_only: false,
             memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
             project_store: None,
@@ -156,7 +155,6 @@ impl PermissionGate {
         Self {
             policy: PermissionPolicy::Headless(mode),
             restrictive_rules: None,
-            trusted_project_read_only: false,
             memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
             project_store: None,
@@ -171,12 +169,21 @@ impl PermissionGate {
         self
     }
 
-    /// Lets an explicitly trusted project use built-in read-only tools without
-    /// turning trust into authority for writes, execution, network, or an
-    /// explicit deny rule.
+    /// Lets explicitly trusted workspace roots use built-in read-only tools.
+    /// Paths are still resolved against the active workspace generation, and
+    /// writes, execution, network, and explicit deny rules remain unaffected.
     #[must_use]
-    pub const fn with_trusted_project_read_only(mut self, trusted: bool) -> Self {
-        self.trusted_project_read_only = trusted;
+    pub fn with_trusted_read_roots(
+        self,
+        roots: impl IntoIterator<Item = impl AsRef<Path>>,
+    ) -> Self {
+        let trusted = canonical_workspace_roots(roots);
+        let mut memory = lock_write(&self.memory);
+        memory.trusted_read_roots = trusted
+            .into_iter()
+            .filter(|trusted| memory.workspace_roots.contains(trusted))
+            .collect();
+        drop(memory);
         self
     }
 
@@ -263,6 +270,9 @@ impl PermissionGate {
             invalidated_project_approvals,
         };
         memory.workspace_namespace = namespace;
+        memory
+            .trusted_read_roots
+            .retain(|trusted| roots.contains(trusted));
         memory.workspace_roots = roots;
         memory.generation = update.generation;
         memory.session_allows.clear();
@@ -289,9 +299,14 @@ impl PermissionGate {
         Ok(Self {
             policy: self.policy.clone(),
             restrictive_rules: self.restrictive_rules.clone(),
-            trusted_project_read_only: self.trusted_project_read_only,
             memory: RwLock::new(PermissionMemory {
                 workspace_namespace: workspace_namespace(&roots),
+                trusted_read_roots: lock_read(&self.memory)
+                    .trusted_read_roots
+                    .iter()
+                    .filter(|trusted| roots.contains(trusted))
+                    .cloned()
+                    .collect(),
                 workspace_roots: roots,
                 generation,
                 session_allows: BTreeSet::new(),
@@ -324,9 +339,9 @@ impl PermissionGate {
         Ok(Self {
             policy: self.policy.clone(),
             restrictive_rules: Some(restrictive_rules),
-            trusted_project_read_only: self.trusted_project_read_only,
             memory: RwLock::new(PermissionMemory {
                 workspace_roots: memory.workspace_roots.clone(),
+                trusted_read_roots: memory.trusted_read_roots.clone(),
                 workspace_namespace: memory.workspace_namespace.clone(),
                 generation: memory.generation,
                 session_allows: memory.session_allows.clone(),
@@ -591,7 +606,14 @@ impl PermissionGate {
                         PermissionDecision::Ask
                     }
                 } else if configured == PermissionDecision::Ask
-                    && (safe_listed || (self.trusted_project_read_only && is_read_only(request)))
+                    && (safe_listed || {
+                        let memory = lock_read(&self.memory);
+                        is_trusted_read_only_request(
+                            request,
+                            &memory.workspace_roots,
+                            &memory.trusted_read_roots,
+                        )
+                    })
                 {
                     PermissionDecision::Allow
                 } else {
@@ -1208,6 +1230,85 @@ fn is_read_only(request: &PermissionRequest) -> bool {
                 .capabilities
                 .iter()
                 .all(|capability| matches!(capability, ToolCapability::ReadFilesystem)))
+}
+
+fn is_trusted_read_only_request(
+    request: &PermissionRequest,
+    workspace_roots: &[PathBuf],
+    trusted_read_roots: &[PathBuf],
+) -> bool {
+    if !is_read_only(request)
+        || !matches!(
+            request.tool_name.as_str(),
+            "read" | "grep" | "glob" | "ls" | "symbols"
+        )
+        || workspace_roots.is_empty()
+        || trusted_read_roots.is_empty()
+        || request
+            .arguments
+            .get("network_domains")
+            .is_some_and(|domains| {
+                normalize_network_domains(domains).is_none_or(|domains| !domains.is_empty())
+            })
+    {
+        return false;
+    }
+    if request.tool_name == "symbols" {
+        return workspace_roots
+            .iter()
+            .all(|root| trusted_read_roots.contains(root));
+    }
+    let path = request
+        .arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .or_else(|| matches!(request.tool_name.as_str(), "glob" | "grep" | "ls").then_some("."));
+    let Some(path) = path else { return false };
+    let supplied = Path::new(path);
+    let candidates = if supplied == Path::new(".")
+        && matches!(request.tool_name.as_str(), "glob" | "grep" | "ls")
+        && workspace_roots.len() > 1
+    {
+        workspace_roots.to_vec()
+    } else {
+        let Some(candidate) = resolve_workspace_read_path(workspace_roots, supplied) else {
+            return false;
+        };
+        vec![candidate]
+    };
+    candidates.iter().all(|candidate| {
+        workspace_roots
+            .iter()
+            .filter(|root| candidate == *root || candidate.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .is_some_and(|owning_root| trusted_read_roots.contains(owning_root))
+    })
+}
+
+fn resolve_workspace_read_path(roots: &[PathBuf], supplied: &Path) -> Option<PathBuf> {
+    let candidate = if supplied.is_absolute() {
+        supplied.to_path_buf()
+    } else {
+        let mut components = supplied.components();
+        if components.next().is_some_and(
+            |component| matches!(component, std::path::Component::Normal(name) if name == "@root"),
+        ) {
+            let std::path::Component::Normal(index) = components.next()? else {
+                return None;
+            };
+            let index = index.to_str()?.parse::<usize>().ok()?;
+            components.fold(roots.get(index)?.clone(), |joined, component| {
+                joined.join(component.as_os_str())
+            })
+        } else {
+            roots.first()?.join(supplied)
+        }
+    };
+    let canonical = fs::canonicalize(candidate).ok()?;
+    roots
+        .iter()
+        .any(|root| canonical == *root || canonical.starts_with(root))
+        .then_some(canonical)
 }
 
 fn bash_sandbox_mode(request: &PermissionRequest) -> Option<BashSandboxMode> {
@@ -2149,6 +2250,7 @@ mod tests {
 
     #[tokio::test]
     async fn trusted_project_allows_read_only_tools_but_preserves_explicit_denies() {
+        let root = tempfile::tempdir().expect("tempdir");
         let request = PermissionRequest {
             id: "trusted-glob".to_owned(),
             tool_name: "glob".to_owned(),
@@ -2157,8 +2259,9 @@ mod tests {
             approval_diff: None,
         };
         let no_prompt = CountingDeny(AtomicUsize::new(0));
-        let trusted =
-            PermissionGate::new(PermissionDecision::Ask).with_trusted_project_read_only(true);
+        let trusted = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_trusted_read_roots([root.path()]);
         assert_eq!(
             trusted.authorize(request.clone(), &no_prompt).await,
             PermissionOutcome::Allowed
@@ -2172,12 +2275,212 @@ mod tests {
                 action: PermissionDecision::Deny,
             }],
         })
-        .with_trusted_project_read_only(true);
+        .with_workspace_roots([root.path()])
+        .with_trusted_read_roots([root.path()]);
         assert_eq!(
             denied.authorize(request, &no_prompt).await,
             PermissionOutcome::Denied
         );
         assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn trusted_workspace_allows_pathless_builtin_symbol_reads_only_with_full_authority() {
+        let primary = tempfile::tempdir().expect("primary");
+        let secondary = tempfile::tempdir().expect("secondary");
+        let symbols = || PermissionRequest {
+            id: "workspace-symbols".to_owned(),
+            tool_name: "symbols".to_owned(),
+            arguments: json!({"pattern": "ProviderRuntime"}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        let no_prompt = CountingDeny(AtomicUsize::new(0));
+        let trusted = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([primary.path(), secondary.path()])
+            .with_trusted_read_roots([primary.path(), secondary.path()]);
+        assert_eq!(
+            trusted.authorize(symbols(), &no_prompt).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
+
+        let partially_trusted = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([primary.path(), secondary.path()])
+            .with_trusted_read_roots([primary.path()]);
+        assert_eq!(
+            partially_trusted.authorize(symbols(), &no_prompt).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn trusted_workspace_read_authority_rejects_extensions_network_and_explicit_denies() {
+        let root = tempfile::tempdir().expect("workspace");
+        let no_prompt = CountingDeny(AtomicUsize::new(0));
+        let trusted = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_trusted_read_roots([root.path()]);
+        let extension = PermissionRequest {
+            id: "extension-read".to_owned(),
+            tool_name: "extension_read".to_owned(),
+            arguments: json!({"path": "."}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            trusted.authorize(extension, &no_prompt).await,
+            PermissionOutcome::Denied
+        );
+
+        let network = PermissionRequest {
+            id: "network-symbols".to_owned(),
+            tool_name: "symbols".to_owned(),
+            arguments: json!({
+                "pattern": "ProviderRuntime",
+                "network_domains": ["example.com"]
+            }),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            trusted.authorize(network, &no_prompt).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 2);
+
+        let denied = PermissionGate::from_config(PermissionConfig {
+            default: PermissionDecision::Ask,
+            rules: vec![PermissionRule {
+                pattern: "symbols(*)".to_owned(),
+                action: PermissionDecision::Deny,
+            }],
+        })
+        .with_workspace_roots([root.path()])
+        .with_trusted_read_roots([root.path()]);
+        let symbols = PermissionRequest {
+            id: "denied-symbols".to_owned(),
+            tool_name: "symbols".to_owned(),
+            arguments: json!({"pattern": "ProviderRuntime"}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            denied.authorize(symbols, &no_prompt).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn trusted_read_only_authority_is_scoped_to_each_workspace_root() {
+        let primary = tempfile::tempdir().expect("primary");
+        let secondary = tempfile::tempdir().expect("secondary");
+        std::fs::write(primary.path().join("primary.rs"), "primary").expect("primary fixture");
+        std::fs::write(secondary.path().join("secondary.rs"), "secondary")
+            .expect("secondary fixture");
+        let gate = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([primary.path(), secondary.path()])
+            .with_trusted_read_roots([primary.path()]);
+        let no_prompt = CountingDeny(AtomicUsize::new(0));
+
+        let primary_read = PermissionRequest {
+            id: "primary-read".to_owned(),
+            tool_name: "read".to_owned(),
+            arguments: json!({"path": "@root/0/primary.rs"}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            gate.authorize(primary_read, &no_prompt).await,
+            PermissionOutcome::Allowed
+        );
+
+        let secondary_read = PermissionRequest {
+            id: "secondary-read".to_owned(),
+            tool_name: "read".to_owned(),
+            arguments: json!({"path": "@root/1/secondary.rs"}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            gate.authorize(secondary_read, &no_prompt).await,
+            PermissionOutcome::Denied
+        );
+
+        let all_roots_glob = PermissionRequest {
+            id: "all-roots-glob".to_owned(),
+            tool_name: "glob".to_owned(),
+            arguments: json!({"pattern": "**/*.rs", "path": "."}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            gate.authorize(all_roots_glob, &no_prompt).await,
+            PermissionOutcome::Denied
+        );
+        let default_all_roots_ls = PermissionRequest {
+            id: "default-all-roots-ls".to_owned(),
+            tool_name: "ls".to_owned(),
+            arguments: json!({"recursive": false}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            gate.authorize(default_all_roots_ls, &no_prompt).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn trusted_secondary_root_allows_virtual_paths_without_trusting_primary() {
+        let primary = tempfile::tempdir().expect("primary");
+        let secondary = tempfile::tempdir().expect("secondary");
+        std::fs::write(primary.path().join("primary.rs"), "primary").expect("primary fixture");
+        std::fs::write(secondary.path().join("secondary.rs"), "secondary")
+            .expect("secondary fixture");
+        let gate = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([primary.path(), secondary.path()])
+            .with_trusted_read_roots([secondary.path()]);
+        let no_prompt = CountingDeny(AtomicUsize::new(0));
+        let secondary_read = PermissionRequest {
+            id: "secondary-read".to_owned(),
+            tool_name: "read".to_owned(),
+            arguments: json!({"path": "@root/1/secondary.rs"}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            gate.authorize(secondary_read, &no_prompt).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn untrusted_nested_root_does_not_inherit_primary_read_authority() {
+        let tree = tempfile::tempdir().expect("tree");
+        let nested = tree.path().join("nested");
+        std::fs::create_dir(&nested).expect("nested root");
+        std::fs::write(nested.join("private.rs"), "private").expect("nested fixture");
+        let gate = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([tree.path(), nested.as_path()])
+            .with_trusted_read_roots([tree.path()]);
+        let prompt = CountingDeny(AtomicUsize::new(0));
+        let request = PermissionRequest {
+            id: "nested-read".to_owned(),
+            tool_name: "read".to_owned(),
+            arguments: json!({"path": "@root/1/private.rs"}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        assert_eq!(
+            gate.authorize(request, &prompt).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(prompt.0.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

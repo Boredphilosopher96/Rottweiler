@@ -9,12 +9,13 @@ import {
   type TreeSitterClient,
 } from "@opentui/core"
 
-import { formatPercent, formatSessionCost } from "../render"
+import { formatPercent, formatSessionCost, formatToolArguments } from "../render"
 import type {
   ApprovalDecision,
   PlanArtifact,
   PlanDecision,
   Question,
+  Usage,
 } from "../protocol"
 import type { QuestionProjection, RottweilerState, ToolProjection } from "../state"
 import type { RottweilerTheme } from "../theme"
@@ -415,16 +416,19 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#activeQuestion = null
     this.#activePlan = null
     this.visible = true
+    this.select.visible = true
     const bash = bashApproval(tool)
     this.title = bash?.unsandboxed === true ? " UNSANDBOXED approval required " : " Permission required "
     const diff = readUnifiedDiff(tool.diff)
     const truncated = diff?.truncated === true
     const command = bash === null ? "" : `\n$ ${bash.command}`
-    this.prompt.content = `${tool.name} requests ${tool.capabilities.join(", ") || "permission"}${command}\n${
+    const argumentsSummary = formatToolArguments(tool.args)
+    this.prompt.content = `${toolDisplayName(tool.name)} wants to ${tool.capabilities.map(capabilityLabel).join(", ") || "continue"}${command}\nArguments: ${argumentsSummary}\n${
       truncated
         ? "Diff exceeds the review limit. Approval is disabled until the complete change can be reviewed."
         : (tool.rationale ?? "Review this action.")
     }`
+    this.prompt.height = Math.min(6, Math.max(1, this.prompt.plainText.split("\n").length))
     this.select.options = truncated
       ? [{ name: "Deny", description: "A truncated change cannot be approved", value: "deny" }]
       : [
@@ -473,10 +477,17 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.visible = true
     this.title = " Rottweiler asks "
     const first = question.questions[0]
-    this.prompt.content = first?.prompt ?? "Choose an answer"
+    const freeText = first?.response_kind === "text"
+    this.prompt.content = freeText
+      ? `${first?.prompt ?? "Your answer"}\nType your answer below. Enter sends; Shift+Enter adds a line.`
+      : first?.prompt ?? "Choose an answer"
+    this.prompt.height = Math.min(4, Math.max(1, this.prompt.plainText.split("\n").length))
     this.select.options = questionOptions(first)
-    this.select.setSelectedIndex(0)
-    this.select.focus()
+    this.select.visible = !freeText
+    if (!freeText) {
+      this.select.setSelectedIndex(0)
+      this.select.focus()
+    }
   }
 
   #showPlan(plan: PlanArtifact): void {
@@ -485,8 +496,10 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#activePlan = plan
     this.#removeDiff()
     this.visible = true
+    this.select.visible = true
     this.title = " Plan approval required "
     this.prompt.content = `${plan.title}\n${plan.summary_md}\n${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`
+    this.prompt.height = Math.min(6, Math.max(1, this.prompt.plainText.split("\n").length))
     this.select.options = [
       { name: "Approve plan", description: "Pin this artifact and enter Execute", value: "approve" },
       { name: "Reject plan", description: "Stay in Plan mode", value: "reject" },
@@ -718,7 +731,9 @@ export class StatusLineRenderable extends TextRenderable {
         ? "ctx —"
         : `ctx ${formatPercent(state.context.used_tokens, state.context.usable_tokens)}`
     const cache =
-      state.cost === null ? "cache —" : `cache ${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
+      state.cost === null || !hasRecordedUsage(state.cost.session_usage)
+        ? "cache —"
+        : `cache ${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
     const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
     this.content = [
       ...(this.#inputMode === null
@@ -729,20 +744,30 @@ export class StatusLineRenderable extends TextRenderable {
             }`,
           ]),
       ...(state.replay.active ? ["◉ replay"] : []),
-      ...(state.replay.active ? [] : [`◉ ${state.mode ?? "execute"}`]),
-      ...(waitingApproval === undefined ? [] : [`approval ${waitingApproval.name}`]),
+      ...(state.replay.active ? [] : [`◉ ${state.mode ?? "—"}`]),
+      ...(waitingApproval === undefined ? [] : [`approval · ${toolDisplayName(waitingApproval.name)}`]),
       `model ${
         state.provider === null || state.model?.includes("/") === true
-          ? (state.model ?? "fast")
-          : `${state.provider}/${state.model ?? "fast"}`
+          ? (state.model ?? "—")
+          : `${state.provider}/${state.model ?? "—"}`
       }`,
       context,
       formatSessionCost(state.cost, state.context?.used_tokens ?? null),
       cache,
       `git ${this.#branch ?? "—"}`,
-      ...(pluginStatus === undefined ? [] : [`${pluginStatus[0]} ${pluginStatus[1]}`]),
+      ...(pluginStatus === undefined ? [] : [`Extension · ${humanLabel(pluginStatus[1])}`]),
     ].join("  │  ")
   }
+}
+
+function hasRecordedUsage(usage: Usage): boolean {
+  return [
+    usage.input_tokens,
+    usage.output_tokens,
+    usage.cache_read_tokens,
+    usage.cache_write_tokens,
+    usage.reasoning_tokens,
+  ].some((value) => /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) > 0n)
 }
 
 export class StateBannerRenderable extends TextRenderable {
@@ -772,15 +797,15 @@ export class StateBannerRenderable extends TextRenderable {
     if (latestError !== undefined) {
       this.visible = true
       this.fg = this.#theme.danger
-      this.content = `Error · ${latestError.message}`
+      this.content = userFacingError(latestError.category, latestError.code, latestError.message)
     } else if (latestBudget !== undefined && latestBudget.level === "hard_cap") {
       this.visible = true
       this.fg = this.#theme.danger
-      this.content = `Budget hard cap · ${latestBudget.scope} ${latestBudget.current}/${latestBudget.limit}`
+      this.content = `Budget limit reached · ${budgetScopeLabel(latestBudget.scope)} · ${formatBudgetAmount(latestBudget.current, latestBudget.unit)} of ${formatBudgetAmount(latestBudget.limit, latestBudget.unit)}`
     } else if (waitingApproval !== undefined) {
       this.visible = true
       this.fg = this.#theme.warning
-      this.content = `Waiting for approval · ${waitingApproval.name}`
+      this.content = `Waiting for approval · ${toolDisplayName(waitingApproval.name)}`
     } else if (state.replay.active) {
       this.visible = true
       this.fg = this.#theme.info
@@ -792,14 +817,13 @@ export class StateBannerRenderable extends TextRenderable {
     } else if (state.compaction.active) {
       this.visible = true
       this.fg = this.#theme.info
-      this.content = `Compacting context · ${state.compaction.reason ?? "manual"} · UI remains responsive`
+      this.content = `Compacting context · ${compactionReasonLabel(state.compaction.reason)} · UI remains responsive`
     } else if (state.connection.phase !== "connected" && state.connection.phase !== "idle") {
       this.visible = true
       this.fg = this.#theme.warning
-      this.content =
-        state.connection.gap === null
-          ? `${state.connection.phase} · attempt ${state.connection.attempt}`
-          : `Replaying event gap ${state.connection.gap.expected}…${state.connection.gap.received}`
+      this.content = state.connection.gap === null
+        ? connectionMessage(state.connection.phase)
+        : "Restoring missed updates…"
     } else if (latestPluginNotification !== undefined) {
       this.visible = true
       this.fg = this.#theme.info
@@ -811,9 +835,92 @@ export class StateBannerRenderable extends TextRenderable {
   }
 }
 
+function toolDisplayName(name: string): string {
+  const known: Record<string, string> = {
+    bash: "Terminal command",
+    glob: "Find files",
+    grep: "Search files",
+    ls: "List files",
+    read: "Read file",
+    write: "Write file",
+    edit: "Edit file",
+    multi_edit: "Edit files",
+    webfetch: "Open web page",
+    websearch: "Search the web",
+    ask_user: "Ask a question",
+    todo: "Update tasks",
+  }
+  return known[name] ?? humanLabel(name)
+}
+
+function capabilityLabel(capability: string): string {
+  switch (capability) {
+    case "read_filesystem": return "read files"
+    case "write_filesystem": return "change files"
+    case "network": return "access the network"
+    case "execute": return "run a command"
+    default: return "use additional access"
+  }
+}
+
+function connectionMessage(phase: RottweilerState["connection"]["phase"]): string {
+  switch (phase) {
+    case "connecting": return "Connecting to the engine…"
+    case "reconnecting": return "Reconnecting to the engine…"
+    case "replaying": return "Restoring the session…"
+    case "disconnected": return "Connection lost · retrying…"
+    case "closed": return "Engine stopped"
+    case "connected": return "Connected"
+    case "idle": return ""
+  }
+}
+
+function budgetScopeLabel(scope: string): string {
+  switch (scope) {
+    case "session": return "This session"
+    case "daily": return "Today"
+    case "trailing_minute": return "Recent usage"
+    default: return "Usage"
+  }
+}
+
+function formatBudgetAmount(value: string, unit: string): string {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) return "unknown"
+  const micros = BigInt(value)
+  const whole = micros / 1_000_000n
+  const fraction = (micros % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "")
+  const amount = fraction.length === 0 ? `${whole}` : `${whole}.${fraction}`
+  return unit === "micros_usd" ? `$${amount}` : `${amount} AI credits`
+}
+
+function compactionReasonLabel(reason: string | null): string {
+  if (reason === null || reason === "manual") return "Requested"
+  if (reason === "context_overflow") return "Making room for more context"
+  return "Keeping the conversation responsive"
+}
+
+function humanLabel(value: string): string {
+  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function userFacingError(category: string, code: string, message: string): string {
+  if (/recovery|checkpoint|journal/i.test(code) || /fail-closed.*recovery|checkpoint journal/i.test(message)) {
+    return "Restoring this session · input will be available shortly"
+  }
+  if (/protocol/i.test(code) || /protocol failure|does not match/i.test(message)) {
+    return "Rottweiler lost sync with the engine · reconnecting"
+  }
+  if (/provider.*auth/i.test(code)) return "Sign-in could not be completed · try again"
+  if (category === "internal") return "Rottweiler hit an internal error · retry the action"
+  const friendly = message
+    .replaceAll("fail-closed", "temporarily unavailable")
+    .replace(/\b[a-z]+(?:_[a-z0-9]+)+\b/g, (value) => value.replaceAll("_", " "))
+  return `Error · ${friendly}`
+}
+
 function questionOptions(question: Question | undefined) {
   if (question === undefined || question.response_kind === "text") {
-    return [{ name: "Write an answer in the composer", description: "Free text", value: "" }]
+    return []
   }
   return question.options.map((option) => ({
     name: option.label,

@@ -61,6 +61,9 @@ export interface TranscriptEntry {
   readonly sequenceId: string
   readonly agentTurn: string
   readonly turn: Turn
+  /** Presentation kind for host results that are not conversation turns. */
+  readonly presentation?: "conversation" | "command_result"
+  readonly title?: string
 }
 
 export interface StreamingCitation {
@@ -211,6 +214,7 @@ export interface ProtocolProjection {
 
 export interface SessionChoice {
   readonly sessionId: string
+  readonly title?: string
   readonly workspaceName: string
   readonly model: string
   readonly driverClientId: string | null

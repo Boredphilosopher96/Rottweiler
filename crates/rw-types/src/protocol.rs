@@ -172,6 +172,9 @@ pub struct StoredAttachment {
 #[ts(optional_fields = nullable)]
 pub struct SessionDescriptor {
     pub session_id: SessionId,
+    /// Human-facing session title. Empty only when reading an older peer.
+    #[serde(default)]
+    pub title: String,
     pub workspace_name: String,
     pub model: ModelAlias,
     pub driver_client_id: Option<ClientId>,
@@ -724,6 +727,7 @@ pub enum AccountingAttribution {
     Main,
     Compaction,
     Subagent,
+    Title,
 }
 
 /// Session-level cost, token, cache, and burn-rate snapshot.
@@ -1650,6 +1654,18 @@ pub enum EngineEvent {
         content: String,
         attachments: Vec<StoredAttachment>,
     },
+    /// Human-facing title selected asynchronously after the first successful
+    /// assistant turn. This is durable so replay and session lists agree.
+    SessionTitleUpdated {
+        meta: EventMeta,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        usage: Option<Usage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        cost: Option<Cost>,
+    },
     /// A plugin-originated user message was admitted through the bounded
     /// machine boundary. The ordinary message/turn events remain authoritative
     /// for conversation reconstruction.
@@ -1977,6 +1993,7 @@ impl EngineEvent {
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
+            | Self::SessionTitleUpdated { meta, .. }
             | Self::PluginMessageInjected { meta, .. }
             | Self::PluginStatusChanged { meta, .. }
             | Self::UiNotification { meta, .. }
@@ -2050,6 +2067,7 @@ impl EngineEvent {
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
+            | Self::SessionTitleUpdated { meta, .. }
             | Self::PluginMessageInjected { meta, .. }
             | Self::PluginStatusChanged { meta, .. }
             | Self::UiNotification { meta, .. }

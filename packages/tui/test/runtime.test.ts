@@ -122,7 +122,9 @@ class BlockingPreparationClient implements RuntimeEngineClient {
     return { type: "accepted" }
   }
 
-  async subscribe(_options: EngineSubscriptionOptions): Promise<void> {}
+  async subscribe(options: EngineSubscriptionOptions): Promise<void> {
+    options.onConnection?.({ phase: "connected", attempt: 0 })
+  }
 }
 
 class SwitchingClient implements RuntimeEngineClient {
@@ -159,11 +161,14 @@ class SwitchingClient implements RuntimeEngineClient {
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
     this.subscriptions.push(options)
+    options.onConnection?.({ phase: "connected", attempt: 0 })
     await new Promise<void>((resolve) => {
       if (options.signal.aborted) {
         resolve()
       } else {
-        options.signal.addEventListener("abort", () => resolve(), { once: true })
+        options.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        })
       }
     })
   }
@@ -171,6 +176,60 @@ class SwitchingClient implements RuntimeEngineClient {
   blockResume(sessionId: string): void {
     this.blockedResumes.set(sessionId, () => {})
   }
+}
+
+class DelayedConnectionClient implements RuntimeEngineClient {
+  readonly commands: ClientCommand[] = []
+  subscription: EngineSubscriptionOptions | null = null
+  readonly connected: Promise<void>
+  readonly #markConnected: () => void
+
+  constructor() {
+    let markConnected!: () => void
+    this.connected = new Promise((resolve) => {
+      markConnected = resolve
+    })
+    this.#markConnected = markConnected
+  }
+
+  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+    this.commands.push(command)
+    return { type: "accepted" }
+  }
+
+  async subscribe(options: EngineSubscriptionOptions): Promise<void> {
+    this.subscription = options
+    await this.connected
+    options.onConnection?.({ phase: "connected", attempt: 0 })
+    await new Promise<void>((resolve) => {
+      if (options.signal.aborted) resolve()
+      else
+        options.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        })
+    })
+  }
+
+  connect(): void {
+    this.#markConnected()
+  }
+}
+
+class BlockingShutdownClient implements RuntimeEngineClient {
+  readonly commands: ClientCommand[] = []
+  shutdownAborted = false
+
+  async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
+    this.commands.push(command)
+    await new Promise<void>((resolve) => {
+      if (signal?.aborted) resolve()
+      else signal?.addEventListener("abort", () => resolve(), { once: true })
+    })
+    this.shutdownAborted = signal?.aborted ?? false
+    throw signal?.reason ?? new Error("shutdown request aborted")
+  }
+
+  async subscribe(): Promise<void> {}
 }
 
 class CorrelatedForkClient implements RuntimeEngineClient {
@@ -211,7 +270,10 @@ class CorrelatedForkClient implements RuntimeEngineClient {
     options.onConnection?.({ phase: "connected", attempt: 0 })
     await new Promise<void>((resolve) => {
       if (options.signal.aborted) resolve()
-      else options.signal.addEventListener("abort", () => resolve(), { once: true })
+      else
+        options.signal.addEventListener("abort", () => resolve(), {
+          once: true,
+        })
     })
   }
 }
@@ -292,6 +354,39 @@ describe("OpenTUI engine runtime", () => {
     expect(delays).toEqual([10])
   })
 
+  test("requests typed host shutdown before stopping and keeps an unavailable host bounded", async () => {
+    const config = {
+      socketPath: "/private/engine.sock",
+      bootstrapToken: "bootstrap-secret",
+      sessionId: "session-runtime",
+      lastSeenSequence: null,
+      lastSeenFile: null,
+      replayMode: false,
+    }
+    const acceptedClient = new ScriptedClient()
+    const acceptedRuntime = new TuiEngineRuntime(config, acceptedClient)
+
+    expect(await acceptedRuntime.shutdownHost()).toBeTrue()
+    expect(acceptedClient.commands).toEqual([
+      {
+        type: "shutdown_host",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          client_id: "tui-runtime",
+          request_id: expect.any(String),
+        },
+      },
+    ])
+    await acceptedRuntime.stop()
+
+    const blockedClient = new BlockingShutdownClient()
+    const blockedRuntime = new TuiEngineRuntime(config, blockedClient)
+    expect(await blockedRuntime.shutdownHost(5)).toBeFalse()
+    expect(blockedClient.commands[0]?.type).toBe("shutdown_host")
+    expect(blockedClient.shutdownAborted).toBeTrue()
+    await blockedRuntime.stop()
+  })
+
   test("rejects partial runtime configuration and malformed cursors", async () => {
     const files = new MemoryFiles()
     expect(
@@ -309,9 +404,7 @@ describe("OpenTUI engine runtime", () => {
         files,
       ),
     ).rejects.toEqual(
-      new EngineRuntimeError(
-        "ROTTWEILER_LAST_SEEN_SEQUENCE must contain a decimal u64 sequence",
-      ),
+      new EngineRuntimeError("ROTTWEILER_LAST_SEEN_SEQUENCE must contain a decimal u64 sequence"),
     )
   })
 
@@ -606,7 +699,9 @@ describe("OpenTUI engine runtime", () => {
     if (firstFork?.type !== "fork") throw new Error("capacity fork command missing")
     expect(files.reads.get("/private/pending-forks/fork-parent.json")).not.toBe("")
 
-    expect(await runtime.sendCommand(command("capacity-retry"))).toEqual({ type: "accepted" })
+    expect(await runtime.sendCommand(command("capacity-retry"))).toEqual({
+      type: "accepted",
+    })
     const forks = client.commands.filter((candidate) => candidate.type === "fork")
     expect(forks).toHaveLength(2)
     expect(forks[1]?.type === "fork" ? forks[1].operation_id : null).toBe(firstFork.operation_id)
@@ -662,6 +757,54 @@ describe("OpenTUI engine runtime", () => {
       "list_commands",
     ])
     expect(client.subscription?.attach.role).toBe("driver")
+  })
+
+  test("waits for checkpoint recovery before exposing a writable driver", async () => {
+    const client = new ScriptedClient([
+      {
+        type: "rejected",
+        error: {
+          category: "protocol",
+          code: "session_requires_recovery",
+          message: "session is fail-closed until checkpoint journal recovery completes",
+          retryable: true,
+        },
+      },
+      { type: "accepted" },
+      { type: "accepted" },
+    ])
+    const delays: number[] = []
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "session-recovering",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+      },
+      client,
+      new MemoryFiles(),
+      () => `request-${client.commands.length + 1}`,
+      async (delay) => {
+        delays.push(delay)
+      },
+    )
+    runtime.bind(new TestApp())
+    await runtime.start()
+
+    expect(delays).toEqual([10])
+    expect(client.commands.map((command) => command.type)).toEqual([
+      "resume_session",
+      "resume_session",
+      "take_driver",
+      "get_context",
+      "get_cost",
+      "get_workspace_status",
+      "list_models",
+      "list_settings",
+      "list_commands",
+    ])
   })
 
   test("fails permanent session persistence preparation instead of retrying forever", async () => {
@@ -780,6 +923,51 @@ describe("OpenTUI engine runtime", () => {
       "list_commands",
       "send_message",
     ])
+  })
+
+  test("waits for the event stream before requesting connection-scoped projections", async () => {
+    const client = new DelayedConnectionClient()
+    const readySessions: string[] = []
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "session-delayed-events",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+      },
+      client,
+      new MemoryFiles(),
+      undefined,
+      undefined,
+      (sessionId) => readySessions.push(sessionId),
+    )
+    runtime.bind(new TestApp())
+
+    const starting = runtime.start()
+    await waitFor(() => client.subscription !== null)
+    expect(client.commands.map((command) => command.type)).toEqual([
+      "resume_session",
+      "take_driver",
+    ])
+    expect(readySessions).toEqual([])
+
+    client.connect()
+    await waitFor(() => readySessions.length === 1)
+    expect(readySessions).toEqual(["session-delayed-events"])
+    expect(client.commands.map((command) => command.type)).toEqual([
+      "resume_session",
+      "take_driver",
+      "get_context",
+      "get_cost",
+      "get_workspace_status",
+      "list_models",
+      "list_settings",
+      "list_commands",
+    ])
+    await runtime.stop()
+    await starting
   })
 
   test("switches sessions atomically and suppresses old-session commands and events", async () => {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { formatCost, formatSessionCost, toolOutputText, TranscriptVirtualizer } from "../src/render"
+import { formatCost, formatSessionCost, toolOutputText, TranscriptVirtualizer, turnMarkdown } from "../src/render"
 
 describe("bounded retained rendering", () => {
   test("renders subscription usage and AI credits instead of a dead dollar placeholder", () => {
@@ -72,6 +72,49 @@ describe("bounded retained rendering", () => {
     expect(text).toContain("4194304 chars")
     expect(text).not.toContain("file-4095.txt")
     expect(text.length).toBeLessThan(2_000)
+  })
+
+  test("keeps provider-facing tool JSON and internal identifiers out of transcript text", () => {
+    const output = {
+      type: "mixed" as const,
+      parts: [
+        { type: "text" as const, text: "README.md" },
+        {
+          type: "structured" as const,
+          value: {
+            data: { paths: ["README.md"], machine_local_path: "/private/repo/README.md" },
+            stable_prefix_hash: "internal-hash",
+            source: "tool_registry",
+          },
+        },
+      ],
+    }
+    expect(toolOutputText(output)).toBe("README.md")
+
+    const markdown = turnMarkdown({
+      role: "tool",
+      blocks: [{ type: "tool_result", id: "call-internal", output, is_error: false }],
+      meta: { synthetic: false, summary: false },
+    })
+    expect(markdown).toBe("")
+    expect(markdown).not.toContain("machine_local_path")
+    expect(markdown).not.toContain("tool_registry")
+    expect(markdown).not.toContain("call-internal")
+    expect(markdown).not.toContain("{")
+
+    const structuredOnly = toolOutputText({
+      type: "structured",
+      value: {
+        source: "tool_registry",
+        kind: "tool_definitions",
+        machine_local_path: "/private/repo",
+        count: 3,
+      },
+    })
+    expect(structuredOnly).toBe("Count: 3")
+    expect(structuredOnly).not.toContain("tool_registry")
+    expect(structuredOnly).not.toContain("tool_definitions")
+    expect(structuredOnly).not.toContain("/private/repo")
   })
 
   test("includes bounded child-panel rows in transcript virtual offsets", () => {
