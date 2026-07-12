@@ -56,6 +56,14 @@ class PerfBaselineTests(unittest.TestCase):
             for suite in platform["suites"].values():
                 self.assertIn("bootstrap", suite["provenance"])
                 self.assertEqual(suite["baseline_kind"], "bootstrap")
+        darwin = document["platforms"]["darwin-arm64"]["suites"]["core"]["metrics"]
+        linux = document["platforms"]["linux-x86_64"]["suites"]["core"]["metrics"]
+        self.assertEqual(darwin["tui_bundle_bytes"], 90_909_090)
+        self.assertEqual(darwin["tui_frame_p95_us"], 14_545)
+        self.assertEqual(darwin["tui_frame_p999_us"], 30_000)
+        self.assertEqual(linux["tui_bundle_bytes"], 99_999_999)
+        self.assertEqual(linux["tui_frame_p95_us"], 36_363)
+        self.assertEqual(linux["tui_frame_p999_us"], 59_999)
 
     def test_require_measured_rejects_bootstrap_and_accepts_reviewed_measurement(self) -> None:
         document = baseline()

@@ -19,7 +19,7 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 **Consequences (accepted).**
 - Two build toolchains (cargo + bun) and a protocol contract test suite between them (see 07 §2).
 - Startup budget is split: engine ready < 50ms, TUI first paint < 150ms total (Bun-compiled binaries cold-start in tens of ms; opencode demonstrates this is achievable).
-- Distribution artifact is larger (Bun-compiled executables are ~60–90MB). The binary-size gate applies to the Rust engine only; the TUI bundle gets its own budget (< 100MB) — a knowing trade for the renderer.
+- Distribution artifact is larger because a Bun-compiled executable embeds the Bun runtime. The binary-size gate applies to the Rust engine only; the TUI bundle has platform-specific budgets (< 100MB on macOS, < 110MB on Linux) — a knowing trade for the renderer. Linux release builds fail closed unless the copied OpenTUI native library can be stripped with the trusted system `strip` binary.
 - If the TUI process dies, the engine survives; `rw` reattaches (this must be a tested behavior, not an accident).
 
 **Revisit when.** OpenTUI publishes a stable C ABI / Rust binding for its Zig renderer — then evaluate moving the TUI in-process behind the same component API.

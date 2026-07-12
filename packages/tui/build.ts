@@ -1,4 +1,5 @@
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
@@ -65,6 +66,21 @@ const selectedNativeLibrary =
       ? "libopentui.dylib"
       : "libopentui.so"
 const selectedNativePath = join(selectedNativeDirectory, selectedNativeLibrary)
+function stripLinuxArtifact(path: string, label: string): void {
+  if (process.platform !== "linux") return
+  const stripped = spawnSync("/usr/bin/strip", ["--strip-unneeded", path], {
+    encoding: "utf8",
+  })
+  if (stripped.error !== undefined) {
+    throw new Error(`failed to strip Linux ${label}: ${stripped.error.message}`)
+  }
+  if (stripped.status !== 0) {
+    const detail = stripped.stderr.trim()
+    throw new Error(
+      `failed to strip Linux ${label} (exit ${stripped.status})${detail === "" ? "" : `: ${detail}`}`,
+    )
+  }
+}
 const nativePrelude: BunPlugin = {
   name: "rottweiler-opentui-native",
   setup(build) {
@@ -127,4 +143,6 @@ if (!result.success) {
 }
 
 mkdirSync(outputDirectory, { recursive: true })
-copyFileSync(selectedNativePath, join(outputDirectory, selectedNativeLibrary))
+const outputNativePath = join(outputDirectory, selectedNativeLibrary)
+copyFileSync(selectedNativePath, outputNativePath)
+stripLinuxArtifact(outputNativePath, "OpenTUI native library")

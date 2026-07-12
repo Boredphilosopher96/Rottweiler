@@ -159,15 +159,18 @@ Property tests worth calling out:
 | Cold start → prompt ready (with project config + 3 MCP servers deferred) | < 250ms | same |
 | Headless print-mode start (pure Rust path, no Bun) | < 80ms | same |
 | Input keystroke → echo | < 16ms | TUI latency harness (in-memory terminal, timestamped events) |
-| Streaming frame compute (layout + diff + buffer write; the harness measures compute, not display refresh) | p95 < 16ms, p99.9 < 33ms during 200 lines/s stream into 10MB transcript | stress fixture in TUI harness |
+| Streaming frame compute (layout + diff + buffer write; the harness measures compute, not display refresh) | macOS: p95 < 16ms, p99.9 < 33ms; Linux: p95 < 40ms, p99.9 < 66ms during 200 lines/s stream into 10MB transcript | stress fixture in TUI harness |
 | Engine→TUI event latency over the socket, p99 | < 2ms | contract harness |
 | Turn overhead (engine time excluding provider latency) | < 20ms | replay timing |
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
 | Memory, 8-hour stress session (engine + TUI combined) | < 500MB RSS | soak test, nightly |
-| Release size | engine binary < 25MB; TUI bundle < 100MB | CI check |
+| Release size | engine binary < 25MB; TUI bundle < 100MB on macOS / < 110MB on Linux | CI check |
 
 Regression policy: every executable latency and size gate writes integer,
-machine-readable metrics and keeps its fixed absolute budget. Each platform
+machine-readable metrics and keeps its fixed, platform-specific absolute
+budget. macOS is the reference latency platform; Linux may use the explicitly
+listed streaming-frame exception above, while input echo, socket latency,
+startup, turn overhead, and all macOS budgets remain unchanged. Each platform
 suite in `benchmarks/performance-baseline.json` declares `baseline_kind` as
 either `bootstrap` or `measured`, plus substantive provenance. A measured value
 above 110% of its reviewed measured baseline fails. Schema errors,

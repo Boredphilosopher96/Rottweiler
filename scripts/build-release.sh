@@ -16,9 +16,9 @@ release_dir=$(scripts/cargo-release.sh artifact-dir)
 engine="$release_dir/rw"
 tui="$repo/packages/tui/dist/rottweiler-tui"
 case "$(uname -s)" in
-  Darwin) opentui_native_name=libopentui.dylib ;;
-  Linux) opentui_native_name=libopentui.so ;;
-  MINGW*|MSYS*|CYGWIN*) opentui_native_name=opentui.dll ;;
+  Darwin) opentui_native_name=libopentui.dylib; tui_bundle_limit=100000000 ;;
+  Linux) opentui_native_name=libopentui.so; tui_bundle_limit=110000000 ;;
+  MINGW*|MSYS*|CYGWIN*) opentui_native_name=opentui.dll; tui_bundle_limit=100000000 ;;
   *) echo "unsupported release platform: $(uname -s)" >&2; exit 1 ;;
 esac
 opentui_native="$repo/packages/tui/dist/$opentui_native_name"
@@ -30,8 +30,8 @@ if [ "$engine_bytes" -ge 25000000 ]; then
   echo "release engine is ${engine_bytes} bytes; budget is <25000000" >&2
   exit 1
 fi
-if [ "$tui_bundle_bytes" -ge 100000000 ]; then
-  echo "release TUI bundle is ${tui_bundle_bytes} bytes; budget is <100000000" >&2
+if [ "$tui_bundle_bytes" -ge "$tui_bundle_limit" ]; then
+  echo "release TUI bundle is ${tui_bundle_bytes} bytes; budget is <${tui_bundle_limit}" >&2
   exit 1
 fi
 

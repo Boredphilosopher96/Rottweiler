@@ -102,9 +102,41 @@ jobs:
           ROTTWEILER_M8_FUNCTIONAL_ONLY: 1
           ROTTWEILER_M8_PERF_SAMPLES: 1
 
+  macos-performance-build:
+    name: Build isolated macOS performance binary
+    needs: [test, security-tests]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - name: Build performance binary outside the workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_root="$RUNNER_TEMP/rottweiler-macos-performance-build.noindex"
+          artifact_root="$RUNNER_TEMP/rottweiler-macos-performance-artifact.noindex"
+          rm -rf "$build_root" "$artifact_root"
+          mkdir -p "$build_root" "$artifact_root"
+          CARGO_TARGET_DIR="$build_root" scripts/cargo-release.sh build --locked --release -p rw-cli
+          release_dir=$(CARGO_TARGET_DIR="$build_root" scripts/cargo-release.sh artifact-dir)
+          install -m 700 "$release_dir/rw" "$artifact_root/rw"
+          (cd "$artifact_root" && shasum -a 256 rw > rw.sha256)
+      - name: Upload isolated macOS performance binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
   performance:
     name: Performance budgets (${{ matrix.platform }})
-    needs: [test, security-tests]
+    needs: [test, security-tests, macos-performance-build]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -120,6 +152,28 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+      - run: mkdir -p perf-results
+      - name: Download isolated macOS performance binary
+        if: runner.os == 'macOS'
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: macos-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex
+      - name: Verify isolated macOS performance binary
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/rottweiler-macos-performance-download.noindex"
+          shasum -a 256 -c rw.sha256
+          chmod 700 rw
+      - name: Headless performance gate (macOS prebuilt binary)
+        if: runner.os == 'macOS'
+        run: crates/rw-cli/tests/perf_gate.sh
+        env:
+          ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
+          ROTTWEILER_PERF_SAMPLES: 500
+          ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex/rw
       - name: Install Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
       - run: rustup override set 1.94.1
@@ -128,8 +182,9 @@ jobs:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
-      - run: mkdir -p perf-results
-      - run: crates/rw-cli/tests/perf_gate.sh
+      - name: Headless performance gate (Linux source build)
+        if: runner.os == 'Linux'
+        run: crates/rw-cli/tests/perf_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
           ROTTWEILER_PERF_SAMPLES: 500
@@ -167,7 +222,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: pr-performance-${{ matrix.platform }}-${{ github.run_id }}
+          name: pr-performance-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: perf-results
           if-no-files-found: warn
           retention-days: 30
