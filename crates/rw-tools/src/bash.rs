@@ -3505,17 +3505,18 @@ sys.exit(92)
 
     #[cfg(target_os = "linux")]
     fn test_process_is_running(pid: rustix::process::Pid) -> bool {
-        let stat = match std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero())) {
-            Ok(stat) => stat,
-            Err(_) => return false,
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid.as_raw_nonzero()))
+        else {
+            return false;
         };
         // The watchdog is orphaned when its executor is SIGKILLed. Linux can
         // retain the exited process as a zombie until PID 1 reaps it, during
         // which time kill(pid, 0) still reports success. The state is the first
         // field after the final ')' because comm may contain spaces.
-        stat.rsplit_once(") ")
-            .and_then(|(_, fields)| fields.as_bytes().first().copied())
-            != Some(b'Z')
+        let Some((_, fields)) = stat.rsplit_once(") ") else {
+            return false;
+        };
+        !fields.starts_with('Z')
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]
