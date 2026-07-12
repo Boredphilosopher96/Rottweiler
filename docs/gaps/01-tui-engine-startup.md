@@ -6,6 +6,8 @@ The OpenTUI frontend is the reason TypeScript/Bun are in the stack at all (ADR-0
 
 ## GAP-01-01 — Interactive TUI hung forever on "connecting · attempt 0" — **P0 [verified at review time]**
 
+**Resolved (2026-07-12).** The supervisor now gates TUI launch on authenticated engine health, fails immediately when the child exits, rejects competing workspace owners, and preserves the watchdog handoff on direct resume (`dd056c5` through `ee12918`).
+
 **Repro (at review time).** From a clean workspace, `rw` (no args) → grant trust → the OpenTUI shell renders (title bar, input box, status line `◉ execute │ model fast │ ctx — │ $— │ cache — │ git —`) and then sits on `waking the engine… / connecting · attempt 0` indefinitely. With `--dangerously-trust` and a fresh `ROTTWEILER_SESSION_ID`, same result. The non-TUI supervisor path surfaced `engine did not become ready: engine exited before authenticated readiness (exit status: 1); another Rottweiler process may already own this session`.
 
 **What worked, isolating the fault.** `rw -p "…"` (in-process engine) ran full turns. `rw serve --socket <path in a real dir> --session <fresh id> --workspace <dir>` came up and bound its socket. So the engine binary was fine; the *supervised* launch failed. Causes triggered while narrowing:
@@ -15,13 +17,19 @@ The OpenTUI frontend is the reason TypeScript/Bun are in the stack at all (ADR-0
 
 ## GAP-01-02 — Engine child stderr is discarded, making startup failures undiagnosable — **P0 [code]**
 
+**Resolved (2026-07-12).** Production engine stderr is drained concurrently into a 16 KiB tail, control bytes and the bootstrap token are removed, and an early exit includes the bounded diagnostic. Acceptance covers output larger than a pipe buffer so this path cannot deadlock (`dc23ee6`).
+
 `crates/rw-cli/src/supervisor.rs:690` set the engine child's stdio to `StdioMode::Null` for all non-replay launches. When the engine exits before readiness, the operator sees only "engine exited before authenticated readiness" — the actual error is thrown away. Check whether `42935b9` fixed the *surfacing* (including the child's stderr tail in the error) or only the fail-fast timing; the requirement is that the next startup failure is diagnosable from the error message alone.
 
 ## GAP-01-03 — `session workspace is outside authorized roots` on default serve — **P1 [verified at review time]**
 
+**Resolved (2026-07-12).** Default serve derives the hosted workspace through the same canonical root authority as the session, with competing owners rejected before TUI launch.
+
 `rw serve` from a workspace with any prior session (default session resolution) failed authorization at `host_runtime.rs:1189-1203`: a session created in workspace A cannot be served from workspace B, and default resolution can select a cross-workspace session. The check is correct defense-in-depth; the default session *selection* feeding it a foreign workspace was the bug. Possibly addressed by `400b8dd` — re-verify.
 
 ## GAP-01-04 — `rw replay` (default TUI render path) is broken — **P1 [verified]**
+
+**Resolved (2026-07-12).** Both the production TUI replay renderer and `--jsonl` observer path accept the same session-id contract as export; the installed-bundle smoke exercises the production path.
 
 `rw replay <session-id>` → `× No such file or directory (os error 2)` from every working directory, for a session id that `rw export <same id>` renders fine. Only `rw replay <id> --jsonl` works (bypasses `run_history_replay_with_tui`, `main.rs:1250`). The event log loads correctly; the TUI-render replay path opens a missing file (likely the compiled TUI/dylib via a bad relative path) and fails with a bare ENOENT.
 

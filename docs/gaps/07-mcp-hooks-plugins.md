@@ -11,12 +11,18 @@ Structurally present and matching the design; most need live conformance runs th
 
 ## GAP-07-01 — `hooks.toml` declarative shell-hook tier presence unverified — **P2 [code]**
 
+**Resolved (2026-07-12).** Discovery loads user/project `.agents/hooks.toml` and `.rottweiler/hooks.toml` with trust/fingerprint checks; production runtime tests execute matching pre-tool hooks, enforce declared read-only effects, and distinguish recorded/replayed hook streams. Claude import has a rendered-hook fixture.
+
 Dispatcher and `[toolchain]` confirmed; a `hooks.toml` loader wired into discovery was not. Verify a `[[hook]] event="post_tool" run="…"` fixture fires, and that `rw import` produces it from Claude Code settings-hooks.
 
 ## GAP-07-02 — Live MCP conformance not run — **P2 [code]**
 
+**Resolved (2026-07-12).** `five_process_deferred_acceptance` launches five distinct production sandboxed stdio servers, keeps the deferred prompt below 2,000 tokens without schemas, loads/calls each catalog, verifies policy probes, and reaps every process.
+
 Deferred-loading token budget, capability-violation kill, and Rottweiler-as-MCP-server driven by another agent (M8 ACs) not exercised. Scaffolding present; run the fixtures against a real stdio server.
 
 ## GAP-07-03 — Plugin host / capability approval not exercised — **P2 [code]**
+
+**Resolved (2026-07-12).** Production launcher and plugin-host tests cover approval fingerprints, omitted-network launch policy, undeclared capability violation, forced kill, surfaced error, and bounded child reap.
 
 `rw plugin scaffold/dev` exist and `plugin_runtime.rs` is substantial; the capability-manifest approval flow and "manifest omits `network` → killed on outbound" security test were not reproduced live.

@@ -2,6 +2,8 @@
 
 ## GAP-03-01 — `auto-safe` denies *all* file writes → no automation mode that can actually code — **P1 [verified + code]**
 
+**Resolved (2026-07-12).** `auto-safe` admits only `write`, `edit`, and `multi_edit` calls whose single real path stays within a canonical active root, including `@root/N`; exec, network, missing/ambiguous paths, outside paths, and symlink escapes still deny, and explicit deny rules remain absolute (`340188f`).
+
 **Repro.** `rw -p "create hello.py that prints hi, then run it" --permission-mode auto-safe` → the agent replies *"I'm blocked by workspace permissions: the available file-write and shell tools are currently denied"* and writes nothing. The identical prompt under `--permission-mode yolo` creates and runs the file end-to-end.
 
 **Cause.** `crates/rw-core/src/permission.rs:577-612`. Headless `AutoSafe` default is `Deny`; for unsandboxed tools it returns `Deny` unconditionally (`:589`); for sandboxed tools it allows only `safe_listed || is_read_only` (`:607`). `write`/`edit`/`multi_edit` are mutating file tools, so auto-safe denies them across the board.
