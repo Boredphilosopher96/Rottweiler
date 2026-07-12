@@ -281,9 +281,35 @@ impl CliSessionFactory {
         )
     }
 
+    fn settings_loader_for(&self, workspace: &Path) -> rw_store::config::ConfigLoader {
+        rw_store::config::ConfigLoader::new(
+            self.options.credentials_path.with_file_name("config.toml"),
+            workspace.join(".rottweiler/config.toml"),
+        )
+    }
+
+    fn requested_model_for_compose(
+        &self,
+        workspace: &Path,
+        model: Option<ModelAlias>,
+        resume: bool,
+    ) -> Result<Option<String>, HostError> {
+        match (resume, model) {
+            (true, model) => Ok(model.map(|model| model.0)),
+            (false, Some(model)) => Ok(Some(model.0)),
+            (false, None) => self
+                .settings_loader_for(workspace)
+                .tui_project_model()
+                .map_err(|error| HostError::Persistence(error.to_string())),
+        }
+    }
+
     fn setting_descriptors(
         loaded: &rw_store::config::LoadedConfig,
         session: &SessionDescriptor,
+        project_model: Option<&str>,
+        keybinding_preset: &str,
+        mcp_servers: &[(String, bool)],
     ) -> Vec<UserSettingDescriptor> {
         let alias = if loaded.config.models.aliases.contains_key(&session.model.0) {
             &session.model.0
@@ -296,7 +322,23 @@ impl CliSessionFactory {
                 .provenance(key)
                 .map_or_else(|| "built-in".to_owned(), ToString::to_string)
         };
-        vec![
+        let mut settings = vec![
+            UserSettingDescriptor {
+                key: "ui.keybindings.preset".to_owned(),
+                label: "Keybinding preset".to_owned(),
+                value: keybinding_preset.to_owned(),
+                choices: ["standard", "vim"].map(str::to_owned).to_vec(),
+                provenance: "user keybindings".to_owned(),
+                applies_immediately: false,
+            },
+            UserSettingDescriptor {
+                key: "project.models.default".to_owned(),
+                label: "Project default model".to_owned(),
+                value: project_model.unwrap_or("not set").to_owned(),
+                choices: project_model.into_iter().map(str::to_owned).collect(),
+                provenance: "private project preference".to_owned(),
+                applies_immediately: false,
+            },
             UserSettingDescriptor {
                 key: "ui.theme".to_owned(),
                 label: "Theme".to_owned(),
@@ -338,7 +380,20 @@ impl CliSessionFactory {
                 provenance: provenance("permissions.default"),
                 applies_immediately: false,
             },
-        ]
+        ];
+        settings.extend(
+            mcp_servers
+                .iter()
+                .map(|(server, enabled)| UserSettingDescriptor {
+                    key: format!("mcp.servers.{server}.enabled"),
+                    label: format!("MCP · {server}"),
+                    value: enabled.to_string(),
+                    choices: ["true", "false"].map(str::to_owned).to_vec(),
+                    provenance: "user MCP configuration".to_owned(),
+                    applies_immediately: false,
+                }),
+        );
+        settings
     }
 
     fn fork_operation_id(key: &ForkOperationKey) -> String {
@@ -1301,6 +1356,7 @@ impl CliSessionFactory {
         model: Option<ModelAlias>,
         resume: bool,
     ) -> Result<HostedSession, HostError> {
+        let requested_model = self.requested_model_for_compose(&workspace, model, resume)?;
         let runtime = compose_hosted_actor(HostedSessionComposition {
             workspace: workspace.clone(),
             additional_workspaces: Vec::new(),
@@ -1314,7 +1370,7 @@ impl CliSessionFactory {
             credentials_path: self.options.credentials_path.clone(),
             config: self.options.config.clone(),
             session_id: session_id.clone(),
-            requested_model: model.map(|model| model.0),
+            requested_model,
             resume,
             permission_mode: self.options.permission_mode,
             max_turns: self.options.max_turns,
@@ -1729,12 +1785,29 @@ impl HostQueryService for CliSessionFactory {
         &self,
         session: &SessionDescriptor,
     ) -> Result<Vec<UserSettingDescriptor>, HostError> {
-        let config_loader = self.settings_loader();
+        let workspace = self.workspace_for_session(session)?;
+        let config_loader = self.settings_loader_for(&workspace);
+        let project_loader = config_loader.clone();
         let effective = tokio::task::spawn_blocking(move || config_loader.load())
             .await
             .map_err(|_| HostError::Query("user settings worker failed".to_owned()))?
             .map_err(|error| HostError::Query(error.to_string()))?;
-        Ok(Self::setting_descriptors(&effective, session))
+        let project_model = project_loader
+            .tui_project_model()
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        let keybinding_preset = project_loader
+            .tui_keybinding_preset()
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        let mcp_servers = project_loader
+            .tui_mcp_servers()
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        Ok(Self::setting_descriptors(
+            &effective,
+            session,
+            project_model.as_deref(),
+            &keybinding_preset,
+            &mcp_servers,
+        ))
     }
 
     async fn set_user_setting(
@@ -1743,15 +1816,59 @@ impl HostQueryService for CliSessionFactory {
         key: &str,
         value: &str,
     ) -> Result<Vec<UserSettingDescriptor>, HostError> {
-        let config_loader = self.settings_loader();
+        let workspace = self.workspace_for_session(session)?;
+        let config_loader = self.settings_loader_for(&workspace);
+        let project_loader = config_loader.clone();
         let key = key.to_owned();
         let value = value.to_owned();
-        let effective =
-            tokio::task::spawn_blocking(move || config_loader.persist_tui_setting(&key, &value))
-                .await
-                .map_err(|_| HostError::Persistence("user setting worker failed".to_owned()))?
-                .map_err(|error| HostError::Persistence(error.to_string()))?;
-        Ok(Self::setting_descriptors(&effective, session))
+        let project_model_write = key == "project.models.default";
+        let persisted_project_model = project_model_write.then(|| value.clone());
+        let effective = tokio::task::spawn_blocking(move || {
+            if key == "project.models.default" {
+                config_loader.persist_tui_project_model(&value)
+            } else if key == "ui.keybindings.preset" {
+                config_loader.persist_tui_keybinding_preset(&value)?;
+                config_loader.load()
+            } else if let Some(server) = mcp_setting_server(&key) {
+                let enabled = match value.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(rw_store::config::ConfigError::InvalidUserSetting {
+                            key,
+                            reason: "MCP enablement must be true or false".to_owned(),
+                        });
+                    }
+                };
+                config_loader.persist_tui_mcp_enabled(server, enabled)?;
+                config_loader.load()
+            } else {
+                config_loader.persist_tui_setting(&key, &value)
+            }
+        })
+        .await
+        .map_err(|_| HostError::Persistence("user setting worker failed".to_owned()))?
+        .map_err(|error| HostError::Persistence(error.to_string()))?;
+        let project_model = if let Some(model) = persisted_project_model {
+            Some(model)
+        } else {
+            project_loader
+                .tui_project_model()
+                .map_err(|error| HostError::Query(error.to_string()))?
+        };
+        let keybinding_preset = project_loader
+            .tui_keybinding_preset()
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        let mcp_servers = project_loader
+            .tui_mcp_servers()
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        Ok(Self::setting_descriptors(
+            &effective,
+            session,
+            project_model.as_deref(),
+            &keybinding_preset,
+            &mcp_servers,
+        ))
     }
 
     async fn begin_provider_auth(&self, provider: &str) -> Result<ProviderAuthAttempt, HostError> {
@@ -1954,6 +2071,20 @@ const fn thinking_level_name(level: ThinkingLevel) -> &'static str {
         ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
         ThinkingLevel::High => "high",
+    }
+}
+
+fn mcp_setting_server(key: &str) -> Option<&str> {
+    let mut segments = key.split('.');
+    match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some("mcp"), Some("servers"), Some(server), Some("enabled"), None) => Some(server),
+        _ => None,
     }
 }
 
@@ -4515,7 +4646,8 @@ mod tests {
             shell_active: false,
         };
 
-        let settings = CliSessionFactory::setting_descriptors(&loaded, &session);
+        let settings =
+            CliSessionFactory::setting_descriptors(&loaded, &session, None, "standard", &[]);
 
         assert!(
             settings
@@ -4526,6 +4658,71 @@ mod tests {
             settings
                 .iter()
                 .all(|setting| !setting.key.contains("openai/gpt-5-mini"))
+        );
+    }
+
+    #[test]
+    fn project_model_preferences_are_isolated_by_the_session_workspace() {
+        let root = tempdir().expect("root");
+        let first = private_test_directory(&root.path().join("first"));
+        let second = private_test_directory(&root.path().join("second"));
+        let factory =
+            factory_with_allowed_workspaces(root.path(), vec![first.clone(), second.clone()]);
+
+        factory
+            .settings_loader_for(&first)
+            .persist_tui_project_model("openai/first")
+            .expect("first preference");
+        factory
+            .settings_loader_for(&second)
+            .persist_tui_project_model("openai/second")
+            .expect("second preference");
+
+        assert_eq!(
+            factory
+                .settings_loader_for(&first)
+                .tui_project_model()
+                .expect("first")
+                .as_deref(),
+            Some("openai/first")
+        );
+        assert_eq!(
+            factory
+                .settings_loader_for(&second)
+                .tui_project_model()
+                .expect("second")
+                .as_deref(),
+            Some("openai/second")
+        );
+    }
+
+    #[test]
+    fn resume_ignores_a_corrupt_project_model_preference() {
+        let root = tempdir().expect("root");
+        let workspace = private_test_directory(&root.path().join("workspace"));
+        let factory = factory(root.path(), &workspace);
+        let preference = factory
+            .options
+            .credentials_path
+            .with_file_name("project-model-preferences.json");
+        fs::write(&preference, "not-json").expect("corrupt preference");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&preference, fs::Permissions::from_mode(0o600))
+                .expect("private corrupt preference");
+        }
+
+        assert_eq!(
+            factory
+                .requested_model_for_compose(&workspace, None, true)
+                .expect("resume ignores preference"),
+            None
+        );
+        assert!(
+            factory
+                .requested_model_for_compose(&workspace, None, false)
+                .is_err()
         );
     }
 }

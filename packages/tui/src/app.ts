@@ -166,6 +166,7 @@ export class RottweilerApp extends BoxRenderable {
   #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
   #pendingModelSwitchRequests = new Set<string>()
+  #pendingModelSelections = new Map<string, string>()
   #keybindings: CompiledKeybindings
   #inputMode: InputMode
   #vimFocus: VimFocus = "composer"
@@ -345,6 +346,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingReviewSelection = null
       this.#reviewOpen = false
       this.#pendingModelSwitchRequests.clear()
+      this.#pendingModelSelections.clear()
       this.reviewPanel.closePresentation()
     }
     this.#sessionId = sessionId
@@ -461,6 +463,7 @@ export class RottweilerApp extends BoxRenderable {
         ? next.commandAcks[commandRequestId]?.outcome
         : null
     if (modelSwitchOutcome?.type === "rejected") {
+      if (commandRequestId !== null) this.#pendingModelSelections.delete(commandRequestId)
       this.#projectRejection(modelSwitchOutcome)
     }
     this.#notify(previous, next)
@@ -527,6 +530,15 @@ export class RottweilerApp extends BoxRenderable {
         attemptId,
       })
       this.openProviderAuthPicker()
+    }
+    if (event.type === "model_changed" && isRecord(eventRecord.meta)) {
+      const causedBy =
+        typeof eventRecord.meta.caused_by === "string" ? eventRecord.meta.caused_by : null
+      const concrete = causedBy === null ? undefined : this.#pendingModelSelections.get(causedBy)
+      if (causedBy !== null) this.#pendingModelSelections.delete(causedBy)
+      if (concrete !== undefined) {
+        this.#command({ type: "set_setting", key: "project.models.default", value: concrete })
+      }
     }
     if (event.type === "provider_configured") {
       const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
@@ -1895,7 +1907,15 @@ export class RottweilerApp extends BoxRenderable {
         const oldest = this.#pendingModelSwitchRequests.values().next().value
         if (oldest !== undefined) this.#pendingModelSwitchRequests.delete(oldest)
       }
+      if (this.#pendingModelSelections.size >= MAX_PENDING_MODEL_SWITCH_REQUESTS) {
+        const oldest = this.#pendingModelSelections.keys().next().value
+        if (oldest !== undefined) this.#pendingModelSelections.delete(oldest)
+      }
       this.#pendingModelSwitchRequests.add(meta.request_id)
+      const selection = command.model.includes("/") || command.provider === null
+        ? command.model
+        : `${command.provider}/${command.model}`
+      this.#pendingModelSelections.set(meta.request_id, selection)
     } else if (command.type === "list_sessions" || command.type === "search_sessions") {
       this.#latestSessionsRequest = meta.request_id
     }
@@ -1973,7 +1993,10 @@ export class RottweilerApp extends BoxRenderable {
       const outcome = await this.#emit(command)
       if (outcome?.type === "rejected") {
         if (projectionKind(type) === null) {
-          if (type === "switch_model") this.#pendingModelSwitchRequests.delete(requestId)
+          if (type === "switch_model") {
+            this.#pendingModelSwitchRequests.delete(requestId)
+            this.#pendingModelSelections.delete(requestId)
+          }
           this.#projectRejection(outcome)
         } else {
           this.#recordProjectionFailure(type, requestId, outcome.error.message)
@@ -1981,7 +2004,10 @@ export class RottweilerApp extends BoxRenderable {
       } else if (outcome === null) {
         const message = "the engine did not acknowledge the request"
         if (projectionKind(type) === null) {
-          if (type === "switch_model") this.#pendingModelSwitchRequests.delete(requestId)
+          if (type === "switch_model") {
+            this.#pendingModelSwitchRequests.delete(requestId)
+            this.#pendingModelSelections.delete(requestId)
+          }
           this.#projectClientError(`${type}_unavailable`, message, true)
         } else {
           this.#recordProjectionFailure(type, requestId, message)
@@ -1990,7 +2016,10 @@ export class RottweilerApp extends BoxRenderable {
     } catch (error) {
       const message = safeErrorMessage(error)
       if (projectionKind(type) === null) {
-        if (type === "switch_model") this.#pendingModelSwitchRequests.delete(requestId)
+        if (type === "switch_model") {
+          this.#pendingModelSwitchRequests.delete(requestId)
+          this.#pendingModelSelections.delete(requestId)
+        }
         this.#projectClientError(`${type}_failed`, message, true)
       } else {
         this.#recordProjectionFailure(type, requestId, message)

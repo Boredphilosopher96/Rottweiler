@@ -760,14 +760,56 @@ describe("Rottweiler OpenTUI shell", () => {
           modelCount: 0,
           status: "login required",
         }],
-        settings: [{
-          key: "ui.theme",
-          label: "Theme",
-          value: "kennel-dark",
-          choices: ["kennel-dark", "daylight"],
-          provenance: "built-in",
-          appliesImmediately: false,
-        }],
+        settings: [
+          {
+            key: "ui.theme",
+            label: "Theme",
+            value: "kennel-dark",
+            choices: ["kennel-dark", "daylight"],
+            provenance: "built-in",
+            appliesImmediately: false,
+          },
+          {
+            key: "models.thinking.fast",
+            label: "Thinking · fast",
+            value: "medium",
+            choices: ["off", "low", "medium", "high"],
+            provenance: "user",
+            appliesImmediately: false,
+          },
+          {
+            key: "permissions.default",
+            label: "Default permission",
+            value: "ask",
+            choices: ["ask", "allow", "deny"],
+            provenance: "user",
+            appliesImmediately: false,
+          },
+          {
+            key: "compaction.auto",
+            label: "Automatic compaction",
+            value: "true",
+            choices: ["true", "false"],
+            provenance: "user",
+            appliesImmediately: false,
+          },
+          {
+            key: "ui.keybindings.preset",
+            label: "Keybinding preset",
+            value: "standard",
+            choices: ["standard", "vim"],
+            provenance: "user keybindings",
+            appliesImmediately: false,
+          },
+          {
+            key: "mcp.servers.docs.enabled",
+            label: "MCP · docs",
+            value: "true",
+            choices: ["true", "false"],
+            provenance: "user MCP configuration",
+            appliesImmediately: false,
+          },
+        ],
       },
       onCommand(command) {
         emitted.push(command)
@@ -787,6 +829,10 @@ describe("Rottweiler OpenTUI shell", () => {
       model: "copilot/gpt-5",
       provider: "copilot",
     }))
+    const concreteSwitch = emitted.find(
+      (command) => command.type === "switch_model" && command.model === "copilot/gpt-5",
+    )
+    expect(concreteSwitch).toBeDefined()
     app.handleEvent({
       type: "model_changed",
       meta: {
@@ -794,14 +840,26 @@ describe("Rottweiler OpenTUI shell", () => {
         session_id: "session-local",
         sequence_id: "1",
         emitted_at: "2026-01-01T00:00:00Z",
+        caused_by: concreteSwitch?.meta.request_id,
       },
       model: "copilot/gpt-5",
       provider: "copilot",
     })
     expect(app.statusLine.plainText).toContain("model copilot/gpt-5")
     expect(app.statusLine.plainText).not.toContain("copilot/copilot")
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "set_setting",
+      key: "project.models.default",
+      value: "copilot/gpt-5",
+    }))
 
     app.openSettingsPicker()
+    const settingOptions = app.picker.select.options.map((option) => option.value)
+    expect(settingOptions).toContain("models.thinking.fast:high")
+    expect(settingOptions).toContain("permissions.default:deny")
+    expect(settingOptions).toContain("compaction.auto:false")
+    expect(settingOptions).toContain("ui.keybindings.preset:vim")
+    expect(settingOptions).toContain("mcp.servers.docs.enabled:false")
     const daylight = app.picker.select.options.findIndex(
       (option) => option.value === "ui.theme:daylight",
     )
@@ -998,6 +1056,64 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.state.errors.at(-1)?.code).toBe("session_not_idle")
     expect(app.banner.visible).toBeTrue()
     expect(app.banner.plainText).toContain("model switching requires an idle session")
+    expect(commands).not.toContainEqual(expect.objectContaining({
+      type: "set_setting",
+      key: "project.models.default",
+    }))
+  })
+
+  test("bounds no-op model persistence correlations and persists the newest alias", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      requestId: () => `model-correlation-${request++}`,
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+      initialState: {
+        ...createInitialState(),
+        models: [{
+          alias: "fast",
+          providers: ["openai"],
+          vision: false,
+          thinking: true,
+          toolCalling: true,
+        }],
+      },
+    })
+    renderer.root.add(app)
+    for (let index = 0; index < 130; index += 1) {
+      app.openModelPicker()
+      app.picker.select.selectCurrent()
+    }
+    const switches = commands.filter((command) => command.type === "switch_model")
+    expect(switches).toHaveLength(130)
+    const persistedBefore = commands.filter(
+      (command) => command.type === "set_setting" && command.key === "project.models.default",
+    ).length
+    const firstRequest = switches[0]?.meta.request_id
+    const lastRequest = switches.at(-1)?.meta.request_id
+    for (const [sequence, causedBy] of [["1", firstRequest], ["2", lastRequest]] as const) {
+      app.handleEvent({
+        type: "model_changed",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "session-local",
+          sequence_id: sequence,
+          emitted_at: "2026-01-01T00:00:00Z",
+          caused_by: causedBy,
+        },
+        model: "fast",
+      })
+    }
+    const persisted = commands.filter(
+      (command) => command.type === "set_setting" && command.key === "project.models.default",
+    )
+    expect(persisted).toHaveLength(persistedBefore + 1)
+    expect(persisted.at(-1)).toEqual(expect.objectContaining({ value: "fast" }))
   })
 
   test("ignores stale @ search responses by request id", async () => {

@@ -39,6 +39,7 @@ const ENV_PERMISSION_DEFAULT: &str = "RW_PERMISSION_DEFAULT";
 const ENV_SANDBOX_SAFE_LIST: &str = "RW_SANDBOX_SAFE_LIST";
 const ENV_TELEMETRY_ENABLED: &str = "RW_TELEMETRY_ENABLED";
 const ENV_UPDATE_CHANNEL: &str = "RW_UPDATE_CHANNEL";
+const MAX_TUI_AUX_CONFIG_BYTES: usize = 64 * 1024;
 static TUI_SETTING_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(not(unix))]
 static TUI_SETTING_PORTABLE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -731,6 +732,193 @@ impl ConfigLoader {
         persist_tui_provenance(parent, &self.user_path, &key, kind)?;
         persist_tui_config_atomic(parent, &self.user_path, encoded.as_bytes(), &key)?;
         self.load()
+    }
+
+    /// Persists a concrete model route in a private host preference keyed by
+    /// the canonical project identity. The project tree and
+    /// executable trust ledger are never modified.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the route is invalid or the private preference
+    /// file is unsafe or unavailable.
+    pub fn persist_tui_project_model(&self, model: &str) -> Result<LoadedConfig, ConfigError> {
+        if !valid_project_model_selection(model) {
+            return Err(ConfigError::InvalidUserSetting {
+                key: "project.models.default".to_owned(),
+                reason: "project model must be a bounded alias or concrete provider/model route"
+                    .to_owned(),
+            });
+        }
+        let parent = self
+            .user_path
+            .parent()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "project.models.default".to_owned(),
+                reason: "user configuration has no parent directory".to_owned(),
+            })?;
+        prepare_tui_config_parent(parent, &self.user_path)?;
+        let _settings_lock = acquire_tui_settings_lock(parent, "project.models.default")?;
+        let path = project_model_preferences_path(&self.user_path);
+        let mut preferences = read_project_model_preferences(&self.user_path)?;
+        preferences.insert(project_identity(&self.project_root)?, model.to_owned());
+        let bytes = serde_json::to_vec_pretty(&preferences).map_err(|error| {
+            ConfigError::InvalidUserSetting {
+                key: "project.models.default".to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        persist_tui_config_atomic(parent, &path, &bytes, "project.models.default")?;
+        self.load()
+    }
+
+    /// Reads the private concrete model preference for this canonical project.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identity or private preference file is unsafe.
+    pub fn tui_project_model(&self) -> Result<Option<String>, ConfigError> {
+        Ok(read_project_model_preferences(&self.user_path)?
+            .get(&project_identity(&self.project_root)?)
+            .filter(|model| valid_project_model_selection(model))
+            .cloned())
+    }
+
+    /// Reads the user keybinding preset managed by the simple TUI settings surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe, oversized, malformed, or unreadable configuration.
+    pub fn tui_keybinding_preset(&self) -> Result<String, ConfigError> {
+        let path = self.user_path.with_file_name("keybindings.toml");
+        validate_tui_config_file(&path, "ui.keybindings.preset")?;
+        let document = read_bounded_tui_config_document(
+            &path,
+            "ui.keybindings.preset",
+            MAX_TUI_AUX_CONFIG_BYTES,
+        )?;
+        Ok(document
+            .get("preset")
+            .and_then(toml::Value::as_str)
+            .filter(|preset| matches!(*preset, "standard" | "vim"))
+            .unwrap_or("standard")
+            .to_owned())
+    }
+
+    /// Persists only the simple user keybinding preset while preserving custom bindings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid preset or unsafe, malformed, or unwritable configuration.
+    pub fn persist_tui_keybinding_preset(&self, preset: &str) -> Result<(), ConfigError> {
+        if !matches!(preset, "standard" | "vim") {
+            return Err(ConfigError::InvalidUserSetting {
+                key: "ui.keybindings.preset".to_owned(),
+                reason: "keybinding preset must be standard or vim".to_owned(),
+            });
+        }
+        let parent = self
+            .user_path
+            .parent()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "ui.keybindings.preset".to_owned(),
+                reason: "user configuration has no parent directory".to_owned(),
+            })?;
+        prepare_tui_config_parent(parent, &self.user_path)?;
+        let _settings_lock = acquire_tui_settings_lock(parent, "ui.keybindings.preset")?;
+        let path = self.user_path.with_file_name("keybindings.toml");
+        validate_tui_config_file(&path, "ui.keybindings.preset")?;
+        let mut document = read_bounded_tui_config_document(
+            &path,
+            "ui.keybindings.preset",
+            MAX_TUI_AUX_CONFIG_BYTES,
+        )?;
+        set_toml_leaf(&mut document, "preset", preset)?;
+        let bytes =
+            toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
+                key: "ui.keybindings.preset".to_owned(),
+                reason: error.to_string(),
+            })?;
+        persist_tui_config_atomic(parent, &path, bytes.as_bytes(), "ui.keybindings.preset")
+    }
+
+    /// Lists simple user MCP enablement flags without exposing executable details.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe, oversized, malformed, or unreadable MCP configuration.
+    pub fn tui_mcp_servers(&self) -> Result<Vec<(String, bool)>, ConfigError> {
+        let path = self.user_path.with_file_name("mcp.toml");
+        validate_tui_config_file(&path, "mcp.servers")?;
+        let document =
+            read_bounded_tui_config_document(&path, "mcp.servers", MAX_TUI_AUX_CONFIG_BYTES)?;
+        let mut servers = document
+            .get("servers")
+            .and_then(toml::Value::as_table)
+            .into_iter()
+            .flat_map(|servers| servers.iter())
+            .filter(|(name, value)| valid_mcp_server_name(name) && value.is_table())
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    value
+                        .get("enabled")
+                        .and_then(toml::Value::as_bool)
+                        .unwrap_or(true),
+                )
+            })
+            .collect::<Vec<_>>();
+        servers.sort_by(|left, right| left.0.cmp(&right.0));
+        servers.truncate(128);
+        Ok(servers)
+    }
+
+    /// Persists one existing user MCP server's enablement flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown server or unsafe, malformed, or unwritable configuration.
+    pub fn persist_tui_mcp_enabled(&self, server: &str, enabled: bool) -> Result<(), ConfigError> {
+        if !valid_mcp_server_name(server) {
+            return Err(ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "MCP server name is invalid".to_owned(),
+            });
+        }
+        let parent = self
+            .user_path
+            .parent()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "user configuration has no parent directory".to_owned(),
+            })?;
+        prepare_tui_config_parent(parent, &self.user_path)?;
+        let _settings_lock = acquire_tui_settings_lock(parent, "mcp.servers")?;
+        let path = self.user_path.with_file_name("mcp.toml");
+        validate_tui_config_file(&path, "mcp.servers")?;
+        let mut document =
+            read_bounded_tui_config_document(&path, "mcp.servers", MAX_TUI_AUX_CONFIG_BYTES)?;
+        if !document
+            .get("servers")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|servers| servers.contains_key(server))
+        {
+            return Err(ConfigError::InvalidUserSetting {
+                key: format!("mcp.servers.{server}.enabled"),
+                reason: "MCP server is not present in the user configuration".to_owned(),
+            });
+        }
+        set_toml_leaf(
+            &mut document,
+            &format!("servers.{server}.enabled"),
+            if enabled { "true" } else { "false" },
+        )?;
+        let bytes =
+            toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
+                key: format!("mcp.servers.{server}.enabled"),
+                reason: error.to_string(),
+            })?;
+        persist_tui_config_atomic(parent, &path, bytes.as_bytes(), "mcp.servers")
     }
 
     /// Loads, deep-merges, validates, and annotates all configured layers.
@@ -1767,12 +1955,25 @@ fn acquire_tui_settings_lock(
             reason: "user settings lock is unsafe".to_owned(),
         });
     }
-    rustix::fs::flock(&descriptor, rustix::fs::FlockOperation::LockExclusive).map_err(
-        |source| ConfigError::Write {
-            path,
-            source: std::io::Error::from(source),
-        },
-    )?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    loop {
+        match rustix::fs::flock(
+            &descriptor,
+            rustix::fs::FlockOperation::NonBlockingLockExclusive,
+        ) {
+            Ok(()) => break,
+            Err(source) => {
+                let source = std::io::Error::from(source);
+                if source.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+                return Err(ConfigError::Write { path, source });
+            }
+        }
+    }
     Ok(descriptor)
 }
 
@@ -1821,6 +2022,43 @@ fn read_tui_config_document(path: &Path) -> Result<toml::Value, ConfigError> {
             });
         }
     };
+    if source.trim().is_empty() {
+        Ok(toml::Value::Table(toml::map::Map::new()))
+    } else {
+        toml::from_str::<toml::Table>(&source)
+            .map(toml::Value::Table)
+            .map_err(|source| ConfigError::Parse {
+                path: path.to_owned(),
+                source,
+            })
+    }
+}
+
+fn read_bounded_tui_config_document(
+    path: &Path,
+    key: &str,
+    maximum: usize,
+) -> Result<toml::Value, ConfigError> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(source) => {
+            return Err(ConfigError::Read {
+                path: path.to_owned(),
+                source,
+            });
+        }
+    };
+    if bytes.len() > maximum {
+        return Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: format!("configuration exceeds its {maximum}-byte limit"),
+        });
+    }
+    let source = String::from_utf8(bytes).map_err(|_| ConfigError::InvalidUserSetting {
+        key: key.to_owned(),
+        reason: "configuration is not UTF-8".to_owned(),
+    })?;
     if source.trim().is_empty() {
         Ok(toml::Value::Table(toml::map::Map::new()))
     } else {
@@ -1892,6 +2130,84 @@ fn allocate_tui_config_temporary(
 
 fn tui_provenance_path(user_path: &Path) -> PathBuf {
     user_path.with_file_name("config-tui-provenance.json")
+}
+
+fn project_model_preferences_path(user_path: &Path) -> PathBuf {
+    user_path.with_file_name("project-model-preferences.json")
+}
+
+fn project_identity(project_root: &Path) -> Result<String, ConfigError> {
+    let canonical =
+        fs::canonicalize(project_root).map_err(|error| ConfigError::InvalidUserSetting {
+            key: "project.models.default".to_owned(),
+            reason: format!("project identity is unavailable: {error}"),
+        })?;
+    Ok(hash_project_identity(&canonical))
+}
+
+fn hash_project_identity(canonical: &Path) -> String {
+    let mut framed = b"rw-project-identity-v1\0".to_vec();
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::ffi::OsStrExt as _;
+        canonical.as_os_str().as_bytes()
+    };
+    #[cfg(not(unix))]
+    let rendered = canonical.to_string_lossy();
+    #[cfg(not(unix))]
+    let bytes = rendered.as_bytes();
+    framed.extend_from_slice(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_be_bytes());
+    framed.extend_from_slice(bytes);
+    blake3::hash(&framed).to_hex().to_string()
+}
+
+fn valid_project_model_selection(model: &str) -> bool {
+    if model.is_empty()
+        || model.len() > 512
+        || model
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return false;
+    }
+    model.split_once('/').map_or_else(
+        || {
+            model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        },
+        |(provider, model_id)| !provider.is_empty() && !model_id.is_empty(),
+    )
+}
+
+fn valid_mcp_server_name(server: &str) -> bool {
+    !server.is_empty()
+        && server.len() <= 128
+        && server
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn read_project_model_preferences(
+    user_path: &Path,
+) -> Result<BTreeMap<String, String>, ConfigError> {
+    let path = project_model_preferences_path(user_path);
+    validate_tui_provenance_file(&path)?;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(source) => return Err(ConfigError::Read { path, source }),
+    };
+    if bytes.len() > 64 * 1024 {
+        return Err(ConfigError::InvalidUserSetting {
+            key: "project.models.default".to_owned(),
+            reason: "project model preferences exceeded their size limit".to_owned(),
+        });
+    }
+    serde_json::from_slice(&bytes).map_err(|error| ConfigError::InvalidUserSetting {
+        key: "project.models.default".to_owned(),
+        reason: error.to_string(),
+    })
 }
 
 fn read_tui_provenance(user_path: &Path) -> Result<BTreeMap<String, String>, ConfigError> {
@@ -2004,9 +2320,12 @@ fn set_toml_leaf(document: &mut toml::Value, key: &str, value: &str) -> Result<(
             .entry((*segment).to_owned())
             .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
     }
-    let stored = match key {
-        "compaction.auto" => toml::Value::Boolean(value == "true"),
-        _ => toml::Value::String(value.to_owned()),
+    let boolean_leaf = key == "compaction.auto"
+        || (segments.first() == Some(&"servers") && segments.last() == Some(&"enabled"));
+    let stored = if boolean_leaf {
+        toml::Value::Boolean(value == "true")
+    } else {
+        toml::Value::String(value.to_owned())
     };
     let Some(table) = cursor.as_table_mut() else {
         return Err(ConfigError::InvalidUserSetting {
@@ -2586,6 +2905,130 @@ mod tests {
     }
 
     #[test]
+    fn project_model_preference_is_private_concrete_and_independent_of_project_trust() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(&project, "[providers.hostile]\nkind = \"openai\"\n")
+            .expect("untrusted project config");
+        let loader = ConfigLoader::new(user.clone(), project.clone());
+
+        loader
+            .persist_tui_project_model("github_copilot/gpt-5-mini")
+            .expect("concrete preference");
+
+        assert_eq!(
+            loader.tui_project_model().expect("preference").as_deref(),
+            Some("github_copilot/gpt-5-mini")
+        );
+        assert_eq!(
+            ConfigLoader::new(user.clone(), project.clone())
+                .tui_project_model()
+                .expect("restart preference")
+                .as_deref(),
+            Some("github_copilot/gpt-5-mini")
+        );
+        assert_eq!(
+            fs::read_to_string(project).expect("project unchanged"),
+            "[providers.hostile]\nkind = \"openai\"\n"
+        );
+        loader
+            .persist_tui_project_model("fast")
+            .expect("alias preference");
+        assert_eq!(
+            loader.tui_project_model().expect("alias").as_deref(),
+            Some("fast")
+        );
+        assert!(loader.persist_tui_project_model("not valid").is_err());
+    }
+
+    #[test]
+    fn keybinding_and_mcp_settings_preserve_existing_user_details_and_enforce_caps() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        let keybindings = user.with_file_name("keybindings.toml");
+        let mcp = user.with_file_name("mcp.toml");
+        fs::write(
+            &keybindings,
+            "preset='standard'\n[bindings]\nsubmit='enter'\n",
+        )
+        .expect("keybindings");
+        fs::write(
+            &mcp,
+            "[servers.docs]\nargv=['/usr/bin/docs']\ndefer_tools=true\n",
+        )
+        .expect("mcp");
+        let loader = ConfigLoader::new(user, project);
+
+        loader
+            .persist_tui_keybinding_preset("vim")
+            .expect("keybinding preset");
+        loader
+            .persist_tui_mcp_enabled("docs", false)
+            .expect("MCP toggle");
+
+        let keybindings_text = fs::read_to_string(&keybindings).expect("keybindings text");
+        assert!(keybindings_text.contains("preset = \"vim\""));
+        assert!(keybindings_text.contains("submit = \"enter\""));
+        let mcp_text = fs::read_to_string(&mcp).expect("MCP text");
+        assert!(mcp_text.contains("argv = [\"/usr/bin/docs\"]"));
+        assert!(mcp_text.contains("defer_tools = true"));
+        assert!(mcp_text.contains("enabled = false"));
+        assert_eq!(
+            loader.tui_mcp_servers().expect("MCP list"),
+            [("docs".to_owned(), false)]
+        );
+
+        fs::write(
+            &keybindings,
+            vec![b'x'; super::MAX_TUI_AUX_CONFIG_BYTES + 1],
+        )
+        .expect("oversized keybindings");
+        assert!(loader.persist_tui_keybinding_preset("standard").is_err());
+        fs::write(&mcp, vec![b'x'; super::MAX_TUI_AUX_CONFIG_BYTES + 1]).expect("oversized MCP");
+        assert!(loader.persist_tui_mcp_enabled("docs", true).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_identity_distinguishes_non_utf8_canonical_paths() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let first = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b'p', 0x80]));
+        let second = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![b'/', b'p', 0x81]));
+
+        assert_ne!(
+            super::hash_project_identity(&first),
+            super::hash_project_identity(&second)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_model_preference_rejects_symlink_and_hardlink_tampering() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        let preference = user.with_file_name("project-model-preferences.json");
+        let outside = root.path().join("outside.json");
+        fs::write(&outside, "{}").expect("outside");
+        symlink(&outside, &preference).expect("symlink");
+        let loader = ConfigLoader::new(user, project);
+        assert!(loader.persist_tui_project_model("openai/gpt-5").is_err());
+        fs::remove_file(&preference).expect("remove symlink");
+        fs::hard_link(&outside, &preference).expect("hardlink");
+        assert!(loader.persist_tui_project_model("openai/gpt-5").is_err());
+    }
+
+    #[test]
     fn tui_settings_reject_malformed_and_oversized_provenance_without_changing_config() {
         let root = tempdir().expect("root");
         let user = root.path().join("user/config.toml");
@@ -2654,6 +3097,27 @@ mod tests {
         fs::remove_file(&provenance).expect("remove provenance symlink");
         fs::hard_link(&outside, &provenance).expect("provenance hardlink");
         assert!(loader.persist_tui_setting("ui.theme", "daylight").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_settings_lock_contention_fails_without_blocking_driver_lifecycle() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        let held = super::acquire_tui_settings_lock(
+            user.parent().expect("user parent"),
+            "test-contention",
+        )
+        .expect("held lock");
+        let loader = ConfigLoader::new(user, project);
+        let started = std::time::Instant::now();
+
+        assert!(loader.persist_tui_setting("ui.theme", "daylight").is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        drop(held);
     }
 
     fn make_private(path: &std::path::Path) {
