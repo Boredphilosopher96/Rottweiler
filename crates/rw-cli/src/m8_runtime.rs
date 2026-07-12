@@ -655,30 +655,6 @@ impl McpSessionRuntime {
             .ok_or_else(|| miette!("credentials path has no private storage parent"))?;
         let approvals = Arc::new(McpApprovalStore::open(approval_root, configs)?);
         let scratch = PrivateMcpScratch::create()?;
-        let environment = configs
-            .iter()
-            .flat_map(|config| match &config.transport {
-                crate::m8_config::DiscoveredMcpTransport::Stdio { inherit_env, .. } => inherit_env
-                    .iter()
-                    .cloned()
-                    .chain(
-                        config
-                            .credentials
-                            .iter()
-                            .map(|binding| binding.environment.clone()),
-                    )
-                    .collect::<Vec<_>>(),
-                crate::m8_config::DiscoveredMcpTransport::Http { .. } => Vec::new(),
-            })
-            .collect::<Vec<_>>();
-        let launcher =
-            SandboxedProtocolLauncher::new(workspace_roots, scratch.path(), helper, environment)
-                .into_diagnostic()?;
-        let stdio: Arc<dyn McpConnector> =
-            Arc::new(rw_core::runtime_support::mcp::SandboxedStdioConnector::new(
-                launcher,
-                approvals.clone(),
-            ));
         let credentials = Arc::new(CredentialManager::system(credentials_path));
         let bindings = configs
             .iter()
@@ -715,7 +691,50 @@ impl McpSessionRuntime {
             authorization,
             approvals.clone(),
         ));
-        let connector = Arc::new(DispatchingMcpConnector { stdio, http });
+        let connector: Arc<dyn McpConnector> = if configs.iter().any(|config| {
+            matches!(
+                &config.transport,
+                crate::m8_config::DiscoveredMcpTransport::Stdio { .. }
+            )
+        }) {
+            let environment = configs
+                .iter()
+                .flat_map(|config| match &config.transport {
+                    crate::m8_config::DiscoveredMcpTransport::Stdio { inherit_env, .. } => {
+                        inherit_env
+                            .iter()
+                            .cloned()
+                            .chain(
+                                config
+                                    .credentials
+                                    .iter()
+                                    .map(|binding| binding.environment.clone()),
+                            )
+                            .collect::<Vec<_>>()
+                    }
+                    crate::m8_config::DiscoveredMcpTransport::Http { .. } => Vec::new(),
+                })
+                .collect::<Vec<_>>();
+            let launcher = SandboxedProtocolLauncher::new(
+                workspace_roots,
+                scratch.path(),
+                helper,
+                environment,
+            )
+            .into_diagnostic()?;
+            let stdio: Arc<dyn McpConnector> =
+                Arc::new(rw_core::runtime_support::mcp::SandboxedStdioConnector::new(
+                    launcher,
+                    approvals.clone(),
+                ));
+            Arc::new(DispatchingMcpConnector { stdio, http })
+        } else {
+            // Empty and HTTP-only sessions never launch a local child. Avoid
+            // validating an irrelevant helper path (which may legitimately be
+            // reached through package-manager symlink provenance) while stdio
+            // configurations continue through the fail-closed launcher above.
+            http
+        };
         Self::start(
             configs,
             connector,
@@ -1802,6 +1821,110 @@ mod tests {
         ) -> std::result::Result<Arc<dyn McpClient>, McpError> {
             Err(McpError::Policy("offline fixture".to_owned()))
         }
+    }
+
+    #[cfg(unix)]
+    fn production_roots_with_symlinked_helper()
+    -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = tempfile::tempdir().expect("root");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("root mode");
+        let workspace = root.path().join("workspace");
+        let session = root.path().join("session");
+        let helper_root = root.path().join("helper-root");
+        for directory in [&workspace, &session, &helper_root] {
+            fs::create_dir(directory).expect("private directory");
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+                .expect("private mode");
+        }
+        let helper = helper_root.join("rw");
+        fs::write(&helper, b"#!/bin/sh\nexit 0\n").expect("helper");
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).expect("helper mode");
+        let linked_root = root.path().join("linked-helper-root");
+        symlink(&helper_root, &linked_root).expect("helper parent symlink");
+        let credentials = root.path().join("credentials.toml");
+        (
+            root,
+            workspace,
+            session,
+            linked_root.join("rw"),
+            credentials,
+        )
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_or_http_only_production_runtime_does_not_validate_stdio_helper() {
+        let (_root, workspace, session, helper, credentials) =
+            production_roots_with_symlinked_helper();
+        let empty = McpSessionRuntime::start_production(
+            &[],
+            std::slice::from_ref(&workspace),
+            &session,
+            &helper,
+            &credentials,
+            None,
+        )
+        .await
+        .expect("empty hosted MCP runtime must not require a stdio helper");
+        assert!(empty.manager.statuses().await.is_empty());
+        empty.shutdown().await;
+
+        let http = DiscoveredMcpServer {
+            name: "remote.docs".to_owned(),
+            enabled: false,
+            defer_tools: true,
+            transport: DiscoveredMcpTransport::Http {
+                endpoint: "https://example.com/mcp".to_owned(),
+                oauth_credential: None,
+                oauth_resource: None,
+                oauth_audience: None,
+                oauth_authorization_endpoint: None,
+                oauth_token_endpoint: None,
+                oauth_client_id: None,
+                oauth_scopes: Vec::new(),
+                oauth_proxy: None,
+            },
+            credentials: Vec::new(),
+            attested_files: Vec::new(),
+            origin: ExecutableConfigOrigin::User(credentials.with_file_name("mcp.toml")),
+            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            capability_override_origin: None,
+        };
+        let http_runtime = McpSessionRuntime::start_production(
+            &[http],
+            &[workspace],
+            &session,
+            &helper,
+            &credentials,
+            None,
+        )
+        .await
+        .expect("HTTP-only MCP runtime must not require a stdio helper");
+        assert_eq!(http_runtime.manager.statuses().await.len(), 1);
+        http_runtime.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_production_runtime_still_rejects_symlinked_helper_provenance() {
+        let (root, workspace, session, helper, credentials) =
+            production_roots_with_symlinked_helper();
+        let config = approval_reconnect_config(root.path());
+        let result = McpSessionRuntime::start_production(
+            &[config],
+            &[workspace],
+            &session,
+            &helper,
+            &credentials,
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "stdio helper provenance must remain fail-closed"
+        );
     }
 
     #[test]

@@ -427,6 +427,15 @@ impl<B: ProcessBackend> Supervisor<B> {
 
     #[allow(clippy::too_many_lines)]
     pub async fn run(&self) -> Result<(), SupervisorError> {
+        self.run_with_shell_broker(|| self.start_shell_broker())
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn run_with_shell_broker(
+        &self,
+        start_shell_broker: impl FnOnce() -> (ShellBrokerTask, Option<ShellBrokerReady>),
+    ) -> Result<(), SupervisorError> {
         let mut budget = RestartBudget::new(self.config.restart_policy);
         let mut engine = None;
         let mut tui = None;
@@ -467,24 +476,15 @@ impl<B: ProcessBackend> Supervisor<B> {
             };
             tui = Some(spawned?);
 
-            let (broker_task, broker_ready) = self.start_shell_broker();
+            let (broker_task, mut broker_ready) = start_shell_broker();
             shell_broker = Some(broker_task);
-            if let Some(broker_ready) = broker_ready {
-                let Some(readiness) = await_or_shutdown!(broker_ready) else {
-                    return Ok(());
-                };
-                match readiness {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => return Err(SupervisorError::ShellBroker(error)),
-                    Err(error) => return Err(SupervisorError::ShellBroker(error.to_string())),
-                }
-            }
 
             loop {
                 enum RuntimeEvent {
                     Shutdown(io::Result<()>),
                     Engine(io::Result<ExitStatus>),
                     Tui(io::Result<ExitStatus>),
+                    BrokerReady(Result<Result<(), String>, tokio::sync::oneshot::error::RecvError>),
                     Broker(Result<ShellBrokerResult, tokio::task::JoinError>),
                 }
 
@@ -503,6 +503,12 @@ impl<B: ProcessBackend> Supervisor<B> {
                         signal = &mut shutdown_signal => RuntimeEvent::Shutdown(signal),
                         status = engine_child.wait() => RuntimeEvent::Engine(status),
                         status = tui_child.wait() => RuntimeEvent::Tui(status),
+                        readiness = async {
+                            match broker_ready.as_mut() {
+                                Some(receiver) => receiver.await,
+                                None => std::future::pending().await,
+                            }
+                        } => RuntimeEvent::BrokerReady(readiness),
                         broker = broker_task => RuntimeEvent::Broker(broker),
                     }
                 };
@@ -575,6 +581,13 @@ impl<B: ProcessBackend> Supervisor<B> {
                         };
                         tui = Some(spawned?);
                     }
+                    RuntimeEvent::BrokerReady(readiness) => match readiness {
+                        Ok(Ok(())) => broker_ready = None,
+                        Ok(Err(error)) => return Err(SupervisorError::ShellBroker(error)),
+                        Err(error) => {
+                            return Err(SupervisorError::ShellBroker(error.to_string()));
+                        }
+                    },
                     RuntimeEvent::Broker(broker) => {
                         shell_broker.take();
                         let message = match broker {
@@ -1324,6 +1337,39 @@ mod tests {
         (result, specs, events)
     }
 
+    async fn run_scenario_with_pending_broker(
+        scenario: Scenario,
+    ) -> (Result<(), SupervisorError>, Vec<ChildSpec>, Vec<String>) {
+        let spawned = Arc::new(Mutex::new(Vec::new()));
+        let lifecycle = Arc::new(Mutex::new(Vec::new()));
+        let backend = MockBackend {
+            scenario,
+            spawned: Arc::clone(&spawned),
+            lifecycle: Arc::clone(&lifecycle),
+            ready: Arc::new(AtomicBool::new(false)),
+            count: AtomicUsize::new(0),
+        };
+        let supervisor = Supervisor::new(fixture_config(), backend, ResumeHandoff::default())
+            .expect("supervisor");
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            supervisor.run_with_shell_broker(|| {
+                let (ready, ready_rx) = tokio::sync::oneshot::channel();
+                let task = tokio::spawn(async move {
+                    let _keep_ready_pending = ready;
+                    std::future::pending::<()>().await;
+                    Ok(())
+                });
+                (task, Some(ready_rx))
+            }),
+        )
+        .await
+        .expect("child lifecycle must not be hidden behind broker readiness");
+        let specs = spawned.lock().expect("spawns").clone();
+        let events = lifecycle.lock().expect("lifecycle").clone();
+        (result, specs, events)
+    }
+
     async fn run_scenario(scenario: Scenario) -> (Vec<ChildSpec>, Vec<String>) {
         let (result, specs, events) = run_scenario_with_config(scenario, fixture_config()).await;
         result.expect("supervisor run");
@@ -1365,6 +1411,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn engine_exit_during_broker_readiness_is_reaped_and_restarted() {
+        let (result, specs, lifecycle) =
+            run_scenario_with_pending_broker(Scenario::EngineCrash).await;
+        result.expect("engine crash must recover while broker readiness is pending");
+        assert_eq!(specs.len(), 4);
+        assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+        assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
+        assert!(lifecycle.contains(&"spawn:engine".to_owned()));
+        assert!(lifecycle.contains(&"spawn:tui".to_owned()));
+    }
+
+    #[tokio::test]
     async fn clean_engine_exit_reaps_tui_without_restarting_the_app() {
         let (specs, lifecycle) = run_scenario(Scenario::EngineCleanExit).await;
         assert_eq!(specs.len(), 2);
@@ -1392,6 +1451,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn tui_exit_during_broker_readiness_is_reaped_and_restarted() {
+        let (result, specs, lifecycle) = run_scenario_with_pending_broker(Scenario::TuiCrash).await;
+        result.expect("TUI crash must recover while broker readiness is pending");
+        assert_eq!(specs.len(), 3);
+        assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
+        assert_eq!(specs[1].env, specs[2].env);
+        assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+    }
+
+    #[tokio::test]
     async fn detach_keeps_the_engine_group_alive_after_normal_tui_exit() {
         let mut config = fixture_config();
         config.detach = true;
@@ -1408,6 +1478,18 @@ mod tests {
     #[tokio::test]
     async fn shutdown_signal_reaps_tui_and_independent_engine_group() {
         let (specs, lifecycle) = run_scenario(Scenario::ShutdownSignal).await;
+        assert_eq!(specs.len(), 2);
+        assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
+        assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn shutdown_during_broker_readiness_reaps_both_process_groups() {
+        let (result, specs, lifecycle) =
+            run_scenario_with_pending_broker(Scenario::ShutdownSignal).await;
+        result.expect("shutdown must remain responsive while broker readiness is pending");
         assert_eq!(specs.len(), 2);
         assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
         assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
