@@ -1882,9 +1882,8 @@ async fn run_serve(
         .await;
     }
 
-    let _runtime_directory = RuntimeDirectoryGuard::capture(&paths.directory)?;
-
-    let (runtime, listener) = server::ServerRuntime::create_for_session(paths, Some(&session_id))?;
+    let (_runtime_directory, runtime, listener) =
+        create_guarded_server_runtime(paths, Some(&session_id))?;
     let deferred = DeferredHostedEngine::default();
     let state = server::ServerState::new(Arc::new(deferred.clone()), &runtime);
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -2196,6 +2195,22 @@ struct RuntimeDirectoryGuard {
     inode: u64,
     owner: u32,
     armed: bool,
+}
+
+fn create_guarded_server_runtime(
+    paths: server::ServerRuntimePaths,
+    session_id: Option<&str>,
+) -> Result<(
+    RuntimeDirectoryGuard,
+    server::ServerRuntime,
+    std::os::unix::net::UnixListener,
+)> {
+    // Selected remote paths may not exist on first attach. Let the server's
+    // owner/private path validation create the leaf before capturing its exact
+    // identity for lifecycle cleanup.
+    let (runtime, listener) = server::ServerRuntime::create_for_session(paths, session_id)?;
+    let runtime_directory = RuntimeDirectoryGuard::capture(&runtime.paths.directory)?;
+    Ok((runtime_directory, runtime, listener))
 }
 
 impl RuntimeDirectoryGuard {
@@ -3132,9 +3147,9 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Cli, Command, RuntimeDirectoryGuard, TrustCommand, UpgradeChannel, resolve_tui_executable,
-        sync_install_paths, valid_bootstrap_token, write_github_device_prompt,
-        write_private_file_atomic,
+        Cli, Command, RuntimeDirectoryGuard, TrustCommand, UpgradeChannel,
+        create_guarded_server_runtime, resolve_tui_executable, sync_install_paths,
+        valid_bootstrap_token, write_github_device_prompt, write_private_file_atomic,
     };
     #[cfg(unix)]
     use super::{rustix_device_id, rustix_mode_bits};
@@ -3316,6 +3331,29 @@ mod tests {
             .cleanup()
             .unwrap_or_else(|error| panic!("known runtime artifacts must clean: {error}"));
         assert!(!runtime.exists());
+    }
+
+    #[test]
+    fn guarded_server_creates_a_missing_selected_runtime_before_capture() {
+        let root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary directory must exist: {error}"));
+        let directory = root.path().join("remote/engine-fixture");
+        let paths = crate::server::ServerRuntimePaths {
+            socket: directory.join("engine.sock"),
+            token: directory.join("auth.token"),
+            descriptor: directory.join("runtime.json"),
+            directory: directory.clone(),
+        };
+        let (mut guard, runtime, listener) =
+            create_guarded_server_runtime(paths, Some("remote-session"))
+                .unwrap_or_else(|error| panic!("missing selected runtime must start: {error}"));
+        assert!(directory.is_dir());
+        drop(listener);
+        drop(runtime);
+        guard
+            .cleanup()
+            .unwrap_or_else(|error| panic!("created runtime must clean: {error}"));
+        assert!(!directory.exists());
     }
 
     #[test]
