@@ -2335,11 +2335,13 @@ pub(crate) async fn compose_hosted_actor(
                         .config;
                 let config = merge_reloaded_provider_config(base_config.clone(), loaded);
                 let config = prepare_provider_activation_config(config, provider)?;
-                let runtime = Arc::new(
-                    rebuild_factory
-                        .build(&config)
-                        .map_err(|error| AgentLoopError::Provider(error.to_string()))?,
-                );
+                let runtime = rebuild_factory
+                    .build(&config)
+                    .map_err(|error| AgentLoopError::Provider(error.to_string()))?;
+                runtime
+                    .activate_provider(provider)
+                    .map_err(|error| AgentLoopError::Provider(error.to_string()))?;
+                let runtime = Arc::new(runtime);
                 let pre_runtime = Arc::clone(&runtime);
                 let pre_redactor = rebuild_redactor.clone();
                 let pre_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
@@ -6025,12 +6027,11 @@ impl ModelDriver for RecomposableHostedModel {
     async fn activate_provider(
         &self,
         provider: &str,
-        selected_model: Option<&str>,
+        _selected_model: Option<&str>,
     ) -> std::result::Result<(), AgentLoopError> {
         let _activation = self.activation.lock().await;
         let rebuild = Arc::clone(&self.rebuild);
         let provider = provider.to_owned();
-        let selected_model = selected_model.map(str::to_owned);
         let rebuild_provider = provider.clone();
         if self
             .rebuild_inflight
@@ -6058,9 +6059,13 @@ impl ModelDriver for RecomposableHostedModel {
         .await
         .map_err(|_| AgentLoopError::Provider("provider activation rebuild timed out".to_owned()))?
         .map_err(|_| AgentLoopError::Provider("provider activation rebuild failed".to_owned()))??;
-        if let Some(selected_model) = selected_model.as_deref() {
-            rebuilt_runtime.model.prepare_model(selected_model).await?;
-        }
+        // Authentication activates one provider, not the session's current
+        // model selection. The selected alias may belong to another provider
+        // or may be temporarily absent from its live catalog; neither should
+        // turn a successfully stored credential into a failed login. The
+        // blocking rebuild validates the authenticated provider before it
+        // returns this generation. Model readiness remains a separate
+        // selection or send-time concern.
         if let Some(pre_commit) = &rebuilt_runtime.pre_commit {
             pre_commit();
         }
@@ -10910,9 +10915,9 @@ mod tests {
             .configure_builtin_provider("openai")
             .expect("new provider profile must persist");
         model
-            .activate_provider("openai", None)
+            .activate_provider("openai", Some("fast"))
             .await
-            .expect("healthy runtime must reload the new provider");
+            .expect("an unavailable provider-neutral alias must not fail provider activation");
         assert!(model.has_model_alias("openai/live-model"));
         assert!(
             ModelCatalogSource::discover(&model)
