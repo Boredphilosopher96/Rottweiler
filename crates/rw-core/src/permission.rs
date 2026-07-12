@@ -102,6 +102,7 @@ struct PermissionMemory {
 pub struct PermissionGate {
     policy: PermissionPolicy,
     restrictive_rules: Option<Vec<PermissionRule>>,
+    trusted_project_read_only: bool,
     memory: RwLock<PermissionMemory>,
     session_rules: RwLock<Vec<PermissionRule>>,
     project_store: Option<Arc<ProjectApprovalStore>>,
@@ -133,6 +134,7 @@ impl PermissionGate {
         Self {
             policy: PermissionPolicy::Configured(config),
             restrictive_rules: None,
+            trusted_project_read_only: false,
             memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
             project_store: None,
@@ -154,6 +156,7 @@ impl PermissionGate {
         Self {
             policy: PermissionPolicy::Headless(mode),
             restrictive_rules: None,
+            trusted_project_read_only: false,
             memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
             project_store: None,
@@ -165,6 +168,15 @@ impl PermissionGate {
     #[must_use]
     pub fn with_command_safety(mut self, safety: Arc<CommandSafetyClassifier>) -> Self {
         self.command_safety = safety;
+        self
+    }
+
+    /// Lets an explicitly trusted project use built-in read-only tools without
+    /// turning trust into authority for writes, execution, network, or an
+    /// explicit deny rule.
+    #[must_use]
+    pub const fn with_trusted_project_read_only(mut self, trusted: bool) -> Self {
+        self.trusted_project_read_only = trusted;
         self
     }
 
@@ -277,6 +289,7 @@ impl PermissionGate {
         Ok(Self {
             policy: self.policy.clone(),
             restrictive_rules: self.restrictive_rules.clone(),
+            trusted_project_read_only: self.trusted_project_read_only,
             memory: RwLock::new(PermissionMemory {
                 workspace_namespace: workspace_namespace(&roots),
                 workspace_roots: roots,
@@ -311,6 +324,7 @@ impl PermissionGate {
         Ok(Self {
             policy: self.policy.clone(),
             restrictive_rules: Some(restrictive_rules),
+            trusted_project_read_only: self.trusted_project_read_only,
             memory: RwLock::new(PermissionMemory {
                 workspace_roots: memory.workspace_roots.clone(),
                 workspace_namespace: memory.workspace_namespace.clone(),
@@ -576,7 +590,9 @@ impl PermissionGate {
                     } else {
                         PermissionDecision::Ask
                     }
-                } else if configured == PermissionDecision::Ask && safe_listed {
+                } else if configured == PermissionDecision::Ask
+                    && (safe_listed || (self.trusted_project_read_only && is_read_only(request)))
+                {
                     PermissionDecision::Allow
                 } else {
                     configured
@@ -2129,6 +2145,75 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn trusted_project_allows_read_only_tools_but_preserves_explicit_denies() {
+        let request = PermissionRequest {
+            id: "trusted-glob".to_owned(),
+            tool_name: "glob".to_owned(),
+            arguments: json!({"pattern": "**/*.rs", "path": "."}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        let no_prompt = CountingDeny(AtomicUsize::new(0));
+        let trusted =
+            PermissionGate::new(PermissionDecision::Ask).with_trusted_project_read_only(true);
+        assert_eq!(
+            trusted.authorize(request.clone(), &no_prompt).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
+
+        let denied = PermissionGate::from_config(PermissionConfig {
+            default: PermissionDecision::Ask,
+            rules: vec![PermissionRule {
+                pattern: "glob(*)".to_owned(),
+                action: PermissionDecision::Deny,
+            }],
+        })
+        .with_trusted_project_read_only(true);
+        assert_eq!(
+            denied.authorize(request, &no_prompt).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn remembered_glob_approval_applies_without_reprompt_and_survives_reload() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let approval_file = root.path().join("approvals.json");
+        let request = PermissionRequest {
+            id: "glob-first".to_owned(),
+            tool_name: "glob".to_owned(),
+            arguments: json!({"pattern": "**/*.rs", "path": "."}),
+            capabilities: vec![ToolCapability::ReadFilesystem],
+            approval_diff: None,
+        };
+        let gate = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(&approval_file);
+        assert_eq!(
+            gate.authorize(request.clone(), &Decision(ApprovalDecision::AllowProject),)
+                .await,
+            PermissionOutcome::Allowed
+        );
+        let no_prompt = CountingDeny(AtomicUsize::new(0));
+        let mut repeated = request.clone();
+        repeated.id = "glob-second".to_owned();
+        assert_eq!(
+            gate.authorize(repeated.clone(), &no_prompt).await,
+            PermissionOutcome::Allowed
+        );
+        let reloaded = PermissionGate::new(PermissionDecision::Ask)
+            .with_workspace_roots([root.path()])
+            .with_project_approval_file(&approval_file);
+        assert_eq!(
+            reloaded.authorize(repeated, &no_prompt).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -1934,6 +1934,21 @@ impl EngineHost {
                         attempt_id: current,
                         attempt,
                     }) if current == attempt_id => attempt,
+                    Some(pending @ PendingProviderAuth::Completing { .. })
+                        if pending_provider_auth_id(&pending) == &attempt_id =>
+                    {
+                        self.provider_auth
+                            .entries
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .insert(owner, pending);
+                        // ProviderAuthStarted is durable and can be replayed after a
+                        // transport reconnect. Treat the corresponding completion
+                        // command as an idempotent subscription to the already-running
+                        // poll/callback instead of turning a healthy login into a
+                        // protocol error.
+                        return Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()));
+                    }
                     Some(other) => {
                         self.provider_auth
                             .entries
@@ -3085,6 +3100,15 @@ fn sanitized_provider_auth_error(error: &HostError) -> String {
         HostError::SessionCapacity => "provider authentication capacity is exhausted",
         HostError::Persistence(_) => "provider credential storage failed",
         HostError::Protocol(_) => "provider authentication request was invalid",
+        HostError::Query(message) if message.contains("no GitHub OAuth client id") => {
+            "GitHub Copilot sign-in is unavailable in this build because it has no Rottweiler OAuth client identity"
+        }
+        HostError::Query(message) if message.contains("device authorization expired") => {
+            "GitHub sign-in expired; start a new sign-in attempt"
+        }
+        HostError::Query(message) if message.contains("device authorization was denied") => {
+            "GitHub sign-in was denied; start a new sign-in attempt to try again"
+        }
         HostError::Query(_) | HostError::SessionIdentityMismatch | HostError::RequestConflict => {
             "provider authentication failed"
         }
@@ -4304,6 +4328,20 @@ mod tests {
             .await
             .expect("completion command must not await device polling"),
             CommandOutcome::Accepted
+        );
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::CompleteProviderAuth {
+                    meta: meta("spoofed", "auth-complete-replayed"),
+                    session_id: session_id.clone(),
+                    provider: "github_copilot".to_owned(),
+                    attempt_id: attempt_id.clone(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted,
+            "a replayed durable auth prompt must join the in-flight completion"
         );
         assert!(matches!(
             host.dispatch(

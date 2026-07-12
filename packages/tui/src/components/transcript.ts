@@ -73,7 +73,9 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#tool = tool
     const glyph = tool.status === "running" ? "◌" : tool.isError === true ? "✕" : "✓"
     const approval = tool.status === "awaiting_approval" ? " · approval needed" : ""
-    this.header.content = `${this.#collapsed ? "▸" : "▾"} ${glyph} ${tool.name}${approval}`
+    const result =
+      tool.status === "finished" ? singleLine(toolOutputText(tool.output), 72) : ""
+    this.header.content = `${this.#collapsed ? "▸" : "▾"} ${glyph} ${tool.name}${approval}${result === "" ? "" : ` · ${result}`}`
     this.header.fg =
       tool.status === "awaiting_approval"
         ? this.#theme.warning
@@ -549,8 +551,16 @@ export class TranscriptRenderable extends BoxRenderable {
       this.streamingCard.height = subagents.length === 0 ? 0 : subagents.length + 5
       return
     }
+    const tools = tail.toolCallIds
+      .map((toolCallId) => state.tools[toolCallId])
+      .filter((tool): tool is ToolProjection => tool !== undefined)
+    const emptyActivity = tools.some((tool) => tool.status === "awaiting_approval")
+      ? "_Waiting for tool approval…_"
+      : tools.some((tool) => tool.status === "running")
+        ? "_Running tools…_"
+        : "_Waiting for response…_"
     this.streamingMarkdown.visible = true
-    this.streamingMarkdown.content = tail.text.length === 0 ? "_Waiting for response…_" : tail.text
+    this.streamingMarkdown.content = tail.text.length === 0 ? emptyActivity : tail.text
     this.streamingMarkdown.streaming = tail.finished === null
     this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? "streaming" : formatCost(tail.finished.cost, tail.finished.usage)}`
     const thinkingRows = tail.thinking.length === 0 ? 0 : Math.min(4, tail.thinking.split("\n").length)
@@ -562,9 +572,6 @@ export class TranscriptRenderable extends BoxRenderable {
       .map((citation, index) => `[${index + 1}] ${citation.title ?? citation.uri}`)
       .join("  ")
     this.#tailCitations.height = tail.citations.length > 0 ? 1 : 0
-    const tools = tail.toolCallIds
-      .map((toolCallId) => state.tools[toolCallId])
-      .filter((tool): tool is ToolProjection => tool !== undefined)
     this.#replaceTailTools(tools)
     const textRows = Math.max(1, tail.text.split("\n").length)
     this.streamingMarkdown.height = Math.min(20, textRows)

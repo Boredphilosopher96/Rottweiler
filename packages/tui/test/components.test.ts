@@ -96,6 +96,57 @@ describe("M4 retained components", () => {
     expect(app.transcript.mountedKeys.at(-1)).not.toContain(":0:")
   })
 
+  test("shows retained tool activity and output instead of a generic response wait", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 24, useThread: false })
+    renderer = setup.renderer
+    const runningTool = {
+      toolCallId: "glob-visible",
+      turnId: "1",
+      name: "glob",
+      args: { pattern: "**/*.rs", path: "." },
+      status: "running" as const,
+      capabilities: ["read_filesystem" as const],
+      rationale: null,
+      diff: null,
+      chunks: [],
+      output: null,
+      isError: null,
+      callIndex: 0,
+    }
+    const initial: RottweilerState = {
+      ...createInitialState(),
+      tools: { [runningTool.toolCallId]: runningTool },
+      streamingTail: {
+        turnId: "1",
+        text: "",
+        thinking: "checking the workspace",
+        citations: [],
+        toolCallIds: [runningTool.toolCallId],
+        finished: null,
+      },
+    }
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("Running tools")
+    expect(setup.captureCharFrame()).toContain("Thinking · checking the workspace")
+    expect(setup.captureCharFrame()).toContain("glob")
+
+    app.setState({
+      ...initial,
+      tools: {
+        [runningTool.toolCallId]: {
+          ...runningTool,
+          status: "finished",
+          output: { type: "text", text: "src/lib.rs" },
+          isError: false,
+        },
+      },
+    })
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("src/lib.rs")
+  })
+
   test("routes diff approval through generated commands", async () => {
     const setup = await createTestRenderer({ width: 112, height: 30, useThread: false })
     renderer = setup.renderer

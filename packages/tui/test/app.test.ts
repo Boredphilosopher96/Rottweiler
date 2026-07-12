@@ -419,6 +419,7 @@ describe("Rottweiler OpenTUI shell", () => {
     }))
     const app = createRottweilerApp(renderer, {
       initialState: { ...createInitialState(), commands },
+      onCommand: () => ({ type: "accepted" }),
     })
     renderer.root.add(app)
     await setup.mockInput.typeText("/")
@@ -444,8 +445,114 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.getSelectedIndex()).toBe(0)
 
     setup.mockInput.pressEnter()
+    await Bun.sleep(0)
     expect(app.picker.visible).toBeFalse()
-    expect(app.composer.value).toBe("/help ")
+    expect(app.composer.value).toBe("")
+  })
+
+  test("positions the first slash palette above the composer and keeps that layout on reopen", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+
+    // Exercise the real first-input path before OpenTUI has completed a prior frame.
+    await setup.mockInput.typeText("/")
+    await setup.renderOnce()
+    const first = { y: app.picker.y, height: app.picker.height }
+    expect(first.y + first.height).toBeLessThanOrEqual(app.composer.y)
+
+    app.closePicker()
+    app.composer.value = ""
+    await setup.mockInput.typeText("/")
+    await setup.renderOnce()
+    expect({ y: app.picker.y, height: app.picker.height }).toEqual(first)
+    expect(app.picker.y + app.picker.height).toBeLessThanOrEqual(app.composer.y)
+  })
+
+  test("moves anchored slash selection to the closest match as the query changes", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+
+    await setup.mockInput.typeText("/")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("help")
+    await setup.mockInput.typeText("sta")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("status")
+    app.closePicker()
+    app.composer.value = ""
+    await setup.mockInput.typeText("/pro")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("providers")
+  })
+
+  test("executes a selected no-argument slash command on Enter and renders its result", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    await setup.mockInput.typeText("/sta")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("status")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "send_message",
+      content: "/status",
+    }))
+    expect(app.picker.visible).toBeFalse()
+    expect(app.composer.value).toBe("")
+
+    app.handleEvent({
+      type: "command_finished",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      name: "status",
+      message: "actor idle · queue empty",
+      unrestorable_paths: [],
+    })
+    await setup.renderOnce()
+
+    expect(app.state.transcript.at(-1)?.turn.role).toBe("system")
+    const commandCard = [...app.transcript.mountedCards.values()].at(-1)
+    expect(commandCard?.markdown.content).toContain("actor idle · queue empty")
+  })
+
+  test("prefills slash commands with required arguments instead of running invalid input", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    await setup.mockInput.typeText("/rew")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("rewind")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+
+    expect(app.composer.value).toBe("/rewind ")
+    expect(app.picker.visible).toBeFalse()
+    expect(emitted.some((command) => command.type === "send_message")).toBeFalse()
   })
 
   test("keeps slash defaults and the full action palette useful before engine projections", async () => {
@@ -672,7 +779,7 @@ describe("Rottweiler OpenTUI shell", () => {
       },
     })
     renderer.root.add(app)
-    await setup.mockInput.typeText("/mod")
+    await setup.mockInput.typeText("/model")
     app.picker.select.selectCurrent()
     await setup.renderOnce()
 
@@ -901,6 +1008,15 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options[0]?.description).toContain("login required")
 
     app.openModelPicker()
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "copilot/gpt-5",
+    ])
+    expect(app.picker.select.options.map((option) => option.name).join(" ")).not.toContain(
+      "Alias ·",
+    )
+    expect(app.picker.select.options.map((option) => option.name).join(" ")).not.toContain(
+      "Thinking ·",
+    )
     app.picker.select.selectCurrent()
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "switch_model",
@@ -1265,19 +1381,44 @@ describe("Rottweiler OpenTUI shell", () => {
       provider: "github_copilot",
       attempt_id: "attempt-1",
     }))
-    expect(app.picker.title).toContain("Authenticate github_copilot")
+    expect(app.picker.title).toContain("Sign in · GitHub Copilot")
     expect(app.picker.select.options[0]?.description).toContain("ABCD-1234")
     expect(app.picker.select.options.map((option) => option.value)).toEqual([
       "provider-auth.open",
       "provider-auth.copy-code",
       "provider-auth.copy-url",
-      "provider-auth.waiting",
       "provider-auth.cancel",
     ])
+    app.handleEvent({
+      type: "provider_auth_started",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: "begin-copilot-replayed",
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      session_id: "session-local",
+      attempt_id: "attempt-1",
+      provider: "github_copilot",
+      challenge: {
+        kind: "device_flow",
+        verification_uri: "https://github.com/login/device",
+        user_code: "ABCD-1234",
+      },
+      warnings: [],
+    })
+    expect(emitted.filter((command) =>
+      command.type === "complete_provider_auth" && command.attempt_id === "attempt-1"
+    )).toHaveLength(1)
+    await Bun.sleep(0)
+    expect(openedUrls).toEqual(["https://github.com/login/device"])
     app.picker.select.setSelectedIndex(0)
     app.picker.select.selectCurrent()
     await Bun.sleep(0)
-    expect(openedUrls).toEqual(["https://github.com/login/device"])
+    expect(openedUrls).toEqual([
+      "https://github.com/login/device",
+      "https://github.com/login/device",
+    ])
 
     app.picker.select.setSelectedIndex(1)
     app.picker.select.selectCurrent()
@@ -1424,7 +1565,6 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options.map((option) => option.value)).toEqual([
       "provider-auth.open",
       "provider-auth.copy-url",
-      "provider-auth.waiting",
       "provider-auth.cancel",
     ])
     app.picker.select.setSelectedIndex(0)
@@ -1444,9 +1584,8 @@ describe("Rottweiler OpenTUI shell", () => {
     await Bun.sleep(0)
     expect(copied).toEqual([authorizationUrl])
     expect(
-      app.picker.select.options.find(
-        (option) => option.value === "provider-auth.waiting",
-      )?.description,
+      app.picker.select.options.find((option) => option.value === "provider-auth.open")
+        ?.description,
     ).toContain("URL copied")
   })
 

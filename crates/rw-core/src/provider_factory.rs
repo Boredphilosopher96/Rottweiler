@@ -1637,7 +1637,12 @@ where
         &self,
         config: &Config,
     ) -> Result<ModelCatalogSnapshot, ProviderFactoryError> {
-        let provider_names = config.providers.keys().cloned().collect::<Vec<_>>();
+        let provider_names = config
+            .providers
+            .keys()
+            .filter(|provider| !is_shadowed_legacy_subscription_profile(config, provider))
+            .cloned()
+            .collect::<Vec<_>>();
         let discoveries = futures_util::stream::iter(provider_names.into_iter().map(
             |provider_name| async move {
                 let candidate = discovery_candidate(config, &provider_name);
@@ -2755,6 +2760,9 @@ fn project_model_catalog(
         }
     }
     for name in ["anthropic", "openai", "openai_codex", "github_copilot"] {
+        if name == "openai_codex" && has_openai_named_subscription(config) {
+            continue;
+        }
         if !providers.iter().any(|provider| provider.name == name) {
             providers.push(ProviderDescriptor {
                 name: name.to_owned(),
@@ -2844,6 +2852,25 @@ fn project_available_provider(
     }
 }
 
+fn has_openai_named_subscription(config: &Config) -> bool {
+    config.providers.get("openai").is_some_and(|provider| {
+        AdapterKind::parse("openai", &provider.kind) == Ok(AdapterKind::OpenAiSubscription)
+    })
+}
+
+fn is_shadowed_legacy_subscription_profile(config: &Config, provider: &str) -> bool {
+    provider == "openai_codex"
+        && has_openai_named_subscription(config)
+        && config.providers.get(provider).is_some_and(|entry| {
+            AdapterKind::parse(provider, &entry.kind) == Ok(AdapterKind::OpenAiSubscription)
+        })
+        && !config.models.aliases.values().flatten().any(|candidate| {
+            candidate
+                .split_once('/')
+                .is_some_and(|(candidate_provider, _)| candidate_provider == provider)
+        })
+}
+
 fn bound_catalog_snapshot(mut snapshot: ModelCatalogSnapshot) -> ModelCatalogSnapshot {
     if snapshot.models.len() > MAX_CATALOG_MODELS {
         snapshot.models.truncate(MAX_CATALOG_MODELS);
@@ -2914,6 +2941,14 @@ fn project_unavailable_provider(
     current_candidate: Option<&String>,
     models: &mut BTreeMap<String, ModelDescriptor>,
 ) -> ProviderDescriptor {
+    let configured_subscription_fallback = authenticated
+        && error == "provider model discovery request was rejected"
+        && config.providers.get(provider_name).is_some_and(|provider| {
+            AdapterKind::parse(provider_name, &provider.kind) == Ok(AdapterKind::OpenAiSubscription)
+        });
+    let fallback_status =
+        "Live ChatGPT model discovery is unavailable; using configured model routes";
+    let mut fallback_model_count = 0_u32;
     for candidate in config
         .models
         .aliases
@@ -2928,19 +2963,29 @@ fn project_unavailable_provider(
         let Some((_, model)) = candidate.split_once('/') else {
             continue;
         };
+        if configured_subscription_fallback && !subscription_model_allowed(model) {
+            continue;
+        }
         let enriched = enrich_discovered_capabilities(config, pricing, provider_name, model, None);
+        if configured_subscription_fallback {
+            fallback_model_count = fallback_model_count.saturating_add(1);
+        }
         models
             .entry(candidate.clone())
             .or_insert_with(|| ModelDescriptor {
                 alias: ModelAlias(candidate.clone()),
                 id: candidate.clone(),
-                display_name: model.to_owned(),
+                display_name: subscription_model_display_name(model).to_owned(),
                 provider: provider_name.to_owned(),
                 providers: vec![provider_name.to_owned()],
                 aliases: reverse_aliases.get(candidate).cloned().unwrap_or_default(),
                 current: current_candidate == Some(candidate),
-                available: false,
-                status: Some(error.clone()),
+                available: configured_subscription_fallback,
+                status: Some(if configured_subscription_fallback {
+                    fallback_status.to_owned()
+                } else {
+                    error.clone()
+                }),
                 capabilities: protocol_capabilities(&enriched),
             });
     }
@@ -2950,9 +2995,23 @@ fn project_unavailable_provider(
         name: provider_name.to_owned(),
         configured: true,
         authenticated,
-        reachable: false,
-        model_count: 0,
-        status: Some(error),
+        reachable: configured_subscription_fallback,
+        model_count: fallback_model_count,
+        status: Some(if configured_subscription_fallback {
+            fallback_status.to_owned()
+        } else {
+            error
+        }),
+    }
+}
+
+fn subscription_model_display_name(model: &str) -> &str {
+    match model {
+        "gpt-5.5" => "GPT-5.5",
+        "gpt-5.3-codex-spark" => "GPT-5.3 Codex Spark",
+        "gpt-5.4" => "GPT-5.4",
+        "gpt-5.4-mini" => "GPT-5.4 Mini",
+        _ => model,
     }
 }
 
@@ -3542,6 +3601,61 @@ mod native_search_tests {
                 && !provider.configured
                 && provider.auth_kind == ProviderAuthKind::DeviceFlow
                 && provider.next_action == ProviderNextAction::Configure
+        }));
+    }
+
+    #[test]
+    fn chatgpt_invalid_catalog_uses_configured_routes_without_duplicate_profile() {
+        let mut config = Config::default();
+        config.providers.clear();
+        for provider in ["openai", "openai_codex"] {
+            config.providers.insert(
+                provider.to_owned(),
+                ProviderConfig {
+                    kind: "openai_codex".to_owned(),
+                    ..ProviderConfig::default()
+                },
+            );
+        }
+        config.models.default = "fast".to_owned();
+        config.models.aliases = BTreeMap::from([
+            ("fast".to_owned(), vec!["openai/gpt-5.4-mini".to_owned()]),
+            ("plan".to_owned(), vec!["openai/gpt-5.4".to_owned()]),
+        ]);
+
+        assert!(is_shadowed_legacy_subscription_profile(
+            &config,
+            "openai_codex"
+        ));
+        let catalog = project_model_catalog(
+            &config,
+            &PricingTable::bundled().expect("pricing"),
+            vec![(
+                "openai".to_owned(),
+                "openai/gpt-5.4-mini".to_owned(),
+                true,
+                Err("provider model discovery request was rejected".to_owned()),
+            )],
+        );
+
+        assert!(
+            catalog
+                .providers
+                .iter()
+                .all(|provider| provider.name != "openai_codex")
+        );
+        let provider = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.name == "openai")
+            .expect("ChatGPT provider");
+        assert_eq!(provider.auth_kind, ProviderAuthKind::Oauth);
+        assert!(provider.authenticated);
+        assert!(provider.reachable);
+        assert_eq!(provider.model_count, 2);
+        assert!(catalog.models.iter().all(|model| model.available));
+        assert!(catalog.models.iter().any(|model| {
+            model.id == "openai/gpt-5.4-mini" && model.display_name == "GPT-5.4 Mini"
         }));
     }
 

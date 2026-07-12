@@ -25,6 +25,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   #filtered: readonly PickerItem<T>[] = []
   #onSelect: ((item: PickerItem<T>) => void) | undefined
   #onQuery: ((query: string) => void) | undefined
+  #query = ""
   #anchored = false
   #desiredHeight = 12
   #secretMode = false
@@ -245,6 +246,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#items = items
     this.#onSelect = onSelect
     this.input.value = ""
+    this.#query = ""
     this.#filter("", false)
     this.visible = true
     this.input.focus()
@@ -299,6 +301,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.title = ` ${title} `
     this.#items = items
     this.#onSelect = onSelect
+    this.#query = this.input.value
     this.#filter(this.input.value, true)
   }
 
@@ -313,11 +316,12 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.title = ` ${title} `
     this.#items = items
     this.#onSelect = onSelect
+    this.#query = query
     this.#filter(query, false)
     this.visible = true
   }
 
-  /** Refresh composer autocomplete without stealing focus or jumping selection. */
+  /** Refresh composer autocomplete without stealing focus. A new query selects its best match. */
   refreshAnchored(
     title: string,
     items: readonly PickerItem<T>[],
@@ -332,7 +336,9 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.title = ` ${title} `
     this.#items = items
     this.#onSelect = onSelect
-    this.#filter(query, true)
+    const queryChanged = query !== this.#query
+    this.#query = query
+    this.#filter(query, !queryChanged)
   }
 
   get anchored(): boolean {
@@ -373,6 +379,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.#clearInputModes()
     this.#items = []
     this.#filtered = []
+    this.#query = ""
     this.select.options = []
     this.input.value = ""
   }
@@ -411,12 +418,13 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     const selectedIndex = preserveSelection ? this.select.getSelectedIndex() : 0
     const scrollOffset = preserveSelection ? this.#scrollOffset() : 0
     const ranked = this.#items
-      .map((item) => ({
+      .map((item, index) => ({
         item,
-        score: fuzzyScore(query, `${item.label} ${item.searchText ?? ""} ${item.description}`),
+        index,
+        score: pickerItemScore(query, item),
       }))
       .filter((entry) => entry.score !== null)
-      .sort((left, right) => (right.score ?? 0) - (left.score ?? 0))
+      .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || left.index - right.index)
     this.#filtered = ranked.map((entry) => entry.item)
     this.select.options = this.#filtered.map((item) => ({
       name: item.label,
@@ -492,6 +500,28 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     const index = this.#scrollOffset() + Math.floor(localRow / 2)
     return index >= 0 && index < this.select.options.length ? index : null
   }
+}
+
+function pickerItemScore<T>(query: string, item: PickerItem<T>): number | null {
+  const needle = query.trim().toLocaleLowerCase()
+  if (needle.length === 0) return 0
+
+  const label = item.label.toLocaleLowerCase()
+  const searchText = (item.searchText ?? "").toLocaleLowerCase()
+  const description = item.description.toLocaleLowerCase()
+  const labelScore = fuzzyScore(needle, label)
+  const searchScore = searchText.length === 0 ? null : fuzzyScore(needle, searchText)
+  const descriptionScore = fuzzyScore(needle, description)
+  const scores: number[] = []
+
+  if (labelScore !== null) {
+    const exact = label === needle || label === `/${needle}`
+    const prefix = label.startsWith(needle) || label.startsWith(`/${needle}`)
+    scores.push(labelScore + (exact ? 1_000 : prefix ? 500 : 200))
+  }
+  if (searchScore !== null) scores.push(searchScore + 100)
+  if (descriptionScore !== null) scores.push(descriptionScore)
+  return scores.length === 0 ? null : Math.max(...scores)
 }
 
 function isPrintableInput(value: string): boolean {

@@ -310,6 +310,44 @@ describe("pure TUI state reducer", () => {
     expect(state.todos.map((todo) => todo.id)).toEqual(["audit", "tests"])
   })
 
+  test("retains tool activity when attach or replay begins after the start event", () => {
+    let state = reduce(createInitialState(), {
+      type: "tool_approval_needed",
+      meta: meta("1"),
+      turn_id: "8",
+      tool_call_id: "late-glob",
+      name: "glob",
+      args: { pattern: "**/*.rs", path: "." },
+      capabilities: ["read_filesystem"],
+      rationale: "Inspect workspace files",
+    })
+    expect(state.streamingTail?.toolCallIds).toEqual(["late-glob"])
+    expect(state.tools["late-glob"]?.status).toBe("awaiting_approval")
+
+    state = reduce(state, {
+      type: "tool_output_delta",
+      meta: meta("2"),
+      turn_id: "8",
+      tool_call_id: "late-glob",
+      stream: "stdout",
+      chunk: "src/lib.rs",
+    })
+    state = reduce(state, {
+      type: "tool_call_finished",
+      meta: meta("3"),
+      turn_id: "8",
+      tool_call_id: "late-glob",
+      output: { type: "text", text: "src/lib.rs" },
+      is_error: false,
+      call_index: 0,
+    })
+    expect(state.streamingTail?.toolCallIds).toEqual(["late-glob"])
+    expect(state.tools["late-glob"]?.chunks).toEqual([
+      { stream: "stdout", chunk: "src/lib.rs" },
+    ])
+    expect(state.tools["late-glob"]?.status).toBe("finished")
+  })
+
   test("rederives the latest valid todo snapshot at a rewind boundary", () => {
     let state = createInitialState()
     for (const [sequence, turn, id, content] of [

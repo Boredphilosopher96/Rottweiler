@@ -115,14 +115,9 @@ type ProjectionKind = "commands" | "models" | "sessions" | "files"
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 
 type CommandChoice = RottweilerState["commands"][number]
-type ModelPickerChoice =
-  | { readonly kind: "alias"; readonly alias: RottweilerState["modelAliases"][number] }
-  | { readonly kind: "model"; readonly model: RottweilerState["models"][number] }
-  | {
-      readonly kind: "thinking"
-      readonly setting: RottweilerState["settings"][number]
-      readonly value: string
-    }
+type ProviderProjection = RottweilerState["providers"][number]
+type ProviderIdentity = Pick<ProviderProjection, "name" | "authKind">
+type ModelPickerChoice = { readonly kind: "model"; readonly model: RottweilerState["models"][number] }
 
 type PermissionPickerAction =
   | { readonly kind: "refresh" }
@@ -164,7 +159,6 @@ type ProviderAuthPickerAction =
   | { readonly kind: "copy_url"; readonly value: string }
   | { readonly kind: "copy_code"; readonly value: string }
   | { readonly kind: "cancel" }
-  | { readonly kind: "waiting" }
 
 type McpPickerAction =
   | { readonly kind: "add" }
@@ -226,6 +220,7 @@ export class RottweilerApp extends BoxRenderable {
   #providerRecoveryProvider: RottweilerState["providers"][number] | null = null
   #providerAuthActionInFlight = false
   #providerAuthActionNotice: string | null = null
+  #providerAuthCompletionAttempts = new Set<string>()
   #storedProviderKeys = new Set<string>()
   #providerApiKeyPending: string | null = null
   #mcpDraftName: string | null = null
@@ -484,6 +479,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#storedProviderKeys.clear()
       this.#providerAuthActionInFlight = false
       this.#providerAuthActionNotice = null
+      this.#providerAuthCompletionAttempts.clear()
       this.reviewPanel.closePresentation()
     }
     this.#sessionId = sessionId
@@ -662,12 +658,29 @@ export class RottweilerApp extends BoxRenderable {
       if (provider === null || attemptId === null) return
       this.#providerAuthActionInFlight = false
       this.#providerAuthActionNotice = null
-      this.#command({
-        type: "complete_provider_auth",
-        provider,
-        attemptId,
-      })
+      const firstDelivery = !this.#providerAuthCompletionAttempts.has(attemptId)
+      if (firstDelivery) {
+        if (this.#providerAuthCompletionAttempts.size >= 64) {
+          const oldest = this.#providerAuthCompletionAttempts.values().next().value
+          if (oldest !== undefined) this.#providerAuthCompletionAttempts.delete(oldest)
+        }
+        this.#providerAuthCompletionAttempts.add(attemptId)
+        this.#command({
+          type: "complete_provider_auth",
+          provider,
+          attemptId,
+        })
+      }
       this.openProviderAuthPicker()
+      if (firstDelivery) {
+        const challenge = next.providerAuth.pending?.challenge
+        const url = challenge?.kind === "oauth"
+          ? challenge.authorization_url
+          : challenge?.verification_uri
+        if (url !== undefined) {
+          void this.#runProviderAuthAction(provider, attemptId, { kind: "open_url", value: url })
+        }
+      }
     }
     if (event.type === "provider_configured") {
       const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
@@ -1343,7 +1356,21 @@ export class RottweilerApp extends BoxRenderable {
               this.openSettingsPicker()
               return
             }
-            this.composer.value = `/${command.name} `
+            if (command.name === "mode") {
+              clearAnchoredTrigger()
+              this.closePicker()
+              this.openModePicker()
+              return
+            }
+            const content = `/${command.name}`
+            const requiresArgument = /<[^>]+>/.test(command.usage)
+            if (this.#pickerAnchored && !requiresArgument) {
+              this.composer.value = content
+              this.closePicker()
+              void this.composer.submit()
+              return
+            }
+            this.composer.value = `${content} `
             this.closePicker()
           },
         )
@@ -1408,20 +1435,12 @@ export class RottweilerApp extends BoxRenderable {
         )
         const modelItems: PickerItem<ModelPickerChoice | null>[] =
           [
-          ...(this.#modelProviderFilter === null
-            ? this.#state.modelAliases.map((alias) => ({
-                id: `alias:${alias.alias}`,
-                label: `${alias.current ? "● " : ""}Alias · ${alias.alias}`,
-                description: alias.candidates.join(" → "),
-                value: { kind: "alias" as const, alias },
-              }))
-            : []),
           ...models.map((model) => ({
             id: model.id ?? model.alias,
             label: `${model.current === true ? "● " : ""}${model.displayName ?? model.alias}`,
             description: [
               model.provider ?? model.providers[0] ?? "unconfigured",
-              model.available === false ? (model.status ?? "unavailable") : "available",
+              model.available === false ? (model.status ?? "unavailable") : (model.status ?? "available"),
               model.toolCalling ? "tools" : "",
               model.vision ? "vision" : "",
               model.thinking ? "thinking" : "",
@@ -1430,18 +1449,6 @@ export class RottweilerApp extends BoxRenderable {
               .join(" · "),
             value: { kind: "model" as const, model },
           })),
-          ...(this.#modelProviderFilter === null
-            ? this.#state.settings
-                .filter((setting) => setting.key.startsWith("models.thinking."))
-                .flatMap((setting) =>
-                  setting.choices.map((value) => ({
-                    id: `thinking:${setting.key}:${value}`,
-                    label: `Thinking · ${value}`,
-                    description: `${value === setting.value ? "current · " : ""}${setting.label} · persists for new sessions`,
-                    value: { kind: "thinking" as const, setting, value },
-                  })),
-                )
-            : []),
         ]
         const modelError = this.#projectionErrors.models
         if (modelError !== undefined) {
@@ -1476,24 +1483,6 @@ export class RottweilerApp extends BoxRenderable {
                 "models_unavailable",
                 "no configured model routes are available; configure a provider and model alias",
               )
-              this.closePicker()
-              return
-            }
-            if (selection.kind === "alias") {
-              this.#command({
-                type: "switch_model",
-                model: selection.alias.alias,
-                provider: null,
-              })
-              this.closePicker()
-              return
-            }
-            if (selection.kind === "thinking") {
-              this.#command({
-                type: "set_setting",
-                key: selection.setting.key,
-                value: selection.value
-              })
               this.closePicker()
               return
             }
@@ -1534,15 +1523,13 @@ export class RottweilerApp extends BoxRenderable {
             .sort((left, right) => left.name.localeCompare(right.name))
             .map((provider) => ({
               id: provider.name,
-              label: provider.name,
+              label: providerDisplayName(provider),
               description: [
-                provider.authenticated ? "authenticated" : "not authenticated",
-                provider.reachable ? "reachable" : "unreachable",
+                providerConnectionStatus(provider),
                 `${provider.modelCount} model${provider.modelCount === 1 ? "" : "s"}`,
-                provider.nextAction.replaceAll("_", " "),
               this.#storedProviderKeys.has(
                 provider.name)
-                ? "credential stored · select to refresh activation"
+                ? "credential stored"
                 : "",
               provider.status ?? "",
               ].filter(Boolean).join(" · "),
@@ -1661,13 +1648,13 @@ export class RottweilerApp extends BoxRenderable {
             : pending.challenge.verification_uri
         const prompt =
           pending.challenge.kind === "oauth"
-            ? `Authorize in your browser · callback ${pending.challenge.redirect_uri}`
-            : `Open the verification page · enter code ${pending.challenge.user_code}`
+            ? "Finish signing in in your browser; Rottweiler will continue automatically"
+            : `Enter code ${pending.challenge.user_code} on GitHub; Rottweiler will continue automatically`
         const items: PickerItem<ProviderAuthPickerAction>[] = [
           {
             id: "provider-auth.open",
-            label: "Open browser",
-            description: prompt,
+            label: pending.challenge.kind === "oauth" ? "Continue in browser" : "Open GitHub",
+            description: this.#providerAuthActionNotice ?? prompt,
             searchText: `open browser ${prompt}`,
             value: { kind: "open_url", value: authUrl },
           },
@@ -1675,8 +1662,8 @@ export class RottweilerApp extends BoxRenderable {
         if (pending.challenge.kind === "device_flow") {
           items.push({
             id: "provider-auth.copy-code",
-            label: "Copy code",
-            description: pending.challenge.user_code,
+            label: `Copy code ${pending.challenge.user_code}`,
+            description: "Copy the one-time GitHub device code",
             searchText: `copy code ${pending.challenge.user_code}`,
             value: { kind: "copy_code", value: pending.challenge.user_code },
           })
@@ -1684,27 +1671,23 @@ export class RottweilerApp extends BoxRenderable {
         items.push(
           {
             id: "provider-auth.copy-url",
-            label: "Copy URL",
-            description: authUrl,
+            label: "Copy sign-in link",
+            description: "Copy the browser link to the clipboard",
             searchText: `copy url ${authUrl}`,
             value: { kind: "copy_url", value: authUrl },
           },
           {
-            id: "provider-auth.waiting",
-            label: "Waiting for authentication…",
-            description: this.#providerAuthActionNotice ?? prompt,
-            searchText: prompt,
-            value: { kind: "waiting" },
-          },
-          {
             id: "provider-auth.cancel",
-            label: "Cancel authentication",
-            description: pending.warnings.join(" · "),
+            label: "Cancel sign-in",
+            description: pending.warnings.join(" · ") || "Stop this sign-in attempt",
             value: { kind: "cancel" },
           },
         )
         this.#openPicker(
-          `Authenticate ${pending.provider}`,
+          `Sign in · ${providerDisplayName({
+            name: pending.provider,
+            authKind: pending.challenge.kind === "oauth" ? "oauth" : "device_flow",
+          })}`,
           items,
           (item) => {
             if (item.value.kind === "cancel") {
@@ -1714,7 +1697,7 @@ export class RottweilerApp extends BoxRenderable {
                 provider: pending.provider,
                 attemptId: pending.attemptId,
               })
-            } else if (item.value.kind !== "waiting") {
+            } else {
               void this.#runProviderAuthAction(
                 pending.provider,
                 pending.attemptId,
@@ -2141,9 +2124,12 @@ export class RottweilerApp extends BoxRenderable {
 
   #positionPicker(anchored: boolean): void {
     if (anchored) {
+      const statusHeight = Math.max(1, this.statusLine.height || 1)
       const composerTop = Math.max(
         0,
-        this.ctx.height - this.statusLine.height - this.composer.height,
+        this.composer.y > 0
+          ? this.composer.y
+          : this.ctx.height - statusHeight - 3,
       )
       this.picker.constrainAnchoredHeight(composerTop)
       this.picker.bottom = undefined
@@ -2512,7 +2498,6 @@ export class RottweilerApp extends BoxRenderable {
             "URL copied · waiting for authentication"
           break
         case "cancel":
-        case "waiting":
           return
       }
     } catch {
@@ -3003,6 +2988,29 @@ function commandSourceLabel(source: CommandChoice["source"]): string {
     case "builtin":
     case undefined:
       return "Built-in"
+  }
+}
+
+function providerDisplayName(provider: ProviderIdentity): string {
+  if (
+    (provider.name === "openai" || provider.name === "openai_codex") &&
+    provider.authKind === "oauth"
+  ) return "OpenAI · ChatGPT"
+  if (provider.name === "openai") return "OpenAI API"
+  if (provider.name === "github_copilot") return "GitHub Copilot"
+  if (provider.name === "anthropic") return "Anthropic API"
+  return provider.name.replaceAll("_", " ")
+}
+
+function providerConnectionStatus(provider: ProviderProjection): string {
+  if (provider.authenticated && provider.reachable) return "Connected"
+  if (provider.authenticated) return "Signed in · connection unavailable"
+  if (!provider.configured) return "Not set up"
+  switch (provider.authKind) {
+    case "oauth": return "Sign in with ChatGPT"
+    case "device_flow": return "Sign in with GitHub"
+    case "api_key": return "API key required"
+    case "none": return "Unavailable"
   }
 }
 

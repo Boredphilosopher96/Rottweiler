@@ -1565,6 +1565,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         None => PermissionGate::from_config(loaded_config.config.permissions.clone()),
     }
     .with_workspace_roots(&workspace_roots)
+    .with_trusted_project_read_only(derived_project_trusted || options.dangerously_trust)
     .with_command_safety(Arc::clone(&command_safety))
     .with_project_approval_file(project_approvals.clone());
     let permissions = Arc::new(permissions);
@@ -2405,6 +2406,7 @@ pub(crate) async fn compose_hosted_actor(
         None => PermissionGate::from_config(options.config.permissions.clone()),
     }
     .with_workspace_roots(&workspace_roots)
+    .with_trusted_project_read_only(derived_project_trusted || options.dangerously_trust)
     .with_command_safety(Arc::clone(&command_safety))
     .with_project_approval_file(project_approvals.clone());
     let permissions = Arc::new(permissions);

@@ -1079,6 +1079,112 @@ fn simultaneous_resume_rejects_the_second_writer_before_startup_mutation() {
 }
 
 #[test]
+fn real_process_executes_glob_and_read_without_a_stalled_approval_channel() {
+    let root = tempdir().expect("root");
+    let script = root.path().join("read-tools.json");
+    write_script(
+        &script,
+        vec![
+            vec![
+                ProviderEvent::ToolCallStart {
+                    id: "glob-rust".to_owned(),
+                    name: "glob".to_owned(),
+                },
+                ProviderEvent::ToolCallEnd {
+                    id: "glob-rust".to_owned(),
+                    arguments: json!({"pattern": "**/*.rs", "path": "."}),
+                },
+                ProviderEvent::ToolCallStart {
+                    id: "read-rust".to_owned(),
+                    name: "read".to_owned(),
+                },
+                ProviderEvent::ToolCallEnd {
+                    id: "read-rust".to_owned(),
+                    arguments: json!({"path": "src/lib.rs"}),
+                },
+                ProviderEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                },
+            ],
+            text_events("read tools completed"),
+        ],
+    );
+
+    for (name, permission_args) in [
+        (
+            "auto-safe-read-tools",
+            vec!["--permission-mode", "auto-safe"],
+        ),
+        ("yolo-read-tools", vec!["--permission-mode", "yolo"]),
+        ("trusted-read-tools", vec!["--dangerously-trust"]),
+    ] {
+        let run = TestRun::new(&root, name);
+        fs::create_dir_all(run.workspace.join("src")).expect("source directory");
+        fs::write(
+            run.workspace.join("src/lib.rs"),
+            "pub const TOOL_EXECUTION_CANARY: &str = \"visible\";\n",
+        )
+        .expect("source fixture");
+        let mut command = base_command(&run.workspace, &run.home);
+        command.args([
+            "-p",
+            "inspect the Rust source with glob and read",
+            "--output-format",
+            "stream-json",
+            "--in-memory-replay-script",
+            script.to_str().expect("script path"),
+        ]);
+        command.args(permission_args);
+        let output = command.output().expect("rw process");
+        assert!(
+            output.status.success(),
+            "{name} stderr: {}\nstdout: {}",
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout),
+        );
+        let events = parse_stream(&output.stdout);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, EngineEvent::ToolCallStarted { .. }))
+                .count(),
+            2,
+            "{name}: missing visible tool starts: {events:#?}",
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    EngineEvent::ToolCallFinished {
+                        is_error: false,
+                        ..
+                    }
+                ))
+                .count(),
+            2,
+            "{name}: tools did not finish successfully: {events:#?}",
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("TOOL_EXECUTION_CANARY"),
+            "{name}: read output was not projected",
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, EngineEvent::ToolApprovalNeeded { .. }))
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            EngineEvent::TurnFinished {
+                status: TurnStatus::Completed,
+                ..
+            }
+        )));
+    }
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn sigkill_mid_bash_waits_for_watchdog_then_recovers_opaque_checkpoint() {
     if probe_sandbox().support != SandboxSupport::Enforced {

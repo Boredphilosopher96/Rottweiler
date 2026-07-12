@@ -802,12 +802,26 @@ function applyKnownEvent(
         isError: existing?.isError ?? null,
         callIndex: existing?.callIndex ?? 0,
       }
-      return { ...state, tools: { ...state.tools, [event.tool_call_id]: tool } }
+      return {
+        ...state,
+        tools: { ...state.tools, [event.tool_call_id]: tool },
+        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
+      }
     }
     case "tool_output_delta": {
-      const existing = state.tools[event.tool_call_id]
-      if (existing === undefined) {
-        return state
+      const existing: ToolProjection = state.tools[event.tool_call_id] ?? {
+        toolCallId: event.tool_call_id,
+        turnId: event.turn_id,
+        name: "tool",
+        args: null,
+        status: "running",
+        capabilities: [],
+        rationale: null,
+        diff: null,
+        chunks: [],
+        output: null,
+        isError: null,
+        callIndex: 0,
       }
       return {
         ...state,
@@ -818,6 +832,7 @@ function applyKnownEvent(
             chunks: [...existing.chunks, { stream: event.stream, chunk: event.chunk }],
           },
         },
+        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
       }
     }
     case "tool_call_finished": {
@@ -841,6 +856,7 @@ function applyKnownEvent(
       return {
         ...state,
         tools: { ...state.tools, [event.tool_call_id]: tool },
+        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
         ...(todos === null ? {} : { todos }),
       }
     }
@@ -958,13 +974,36 @@ function applyKnownEvent(
       }
     case "error":
       return { ...state, errors: [...state.errors.slice(-63), event.error] }
+    case "command_finished": {
+      const commandSequence = sequenceId ?? state.lastSequence ?? "0"
+      const message = event.message.trim()
+      return {
+        ...state,
+        transcript: [
+          ...state.transcript,
+          {
+            sequenceId: commandSequence,
+            agentTurn: `command:${event.name}:${commandSequence}`,
+            turn: {
+              role: "system",
+              blocks: [
+                {
+                  type: "text",
+                  text: `/${event.name}\n\n${message.length === 0 ? "Command completed." : message}`,
+                },
+              ],
+              meta: { synthetic: true, summary: false },
+            },
+          },
+        ],
+      }
+    }
     case "context_usage_updated":
     case "compaction_attempt_finished":
     case "tool_output_pruned":
     case "context_item_pinned":
     case "context_item_evicted":
     case "hook_failed":
-    case "command_finished":
     case "guard_triggered":
       return state
   }
@@ -1295,6 +1334,19 @@ function updateTail(
           finished: null,
         }
   return update(tail)
+}
+
+function attachToolToTail(
+  current: StreamingTail | null,
+  turnId: string,
+  toolCallId: string,
+): StreamingTail {
+  return updateTail(current, turnId, (tail) => ({
+    ...tail,
+    toolCallIds: tail.toolCallIds.includes(toolCallId)
+      ? tail.toolCallIds
+      : [...tail.toolCallIds, toolCallId],
+  }))
 }
 
 function parseU64(value: string | null): bigint | null {
