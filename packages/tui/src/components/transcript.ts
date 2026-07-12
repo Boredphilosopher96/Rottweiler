@@ -509,7 +509,10 @@ export class TranscriptRenderable extends BoxRenderable {
         this.#syntaxStyle,
         entry,
         width,
-        formatCost(state.turns[entry.agentTurn]?.cost),
+        formatCost(
+          state.turns[entry.agentTurn]?.cost,
+          state.turns[entry.agentTurn]?.usage,
+        ),
         tools,
         visibleSubagents,
         turnSubagents.length,
@@ -549,7 +552,7 @@ export class TranscriptRenderable extends BoxRenderable {
     this.streamingMarkdown.visible = true
     this.streamingMarkdown.content = tail.text.length === 0 ? "_Waiting for response…_" : tail.text
     this.streamingMarkdown.streaming = tail.finished === null
-    this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? "streaming" : formatCost(tail.finished.cost)}`
+    this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? "streaming" : formatCost(tail.finished.cost, tail.finished.usage)}`
     const thinkingRows = tail.thinking.length === 0 ? 0 : Math.min(4, tail.thinking.split("\n").length)
     this.#tailThinking.visible = tail.thinking.length > 0
     this.#tailThinking.content = tail.thinking.length > 0 ? `Thinking · ${tail.thinking}` : ""

@@ -733,7 +733,7 @@ export class StatusLineRenderable extends TextRenderable {
       ...(waitingApproval === undefined ? [] : [`approval ${waitingApproval.name}`]),
       `model ${state.provider === null ? (state.model ?? "fast") : `${state.provider}/${state.model ?? "fast"}`}`,
       context,
-      formatSessionCost(state.cost),
+      formatSessionCost(state.cost, state.context?.used_tokens ?? null),
       cache,
       `git ${this.#branch ?? "—"}`,
       ...(pluginStatus === undefined ? [] : [`${pluginStatus[0]} ${pluginStatus[1]}`]),

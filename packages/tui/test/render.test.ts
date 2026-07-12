@@ -1,8 +1,55 @@
 import { describe, expect, test } from "bun:test"
 
-import { toolOutputText, TranscriptVirtualizer } from "../src/render"
+import { formatCost, formatSessionCost, toolOutputText, TranscriptVirtualizer } from "../src/render"
 
 describe("bounded retained rendering", () => {
+  test("renders subscription usage and AI credits instead of a dead dollar placeholder", () => {
+    const usage = {
+      input_tokens: "640",
+      output_tokens: "96",
+      cache_read_tokens: "512",
+      cache_write_tokens: "0",
+      reasoning_tokens: "12",
+    }
+    expect(formatCost({ kind: "subscription_quota" }, usage)).toBe("736 tokens")
+    expect(formatCost({ kind: "ai_credits", credits_micros: "1250000" }, usage)).toBe(
+      "1.250 credits",
+    )
+    expect(formatSessionCost(null, "6400")).toBe("6400 tokens")
+    expect(formatSessionCost({
+      utc_day: "2026-01-01",
+      turns: [{
+        turn_id: "1",
+        attribution: "main",
+        usage,
+        cost: { kind: "subscription_quota", used: "736", unit: "tokens" },
+      }],
+      session_usage: usage,
+      session_cost_micros_usd: "0",
+      session_ai_credit_micros: "0",
+      daily_cost_micros_usd: "0",
+      daily_ai_credit_micros: "0",
+      trailing_minute_cost_micros_usd: "0",
+      trailing_minute_ai_credit_micros: "0",
+      cache_hit_basis_points: 0,
+      session_cost_cap_micros_usd: null,
+      daily_cost_cap_micros_usd: null,
+      session_ai_credit_cap_micros: null,
+      daily_ai_credit_cap_micros: null,
+      spend_rate_alarm_micros_usd_per_minute: null,
+      ai_credit_rate_alarm_micros_per_minute: null,
+      hard_cap_reached: false,
+      session_monetary_accounting_complete: false,
+      daily_monetary_accounting_complete: false,
+      session_subscription_quota_entries: "1",
+      session_cost_unavailable_entries: "0",
+      session_non_usd_monetary_entries: "0",
+      daily_subscription_quota_entries: "1",
+      daily_cost_unavailable_entries: "0",
+      daily_non_usd_monetary_entries: "0",
+    })).toBe("736 tokens")
+  })
+
   test("summarizes a maximum-size subagent diff before serializing tool output", () => {
     const text = toolOutputText({
       type: "structured",

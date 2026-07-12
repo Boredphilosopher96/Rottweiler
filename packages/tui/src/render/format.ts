@@ -1,6 +1,6 @@
-import type { Cost, CostSnapshot, ToolOutput, Turn } from "../protocol"
+import type { Cost, CostSnapshot, ToolOutput, Turn, Usage } from "../protocol"
 
-export function formatCost(cost: Cost | null | undefined): string {
+export function formatCost(cost: Cost | null | undefined, usage?: Usage | null): string {
   if (cost === null || cost === undefined) {
     return "—"
   }
@@ -11,18 +11,50 @@ export function formatCost(cost: Cost | null | undefined): string {
       return `${(decimal(cost.credits_micros) / 1_000_000).toFixed(3)} credits`
     case "subscription_quota":
       return cost.used === undefined || cost.used === null
-        ? "subscription"
+        ? usage === undefined || usage === null
+          ? "subscription"
+          : `${usageTokens(usage)} tokens`
         : `${cost.used}${cost.unit === undefined || cost.unit === null ? "" : ` ${cost.unit}`}`
     case "unavailable":
       return "unpriced"
   }
 }
 
-export function formatSessionCost(snapshot: CostSnapshot | null): string {
+export function formatSessionCost(
+  snapshot: CostSnapshot | null,
+  fallbackTokens: string | null = null,
+): string {
   if (snapshot === null) {
-    return "$—"
+    return fallbackTokens === null ? "$—" : `${fallbackTokens} tokens`
+  }
+  if (decimal(snapshot.session_subscription_quota_entries) > 0) {
+    const quota = subscriptionQuota(snapshot)
+    return quota ?? `${usageTokens(snapshot.session_usage)} tokens`
+  }
+  if (decimal(snapshot.session_ai_credit_micros) > 0) {
+    return `${(decimal(snapshot.session_ai_credit_micros) / 1_000_000).toFixed(3)} credits`
   }
   return `$${(decimal(snapshot.session_cost_micros_usd) / 1_000_000).toFixed(3)}`
+}
+
+function subscriptionQuota(snapshot: CostSnapshot): string | null {
+  const values = snapshot.turns
+    .map((turn) => turn.cost)
+    .filter((cost): cost is Extract<Cost, { kind: "subscription_quota" }> =>
+      cost.kind === "subscription_quota" && cost.used !== undefined && cost.used !== null,
+    )
+  if (values.length === 0) return null
+  const units = new Set(values.map((cost) => cost.unit ?? "quota"))
+  if (units.size !== 1) return null
+  const used = values.reduce((sum, cost) => sum + decimal(cost.used ?? "0"), 0)
+  return `${used} ${values[0]?.unit ?? "quota"}`
+}
+
+function usageTokens(usage: Usage): string {
+  return (
+    decimal(usage.input_tokens) +
+    decimal(usage.output_tokens)
+  ).toFixed(0)
 }
 
 export function formatPercent(numerator: string, denominator: string): string {

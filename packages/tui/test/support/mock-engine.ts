@@ -27,6 +27,7 @@ export class AuthenticatedMockEngine {
   #directory = ""
   #server: Bun.Server<undefined> | undefined
   #plans: StreamPlan[]
+  readonly #streamControllers = new Set<ReadableStreamDefaultController<Uint8Array>>()
 
   constructor(plans: readonly StreamPlan[] = []) {
     this.#plans = [...plans]
@@ -43,6 +44,11 @@ export class AuthenticatedMockEngine {
 
   enqueue(plan: StreamPlan): void {
     this.#plans.push(plan)
+  }
+
+  emit(value: unknown): void {
+    const frame = encodeSseJson(value)
+    for (const controller of this.#streamControllers) controller.enqueue(frame)
   }
 
   async stop(): Promise<void> {
@@ -79,17 +85,22 @@ export class AuthenticatedMockEngine {
       server.timeout(request, 0)
       const plan = this.#plans.shift() ?? { chunks: [], holdOpen: true }
       const owner = this
+      let streamController: ReadableStreamDefaultController<Uint8Array> | null = null
       return new Response(
         new ReadableStream<Uint8Array>({
           start(controller) {
+            streamController = controller
             for (const chunk of plan.chunks) {
               controller.enqueue(chunk)
             }
-            if (plan.holdOpen !== true) {
+            if (plan.holdOpen === true) {
+              owner.#streamControllers.add(controller)
+            } else {
               controller.close()
             }
           },
           cancel() {
+            if (streamController !== null) owner.#streamControllers.delete(streamController)
             owner.cancelledStreams += 1
           },
         }),

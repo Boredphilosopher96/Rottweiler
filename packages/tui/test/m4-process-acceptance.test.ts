@@ -79,6 +79,113 @@ describe("M4 transport and process acceptance", () => {
     await child.exited
   }, 10_000)
 
+  test("supervised TUI approves a mutating tool through the real panel and driver transport", async () => {
+    const engine = new AuthenticatedMockEngine([{ chunks: [], holdOpen: true }])
+    await engine.start()
+    cleanups.push(() => engine.stop())
+    const directory = await mkdtemp(join(tmpdir(), "rw-tui-approval-"))
+    cleanups.push(() => rm(directory, { recursive: true, force: true }))
+    const tokenFile = join(directory, "auth.token")
+    const reportFile = join(directory, "report.json")
+    await writeFile(tokenFile, `${engine.bootstrapToken}\n`, { mode: 0o600 })
+
+    const worker = fileURLToPath(new URL("./approval-roundtrip-worker.ts", import.meta.url))
+    const child = Bun.spawn([process.execPath, worker], {
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      env: {
+        ...process.env,
+        ROTTWEILER_CREDENTIAL_BACKEND: "file",
+        ROTTWEILER_ENGINE_SOCKET: engine.socketPath,
+        ROTTWEILER_ENGINE_TOKEN_FILE: tokenFile,
+        ROTTWEILER_SESSION_ID: SESSION_ID,
+        ROTTWEILER_TEST_REPORT_FILE: reportFile,
+      },
+    })
+    cleanups.push(async () => {
+      child.kill()
+      await child.exited
+    })
+
+    await waitFor(async () =>
+      engine.commands.some((command) => command.type === "take_driver") &&
+      engine.requests.some((request) => request.path === "/v1/events"),
+    )
+    const meta = (sequence: number) => ({
+      protocol_version: PROTOCOL_VERSION,
+      session_id: SESSION_ID,
+      sequence_id: String(sequence),
+      emitted_at: `2026-07-10T00:00:0${sequence}Z`,
+    })
+    engine.emit({ type: "turn_started", meta: meta(1), turn_id: "turn-approval" })
+    engine.emit({
+      type: "tool_call_started",
+      meta: meta(2),
+      turn_id: "turn-approval",
+      tool_call_id: "mutating-tool",
+      name: "write",
+      args: { path: "src/main.rs" },
+      call_index: 0,
+    })
+    engine.emit({
+      type: "tool_approval_needed",
+      meta: meta(3),
+      turn_id: "turn-approval",
+      tool_call_id: "mutating-tool",
+      name: "write",
+      args: { path: "src/main.rs" },
+      capabilities: ["write_filesystem"],
+      rationale: "Apply the deterministic acceptance fixture",
+      diff: null,
+    })
+
+    await waitFor(async () => engine.commands.some((command) => command.type === "approve_tool"))
+    const approval = engine.commands.find((command) => command.type === "approve_tool")
+    expect(approval).toMatchObject({
+      type: "approve_tool",
+      session_id: SESSION_ID,
+      tool_call_id: "mutating-tool",
+      decision: "allow_once",
+      meta: { client_id: engine.clientId },
+    })
+
+    engine.emit({
+      type: "tool_call_finished",
+      meta: meta(4),
+      turn_id: "turn-approval",
+      tool_call_id: "mutating-tool",
+      output: { type: "text", text: "updated src/main.rs" },
+      is_error: false,
+      call_index: 0,
+    })
+    engine.emit({
+      type: "turn_finished",
+      meta: meta(5),
+      turn_id: "turn-approval",
+      status: "completed",
+      usage: {
+        input_tokens: "10",
+        output_tokens: "5",
+        cache_read_tokens: "0",
+        cache_write_tokens: "0",
+        reasoning_tokens: "0",
+      },
+      cost: { kind: "subscription_quota", used: "15", unit: "tokens" },
+    })
+
+    await waitFor(async () => (await readOptional(reportFile)) !== null)
+    const exitCode = await child.exited
+    const stderr = await new Response(child.stderr).text()
+    expect(exitCode, stderr).toBe(0)
+    expect(JSON.parse(await readFile(reportFile, "utf8"))).toEqual({
+      waitingBanner: "Waiting for approval · write",
+      panelVisibleAfterCompletion: false,
+      turnStatus: "completed",
+      errors: [],
+    })
+  }, 10_000)
+
   test("SIGKILLed TUI runtime rebuilds the complete durable transcript with no lost sequence", async () => {
     const events = [1, 2, 3, 4, 5].map(modeEvent)
     const engine = new AuthenticatedMockEngine([
