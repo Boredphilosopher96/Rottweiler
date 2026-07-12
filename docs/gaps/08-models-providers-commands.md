@@ -4,6 +4,8 @@ The maintainer's ask: models, the `/` command menu, and provider selection shoul
 
 ## GAP-08-01 — `list_models` returns 5 role aliases, not a model catalog — **P0 [code]**
 
+**Resolved (2026-07-12).** The shared session catalog now discovers configured providers live with bounded concurrency and timeouts, caches briefly with explicit refresh, enriches capabilities/pricing separately, and returns concrete provider-qualified models plus aliases, provider state, availability, and current markers. CLI and TUI read the same source; one provider failure remains visible without blocking healthy routes.
+
 `ModelDescriptor` is keyed by **alias** (`rw-types/src/protocol.rs:206`: `alias`, `providers`, `capabilities`), and the real host builds it by iterating `config.models.aliases` (`rw-cli/src/host_runtime.rs:1614`). So `/models` can only ever show `big`, `fast`, `plan`, `compact`, `title` — five rows — regardless of how many models exist.
 
 opencode enumerates **every model of every configured provider** (`opencode/src/provider/provider.ts:1003`) and its `/models` picker lists all of them as `provider/model`, fuzzy-searchable, grouped by provider.
@@ -27,13 +29,19 @@ Do **not** source the picker from `~/.rottweiler/models.toml`. That file is a st
 
 ## GAP-08-02 — Provider picker is derived from alias references, not configured providers — **P1 [code, user-confirmed]**
 
+**Resolved (2026-07-12).** The provider picker consumes the engine's bounded provider inventory, including configured-but-unaliased and supported setup targets, and exposes in-app configure/authenticate/recover actions.
+
 The `/providers` picker counts provider names across alias descriptors (`app.ts:1032`). The maintainer's aliases are all `openai/*` → exactly one provider shown, which they hit live ("providers option only shows 1"). A configured-but-unaliased provider is invisible; the provider list is a side-effect of alias config. See 09/GAP-09-04 for the full design fix (provider inventory + in-app auth).
 
 ## GAP-08-03 — The `/` command menu shows built-in commands only — **P1 [code]**
 
+**Resolved (2026-07-12).** Command discovery merges built-in, project, user, skill, and plugin sources under the trust/discovery rules and projects source-tagged descriptors into slash autocomplete and the full command palette.
+
 `command_descriptors()` (`rw-cli/src/host_runtime.rs:1602`) returns only `builtin_command_registry()` — never custom commands from `.agents/commands/` / `.rottweiler/commands/`, skills, or plugin commands. **Fix:** merge all sources (respecting trust + ADR-014 discovery order), tagging each with its origin so the palette can group Built-in / Project / User / Plugin.
 
 ## GAP-08-04 — `switch_model` has no concrete-model source in the UI — **P1 [code]**
+
+**Resolved (2026-07-12).** Concrete catalog rows dispatch exact provider/model selections, the host durably persists the accepted project preference in lifecycle order, and status/current markers show the resolved concrete route before and after a turn without double qualification.
 
 Because the list is alias-only, `switch_model { model, provider }` gets an alias string. Once GAP-08-01 lands, verify switching to a concrete `provider/model` re-targets the session and that the status line shows the **resolved concrete model**, not the alias (opencode shows the concrete model).
 

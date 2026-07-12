@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::Infallible,
     fmt,
     fs::{self, OpenOptions},
@@ -24,7 +24,7 @@ use hyper_util::rt::TokioIo;
 use miette::{IntoDiagnostic as _, Result, miette};
 use rw_core::{
     ClientCommand, ClientId, CommandOutcome, EngineError, EngineErrorCategory, EngineEvent,
-    SequenceId, SessionId, ShellId,
+    ProviderApiKey, ProviderApiKeySubmission, SequenceId, SessionId, ShellId,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
@@ -33,6 +33,9 @@ use tokio::{
 };
 
 const COMMAND_BODY_LIMIT: usize = 2 * 1024 * 1024;
+const PROVIDER_API_KEY_BODY_LIMIT: usize = 16 * 1024;
+const PROVIDER_API_KEY_LIMIT: usize = 8 * 1024;
+const MAX_PROVIDER_API_KEY_ATTEMPTS: usize = 256;
 const HOST_EVENT_FORWARD_CAPACITY: usize = 256;
 const CLIENT_HEADER: &str = "x-rottweiler-client";
 const CAPABILITY_HEADER: &str = "x-rottweiler-capability";
@@ -413,6 +416,25 @@ pub trait ServerEngine: Send + Sync + 'static {
         status: i32,
         captured_output: Option<String>,
     ) -> std::result::Result<(), String>;
+
+    async fn submit_provider_api_key(
+        &self,
+        _bound_client: ClientId,
+        _session_id: SessionId,
+        _provider: String,
+        _api_key: ProviderApiKey,
+    ) -> std::result::Result<ProviderApiKeySubmission, String> {
+        Err("provider credential submission is unavailable".to_owned())
+    }
+
+    async fn activate_provider(
+        &self,
+        _bound_client: ClientId,
+        _session_id: SessionId,
+        _provider: String,
+    ) -> std::result::Result<(), String> {
+        Err("provider activation is unavailable".to_owned())
+    }
 }
 
 /// Production adapter from the core multi-session host to the transport trait.
@@ -490,6 +512,101 @@ impl ServerEngine for HostedEngine {
             .await
             .map_err(|error| error.to_string())
     }
+
+    async fn submit_provider_api_key(
+        &self,
+        bound_client: ClientId,
+        session_id: SessionId,
+        provider: String,
+        api_key: ProviderApiKey,
+    ) -> std::result::Result<ProviderApiKeySubmission, String> {
+        self.host
+            .submit_provider_api_key(
+                rw_core::BoundClient {
+                    client_id: bound_client,
+                },
+                &session_id,
+                &provider,
+                api_key,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn activate_provider(
+        &self,
+        bound_client: ClientId,
+        session_id: SessionId,
+        provider: String,
+    ) -> std::result::Result<(), String> {
+        self.host
+            .activate_provider_for_client(
+                rw_core::BoundClient {
+                    client_id: bound_client,
+                },
+                &session_id,
+                &provider,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[derive(Deserialize)]
+struct ProviderApiKeyRequest {
+    session_id: String,
+    provider: String,
+    api_key: String,
+}
+
+impl fmt::Debug for ProviderApiKeyRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderApiKeyRequest")
+            .field("session_id", &self.session_id)
+            .field("provider", &self.provider)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+struct ProviderApiKeyResponse {
+    stored: bool,
+    activated: bool,
+    warnings: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct ActivateProviderRequest {
+    session_id: String,
+    provider: String,
+}
+
+struct ProviderApiKeyAttemptGuard {
+    attempts: Arc<Mutex<HashSet<String>>>,
+    key: String,
+}
+
+impl ProviderApiKeyAttemptGuard {
+    fn reserve(attempts: Arc<Mutex<HashSet<String>>>, key: String) -> Option<Self> {
+        let reserved = {
+            let mut entries = attempts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            entries.len() < MAX_PROVIDER_API_KEY_ATTEMPTS && entries.insert(key.clone())
+        };
+        reserved.then_some(Self { attempts, key })
+    }
+}
+
+impl Drop for ProviderApiKeyAttemptGuard {
+    fn drop(&mut self) {
+        self.attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
 }
 
 #[derive(Clone)]
@@ -498,6 +615,7 @@ pub struct ServerState {
     bootstrap: SecretToken,
     clients: Arc<ClientRegistry>,
     shutdown_notifier: Arc<Notify>,
+    provider_api_key_attempts: Arc<Mutex<HashSet<String>>>,
 }
 
 impl fmt::Debug for ServerState {
@@ -517,6 +635,7 @@ impl ServerState {
             bootstrap: runtime.bootstrap().clone(),
             clients: Arc::new(ClientRegistry::new()),
             shutdown_notifier: Arc::new(Notify::new()),
+            provider_api_key_attempts: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 }
@@ -567,7 +686,7 @@ pub async fn serve(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::collapsible_else_if, clippy::too_many_lines)]
 async fn handle_request(
     request: Request<Incoming>,
     state: ServerState,
@@ -667,6 +786,173 @@ async fn handle_request(
                 Err(_) => error_response(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "command body exceeds the transport limit",
+                ),
+            }
+        }
+        (&Method::POST, "/v1/provider-api-key") => {
+            let Some(client) = authenticate_client(&request, &state.clients) else {
+                return Ok(unauthorized());
+            };
+            if client.capability != ClientCapability::Interactive {
+                return Ok(error_response(
+                    StatusCode::FORBIDDEN,
+                    "interactive client required",
+                ));
+            }
+            if request
+                .headers()
+                .get(hyper::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<usize>().ok())
+                .is_some_and(|length| length > PROVIDER_API_KEY_BODY_LIMIT)
+            {
+                return Ok(error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "credential body exceeds the transport limit",
+                ));
+            }
+            match Limited::new(request.into_body(), PROVIDER_API_KEY_BODY_LIMIT)
+                .collect()
+                .await
+            {
+                Ok(collected) => {
+                    match serde_json::from_slice::<ProviderApiKeyRequest>(&collected.to_bytes()) {
+                        Ok(secret_request) => {
+                            let ProviderApiKeyRequest {
+                                session_id,
+                                provider,
+                                api_key,
+                            } = secret_request;
+                            if session_id.is_empty()
+                                || session_id.len() > 512
+                                || provider.len() > 128
+                                || !provider.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric()
+                                        || matches!(byte, b'-' | b'_' | b'.')
+                                })
+                                || api_key.len() > PROVIDER_API_KEY_LIMIT
+                            {
+                                error_response(
+                                    StatusCode::BAD_REQUEST,
+                                    "credential request is invalid",
+                                )
+                            } else {
+                                if let Some(attempt_guard) = ProviderApiKeyAttemptGuard::reserve(
+                                    Arc::clone(&state.provider_api_key_attempts),
+                                    provider.clone(),
+                                ) {
+                                    let api_key = ProviderApiKey::from_terminal_input(api_key);
+                                    let result = match api_key {
+                                        Ok(api_key) => {
+                                            let engine = Arc::clone(&state.engine);
+                                            tokio::spawn(async move {
+                                                let _attempt_guard = attempt_guard;
+                                                engine
+                                                    .submit_provider_api_key(
+                                                        client.client_id,
+                                                        SessionId(session_id),
+                                                        provider,
+                                                        api_key,
+                                                    )
+                                                    .await
+                                            })
+                                            .await
+                                            .unwrap_or_else(|_| {
+                                                Err("provider credential submission failed"
+                                                    .to_owned())
+                                            })
+                                        }
+                                        Err(_) => Err("API key must not be empty".to_owned()),
+                                    };
+                                    match result {
+                                        Ok(submission) => {
+                                            match serde_json::to_vec(&ProviderApiKeyResponse {
+                                                stored: submission.stored,
+                                                activated: submission.activated,
+                                                warnings: submission.warnings,
+                                            }) {
+                                                Ok(bytes) => json_response(StatusCode::OK, bytes),
+                                                Err(_) => error_response(
+                                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                                    "credential result could not serialize",
+                                                ),
+                                            }
+                                        }
+                                        Err(_) => error_response(
+                                            StatusCode::BAD_REQUEST,
+                                            "provider credential submission failed",
+                                        ),
+                                    }
+                                } else {
+                                    error_response(
+                                        StatusCode::CONFLICT,
+                                        "provider credential submission is already in progress",
+                                    )
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            error_response(StatusCode::BAD_REQUEST, "credential body is invalid")
+                        }
+                    }
+                }
+                Err(_) => error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "credential body exceeds the transport limit",
+                ),
+            }
+        }
+        (&Method::POST, "/v1/activate-provider") => {
+            let Some(client) = authenticate_client(&request, &state.clients) else {
+                return Ok(unauthorized());
+            };
+            if client.capability != ClientCapability::Interactive {
+                return Ok(error_response(
+                    StatusCode::FORBIDDEN,
+                    "interactive client required",
+                ));
+            }
+            match Limited::new(request.into_body(), 1_024).collect().await {
+                Ok(collected) => {
+                    match serde_json::from_slice::<ActivateProviderRequest>(&collected.to_bytes()) {
+                        Ok(ActivateProviderRequest {
+                            session_id,
+                            provider,
+                        }) if !session_id.is_empty()
+                            && session_id.len() <= 512
+                            && !provider.is_empty()
+                            && provider.len() <= 128
+                            && provider.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                            }) =>
+                        {
+                            match state
+                                .engine
+                                .activate_provider(
+                                    client.client_id,
+                                    SessionId(session_id),
+                                    provider,
+                                )
+                                .await
+                            {
+                                Ok(()) => {
+                                    json_response(StatusCode::OK, br#"{"activated":true}"#.to_vec())
+                                }
+                                Err(_) => error_response(
+                                    StatusCode::BAD_REQUEST,
+                                    "provider activation failed",
+                                ),
+                            }
+                        }
+                        _ => error_response(
+                            StatusCode::BAD_REQUEST,
+                            "provider activation request is invalid",
+                        ),
+                    }
+                }
+                Err(_) => error_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "provider activation request is too large",
                 ),
             }
         }
@@ -873,6 +1159,7 @@ mod tests {
         dispatches: AtomicUsize,
         received: Mutex<Vec<(ClientId, ClientCommand)>>,
         completions: Mutex<Vec<ShellCompletionFixture>>,
+        provider_keys: Mutex<Vec<(ClientId, SessionId, String, String)>>,
     }
 
     type ShellCompletionFixture = (SessionId, ShellId, i32, Option<String>);
@@ -939,6 +1226,26 @@ mod tests {
                 captured_output,
             ));
             Ok(())
+        }
+
+        async fn submit_provider_api_key(
+            &self,
+            bound_client: ClientId,
+            session_id: SessionId,
+            provider: String,
+            api_key: ProviderApiKey,
+        ) -> std::result::Result<ProviderApiKeySubmission, String> {
+            self.provider_keys.lock().expect("provider keys").push((
+                bound_client,
+                session_id,
+                provider,
+                api_key.expose_secret().to_owned(),
+            ));
+            Ok(ProviderApiKeySubmission {
+                stored: true,
+                activated: true,
+                warnings: vec!["fixture keychain warning".to_owned()],
+            })
         }
     }
 
@@ -1087,6 +1394,115 @@ mod tests {
         };
         command.meta_mut().client_id = ClientId("bound".to_owned());
         assert_eq!(command.meta().client_id.0, "bound");
+    }
+
+    #[test]
+    fn provider_api_key_request_debug_is_redacted() {
+        let canary = "rw-secret-canary-never-debug";
+        let request = ProviderApiKeyRequest {
+            session_id: "session".to_owned(),
+            provider: "openai".to_owned(),
+            api_key: canary.to_owned(),
+        };
+        let debug = format!("{request:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains(canary));
+    }
+
+    #[test]
+    fn provider_api_key_attempt_guard_is_bounded_and_drop_cleans_reservation() {
+        let attempts = Arc::new(Mutex::new(HashSet::new()));
+        let first =
+            ProviderApiKeyAttemptGuard::reserve(Arc::clone(&attempts), "company-openai".to_owned())
+                .expect("first reservation");
+        assert!(ProviderApiKeyAttemptGuard::reserve(
+            Arc::clone(&attempts),
+            "company-openai".to_owned(),
+        )
+        .is_none());
+        drop(first);
+        assert!(
+            ProviderApiKeyAttemptGuard::reserve(attempts, "company-openai".to_owned(),).is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_api_key_uses_authenticated_non_protocol_channel_and_sanitized_response() {
+        let root = tempdir().expect("runtime root");
+        let (runtime, listener) = ServerRuntime::create(root.path()).expect("runtime");
+        let engine = Arc::new(StubEngine::default());
+        let state = ServerState::new(engine.clone(), &runtime);
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve(listener, state, shutdown_rx));
+        let bootstrap = fs::read_to_string(&runtime.paths.token).expect("bootstrap token");
+        let connected = unix_request(
+            &runtime.paths.socket,
+            request_builder(Method::POST, "/v1/connect")
+                .header(AUTHORIZATION, format!("Bearer {}", bootstrap.trim()))
+                .body(Full::new(Bytes::new()))
+                .expect("connect request"),
+        )
+        .await;
+        let credentials: ClientCredentials = serde_json::from_slice(
+            &connected
+                .into_body()
+                .collect()
+                .await
+                .expect("connect body")
+                .to_bytes(),
+        )
+        .expect("credentials");
+        let canary = "rw-secret-canary-never-wire-back";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "session_id": "session-secret",
+            "provider": "company-openai",
+            "api_key": canary,
+        }))
+        .expect("secret body");
+        let response = unix_request(
+            &runtime.paths.socket,
+            request_builder(Method::POST, "/v1/provider-api-key")
+                .header(AUTHORIZATION, format!("Bearer {}", credentials.token))
+                .header(CLIENT_HEADER, &credentials.client_id.0)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Full::new(Bytes::from(body)))
+                .expect("credential request"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response")
+            .to_bytes();
+        assert!(
+            !response_bytes
+                .windows(canary.len())
+                .any(|window| window == canary.as_bytes())
+        );
+        assert!(String::from_utf8_lossy(&response_bytes).contains("fixture keychain warning"));
+        {
+            let keys = engine.provider_keys.lock().expect("provider keys");
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0].0, credentials.client_id);
+            assert_eq!(keys[0].1.0, "session-secret");
+            assert_eq!(keys[0].2, "company-openai");
+            assert_eq!(keys[0].3, canary);
+        }
+        assert!(
+            !serde_json::to_string(&ClientCommand::ListSessions {
+                meta: CommandMeta {
+                    protocol_version: PROTOCOL_VERSION,
+                    client_id: ClientId("client".to_owned()),
+                    request_id: RequestId("request".to_owned()),
+                },
+            })
+            .expect("protocol JSON")
+            .contains(canary)
+        );
+        shutdown.send(true).expect("shutdown");
+        server.await.expect("server task").expect("server result");
     }
 
     #[tokio::test]

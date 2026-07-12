@@ -6,17 +6,19 @@ use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
-use rw_types::config::UpdateChannel;
+use rw_types::config::{ThinkingLevel, UpdateChannel};
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
     ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CommandSource,
     CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState,
     ContextSnapshot, Cost, CostSnapshot, DiffArtifact, EngineError, EngineErrorCategory,
-    EngineEvent, EventMeta, ImageRef, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
-    ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, PlanArtifact, PlanDecision, PlanStep,
-    PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind,
-    ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
+    EngineEvent, EventMeta, ImageRef, McpApprovalReview, McpServerDescriptor, McpServerState,
+    ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities,
+    ModelCatalogSnapshot, ModelDescriptor, PermissionAction, PermissionApprovalDescriptor,
+    PermissionApprovalScope, PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact,
+    PlanDecision, PlanStep, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
+    ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget, Role,
     SequenceId, SessionDescriptor, SessionId, SessionReview, SessionReviewFile, ShellId,
     StoredAttachment, SubagentId, SubagentIsolation, SubagentResult, SubagentStatus, ToolCallId,
@@ -1721,6 +1723,9 @@ fn generate_typescript() -> String {
     declaration!(ProviderNextAction);
     declaration!(ModelCatalogSnapshot);
     declaration!(UserSettingDescriptor);
+    declaration!(McpServerState);
+    declaration!(McpServerDescriptor);
+    declaration!(McpApprovalReview);
     declaration!(WorkspaceFileMatch);
     declaration!(WorkspaceFilePreview);
     declaration!(WorkspaceStatus);
@@ -1752,10 +1757,16 @@ fn generate_typescript() -> String {
     declaration!(CostSnapshot);
     declaration!(PromptTool);
     declaration!(PromptDump);
+    declaration!(PermissionAction);
+    declaration!(PermissionApprovalScope);
+    declaration!(PermissionRuleDescriptor);
+    declaration!(PermissionApprovalDescriptor);
+    declaration!(PermissionStateDescriptor);
     declaration!(ClientCommand);
     declaration!(ToolCapability);
     declaration!(ToolOutputStream);
     declaration!(TurnStatus);
+    declaration!(ThinkingLevel);
     declaration!(CompactionReason);
     declaration!(BudgetUnit);
     declaration!(BudgetLevel);
@@ -2255,6 +2266,7 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(19),
                 model: ModelAlias("fast".to_owned()),
                 provider: None,
+                thinking: Some(ThinkingLevel::Off),
             },
             EngineEvent::ContextItemPinned {
                 meta: event_meta(20),

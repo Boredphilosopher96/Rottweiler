@@ -115,6 +115,30 @@ impl McpManager {
         Ok(())
     }
 
+    /// Removes a server that has not been enabled. This is deliberately
+    /// narrower than a general unregister operation: callers use it to roll
+    /// back a live registration when durable configuration persistence fails.
+    pub async fn unregister_disabled(&self, server: &ServerId) -> Result<(), McpError> {
+        let mut servers = self.servers.write().await;
+        let entry = servers
+            .get(server)
+            .ok_or_else(|| McpError::UnknownServer(server.clone()))?;
+        if entry.config.enabled
+            || entry.client.is_some()
+            || !matches!(entry.state, ServerState::Disabled)
+        {
+            return Err(McpError::Policy(
+                "only a disabled MCP server can be unregistered".to_owned(),
+            ));
+        }
+        servers.remove(server);
+        self.tool_capabilities
+            .write()
+            .map_err(|_| McpError::Policy("MCP capability policy lock was poisoned".to_owned()))?
+            .remove(server);
+        Ok(())
+    }
+
     /// Resolves permission effects without awaiting so core can classify an
     /// invocation before the permission gate runs. Unknown or poisoned state
     /// remains network + execute.

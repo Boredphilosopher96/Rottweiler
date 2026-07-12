@@ -764,7 +764,8 @@ export const contractFixture = {
         "caused_by": null
       },
       "model": "fast",
-      "provider": null
+      "provider": null,
+      "thinking": "off"
     },
     {
       "type": "context_item_pinned",

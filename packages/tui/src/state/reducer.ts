@@ -30,6 +30,9 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "command_descriptors_listed",
   "models_listed",
   "settings_listed",
+  "mcp_servers_listed",
+  "mcp_server_approval_reviewed",
+  "permissions_listed",
   "provider_auth_started",
   "provider_configured",
   "provider_auth_finished",
@@ -94,6 +97,9 @@ const ACK_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "command_descriptors_listed",
   "models_listed",
   "settings_listed",
+  "mcp_servers_listed",
+  "mcp_server_approval_reviewed",
+  "permissions_listed",
   "provider_auth_started",
   "provider_configured",
   "provider_auth_finished",
@@ -413,6 +419,29 @@ function applyKnownEvent(
           provenance: setting.provenance,
           appliesImmediately: setting.applies_immediately,
         })),
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "mcp_servers_listed":
+      return {
+        ...state,
+        mcpServers: event.servers.slice(0, 128),
+        mcpApprovalReview:
+          state.mcpApprovalReview !== null &&
+          event.servers.some((server) => server.name === state.mcpApprovalReview?.server)
+            ? state.mcpApprovalReview
+            : null,
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "mcp_server_approval_reviewed":
+      return {
+        ...state,
+        mcpApprovalReview: event.review,
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "permissions_listed":
+      return {
+        ...state,
+        permissions: event.permissions,
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
       }
     case "provider_auth_started":
@@ -1225,6 +1254,9 @@ function responseAck(
     | "command_descriptors_listed"
     | "models_listed"
     | "settings_listed"
+    | "mcp_servers_listed"
+    | "mcp_server_approval_reviewed"
+    | "permissions_listed"
     | "provider_auth_started"
     | "provider_configured"
     | "provider_auth_finished"

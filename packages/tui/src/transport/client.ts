@@ -23,6 +23,7 @@ export interface EngineTransportOptions {
   readonly origin?: string
   readonly connectPath?: string
   readonly commandPath?: string
+  readonly providerApiKeyPath?: string
   readonly eventsPath?: (sessionId: string, lastSeenSequence: string | null) => string
   readonly backoff?: BackoffPolicy
   readonly scheduler?: BackoffScheduler
@@ -48,6 +49,7 @@ export class EngineHttpSseClient {
   readonly #origin: string
   readonly #connectPath: string
   readonly #commandPath: string
+  readonly #providerApiKeyPath: string
   readonly #eventsPath: (sessionId: string, lastSeenSequence: string | null) => string
   readonly #backoff: BackoffPolicy
   readonly #scheduler: BackoffScheduler
@@ -71,6 +73,7 @@ export class EngineHttpSseClient {
     this.#origin = (options.origin ?? "http://rottweiler.local").replace(/\/$/, "")
     this.#connectPath = options.connectPath ?? "/v1/connect"
     this.#commandPath = options.commandPath ?? "/v1/command"
+    this.#providerApiKeyPath = options.providerApiKeyPath ?? "/v1/provider-api-key"
     this.#eventsPath = options.eventsPath ?? defaultEventsPath
     this.#backoff = options.backoff ?? DEFAULT_BACKOFF_POLICY
     this.#scheduler = options.scheduler ?? systemBackoffScheduler
@@ -113,6 +116,48 @@ export class EngineHttpSseClient {
       throw new EngineTransportError("engine returned an invalid command outcome")
     }
     return outcome
+  }
+
+  async submitProviderApiKey(
+    sessionId: string,
+    provider: string,
+    apiKey: string,
+    signal?: AbortSignal,
+  ): Promise<{ readonly stored: true; readonly activated: boolean; readonly warnings: readonly string[] }> {
+    const auth = await this.#ensureClientAuth(signal)
+    const response = await this.#fetch(this.#url(this.#providerApiKeyPath), {
+      unix: this.#socketPath,
+      method: "POST",
+      headers: this.#clientHeaders(auth, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ session_id: sessionId, provider, api_key: apiKey }),
+      ...(signal === undefined ? {} : { signal }),
+    })
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) this.#clientAuth = null
+      throw new EngineTransportError("provider credential submission failed", response.status)
+    }
+    const value: unknown = await response.json()
+    if (!isRecord(value) || value.stored !== true || typeof value.activated !== "boolean" || !Array.isArray(value.warnings)
+      || value.warnings.some((warning) => typeof warning !== "string")) {
+      throw new EngineTransportError("engine returned an invalid credential result")
+    }
+    return { stored: true, activated: value.activated, warnings: value.warnings as string[] }
+  }
+
+  async activateProvider(
+    sessionId: string,
+    provider: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const auth = await this.#ensureClientAuth(signal)
+    const response = await this.#fetch(this.#url("/v1/activate-provider"), {
+      unix: this.#socketPath,
+      method: "POST",
+      headers: this.#clientHeaders(auth, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ session_id: sessionId, provider }),
+      ...(signal === undefined ? {} : { signal }),
+    })
+    if (!response.ok) throw new EngineTransportError("provider activation failed", response.status)
   }
 
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {

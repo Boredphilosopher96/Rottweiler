@@ -4,6 +4,8 @@ Maintainer-reported symptoms from a live TUI session (2026-07-12): tool calls do
 
 ## GAP-09-01 — Tool calls don't work in the interactive TUI — **P0 [user-reported; code-traced suspects]**
 
+**Resolved (2026-07-12).** The supervised TUI acceptance drives a real mutating tool through the driver-owned approval panel. Waiting is conspicuous, stale/truncated bindings remain deny-only, and rejected approval commands surface as bounded errors.
+
 In interactive (non-headless) mode the permission default is `ask`, so **every mutating tool call blocks on a `ToolApprovalNeeded` → approval-panel → `approve_tool` round trip**. The wiring exists (`app.ts:263 onApproval`, `app.ts:1439 #approve`, `panels.ts` approval select), but if any link fails — the panel not receiving focus, the event not projecting, the `approve_tool` command being rejected (e.g. the client isn't the recognized driver), or the engine binding approvals to a `proposal_id`/hash that doesn't match (`approvalBinding`, `app.ts:1803` requires `proposal_id`+3 hashes or returns null) — the turn stalls silently and every tool appears dead.
 
 **Verify in this order:**
@@ -15,6 +17,8 @@ In interactive (non-headless) mode the permission default is `ask`, so **every m
 
 ## GAP-09-02 — `/` commands appear broken in the TUI — **P0 [user-reported; code-traced]**
 
+**Resolved (2026-07-12).** Slash autocomplete has immediate local defaults, refreshes the typed merged command catalog, preserves navigation/scroll semantics, and renders projection errors and retry rows instead of an empty picker.
+
 Three compounding causes, all traced:
 
 1. **The slash menu is fed by `list_commands`, whose failures are silently swallowed.** Typing `/` opens the anchored picker (`app.ts:1268`) populated from `#state.commands` ← `list_commands` ← `command_descriptors()`. The initial projection commands are "opportunistic" — `runtime.ts:533`: *"These read projections are opportunistic. Their individual command [failures are ignored]"*. If `list_commands`/`list_models`/`list_sessions` are rejected (bad session binding, lease, timing), the pickers are just **empty forever** with no error. Same mechanism explains empty/thin model and session pickers.
@@ -25,9 +29,13 @@ Three compounding causes, all traced:
 
 ## GAP-09-03 — Bottom bar: context %, cost, cache all dead — **P0 [confirmed; same root as GAP-02-01]**
 
+**Resolved (2026-07-12).** Subscription/Copilot capabilities are resolved from live model identity with catalog enrichment, unknown capacity is explicit, and the status line renders subscription quota/AI-credit usage instead of a false dollar placeholder.
+
 The status line shows `ctx — │ $— │ cache —` because `context_usage_updated` carries `usable_tokens: 0` — the subscription provider path hardcodes `max_context_tokens: None` (`provider_factory.rs:1894`) and never consults the pricing table. Cost shows `—` because subscription cost is "quota-unavailable" and the status line has no quota/token fallback rendering; cache % needs provider-reported usage which is present but has nothing to display against a zero window. **One fix (resolve subscription model capabilities from the catalog) re-lights ctx and cache; cost needs a second small fix: when cost is `subscription_quota`, render used tokens/credits instead of `$—`.**
 
 ## GAP-09-04 — `/providers` shows one entry; should show all available options — **P1 [confirmed + design]**
+
+**Resolved (2026-07-12).** The inventory lists all configured and supported setup providers with auth/reachability/model counts. ChatGPT and Copilot use in-app OAuth/device flows with Open/Copy actions; API-key providers use a separate authenticated, non-replayable secret channel. Stored-but-unready and authenticated-but-unreachable providers offer explicit activation retry and credential replacement.
 
 Two layers:
 - **Mechanical (GAP-08-02):** the picker derives providers from alias references (`app.ts:1032`); the maintainer's aliases are all `openai/*`, so exactly one appears.
@@ -36,6 +44,8 @@ Two layers:
 **Fix:** engine exposes a provider inventory — `{ name, auth_kind, authenticated?, reachable?, model_count }` for configured providers *plus* known-supported providers in an "available to set up" section — and the TUI provider picker drives an in-app auth flow (device-code display for Copilot/ChatGPT, key prompt for API providers) instead of pointing users at config files.
 
 ## GAP-09-05 — Settings are file-only; simple use cases must be manageable from the app — **P0 [design]**
+
+**Resolved (2026-07-12).** Safe settings round-trip through typed host commands with user provenance. Concrete models persist per project; thinking is durable per session/concrete route; the theme catalog previews coherently and reverts on cancel; permission rules/opaque approvals have typed selectable add/remove/revoke rows; MCP supports typed add, review, exact confirm, enable/disable, discovery, and calls in the live session with rollback-safe persistence; compaction, permission default, and keybinding choices persist from the settings picker.
 
 The maintainer's directive: *"our settings are supposed to be changed and done from the app for all simple use cases. But now it is only loaded from files. That is stupid."* Current state: model aliases, thinking levels, provider auth, compaction toggles, themes, keybindings, MCP servers, permission defaults — all live in `~/.rottweiler/config.toml` + CLI subcommands. The TUI palette has a few read-only settings items (`permissions.list`, `trust.status`, `mcp.manage` prefill) but **no write path for configuration at all**.
 

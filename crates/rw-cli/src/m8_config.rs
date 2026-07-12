@@ -187,7 +187,7 @@ impl DiscoveredMcpServer {
             }),
         };
         let bytes = serde_json::to_vec(&serde_json::json!({
-            "name":self.name, "enabled":self.enabled, "defer_tools":self.defer_tools,
+            "name":self.name, "defer_tools":self.defer_tools,
             "origin":self.origin.path(), "transport":transport,
             "tool_capabilities":capability_override_json(&self.tool_capabilities),
             "capability_override_origin":self.capability_override_origin,

@@ -5,7 +5,7 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use async_trait::async_trait;
@@ -27,10 +27,12 @@ use rw_core::runtime_support::{
 };
 use rw_core::runtime_support::{SandboxedProtocolLauncher, Tool, UpstreamProxy};
 use rw_core::{
-    LoopbackMcpAuthority, McpPolicyProxy, ProductionMcpHttpClient, ProductionMcpHttpConnector,
+    HostError, HostMcpService, LoopbackMcpAuthority, McpApprovalReview, McpPolicyProxy,
+    McpServerDescriptor, McpServerState, ProductionMcpHttpClient, ProductionMcpHttpConnector,
     SessionCommandAction, SessionCommandContext, SessionCommandOutput, ToonMcpEncoder,
     VaultMcpTokenProvider,
 };
+use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
 use serde::{Deserialize, Serialize};
 
@@ -41,8 +43,8 @@ const APPROVAL_VERSION: u16 = 1;
 
 pub(crate) struct McpApprovalStore {
     path: PathBuf,
-    expected: BTreeMap<ServerId, String>,
-    configs: BTreeMap<ServerId, DiscoveredMcpServer>,
+    expected: RwLock<BTreeMap<ServerId, String>>,
+    configs: RwLock<BTreeMap<ServerId, DiscoveredMcpServer>>,
     approved: Mutex<BTreeMap<String, String>>,
 }
 
@@ -74,19 +76,24 @@ impl McpApprovalStore {
         let approved = read_approval_file(&path)?;
         Ok(Self {
             path,
-            expected,
-            configs,
+            expected: RwLock::new(expected),
+            configs: RwLock::new(configs),
             approved: Mutex::new(approved),
         })
     }
 
     pub(crate) fn approval_summary(&self, server: &ServerId) -> Result<McpApprovalSummary> {
-        let config = self
+        let configs = self
             .configs
+            .read()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        let config = configs
             .get(server)
             .ok_or_else(|| miette!("unknown MCP server {server}"))?;
         let new_fingerprint = self
             .expected
+            .read()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?
             .get(server)
             .cloned()
             .ok_or_else(|| miette!("MCP server {server} has no approval fingerprint"))?;
@@ -168,27 +175,91 @@ impl McpApprovalStore {
     pub(crate) fn approve_server(&self, server: &ServerId) -> Result<bool> {
         let fingerprint = self
             .expected
+            .read()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?
             .get(server)
+            .cloned()
             .ok_or_else(|| miette!("unknown MCP server {server}"))?;
         let mut approved = self
             .approved
             .lock()
             .map_err(|_| miette!("MCP approval lock was poisoned"))?;
-        if approved.get(&server.0) == Some(fingerprint) {
+        if approved.get(&server.0) == Some(&fingerprint) {
             return Ok(false);
         }
         let mut updated = approved.clone();
-        updated.insert(server.0.clone(), fingerprint.clone());
+        updated.insert(server.0.clone(), fingerprint);
         persist_approval_file(&self.path, &updated)?;
         *approved = updated;
         Ok(true)
+    }
+
+    pub(crate) fn register_user_server(&self, config: DiscoveredMcpServer) -> Result<()> {
+        let id = ServerId::new(config.name.clone()).map_err(|error| miette!(error.to_string()))?;
+        let fingerprint = config.approval_fingerprint()?;
+        let mut configs = self
+            .configs
+            .write()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        let mut expected = self
+            .expected
+            .write()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        if configs.contains_key(&id) || expected.contains_key(&id) {
+            return Err(miette!("MCP server already exists"));
+        }
+        configs.insert(id.clone(), config);
+        expected.insert(id, fingerprint);
+        Ok(())
+    }
+
+    pub(crate) fn unregister_user_server(&self, server: &ServerId) -> Result<()> {
+        let mut configs = self
+            .configs
+            .write()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        let mut expected = self
+            .expected
+            .write()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        if self
+            .approved
+            .lock()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?
+            .contains_key(&server.0)
+        {
+            return Err(miette!("approved MCP server cannot be rolled back"));
+        }
+        configs
+            .remove(server)
+            .ok_or_else(|| miette!("unknown MCP server {server}"))?;
+        expected.remove(server);
+        Ok(())
+    }
+
+    fn is_approved(&self, server: &ServerId) -> Result<bool> {
+        let expected = self
+            .expected
+            .read()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        let approved = self
+            .approved
+            .lock()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        Ok(expected
+            .get(server)
+            .is_some_and(|fingerprint| approved.get(&server.0) == Some(fingerprint)))
     }
 }
 
 #[async_trait]
 impl McpConnectionApprovalPolicy for McpApprovalStore {
     async fn approve(&self, config: &McpServerConfig) -> std::result::Result<(), McpError> {
-        let discovered = self.configs.get(&config.id).ok_or_else(|| {
+        let configs = self
+            .configs
+            .read()
+            .map_err(|_| McpError::Policy("MCP approval lock was poisoned".to_owned()))?;
+        let discovered = configs.get(&config.id).ok_or_else(|| {
             McpError::Policy("MCP server has no trusted configuration provenance".to_owned())
         })?;
         for identity in &discovered.attested_files {
@@ -198,7 +269,11 @@ impl McpConnectionApprovalPolicy for McpApprovalStore {
                 )
             })?;
         }
-        let expected = self.expected.get(&config.id).ok_or_else(|| {
+        let expected_map = self
+            .expected
+            .read()
+            .map_err(|_| McpError::Policy("MCP approval lock was poisoned".to_owned()))?;
+        let expected = expected_map.get(&config.id).ok_or_else(|| {
             McpError::Policy("MCP server has no trusted configuration provenance".to_owned())
         })?;
         let approved = self
@@ -240,6 +315,258 @@ pub(crate) struct McpSessionRuntime {
     pub(crate) spool: Arc<dyn OverflowSpool>,
     pub(crate) approvals: Arc<McpApprovalStore>,
     _scratch: PrivateMcpScratch,
+}
+
+/// Transactional control plane for one active MCP manager. The operation lock
+/// prevents two UI mutations from interleaving their live and durable halves.
+pub(crate) struct LiveMcpAdmin {
+    manager: Arc<McpManager>,
+    approvals: Arc<McpApprovalStore>,
+    config_loader: ConfigLoader,
+    user_mcp_path: PathBuf,
+    operation: tokio::sync::Mutex<()>,
+}
+
+impl LiveMcpAdmin {
+    pub(crate) fn new(
+        manager: Arc<McpManager>,
+        approvals: Arc<McpApprovalStore>,
+        config_loader: ConfigLoader,
+    ) -> Self {
+        let user_mcp_path = config_loader.credentials_path().with_file_name("mcp.toml");
+        Self {
+            manager,
+            approvals,
+            config_loader,
+            user_mcp_path,
+            operation: tokio::sync::Mutex::new(()),
+        }
+    }
+
+    async fn inventory(&self) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
+        let mut servers = Vec::new();
+        for status in self.manager.statuses().await.into_iter().take(128) {
+            let approved = self
+                .approvals
+                .is_approved(&status.id)
+                .map_err(|error| HostError::Query(error.to_string()))?;
+            let state = match status.state {
+                rw_core::runtime_support::mcp::ServerState::Disabled => McpServerState::Disabled,
+                rw_core::runtime_support::mcp::ServerState::Connecting => {
+                    McpServerState::Connecting
+                }
+                rw_core::runtime_support::mcp::ServerState::Ready => McpServerState::Ready,
+                rw_core::runtime_support::mcp::ServerState::ApprovalRequired => {
+                    McpServerState::ApprovalRequired
+                }
+                rw_core::runtime_support::mcp::ServerState::Failed { message } => {
+                    McpServerState::Failed {
+                        message: message.chars().take(512).collect(),
+                    }
+                }
+                rw_core::runtime_support::mcp::ServerState::Stopping => McpServerState::Stopping,
+            };
+            servers.push(McpServerDescriptor {
+                name: status.id.0,
+                enabled: status.enabled,
+                approved,
+                state,
+                tool_count: u32::try_from(status.tool_count).unwrap_or(u32::MAX),
+                resource_count: u32::try_from(status.resource_count).unwrap_or(u32::MAX),
+                prompt_count: u32::try_from(status.prompt_count).unwrap_or(u32::MAX),
+            });
+        }
+        Ok(servers)
+    }
+
+    fn discovered_http(
+        &self,
+        name: &str,
+        endpoint: &str,
+    ) -> std::result::Result<DiscoveredMcpServer, HostError> {
+        ServerId::new(name.to_owned()).map_err(|error| HostError::Protocol(error.to_string()))?;
+        let parsed = url::Url::parse(endpoint).map_err(|_| {
+            HostError::Protocol("MCP endpoint must be an absolute HTTPS URL".to_owned())
+        })?;
+        if endpoint.len() > 2_048
+            || parsed.scheme() != "https"
+            || parsed.host().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(HostError::Protocol(
+                "MCP endpoint must be HTTPS without credentials, query, or fragment".to_owned(),
+            ));
+        }
+        Ok(DiscoveredMcpServer {
+            name: name.to_owned(),
+            enabled: false,
+            defer_tools: true,
+            transport: crate::m8_config::DiscoveredMcpTransport::Http {
+                endpoint: endpoint.to_owned(),
+                oauth_credential: None,
+                oauth_resource: None,
+                oauth_audience: None,
+                oauth_authorization_endpoint: None,
+                oauth_token_endpoint: None,
+                oauth_client_id: None,
+                oauth_scopes: Vec::new(),
+                oauth_proxy: None,
+            },
+            credentials: Vec::new(),
+            attested_files: Vec::new(),
+            origin: crate::m8_config::ExecutableConfigOrigin::User(self.user_mcp_path.clone()),
+            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            capability_override_origin: None,
+        })
+    }
+}
+
+#[async_trait]
+impl HostMcpService for LiveMcpAdmin {
+    async fn list(&self) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
+        self.inventory().await
+    }
+
+    async fn add_http(
+        &self,
+        name: &str,
+        endpoint: &str,
+    ) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
+        let _guard = self.operation.lock().await;
+        let discovered = self.discovered_http(name, endpoint)?;
+        let runtime = discovered
+            .runtime_config(|_| unreachable!("HTTP server has no credential binding"))
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        let id = runtime.id.clone();
+        self.manager
+            .register(runtime)
+            .await
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        if let Err(error) = self.approvals.register_user_server(discovered) {
+            let _ = self.manager.unregister_disabled(&id).await;
+            return Err(HostError::Query(error.to_string()));
+        }
+        if let Err(error) = self
+            .config_loader
+            .persist_tui_mcp_http_server(name, endpoint)
+        {
+            let manager_rollback = self.manager.unregister_disabled(&id).await;
+            let approval_rollback = self.approvals.unregister_user_server(&id);
+            if manager_rollback.is_err() || approval_rollback.is_err() {
+                return Err(HostError::Persistence(format!(
+                    "MCP persistence failed and live rollback was incomplete: {error}"
+                )));
+            }
+            return Err(HostError::Persistence(error.to_string()));
+        }
+        self.inventory().await
+    }
+
+    async fn review(&self, name: &str) -> std::result::Result<McpApprovalReview, HostError> {
+        let id = ServerId::new(name.to_owned())
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
+        let summary = self
+            .approvals
+            .approval_summary(&id)
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        let endpoint = summary
+            .transport
+            .get("endpoint")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let transport = summary
+            .transport
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        let origin = summary
+            .origin
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        Ok(McpApprovalReview {
+            server: summary.server,
+            transport,
+            endpoint,
+            origin,
+            defer_tools: summary.defer_tools,
+            fingerprint: summary.new_fingerprint,
+            previously_approved: summary.old_fingerprint.is_some(),
+        })
+    }
+
+    async fn approve(
+        &self,
+        name: &str,
+        fingerprint: &str,
+    ) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
+        let _guard = self.operation.lock().await;
+        if fingerprint.len() != 64
+            || !fingerprint
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(HostError::Protocol(
+                "MCP approval fingerprint is invalid".to_owned(),
+            ));
+        }
+        let id = ServerId::new(name.to_owned())
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
+        let summary = self
+            .approvals
+            .approval_summary(&id)
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        if summary.new_fingerprint != fingerprint {
+            return Err(HostError::Protocol(
+                "MCP approval confirmation did not match the reviewed fingerprint".to_owned(),
+            ));
+        }
+        self.approvals
+            .approve_server(&id)
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        self.inventory().await
+    }
+
+    async fn set_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
+        let _guard = self.operation.lock().await;
+        let id = ServerId::new(name.to_owned())
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
+        if enabled
+            && !self
+                .approvals
+                .is_approved(&id)
+                .map_err(|error| HostError::Query(error.to_string()))?
+        {
+            return Err(HostError::Protocol(
+                "MCP server must be reviewed and approved before enabling".to_owned(),
+            ));
+        }
+        if let Err(error) = self.manager.set_enabled(&id, enabled).await {
+            if enabled {
+                let _ = self.manager.set_enabled(&id, false).await;
+            }
+            return Err(HostError::Query(error.to_string()));
+        }
+        if let Err(error) = self.config_loader.persist_tui_mcp_enabled(name, enabled) {
+            let rollback = self.manager.set_enabled(&id, !enabled).await;
+            if rollback.is_err() {
+                return Err(HostError::Persistence(format!(
+                    "MCP enablement persistence failed and live rollback was incomplete: {error}"
+                )));
+            }
+            return Err(HostError::Persistence(error.to_string()));
+        }
+        self.inventory().await
+    }
 }
 
 impl McpSessionRuntime {
@@ -1558,8 +1885,12 @@ mod tests {
         async fn list_prompts(&self) -> std::result::Result<Vec<Value>, McpError> {
             Ok(vec![json!({"name":"review","description":"Review input"})])
         }
-        async fn call_tool(&self, _: &str, _: Value) -> std::result::Result<Value, McpError> {
-            unreachable!()
+        async fn call_tool(
+            &self,
+            name: &str,
+            arguments: Value,
+        ) -> std::result::Result<Value, McpError> {
+            Ok(json!({"name": name, "arguments": arguments, "ok": true}))
         }
         async fn read_resource(&self, _: &str) -> std::result::Result<Value, McpError> {
             unreachable!()
@@ -1587,6 +1918,181 @@ mod tests {
         ) -> std::result::Result<Arc<dyn McpClient>, McpError> {
             Ok(Arc::new(CatalogClient { tool_name: "echo" }))
         }
+    }
+
+    #[tokio::test]
+    async fn live_admin_adds_reviews_approves_enables_and_calls_without_restart() {
+        let root = tempfile::tempdir().expect("root");
+        let project = tempfile::tempdir().expect("project");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let manager = Arc::new(McpManager::new(
+            Arc::new(CatalogConnector),
+            Arc::new(MemorySpool),
+            Arc::new(ToonMcpEncoder),
+            McpLimits::default(),
+        ));
+        let approvals = Arc::new(McpApprovalStore::open(root.path(), &[]).expect("approvals"));
+        let loader = ConfigLoader::new(
+            root.path().join("config.toml"),
+            project.path().join(".rottweiler/config.toml"),
+        );
+        let admin = LiveMcpAdmin::new(manager.clone(), approvals, loader.clone());
+
+        assert!(
+            admin
+                .add_http("bad name", "https://example.com/mcp")
+                .await
+                .is_err()
+        );
+        assert!(
+            admin
+                .add_http("docs.remote", "http://example.com/mcp")
+                .await
+                .is_err()
+        );
+        let inventory = admin
+            .add_http("docs.remote", "https://example.com/mcp")
+            .await
+            .expect("register and persist");
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].name, "docs.remote");
+        assert!(!inventory[0].enabled);
+        assert!(!inventory[0].approved);
+
+        let review = admin.review("docs.remote").await.expect("typed review");
+        assert_eq!(review.transport, "streamable_http");
+        assert_eq!(review.endpoint.as_deref(), Some("https://example.com/mcp"));
+        assert_eq!(review.fingerprint.len(), 64);
+        assert!(admin.approve("docs.remote", &"0".repeat(64)).await.is_err());
+        let approved = admin
+            .approve("docs.remote", &review.fingerprint)
+            .await
+            .expect("exact approval");
+        assert!(approved[0].approved);
+
+        let enabled = admin
+            .set_enabled("docs.remote", true)
+            .await
+            .expect("live enable and persist");
+        assert!(enabled[0].enabled);
+        assert!(matches!(enabled[0].state, McpServerState::Ready));
+        assert_eq!(manager.deferred_tool_index().await[0].name, "echo");
+        assert!(
+            manager
+                .call_tool(
+                    &ServerId("docs.remote".to_owned()),
+                    "echo",
+                    json!({"value": 1})
+                )
+                .await
+                .is_ok()
+        );
+        assert_eq!(
+            loader.tui_mcp_servers().expect("real loader round trip"),
+            [("docs.remote".to_owned(), true)]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let mcp_path = root.path().join("mcp.toml");
+            let persisted = fs::read(&mcp_path).expect("persisted MCP config");
+            let unsafe_target = root.path().join("outside-mcp.toml");
+            fs::write(&unsafe_target, persisted).expect("unsafe target");
+            fs::remove_file(&mcp_path).expect("replace MCP config");
+            symlink(&unsafe_target, &mcp_path).expect("unsafe MCP path");
+            assert!(admin.set_enabled("docs.remote", false).await.is_err());
+            let rolled_back = manager.statuses().await;
+            assert!(rolled_back[0].enabled);
+            assert!(matches!(rolled_back[0].state, ServerState::Ready));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_admin_rolls_back_registration_when_atomic_persistence_is_rejected() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let project = tempfile::tempdir().expect("project");
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+        fs::write(root.path().join("outside.toml"), "").expect("target");
+        symlink(
+            root.path().join("outside.toml"),
+            root.path().join("mcp.toml"),
+        )
+        .expect("unsafe MCP path");
+        let manager = Arc::new(McpManager::new(
+            Arc::new(CatalogConnector),
+            Arc::new(MemorySpool),
+            Arc::new(ToonMcpEncoder),
+            McpLimits::default(),
+        ));
+        let approvals = Arc::new(McpApprovalStore::open(root.path(), &[]).expect("approvals"));
+        let admin = LiveMcpAdmin::new(
+            manager.clone(),
+            approvals,
+            ConfigLoader::new(
+                root.path().join("config.toml"),
+                project.path().join(".rottweiler/config.toml"),
+            ),
+        );
+        assert!(
+            admin
+                .add_http("rolled.back", "https://example.com/mcp")
+                .await
+                .is_err()
+        );
+        assert!(manager.statuses().await.is_empty());
+        assert!(admin.review("rolled.back").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn live_admin_inventory_is_bounded() {
+        let root = tempfile::tempdir().expect("root");
+        let project = tempfile::tempdir().expect("project");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let manager = Arc::new(McpManager::new(
+            Arc::new(CatalogConnector),
+            Arc::new(MemorySpool),
+            Arc::new(ToonMcpEncoder),
+            McpLimits::default(),
+        ));
+        let approvals = Arc::new(McpApprovalStore::open(root.path(), &[]).expect("approvals"));
+        let admin = LiveMcpAdmin::new(
+            manager.clone(),
+            approvals.clone(),
+            ConfigLoader::new(
+                root.path().join("config.toml"),
+                project.path().join(".rottweiler/config.toml"),
+            ),
+        );
+        for index in 0..129 {
+            let name = format!("server.{index:03}");
+            let discovered = admin
+                .discovered_http(&name, "https://example.com/mcp")
+                .expect("discovered");
+            manager
+                .register(
+                    discovered
+                        .runtime_config(|_| unreachable!())
+                        .expect("runtime"),
+                )
+                .await
+                .expect("register");
+            approvals
+                .register_user_server(discovered)
+                .expect("approval");
+        }
+        assert_eq!(admin.list().await.expect("inventory").len(), 128);
     }
 
     struct FailFirstCatalogConnector(Arc<std::sync::atomic::AtomicUsize>);

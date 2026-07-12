@@ -63,7 +63,9 @@ async function main(): Promise<void> {
   const {
     createDesktopNotificationAdapter,
     createExternalEditorAdapter,
+    createExternalUrlAdapter,
     createImagePasteAdapter,
+    createTextClipboardAdapter,
   } = platform
   const { createEngineRuntimeFromEnvironment } = runtimeModule
   const { reduceRottweilerState, transportDisconnected } = stateModule
@@ -87,8 +89,8 @@ async function main(): Promise<void> {
   const keybindings = await parseKeybindingsFromEnvironment(
     process.env.ROTTWEILER_TUI_KEYBINDINGS,
   )
-  const { daylightTheme, kennelTheme } = await import("./theme")
-  const theme = process.env.ROTTWEILER_TUI_THEME === "daylight" ? daylightTheme : kennelTheme
+  const { kennelTheme, themeByName } = await import("./theme")
+  const theme = themeByName(process.env.ROTTWEILER_TUI_THEME ?? "") ?? kennelTheme
   const terminalHandover = {
     suspend: () => renderer.suspend(),
     resume: () => renderer.resume(),
@@ -106,14 +108,27 @@ async function main(): Promise<void> {
       const bootstrap = await runtimeBootstrap
       return (await bootstrap.runtime?.sendCommand(command)) ?? null
     },
+    onProviderApiKey: async (provider, apiKey) => {
+      const bootstrap = await runtimeBootstrap
+      if (bootstrap.runtime === null)
+        throw new Error("engine runtime is unavailable")
+      return await bootstrap.runtime.submitProviderApiKey(provider, apiKey)
+    },
+    onProviderActivate: async (provider) => {
+      const bootstrap = await runtimeBootstrap
+      if (bootstrap.runtime === null) throw new Error("engine runtime is unavailable")
+      await bootstrap.runtime.activateProvider(provider)
+    },
     onSessionSelect: async (sessionId) => {
       const bootstrap = await runtimeBootstrap
       await bootstrap.runtime?.switchSession(sessionId)
     },
     terminalHandover,
     editor: createExternalEditorAdapter(terminalHandover),
+    externalUrl: createExternalUrlAdapter(),
     notifications: createDesktopNotificationAdapter(),
     imagePaste: createImagePasteAdapter(),
+    textClipboard: createTextClipboardAdapter(),
   })
   startupFrame.destroy()
   renderer.root.add(app)

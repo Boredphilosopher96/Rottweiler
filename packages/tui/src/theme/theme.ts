@@ -63,6 +63,13 @@ export const daylightTheme: RottweilerTheme = {
   removed: "#F2D8DC",
 }
 
+/** Complete built-in theme catalog consumed by startup and the live picker. */
+export const themeCatalog: readonly RottweilerTheme[] = [kennelTheme, daylightTheme]
+
+export function themeByName(name: string): RottweilerTheme | undefined {
+  return themeCatalog.find((theme) => theme.name === name)
+}
+
 export function createSyntaxStyle(theme: RottweilerTheme): SyntaxStyle {
   return SyntaxStyle.fromStyles({
     default: { fg: theme.foreground },

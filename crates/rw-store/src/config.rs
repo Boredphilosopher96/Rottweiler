@@ -661,7 +661,33 @@ impl ConfigLoader {
         let _settings_lock = acquire_tui_settings_lock(parent, key)?;
         validate_tui_config_file(&self.user_path, key)?;
         let mut document = read_tui_config_document(&self.user_path)?;
-        set_toml_leaf(&mut document, key, value)?;
+        if let Some(alias) = key.strip_prefix("models.thinking.") {
+            let root = document
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::InvalidUserSetting {
+                    key: key.to_owned(),
+                    reason: "user configuration root is not a table".to_owned(),
+                })?;
+            let models = root
+                .entry("models".to_owned())
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::InvalidUserSetting {
+                    key: key.to_owned(),
+                    reason: "models configuration is not a table".to_owned(),
+                })?;
+            let thinking = models
+                .entry("thinking".to_owned())
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+                .as_table_mut()
+                .ok_or_else(|| ConfigError::InvalidUserSetting {
+                    key: key.to_owned(),
+                    reason: "model thinking configuration is not a table".to_owned(),
+                })?;
+            thinking.insert(alias.to_owned(), toml::Value::String(value.to_owned()));
+        } else {
+            set_toml_leaf(&mut document, key, value)?;
+        }
         let encoded = format!(
             "# Rottweiler user settings; last updated via TUI\n{}",
             toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
@@ -908,14 +934,107 @@ impl ConfigLoader {
                 reason: "MCP server is not present in the user configuration".to_owned(),
             });
         }
-        set_toml_leaf(
-            &mut document,
-            &format!("servers.{server}.enabled"),
-            if enabled { "true" } else { "false" },
-        )?;
+        let server_table = document
+            .get_mut("servers")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|servers| servers.get_mut(server))
+            .and_then(toml::Value::as_table_mut)
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: format!("mcp.servers.{server}.enabled"),
+                reason: "MCP server is not a table".to_owned(),
+            })?;
+        server_table.insert("enabled".to_owned(), toml::Value::Boolean(enabled));
         let bytes =
             toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
                 key: format!("mcp.servers.{server}.enabled"),
+                reason: error.to_string(),
+            })?;
+        persist_tui_config_atomic(parent, &path, bytes.as_bytes(), "mcp.servers")
+    }
+
+    /// Adds a user-scoped remote HTTPS MCP server in disabled, deferred mode.
+    /// Enabling remains a separate explicit action after fingerprint approval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe name/URL, an existing server, or an
+    /// unsafe, malformed, oversized, or unwritable user MCP file.
+    pub fn persist_tui_mcp_http_server(
+        &self,
+        server: &str,
+        endpoint: &str,
+    ) -> Result<(), ConfigError> {
+        let key = format!("mcp.servers.{server}");
+        if !valid_mcp_server_name(server) || endpoint.len() > 2_048 {
+            return Err(ConfigError::InvalidUserSetting {
+                key,
+                reason: "MCP server name or endpoint is invalid".to_owned(),
+            });
+        }
+        let parsed = Url::parse(endpoint).map_err(|_| ConfigError::InvalidUserSetting {
+            key: key.clone(),
+            reason: "MCP endpoint must be an absolute HTTPS URL".to_owned(),
+        })?;
+        if parsed.scheme() != "https"
+            || parsed.host().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(ConfigError::InvalidUserSetting {
+                key,
+                reason: "MCP endpoint must be HTTPS without credentials, query, or fragment"
+                    .to_owned(),
+            });
+        }
+        let parent = self
+            .user_path
+            .parent()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "user configuration has no parent directory".to_owned(),
+            })?;
+        prepare_tui_config_parent(parent, &self.user_path)?;
+        let _settings_lock = acquire_tui_settings_lock(parent, "mcp.servers")?;
+        let path = self.user_path.with_file_name("mcp.toml");
+        validate_tui_config_file(&path, "mcp.servers")?;
+        let mut document =
+            read_bounded_tui_config_document(&path, "mcp.servers", MAX_TUI_AUX_CONFIG_BYTES)?;
+        if document
+            .get("servers")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|servers| servers.contains_key(server))
+        {
+            return Err(ConfigError::InvalidUserSetting {
+                key,
+                reason: "MCP server already exists".to_owned(),
+            });
+        }
+        let servers = document
+            .as_table_mut()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "MCP configuration root is not a table".to_owned(),
+            })?
+            .entry("servers".to_owned())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "MCP servers value is not a table".to_owned(),
+            })?;
+        let mut server_table = toml::map::Map::new();
+        server_table.insert(
+            "endpoint".to_owned(),
+            toml::Value::String(endpoint.to_owned()),
+        );
+        server_table.insert("enabled".to_owned(), toml::Value::Boolean(false));
+        server_table.insert("defer_tools".to_owned(), toml::Value::Boolean(true));
+        servers.insert(server.to_owned(), toml::Value::Table(server_table));
+        let bytes =
+            toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
+                key: format!("mcp.servers.{server}"),
                 reason: error.to_string(),
             })?;
         persist_tui_config_atomic(parent, &path, bytes.as_bytes(), "mcp.servers")
@@ -2182,10 +2301,10 @@ fn valid_project_model_selection(model: &str) -> bool {
 
 fn valid_mcp_server_name(server: &str) -> bool {
     !server.is_empty()
-        && server.len() <= 128
+        && server.len() <= 96
         && server
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn read_project_model_preferences(

@@ -213,6 +213,98 @@ pub struct UserSettingDescriptor {
     pub applies_immediately: bool,
 }
 
+/// Bounded live state of one MCP server. Transport credentials and process
+/// environment are intentionally never exposed on the interactive protocol.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[ts(tag = "type", rename_all = "snake_case")]
+pub enum McpServerState {
+    Disabled,
+    Connecting,
+    Ready,
+    ApprovalRequired,
+    Failed { message: String },
+    Stopping,
+}
+
+/// One server in the live session MCP inventory.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct McpServerDescriptor {
+    pub name: String,
+    pub enabled: bool,
+    pub approved: bool,
+    pub state: McpServerState,
+    pub tool_count: u32,
+    pub resource_count: u32,
+    pub prompt_count: u32,
+}
+
+/// Exact, redacted configuration identity presented before MCP approval.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct McpApprovalReview {
+    pub server: String,
+    pub transport: String,
+    pub endpoint: Option<String>,
+    pub origin: String,
+    pub defer_tools: bool,
+    pub fingerprint: String,
+    pub previously_approved: bool,
+}
+
+/// Permission decision exposed on the interactive protocol without coupling
+/// clients to configuration-file types.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum PermissionAction {
+    Ask,
+    Allow,
+    Deny,
+}
+
+/// Scope of a remembered exact approval.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum PermissionApprovalScope {
+    Session,
+    Project,
+}
+
+/// Stable, typed rule row rendered by permission-management clients.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct PermissionRuleDescriptor {
+    /// Opaque stable id accepted by remove operations. Clients never rebuild it.
+    pub id: String,
+    pub pattern: String,
+    pub action: PermissionAction,
+}
+
+/// Opaque remembered approval metadata. Invocation arguments and fingerprints
+/// are deliberately absent.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct PermissionApprovalDescriptor {
+    pub id: String,
+    pub scope: PermissionApprovalScope,
+    pub tool_name: String,
+    pub summary: String,
+}
+
+/// Bounded permission inventory for one live session.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct PermissionStateDescriptor {
+    pub default: PermissionAction,
+    /// Effective immutable rules assembled from trusted user configuration.
+    pub effective_rules: Vec<PermissionRuleDescriptor>,
+    /// Project rule authority is intentionally empty while project permission
+    /// config remains forbidden; the typed field makes that policy explicit.
+    pub project_rules: Vec<PermissionRuleDescriptor>,
+    /// Ephemeral rules added by the current session's driver.
+    pub session_rules: Vec<PermissionRuleDescriptor>,
+    pub approvals: Vec<PermissionApprovalDescriptor>,
+    pub truncated: bool,
+}
+
 /// Prompt-cache behavior exposed without leaking a provider implementation.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -906,6 +998,54 @@ pub enum ClientCommand {
         key: String,
         value: String,
     },
+    ListMcpServers {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    AddMcpHttpServer {
+        meta: CommandMeta,
+        session_id: SessionId,
+        name: String,
+        endpoint: String,
+    },
+    ReviewMcpServer {
+        meta: CommandMeta,
+        session_id: SessionId,
+        name: String,
+    },
+    ApproveMcpServer {
+        meta: CommandMeta,
+        session_id: SessionId,
+        name: String,
+        fingerprint: String,
+    },
+    SetMcpServerEnabled {
+        meta: CommandMeta,
+        session_id: SessionId,
+        name: String,
+        enabled: bool,
+    },
+    ListPermissions {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    AddSessionPermissionRule {
+        meta: CommandMeta,
+        session_id: SessionId,
+        pattern: String,
+        action: PermissionAction,
+    },
+    RemoveSessionPermissionRule {
+        meta: CommandMeta,
+        session_id: SessionId,
+        rule_id: String,
+    },
+    RevokePermissionApproval {
+        meta: CommandMeta,
+        session_id: SessionId,
+        approval_id: String,
+        scope: PermissionApprovalScope,
+    },
     BeginProviderAuth {
         meta: CommandMeta,
         session_id: SessionId,
@@ -991,6 +1131,15 @@ impl ClientCommand {
             | Self::ListModels { meta, .. }
             | Self::ListSettings { meta, .. }
             | Self::SetSetting { meta, .. }
+            | Self::ListMcpServers { meta, .. }
+            | Self::AddMcpHttpServer { meta, .. }
+            | Self::ReviewMcpServer { meta, .. }
+            | Self::ApproveMcpServer { meta, .. }
+            | Self::SetMcpServerEnabled { meta, .. }
+            | Self::ListPermissions { meta, .. }
+            | Self::AddSessionPermissionRule { meta, .. }
+            | Self::RemoveSessionPermissionRule { meta, .. }
+            | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
             | Self::CompleteProviderAuth { meta, .. }
@@ -1037,6 +1186,15 @@ impl ClientCommand {
             | Self::ListModels { meta, .. }
             | Self::ListSettings { meta, .. }
             | Self::SetSetting { meta, .. }
+            | Self::ListMcpServers { meta, .. }
+            | Self::AddMcpHttpServer { meta, .. }
+            | Self::ReviewMcpServer { meta, .. }
+            | Self::ApproveMcpServer { meta, .. }
+            | Self::SetMcpServerEnabled { meta, .. }
+            | Self::ListPermissions { meta, .. }
+            | Self::AddSessionPermissionRule { meta, .. }
+            | Self::RemoveSessionPermissionRule { meta, .. }
+            | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
             | Self::CompleteProviderAuth { meta, .. }
@@ -1392,6 +1550,21 @@ pub enum EngineEvent {
         session_id: SessionId,
         settings: Vec<UserSettingDescriptor>,
     },
+    McpServersListed {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        servers: Vec<McpServerDescriptor>,
+    },
+    McpServerApprovalReviewed {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        review: McpApprovalReview,
+    },
+    PermissionsListed {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        permissions: PermissionStateDescriptor,
+    },
     ProviderAuthStarted {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -1713,6 +1886,11 @@ pub enum EngineEvent {
         /// alias's automatic fallback chain.
         #[serde(default)]
         provider: Option<String>,
+        /// Durable per-session effort applied to this selection, including
+        /// concrete provider/model routes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        thinking: Option<crate::config::ThinkingLevel>,
     },
     ContextItemPinned {
         meta: EventMeta,
@@ -1782,6 +1960,9 @@ impl EngineEvent {
             | Self::CommandDescriptorsListed { .. }
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
+            | Self::McpServersListed { .. }
+            | Self::McpServerApprovalReviewed { .. }
+            | Self::PermissionsListed { .. }
             | Self::ProviderAuthStarted { .. }
             | Self::ProviderConfigured { .. }
             | Self::ProviderAuthFinished { .. }
@@ -1852,6 +2033,9 @@ impl EngineEvent {
             | Self::CommandDescriptorsListed { .. }
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
+            | Self::McpServersListed { .. }
+            | Self::McpServerApprovalReviewed { .. }
+            | Self::PermissionsListed { .. }
             | Self::ProviderAuthStarted { .. }
             | Self::ProviderConfigured { .. }
             | Self::ProviderAuthFinished { .. }

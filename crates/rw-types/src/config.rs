@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Fully resolved Rottweiler configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -199,7 +200,7 @@ impl Default for ModelConfig {
 }
 
 /// Provider-neutral thinking effort selected by a model alias or session.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
     /// Do not request provider reasoning output.

@@ -30,6 +30,8 @@ use crate::subscription_credentials::{
     OpenAiSubscriptionCredentialBundle, openai_subscription_credential_id,
 };
 
+static PROVIDER_CREDENTIAL_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Default public model-catalog endpoint used by the administrative facade.
 pub const DEFAULT_MODEL_CATALOG_URL: &str = rw_providers::DEFAULT_MODELS_DEV_URL;
 
@@ -159,10 +161,39 @@ pub fn store_provider_api_key(
     provider_name: &str,
     api_key: ProviderApiKey,
 ) -> Result<Vec<String>, AdminError> {
+    let _store_guard = PROVIDER_CREDENTIAL_STORE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let loader = ConfigLoader::from_environment().map_err(AdminError::from_display)?;
     let credentials_path = loader.credentials_path();
     let effective = loader.load().map_err(AdminError::from_display)?;
     let provider = configured_provider(&effective, provider_name)?;
+    if !matches!(
+        provider.kind.as_str(),
+        "anthropic"
+            | "openai"
+            | "openai_responses"
+            | "openai_chat"
+            | "openai_compatible"
+            | "openai_compatible_chat"
+            | "openai_compatible_responses"
+    ) {
+        return Err(AdminError::new(
+            "the configured provider does not use API-key authentication",
+        ));
+    }
+    if provider.oauth_token_env.is_some()
+        || provider.oauth_authorization_endpoint.is_some()
+        || provider.oauth_token_endpoint.is_some()
+        || provider.oauth_client_id.is_some()
+        || !provider.oauth_scopes.is_empty()
+        || provider.oauth_access_token_credential.is_some()
+        || provider.oauth_refresh_token_credential.is_some()
+    {
+        return Err(AdminError::new(
+            "the configured provider uses OAuth authentication, not an API key",
+        ));
+    }
     let manager = CredentialManager::system(credentials_path);
     let mut warnings = config_warnings(&effective);
     let ProviderApiKey(secret) = api_key;
@@ -527,63 +558,131 @@ impl OAuthLogin {
     /// Returns a sanitized error when callback validation, token exchange, or
     /// credential storage fails.
     pub async fn complete(self) -> Result<OAuthLoginResult, AdminError> {
+        self.prepare().await?.persist()
+    }
+
+    /// Waits for the human callback and token exchange without mutating the
+    /// credential store. The returned opaque value keeps all token material
+    /// inside the core until a host-owned lifecycle task persists it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized callback-validation or token-exchange failure.
+    pub async fn prepare(self) -> Result<PreparedOAuthCredential, AdminError> {
         let tokens = self
             .session
             .complete()
             .await
             .map_err(AdminError::from_display)?;
-        let mut warnings = Vec::new();
-        if self.openai_subscription {
+        let payload = if self.openai_subscription {
             let bundle = OpenAiSubscriptionCredentialBundle::from_login(&tokens)?;
             let encoded = bundle.encode()?;
-            let stored = self
-                .credential_manager
-                .store(
-                    &CredentialReference::new(openai_subscription_credential_id(
-                        &self.provider_name,
-                    )),
-                    &StoredSecret::new(encoded),
-                )
-                .map_err(AdminError::from_display)?;
-            warnings.extend(stored.warnings().iter().map(ToString::to_string));
-            return Ok(OAuthLoginResult {
-                provider: self.provider_name,
-                refresh_token_stored: true,
-                warnings,
-            });
-        }
-        let access_identifier = self
-            .provider
-            .oauth_access_token_credential
-            .unwrap_or_else(|| format!("providers.{}.oauth.access_token", self.provider_name));
-        let access = self
-            .credential_manager
-            .store(
-                &CredentialReference::new(access_identifier),
-                &StoredSecret::new(tokens.access_token().expose_secret().to_owned()),
-            )
-            .map_err(AdminError::from_display)?;
-        warnings.extend(access.warnings().iter().map(ToString::to_string));
-
-        let refresh_token_stored = if let Some(refresh_token) = tokens.refresh_token() {
-            let refresh_identifier = self
-                .provider
-                .oauth_refresh_token_credential
-                .unwrap_or_else(|| format!("providers.{}.oauth.refresh_token", self.provider_name));
-            let refresh = self
-                .credential_manager
-                .store(
-                    &CredentialReference::new(refresh_identifier),
-                    &StoredSecret::new(refresh_token.expose_secret().to_owned()),
-                )
-                .map_err(AdminError::from_display)?;
-            warnings.extend(refresh.warnings().iter().map(ToString::to_string));
-            true
+            PreparedOAuthPayload::OpenAiSubscription {
+                credential: StoredSecret::new(encoded),
+                reference: CredentialReference::new(openai_subscription_credential_id(
+                    &self.provider_name,
+                )),
+            }
         } else {
-            false
+            let access_identifier = self
+                .provider
+                .oauth_access_token_credential
+                .unwrap_or_else(|| format!("providers.{}.oauth.access_token", self.provider_name));
+            let refresh = tokens.refresh_token().map(|refresh_token| {
+                let identifier = self
+                    .provider
+                    .oauth_refresh_token_credential
+                    .clone()
+                    .unwrap_or_else(|| {
+                        format!("providers.{}.oauth.refresh_token", self.provider_name)
+                    });
+                (
+                    CredentialReference::new(identifier),
+                    StoredSecret::new(refresh_token.expose_secret().to_owned()),
+                )
+            });
+            PreparedOAuthPayload::Standard {
+                access_reference: CredentialReference::new(access_identifier),
+                access_token: StoredSecret::new(tokens.access_token().expose_secret().to_owned()),
+                refresh,
+            }
+        };
+        Ok(PreparedOAuthCredential {
+            provider: self.provider_name,
+            credential_manager: self.credential_manager,
+            payload,
+        })
+    }
+}
+
+enum PreparedOAuthPayload {
+    OpenAiSubscription {
+        reference: CredentialReference,
+        credential: StoredSecret<String>,
+    },
+    Standard {
+        access_reference: CredentialReference,
+        access_token: StoredSecret<String>,
+        refresh: Option<(CredentialReference, StoredSecret<String>)>,
+    },
+}
+
+/// Opaque OAuth tokens that have completed the human/network phase but have
+/// not yet crossed the irreversible credential-store boundary.
+pub struct PreparedOAuthCredential {
+    provider: String,
+    credential_manager: CredentialManager,
+    payload: PreparedOAuthPayload,
+}
+
+impl PreparedOAuthCredential {
+    /// Persists the prepared tokens under the process-wide credential mutation
+    /// lock. No token value is returned or included in errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized credential-storage failure.
+    pub fn persist(self) -> Result<OAuthLoginResult, AdminError> {
+        let _store_guard = PROVIDER_CREDENTIAL_STORE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut warnings = Vec::new();
+        let refresh_token_stored = match self.payload {
+            PreparedOAuthPayload::OpenAiSubscription {
+                reference,
+                credential,
+            } => {
+                let stored = self
+                    .credential_manager
+                    .store(&reference, &credential)
+                    .map_err(AdminError::from_display)?;
+                warnings.extend(stored.warnings().iter().map(ToString::to_string));
+                true
+            }
+            PreparedOAuthPayload::Standard {
+                access_reference,
+                access_token,
+                refresh,
+            } => {
+                let stored = self
+                    .credential_manager
+                    .store(&access_reference, &access_token)
+                    .map_err(AdminError::from_display)?;
+                warnings.extend(stored.warnings().iter().map(ToString::to_string));
+                if let Some((reference, token)) = refresh {
+                    let stored = self
+                        .credential_manager
+                        .store(&reference, &token)
+                        .map_err(AdminError::from_display)?;
+                    warnings.extend(stored.warnings().iter().map(ToString::to_string));
+                    true
+                } else {
+                    false
+                }
+            }
         };
         Ok(OAuthLoginResult {
-            provider: self.provider_name,
+            provider: self.provider,
             refresh_token_stored,
             warnings,
         })
@@ -648,20 +747,61 @@ impl GitHubCopilotLogin {
         self,
         cancellation: &ProviderLoginCancellation,
     ) -> Result<GitHubCopilotLoginResult, AdminError> {
+        self.prepare(cancellation).await?.persist()
+    }
+
+    /// Completes device polling without mutating the credential store.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized device-flow failure.
+    pub async fn prepare(
+        self,
+        cancellation: &ProviderLoginCancellation,
+    ) -> Result<PreparedGitHubCopilotCredential, AdminError> {
         let token = self
             .session
             .complete(&cancellation.0)
             .await
             .map_err(AdminError::from_display)?
             .into_secret();
+        Ok(PreparedGitHubCopilotCredential {
+            provider: self.provider_name,
+            credential_manager: self.credential_manager,
+            token,
+            oauth_client_id: self.oauth_client_id,
+        })
+    }
+}
+
+/// Opaque Copilot token whose human/device phase is complete but whose
+/// credential-store mutation has not begun.
+pub struct PreparedGitHubCopilotCredential {
+    provider: String,
+    credential_manager: CredentialManager,
+    token: ProviderSecret,
+    oauth_client_id: String,
+}
+
+impl PreparedGitHubCopilotCredential {
+    /// Persists the device token under the process-wide credential mutation
+    /// lock without exposing it to callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized credential-storage failure.
+    pub fn persist(self) -> Result<GitHubCopilotLoginResult, AdminError> {
+        let _store_guard = PROVIDER_CREDENTIAL_STORE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let warnings = store_github_copilot_token_with_manager(
             &self.credential_manager,
-            &self.provider_name,
-            &token,
+            &self.provider,
+            &self.token,
             &self.oauth_client_id,
         )?;
         Ok(GitHubCopilotLoginResult {
-            provider: self.provider_name,
+            provider: self.provider,
             warnings,
         })
     }

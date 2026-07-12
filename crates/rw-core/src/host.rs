@@ -12,15 +12,18 @@ use std::{
 use async_trait::async_trait;
 use rw_types::{
     ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta,
-    CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, ModelAlias,
-    ModelCatalogSnapshot, ProviderAuthAttemptId, ProviderAuthChallenge, RequestId, SequenceId,
-    SessionDescriptor, SessionId, ShellId, TurnId, WorkspaceDiff, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceStatus,
+    CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, McpApprovalReview,
+    McpServerDescriptor, ModelAlias, ModelCatalogSnapshot, ProviderAuthAttemptId,
+    ProviderAuthChallenge, RequestId, SequenceId, SessionDescriptor, SessionId, ShellId, TurnId,
+    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
 };
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 
-use crate::{AgentLoopError, CachedModelCatalog, EventClock, SessionHandle, SystemEventClock};
+use crate::{
+    AgentLoopError, CachedModelCatalog, EventClock, ProviderApiKey, SessionHandle,
+    SystemEventClock, store_provider_api_key,
+};
 
 const HOST_EVENT_CAPACITY: usize = 256;
 const MAX_WIRE_COMMANDS: usize = 512;
@@ -38,6 +41,14 @@ const MAX_PROVIDER_AUTH_MESSAGE_BYTES: usize = 1_024;
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BoundClient {
     pub client_id: ClientId,
+}
+
+/// Sanitized outcome of the non-protocol provider credential channel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderApiKeySubmission {
+    pub stored: bool,
+    pub activated: bool,
+    pub warnings: Vec<String>,
 }
 
 /// Bounded process-wide engine-host settings.
@@ -120,6 +131,7 @@ pub struct HostedSession {
     handle: SessionHandle,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
     model_catalog: Option<Arc<CachedModelCatalog>>,
+    mcp: Option<Arc<dyn HostMcpService>>,
 }
 
 impl fmt::Debug for HostedSession {
@@ -139,6 +151,7 @@ impl HostedSession {
             handle,
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             model_catalog: None,
+            mcp: None,
         }
     }
 
@@ -152,6 +165,18 @@ impl HostedSession {
     #[must_use]
     pub fn model_catalog(&self) -> Option<Arc<CachedModelCatalog>> {
         self.model_catalog.clone()
+    }
+
+    /// Attaches live MCP control for this exact actor session.
+    #[must_use]
+    pub fn with_mcp(mut self, mcp: Arc<dyn HostMcpService>) -> Self {
+        self.mcp = Some(mcp);
+        self
+    }
+
+    #[must_use]
+    pub fn mcp(&self) -> Option<Arc<dyn HostMcpService>> {
+        self.mcp.clone()
     }
 
     #[must_use]
@@ -323,6 +348,15 @@ pub trait HostQueryService: Send + Sync + 'static {
             "user settings are unavailable on this host".to_owned(),
         ))
     }
+    async fn persist_project_model_selection(
+        &self,
+        _session: &SessionDescriptor,
+        _model: &ModelAlias,
+    ) -> Result<(), HostError> {
+        Err(HostError::Query(
+            "project model persistence is unavailable on this host".to_owned(),
+        ))
+    }
     async fn begin_provider_auth(&self, _provider: &str) -> Result<ProviderAuthAttempt, HostError> {
         Err(HostError::Query(
             "provider authentication is unavailable on this host".to_owned(),
@@ -357,12 +391,83 @@ pub trait HostQueryService: Send + Sync + 'static {
     ) -> Result<WorkspaceDiff, HostError>;
 }
 
+/// Session-scoped live MCP operations. Implementations own the transaction
+/// between the active manager and user configuration persistence.
+#[async_trait]
+pub trait HostMcpService: Send + Sync + 'static {
+    async fn list(&self) -> Result<Vec<McpServerDescriptor>, HostError>;
+    async fn add_http(
+        &self,
+        name: &str,
+        endpoint: &str,
+    ) -> Result<Vec<McpServerDescriptor>, HostError>;
+    async fn review(&self, name: &str) -> Result<McpApprovalReview, HostError>;
+    async fn approve(
+        &self,
+        name: &str,
+        fingerprint: &str,
+    ) -> Result<Vec<McpServerDescriptor>, HostError>;
+    async fn set_enabled(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> Result<Vec<McpServerDescriptor>, HostError>;
+}
+
+type ProviderAuthPersistence = Box<dyn FnOnce() -> Result<Vec<String>, HostError> + Send + 'static>;
+type ProviderApiKeyStore =
+    dyn Fn(String, ProviderApiKey) -> Result<Vec<String>, HostError> + Send + Sync + 'static;
+
 /// One sanitized provider-auth result. Credential values never cross this boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderAuthCompletion {
     pub provider: String,
     pub message: String,
     pub warnings: Vec<String>,
+    persistence: Option<ProviderAuthPersistence>,
+}
+
+impl fmt::Debug for ProviderAuthCompletion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProviderAuthCompletion")
+            .field("provider", &self.provider)
+            .field("message", &self.message)
+            .field("warnings", &self.warnings)
+            .field(
+                "persistence",
+                &self.persistence.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+impl ProviderAuthCompletion {
+    /// Builds a completion that performs no credential mutation. This is used
+    /// by tests and hosts whose authentication backend has no local secret.
+    #[must_use]
+    pub fn new(provider: String, message: String, warnings: Vec<String>) -> Self {
+        Self {
+            provider,
+            message,
+            warnings,
+            persistence: None,
+        }
+    }
+
+    /// Attaches an opaque, non-async persistence closure. The host invokes it
+    /// in a blocking worker only after lifecycle ownership is revalidated.
+    #[must_use]
+    pub fn with_persistence(
+        mut self,
+        persistence: impl FnOnce() -> Result<Vec<String>, HostError> + Send + 'static,
+    ) -> Self {
+        self.persistence = Some(Box::new(persistence));
+        self
+    }
+
+    fn take_persistence(&mut self) -> Option<ProviderAuthPersistence> {
+        self.persistence.take()
+    }
 }
 
 /// Opaque, connection-scoped provider authentication owned by the host until
@@ -499,11 +604,47 @@ enum PendingProviderAuth {
         cancellation: Arc<dyn Fn() + Send + Sync + 'static>,
         cancelled: watch::Sender<bool>,
     },
+    Finalizing {
+        attempt_id: ProviderAuthAttemptId,
+    },
 }
 
 #[derive(Default)]
 struct PendingProviderAuths {
     entries: Mutex<HashMap<ProviderAuthOwner, PendingProviderAuth>>,
+}
+
+struct ProviderAuthOpeningGuard {
+    pending: Arc<PendingProviderAuths>,
+    owner: ProviderAuthOwner,
+    attempt_id: ProviderAuthAttemptId,
+    armed: bool,
+}
+
+struct ProviderAuthCompletionGuard {
+    pending: Arc<PendingProviderAuths>,
+    owner: ProviderAuthOwner,
+    attempt_id: ProviderAuthAttemptId,
+}
+
+impl Drop for ProviderAuthCompletionGuard {
+    fn drop(&mut self) {
+        remove_provider_auth_reservation(&self.pending, &self.owner, &self.attempt_id);
+    }
+}
+
+impl ProviderAuthOpeningGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ProviderAuthOpeningGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_provider_auth_reservation(&self.pending, &self.owner, &self.attempt_id);
+        }
+    }
 }
 
 struct ProviderAuthSubscriptionGuard {
@@ -532,7 +673,11 @@ impl PendingProviderAuths {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let owners = entries
                 .keys()
-                .filter(|owner| &owner.client_id == client_id && &owner.session_id == session_id)
+                .filter(|owner| {
+                    &owner.client_id == client_id
+                        && &owner.session_id == session_id
+                        && entries.get(*owner).is_some_and(provider_auth_can_cancel)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             owners
@@ -551,7 +696,10 @@ impl PendingProviderAuths {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let owners = entries
                 .keys()
-                .filter(|owner| &owner.client_id == client_id)
+                .filter(|owner| {
+                    &owner.client_id == client_id
+                        && entries.get(*owner).is_some_and(provider_auth_can_cancel)
+                })
                 .cloned()
                 .collect::<Vec<_>>();
             owners
@@ -589,7 +737,7 @@ fn cancel_provider_auth_attempts(attempts: Vec<PendingProviderAuth>) {
                 cancellation();
                 let _ = cancelled.send(true);
             }
-            PendingProviderAuth::Opening { .. } => {}
+            PendingProviderAuth::Opening { .. } | PendingProviderAuth::Finalizing { .. } => {}
         }
     }
 }
@@ -605,6 +753,8 @@ pub struct EngineHost {
     dedupe: Arc<Mutex<DedupeRegistry>>,
     client_events: Arc<Mutex<HashMap<ClientId, broadcast::Sender<EngineEvent>>>>,
     provider_auth: Arc<PendingProviderAuths>,
+    provider_mutation: Arc<tokio::sync::Mutex<()>>,
+    provider_api_key_store: Arc<ProviderApiKeyStore>,
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -643,8 +793,19 @@ impl EngineHost {
             dedupe: Arc::new(Mutex::new(DedupeRegistry::default())),
             client_events: Arc::new(Mutex::new(HashMap::new())),
             provider_auth: Arc::new(PendingProviderAuths::default()),
+            provider_mutation: Arc::new(tokio::sync::Mutex::new(())),
+            provider_api_key_store: Arc::new(|provider, api_key| {
+                store_provider_api_key(&provider, api_key)
+                    .map_err(|_| HostError::Query("provider credential storage failed".to_owned()))
+            }),
             shutting_down: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    #[cfg(test)]
+    fn with_provider_api_key_store(mut self, store: Arc<ProviderApiKeyStore>) -> Self {
+        self.provider_api_key_store = store;
+        self
     }
 
     #[must_use]
@@ -690,6 +851,103 @@ impl EngineHost {
         // durable, so this eager update cannot get ahead of persistence. The
         // descriptor projector independently observes the same event.
         session.set_shell_active(false);
+        Ok(())
+    }
+
+    /// Accepts an API key from the transport's separate, non-replayable secret
+    /// channel. The authenticated client must own the session driver lease;
+    /// key material is consumed directly by the credential store and never
+    /// enters a command, event, snapshot, or diagnostic value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized error for an invalid provider/session, a client
+    /// without the driver lease, credential-storage failure, or activation
+    /// failure.
+    pub async fn submit_provider_api_key(
+        &self,
+        bound: BoundClient,
+        session_id: &SessionId,
+        provider: &str,
+        api_key: ProviderApiKey,
+    ) -> Result<ProviderApiKeySubmission, HostError> {
+        validate_provider_auth_name(provider)?;
+        let session = self.ready_session(session_id).await?;
+        let provider = provider.to_owned();
+        let provider_mutation = Arc::clone(&self.provider_mutation);
+        let provider_api_key_store = Arc::clone(&self.provider_api_key_store);
+        // The host-owned task shields the irreversible vault write. Dropping
+        // the HTTP request cannot drop the lifecycle guard while its blocking
+        // writer continues detached; takeover waits through activation.
+        tokio::spawn(async move {
+            let provider_mutation_guard = provider_mutation.lock_owned().await;
+            let lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+            let snapshot = session.handle().snapshot().await?;
+            if snapshot.driver_client_id.as_ref() != Some(&bound.client_id) {
+                return Err(HostError::Protocol(
+                    "only the current driver may store provider credentials".to_owned(),
+                ));
+            }
+            let provider_for_store = provider.clone();
+            let warnings = tokio::task::spawn_blocking(move || {
+                provider_api_key_store(provider_for_store, api_key)
+            })
+            .await
+            .map_err(|_| HostError::Query("provider credential storage failed".to_owned()))??;
+            let warnings = bounded_provider_auth_warnings(&warnings)?;
+            let activated = session
+                .handle()
+                .activate_provider(&provider, Some(&snapshot.model_alias))
+                .await
+                .is_ok();
+            drop(lifecycle_guard);
+            drop(provider_mutation_guard);
+            if activated && let Some(catalog) = session.model_catalog() {
+                let _ = catalog.get(true).await;
+            }
+            Ok(ProviderApiKeySubmission {
+                stored: true,
+                activated,
+                warnings,
+            })
+        })
+        .await
+        .map_err(|_| HostError::Query("provider credential task failed".to_owned()))?
+    }
+
+    /// Retries activation for an already-stored provider credential without
+    /// asking the client to submit the secret again.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized error for an invalid provider/session, a client
+    /// without the driver lease, or provider activation failure.
+    pub async fn activate_provider_for_client(
+        &self,
+        bound: BoundClient,
+        session_id: &SessionId,
+        provider: &str,
+    ) -> Result<(), HostError> {
+        validate_provider_auth_name(provider)?;
+        let session = self.ready_session(session_id).await?;
+        let provider_mutation_guard = Arc::clone(&self.provider_mutation).lock_owned().await;
+        let lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+        let snapshot = session.handle().snapshot().await?;
+        if snapshot.driver_client_id.as_ref() != Some(&bound.client_id) {
+            return Err(HostError::Protocol(
+                "only the current driver may activate providers".to_owned(),
+            ));
+        }
+        session
+            .handle()
+            .activate_provider(provider, Some(&snapshot.model_alias))
+            .await
+            .map_err(|_| HostError::Query("provider activation failed".to_owned()))?;
+        drop(lifecycle_guard);
+        drop(provider_mutation_guard);
+        if let Some(catalog) = session.model_catalog() {
+            let _ = catalog.get(true).await;
+        }
         Ok(())
     }
 
@@ -1308,17 +1566,22 @@ impl EngineHost {
                 value,
             } => {
                 let session = self.ready_session(&session_id).await?;
-                let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
-                let snapshot = session.handle().snapshot().await?;
-                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
-                    return Err(HostError::Protocol(
-                        "only the current driver may persist user settings".to_owned(),
-                    ));
-                }
-                let settings = self
-                    .queries
-                    .set_user_setting(&session.descriptor(), &key, &value)
-                    .await?;
+                let queries = Arc::clone(&self.queries);
+                let actor = meta.client_id.clone();
+                let settings = tokio::spawn(async move {
+                    let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                    let snapshot = session.handle().snapshot().await?;
+                    if snapshot.driver_client_id.as_ref() != Some(&actor) {
+                        return Err(HostError::Protocol(
+                            "only the current driver may persist user settings".to_owned(),
+                        ));
+                    }
+                    queries
+                        .set_user_setting(&session.descriptor(), &key, &value)
+                        .await
+                })
+                .await
+                .map_err(|_| HostError::Query("user setting task failed".to_owned()))??;
                 Ok((
                     CommandOutcome::Accepted,
                     Some(session_id.clone()),
@@ -1326,6 +1589,160 @@ impl EngineHost {
                         meta: ack_meta(&meta, &*self.clock),
                         session_id,
                         settings,
+                    }],
+                ))
+            }
+            ClientCommand::ListMcpServers { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let mcp = session.mcp().ok_or_else(|| {
+                    HostError::Query(
+                        "live MCP management is unavailable for this session".to_owned(),
+                    )
+                })?;
+                let servers = mcp.list().await?;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::McpServersListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        servers,
+                    }],
+                ))
+            }
+            ClientCommand::AddMcpHttpServer {
+                meta,
+                session_id,
+                name,
+                endpoint,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let mcp = session.mcp().ok_or_else(|| {
+                    HostError::Query(
+                        "live MCP management is unavailable for this session".to_owned(),
+                    )
+                })?;
+                let actor = meta.client_id.clone();
+                let servers = tokio::spawn(async move {
+                    let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                    let snapshot = session.handle().snapshot().await?;
+                    if snapshot.driver_client_id.as_ref() != Some(&actor) {
+                        return Err(HostError::Protocol(
+                            "only the current driver may add MCP servers".to_owned(),
+                        ));
+                    }
+                    mcp.add_http(&name, &endpoint).await
+                })
+                .await
+                .map_err(|_| HostError::Query("MCP add task failed".to_owned()))??;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::McpServersListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        servers,
+                    }],
+                ))
+            }
+            ClientCommand::ReviewMcpServer {
+                meta,
+                session_id,
+                name,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let snapshot = session.handle().snapshot().await?;
+                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
+                    return Err(HostError::Protocol(
+                        "only the current driver may review MCP configuration".to_owned(),
+                    ));
+                }
+                let review = session
+                    .mcp()
+                    .ok_or_else(|| {
+                        HostError::Query(
+                            "live MCP management is unavailable for this session".to_owned(),
+                        )
+                    })?
+                    .review(&name)
+                    .await?;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::McpServerApprovalReviewed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        review,
+                    }],
+                ))
+            }
+            ClientCommand::ApproveMcpServer {
+                meta,
+                session_id,
+                name,
+                fingerprint,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let mcp = session.mcp().ok_or_else(|| {
+                    HostError::Query(
+                        "live MCP management is unavailable for this session".to_owned(),
+                    )
+                })?;
+                let actor = meta.client_id.clone();
+                let servers = tokio::spawn(async move {
+                    let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                    let snapshot = session.handle().snapshot().await?;
+                    if snapshot.driver_client_id.as_ref() != Some(&actor) {
+                        return Err(HostError::Protocol(
+                            "only the current driver may approve MCP servers".to_owned(),
+                        ));
+                    }
+                    mcp.approve(&name, &fingerprint).await
+                })
+                .await
+                .map_err(|_| HostError::Query("MCP approval task failed".to_owned()))??;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::McpServersListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        servers,
+                    }],
+                ))
+            }
+            ClientCommand::SetMcpServerEnabled {
+                meta,
+                session_id,
+                name,
+                enabled,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let mcp = session.mcp().ok_or_else(|| {
+                    HostError::Query(
+                        "live MCP management is unavailable for this session".to_owned(),
+                    )
+                })?;
+                let actor = meta.client_id.clone();
+                let servers = tokio::spawn(async move {
+                    let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                    let snapshot = session.handle().snapshot().await?;
+                    if snapshot.driver_client_id.as_ref() != Some(&actor) {
+                        return Err(HostError::Protocol(
+                            "only the current driver may enable or disable MCP servers".to_owned(),
+                        ));
+                    }
+                    mcp.set_enabled(&name, enabled).await
+                })
+                .await
+                .map_err(|_| HostError::Query("MCP enablement task failed".to_owned()))??;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::McpServersListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        servers,
                     }],
                 ))
             }
@@ -1355,7 +1772,7 @@ impl EngineHost {
                         .entries
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if pending.contains_key(&owner) {
+                    if pending.keys().any(|active| active.provider == provider) {
                         return Err(HostError::Protocol(
                             "provider authentication is already in progress".to_owned(),
                         ));
@@ -1367,6 +1784,12 @@ impl EngineHost {
                         },
                     );
                 }
+                let mut opening_guard = ProviderAuthOpeningGuard {
+                    pending: Arc::clone(&self.provider_auth),
+                    owner: owner.clone(),
+                    attempt_id: attempt_id.clone(),
+                    armed: true,
+                };
                 drop(lifecycle_guard);
                 let attempt = match tokio::time::timeout(
                     PROVIDER_AUTH_BEGIN_DEADLINE,
@@ -1428,6 +1851,7 @@ impl EngineHost {
                         "provider authentication was cancelled during setup".to_owned(),
                     ));
                 }
+                opening_guard.disarm();
                 Ok((
                     CommandOutcome::Accepted,
                     Some(session_id.clone()),
@@ -1448,15 +1872,24 @@ impl EngineHost {
             } => {
                 validate_provider_auth_name(&provider)?;
                 let session = self.ready_session(&session_id).await?;
-                let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
-                let snapshot = session.handle().snapshot().await?;
-                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
-                    return Err(HostError::Protocol(
-                        "only the current driver may configure built-in providers".to_owned(),
-                    ));
-                }
                 let auth_kind = builtin_provider_auth_kind(&provider)?;
-                self.queries.configure_builtin_provider(&provider).await?;
+                let queries = Arc::clone(&self.queries);
+                let provider_mutation = Arc::clone(&self.provider_mutation);
+                let actor = meta.client_id.clone();
+                let provider_for_task = provider.clone();
+                tokio::spawn(async move {
+                    let _provider_mutation = provider_mutation.lock_owned().await;
+                    let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                    let snapshot = session.handle().snapshot().await?;
+                    if snapshot.driver_client_id.as_ref() != Some(&actor) {
+                        return Err(HostError::Protocol(
+                            "only the current driver may configure built-in providers".to_owned(),
+                        ));
+                    }
+                    queries.configure_builtin_provider(&provider_for_task).await
+                })
+                .await
+                .map_err(|_| HostError::Query("provider configuration task failed".to_owned()))??;
                 Ok((
                     CommandOutcome::Accepted,
                     Some(session_id.clone()),
@@ -1541,7 +1974,6 @@ impl EngineHost {
                         attempt,
                         cancel_signal,
                         meta,
-                        snapshot,
                     )
                     .await;
                 });
@@ -1725,8 +2157,17 @@ impl EngineHost {
                     ClientCommand::TakeDriver { meta, .. } => Some(meta.client_id.clone()),
                     _ => None,
                 };
-                let lifecycle = matches!(command, ClientCommand::TakeDriver { .. })
-                    .then(|| Arc::clone(&session.lifecycle));
+                let switched_model = match &command {
+                    ClientCommand::SwitchModel { model, .. } if model.0.contains('/') => {
+                        Some(model.clone())
+                    }
+                    _ => None,
+                };
+                let lifecycle = matches!(
+                    command,
+                    ClientCommand::TakeDriver { .. } | ClientCommand::SwitchModel { .. }
+                )
+                .then(|| Arc::clone(&session.lifecycle));
                 let _lifecycle = match lifecycle {
                     Some(lifecycle) => Some(lifecycle.lock_owned().await),
                     None => None,
@@ -1750,6 +2191,11 @@ impl EngineHost {
                                 .cancel_session_client(&previous, &session_id);
                         }
                         session.set_driver(Some(driver));
+                    }
+                    if let Some(model) = switched_model {
+                        self.queries
+                            .persist_project_model_selection(&session.descriptor(), &model)
+                            .await?;
                     }
                 }
                 Ok((outcome, Some(session_id), Vec::new()))
@@ -2117,6 +2563,7 @@ impl EngineHost {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn complete_provider_auth_task(
         self,
         owner: ProviderAuthOwner,
@@ -2124,8 +2571,12 @@ impl EngineHost {
         attempt: ProviderAuthAttempt,
         mut cancel_signal: watch::Receiver<bool>,
         meta: CommandMeta,
-        snapshot: crate::SessionSnapshot,
     ) {
+        let _reservation_guard = ProviderAuthCompletionGuard {
+            pending: Arc::clone(&self.provider_auth),
+            owner: owner.clone(),
+            attempt_id: attempt_id.clone(),
+        };
         let cancellation = attempt.cancellation();
         let completion = tokio::select! {
             result = tokio::time::timeout(PROVIDER_AUTH_COMPLETE_DEADLINE, attempt.complete()) => {
@@ -2139,49 +2590,138 @@ impl EngineHost {
                 Err(HostError::Query("provider authentication was cancelled".to_owned()))
             }
         };
-        if !take_provider_auth_reservation(&self.provider_auth, &owner, &attempt_id) {
-            return;
-        }
-        let (mut success, mut message, warnings) = match completion
+        let mut completion = match completion
             .and_then(|completion| validate_provider_auth_completion(&owner.provider, completion))
         {
-            Ok(completion) => (true, completion.message, completion.warnings),
+            Ok(completion) => completion,
+            Err(error) => {
+                self.emit_provider_auth_finished(
+                    &owner,
+                    attempt_id,
+                    &meta,
+                    false,
+                    sanitized_provider_auth_error(&error),
+                    Vec::new(),
+                    None,
+                )
+                .await;
+                return;
+            }
+        };
+        let provider_mutation = Arc::clone(&self.provider_mutation).lock_owned().await;
+        let session = match self.ready_session(&owner.session_id).await {
+            Ok(session) => session,
+            Err(error) => {
+                drop(provider_mutation);
+                self.emit_provider_auth_finished(
+                    &owner,
+                    attempt_id,
+                    &meta,
+                    false,
+                    sanitized_provider_auth_error(&error),
+                    Vec::new(),
+                    None,
+                )
+                .await;
+                return;
+            }
+        };
+        let lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+        let snapshot = match session.handle().snapshot().await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                drop(lifecycle_guard);
+                drop(provider_mutation);
+                self.emit_provider_auth_finished(
+                    &owner,
+                    attempt_id,
+                    &meta,
+                    false,
+                    sanitized_provider_auth_error(&HostError::from(error)),
+                    Vec::new(),
+                    None,
+                )
+                .await;
+                return;
+            }
+        };
+        if snapshot.driver_client_id.as_ref() != Some(&owner.client_id)
+            || !transition_provider_auth_to_finalizing(&self.provider_auth, &owner, &attempt_id)
+        {
+            drop(lifecycle_guard);
+            drop(provider_mutation);
+            return;
+        }
+
+        // This transition is the irreversible boundary. The host-owned task
+        // now holds both the global mutation lock and the session lifecycle;
+        // disconnect and takeover may no longer cancel or interleave the write.
+        let persisted = if let Some(persistence) = completion.take_persistence() {
+            tokio::task::spawn_blocking(persistence)
+                .await
+                .map_err(|_| {
+                    HostError::Persistence("provider credential storage failed".to_owned())
+                })
+                .and_then(std::convert::identity)
+        } else {
+            Ok(Vec::new())
+        };
+        let (success, message, warnings) = match persisted {
+            Ok(mut persisted_warnings) => {
+                completion.warnings.append(&mut persisted_warnings);
+                match bounded_provider_auth_warnings(&completion.warnings) {
+                    Ok(warnings) => {
+                        if session
+                            .handle()
+                            .activate_provider(&owner.provider, Some(&snapshot.model_alias))
+                            .await
+                            .is_ok()
+                        {
+                            (true, completion.message, warnings)
+                        } else {
+                            (
+                                false,
+                                "provider credentials were stored, but activation failed; retry activation without re-entering the credential".to_owned(),
+                                warnings,
+                            )
+                        }
+                    }
+                    Err(_) => (
+                        false,
+                        "provider credentials were stored, but activation was skipped because credential warnings exceeded the safety limit; retry activation without re-entering the credential".to_owned(),
+                        Vec::new(),
+                    ),
+                }
+            }
             Err(error) => (false, sanitized_provider_auth_error(&error), Vec::new()),
         };
-        let mut refreshed_catalog = None;
-        if success {
-            if let Ok(session) = self.ready_session(&owner.session_id).await {
-                if session
-                    .handle()
-                    .activate_provider(&owner.provider)
-                    .await
-                    .is_err()
-                {
-                    success = false;
-                    "authentication completed but provider activation failed"
-                        .clone_into(&mut message);
-                } else if let Some(catalog) = session.model_catalog()
-                    && let Ok(mut catalog) = catalog.get(true).await
-                {
-                    overlay_model_catalog_current(
-                        &mut catalog,
-                        Some(&snapshot.model_alias),
-                        snapshot.conversation.iter().rev().find_map(|turn| {
-                            turn.meta
-                                .model
-                                .as_deref()
-                                .filter(|model| model.contains('/'))
-                        }),
-                    );
-                    refreshed_catalog = Some(catalog);
-                }
-            } else {
-                success = false;
-                "authentication completed but its session is unavailable".clone_into(&mut message);
-            }
-        }
+        drop(lifecycle_guard);
+        drop(provider_mutation);
+        self.emit_provider_auth_finished(
+            &owner,
+            attempt_id,
+            &meta,
+            success,
+            message,
+            warnings,
+            success.then_some(snapshot),
+        )
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_provider_auth_finished(
+        &self,
+        owner: &ProviderAuthOwner,
+        attempt_id: ProviderAuthAttemptId,
+        meta: &CommandMeta,
+        success: bool,
+        message: String,
+        warnings: Vec<String>,
+        snapshot: Option<crate::SessionSnapshot>,
+    ) {
         let mut events = vec![EngineEvent::ProviderAuthFinished {
-            meta: ack_meta(&meta, &*self.clock),
+            meta: ack_meta(meta, &*self.clock),
             session_id: owner.session_id.clone(),
             attempt_id,
             provider: owner.provider.clone(),
@@ -2189,32 +2729,41 @@ impl EngineHost {
             message,
             warnings,
         }];
-        if success && refreshed_catalog.is_none() {
-            refreshed_catalog = self
-                .queries
-                .model_catalog(
-                    true,
-                    Some(&snapshot.model_alias),
-                    snapshot.conversation.iter().rev().find_map(|turn| {
-                        turn.meta
-                            .model
-                            .as_deref()
-                            .filter(|model| model.contains('/'))
-                    }),
-                )
-                .await
-                .ok();
-        }
-        if let Some(catalog) = refreshed_catalog {
-            events.push(EngineEvent::ModelsListed {
-                meta: ack_meta(&meta, &*self.clock),
-                session_id: Some(owner.session_id),
-                models: catalog.models,
-                aliases: catalog.aliases,
-                providers: catalog.providers,
-                cached: catalog.cached,
-                truncated: catalog.truncated,
+        if let Some(snapshot) = snapshot {
+            let selected = Some(snapshot.model_alias.as_str());
+            let resolved = snapshot.conversation.iter().rev().find_map(|turn| {
+                turn.meta
+                    .model
+                    .as_deref()
+                    .filter(|model| model.contains('/'))
             });
+            let mut refreshed_catalog = if let Ok(session) =
+                self.ready_session(&owner.session_id).await
+                && let Some(catalog) = session.model_catalog()
+            {
+                catalog.get(true).await.ok()
+            } else {
+                None
+            };
+            if refreshed_catalog.is_none() {
+                refreshed_catalog = self
+                    .queries
+                    .model_catalog(true, selected, resolved)
+                    .await
+                    .ok();
+            }
+            if let Some(mut catalog) = refreshed_catalog {
+                overlay_model_catalog_current(&mut catalog, selected, resolved);
+                events.push(EngineEvent::ModelsListed {
+                    meta: ack_meta(meta, &*self.clock),
+                    session_id: Some(owner.session_id.clone()),
+                    models: catalog.models,
+                    aliases: catalog.aliases,
+                    providers: catalog.providers,
+                    cached: catalog.cached,
+                    truncated: catalog.truncated,
+                });
+            }
         }
         self.emit_many(&owner.client_id, &events);
     }
@@ -2349,6 +2898,15 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::ListCommands { session_id, .. }
         | ClientCommand::ListSettings { session_id, .. }
         | ClientCommand::SetSetting { session_id, .. }
+        | ClientCommand::ListMcpServers { session_id, .. }
+        | ClientCommand::AddMcpHttpServer { session_id, .. }
+        | ClientCommand::ReviewMcpServer { session_id, .. }
+        | ClientCommand::ApproveMcpServer { session_id, .. }
+        | ClientCommand::SetMcpServerEnabled { session_id, .. }
+        | ClientCommand::ListPermissions { session_id, .. }
+        | ClientCommand::AddSessionPermissionRule { session_id, .. }
+        | ClientCommand::RemoveSessionPermissionRule { session_id, .. }
+        | ClientCommand::RevokePermissionApproval { session_id, .. }
         | ClientCommand::BeginProviderAuth { session_id, .. }
         | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
         | ClientCommand::CompleteProviderAuth { session_id, .. }
@@ -2405,8 +2963,13 @@ fn pending_provider_auth_id(pending: &PendingProviderAuth) -> &ProviderAuthAttem
     match pending {
         PendingProviderAuth::Opening { attempt_id }
         | PendingProviderAuth::Ready { attempt_id, .. }
-        | PendingProviderAuth::Completing { attempt_id, .. } => attempt_id,
+        | PendingProviderAuth::Completing { attempt_id, .. }
+        | PendingProviderAuth::Finalizing { attempt_id } => attempt_id,
     }
+}
+
+const fn provider_auth_can_cancel(pending: &PendingProviderAuth) -> bool {
+    !matches!(pending, PendingProviderAuth::Finalizing { .. })
 }
 
 fn remove_provider_auth_reservation(
@@ -2426,7 +2989,7 @@ fn remove_provider_auth_reservation(
     }
 }
 
-fn take_provider_auth_reservation(
+fn transition_provider_auth_to_finalizing(
     pending: &PendingProviderAuths,
     owner: &ProviderAuthOwner,
     attempt_id: &ProviderAuthAttemptId,
@@ -2435,11 +2998,16 @@ fn take_provider_auth_reservation(
         .entries
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if entries
-        .get(owner)
-        .is_some_and(|attempt| pending_provider_auth_id(attempt) == attempt_id)
-    {
-        entries.remove(owner);
+    if matches!(
+        entries.get(owner),
+        Some(PendingProviderAuth::Completing { attempt_id: current, .. }) if current == attempt_id
+    ) {
+        entries.insert(
+            owner.clone(),
+            PendingProviderAuth::Finalizing {
+                attempt_id: attempt_id.clone(),
+            },
+        );
         true
     } else {
         false
@@ -2529,7 +3097,11 @@ fn overlay_model_catalog_current(
     selected_model: Option<&str>,
     resolved_model: Option<&str>,
 ) {
-    if let Some(current) = resolved_model.or(selected_model) {
+    let current = selected_model
+        .filter(|selected| selected.contains('/'))
+        .or(resolved_model)
+        .or(selected_model);
+    if let Some(current) = current {
         for model in &mut catalog.models {
             model.current = model.id == current
                 || catalog.aliases.iter().any(|alias| {
@@ -2598,7 +3170,10 @@ fn wire_command_catalog(
 #[allow(clippy::expect_used)]
 mod tests {
     use std::{
-        sync::atomic::{AtomicU8, AtomicUsize},
+        sync::{
+            Condvar,
+            atomic::{AtomicU8, AtomicUsize},
+        },
         time::Duration,
     };
 
@@ -2649,7 +3224,7 @@ mod tests {
         }
 
         fn has_model_alias(&self, alias: &str) -> bool {
-            matches!(alias, "fast" | "big")
+            matches!(alias, "fast" | "big") || alias.contains('/')
         }
     }
 
@@ -2858,11 +3433,13 @@ mod tests {
     #[derive(Default)]
     struct StubQueries {
         auth: Option<Arc<AuthFixture>>,
+        persisted_models: std::sync::Mutex<Vec<String>>,
     }
 
     struct AuthFixture {
         completion: watch::Sender<bool>,
         cancelled: Arc<AtomicBool>,
+        persistence: Option<Arc<BlockingCredentialMutation>>,
     }
 
     impl AuthFixture {
@@ -2871,7 +3448,57 @@ mod tests {
             Arc::new(Self {
                 completion,
                 cancelled: Arc::new(AtomicBool::new(false)),
+                persistence: None,
             })
+        }
+
+        fn with_persistence(persistence: Arc<BlockingCredentialMutation>) -> Arc<Self> {
+            let (completion, _) = watch::channel(false);
+            Arc::new(Self {
+                completion,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                persistence: Some(persistence),
+            })
+        }
+    }
+
+    struct BlockingCredentialMutation {
+        started: Notify,
+        persisted: AtomicBool,
+        gate: (Mutex<bool>, Condvar),
+    }
+
+    impl BlockingCredentialMutation {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                started: Notify::new(),
+                persisted: AtomicBool::new(false),
+                gate: (Mutex::new(false), Condvar::new()),
+            })
+        }
+
+        #[allow(clippy::unnecessary_wraps)]
+        fn run(&self) -> Result<Vec<String>, HostError> {
+            self.started.notify_one();
+            let (gate, release) = &self.gate;
+            let mut open = gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*open {
+                open = release
+                    .wait(open)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            self.persisted.store(true, Ordering::Release);
+            Ok(Vec::new())
+        }
+
+        fn release(&self) {
+            let (gate, release) = &self.gate;
+            *gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            release.notify_all();
         }
     }
 
@@ -2901,6 +3528,18 @@ mod tests {
             })
         }
 
+        async fn persist_project_model_selection(
+            &self,
+            _session: &SessionDescriptor,
+            model: &ModelAlias,
+        ) -> Result<(), HostError> {
+            self.persisted_models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(model.0.clone());
+            Ok(())
+        }
+
         async fn begin_provider_auth(
             &self,
             provider: &str,
@@ -2910,16 +3549,22 @@ mod tests {
             })?;
             let mut completion = fixture.completion.subscribe();
             let completion_provider = provider.to_owned();
+            let persistence = fixture.persistence.clone();
             let future = Box::pin(async move {
                 while !*completion.borrow_and_update() {
                     completion.changed().await.map_err(|_| {
                         HostError::Query("provider authentication cancelled".to_owned())
                     })?;
                 }
-                Ok(ProviderAuthCompletion {
-                    provider: completion_provider,
-                    message: "provider authentication completed".to_owned(),
-                    warnings: Vec::new(),
+                let completion = ProviderAuthCompletion::new(
+                    completion_provider,
+                    "provider authentication completed".to_owned(),
+                    Vec::new(),
+                );
+                Ok(if let Some(persistence) = persistence {
+                    completion.with_persistence(move || persistence.run())
+                } else {
+                    completion
                 })
             });
             let cancellation = Arc::clone(&fixture.cancelled);
@@ -3011,6 +3656,68 @@ mod tests {
         )
         .expect("host");
         (host, factory)
+    }
+
+    #[tokio::test]
+    async fn accepted_concrete_model_switches_persist_in_dispatch_order() {
+        let factory = Arc::new(StubFactory::new());
+        let queries = Arc::new(StubQueries::default());
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 1,
+                max_deduplicated_requests: 32,
+            },
+            factory,
+            queries.clone(),
+        )
+        .expect("host");
+        let session_id = SessionId("ordered-model-switches".to_owned());
+        let driver = BoundClient {
+            client_id: ClientId("driver".to_owned()),
+        };
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::ResumeSession {
+                    meta: meta("spoofed", "resume"),
+                    session_id: session_id.clone(),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        for (request, model) in [("switch-a", "openai/a"), ("switch-b", "openai/b")] {
+            assert_eq!(
+                host.dispatch(
+                    driver.clone(),
+                    ClientCommand::SwitchModel {
+                        meta: meta("spoofed", request),
+                        session_id: session_id.clone(),
+                        model: ModelAlias(model.to_owned()),
+                        provider: None,
+                    },
+                )
+                .await,
+                CommandOutcome::Accepted
+            );
+        }
+        assert_eq!(
+            *queries
+                .persisted_models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["openai/a".to_owned(), "openai/b".to_owned()]
+        );
+        assert_eq!(
+            host.session(&session_id)
+                .await
+                .expect("session")
+                .descriptor()
+                .model,
+            ModelAlias("openai/b".to_owned())
+        );
     }
 
     #[tokio::test]
@@ -3522,6 +4229,7 @@ mod tests {
             factory,
             Arc::new(StubQueries {
                 auth: Some(Arc::clone(&fixture)),
+                ..StubQueries::default()
             }),
         )
         .expect("host");
@@ -3639,6 +4347,7 @@ mod tests {
             factory,
             Arc::new(StubQueries {
                 auth: Some(Arc::clone(&fixture)),
+                ..StubQueries::default()
             }),
         )
         .expect("host");
@@ -3713,6 +4422,297 @@ mod tests {
         })
         .await
         .expect("takeover cancellation");
+    }
+
+    #[tokio::test]
+    async fn cancelled_begin_future_drops_its_opening_reservation() {
+        let pending = Arc::new(PendingProviderAuths::default());
+        let owner = ProviderAuthOwner {
+            client_id: ClientId("cancelled-begin".to_owned()),
+            session_id: SessionId("cancelled-begin-session".to_owned()),
+            provider: "github_copilot".to_owned(),
+        };
+        let attempt_id = ProviderAuthAttemptId("cancelled-opening".to_owned());
+        pending
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                owner.clone(),
+                PendingProviderAuth::Opening {
+                    attempt_id: attempt_id.clone(),
+                },
+            );
+        let task = tokio::spawn({
+            let pending = Arc::clone(&pending);
+            async move {
+                let _guard = ProviderAuthOpeningGuard {
+                    pending,
+                    owner,
+                    attempt_id,
+                    armed: true,
+                };
+                std::future::pending::<()>().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        assert!(task.await.expect_err("cancelled begin").is_cancelled());
+        assert!(
+            pending
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_api_key_request_cannot_interrupt_store_or_overtake_lifecycle() {
+        let mutation = BlockingCredentialMutation::new();
+        let store = {
+            let mutation = Arc::clone(&mutation);
+            Arc::new(move |_provider: String, _api_key: ProviderApiKey| mutation.run())
+                as Arc<ProviderApiKeyStore>
+        };
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 1,
+                max_deduplicated_requests: 32,
+            },
+            Arc::new(StubFactory::new()),
+            Arc::new(StubQueries::default()),
+        )
+        .expect("host")
+        .with_provider_api_key_store(store);
+        let session_id = SessionId("api-key-cancellation".to_owned());
+        host.prepare_session(
+            CreateSessionRequest {
+                session_id: session_id.clone(),
+                workspace: "workspace".to_owned(),
+                model: None,
+            },
+            false,
+        )
+        .await
+        .expect("session");
+        let original = BoundClient {
+            client_id: ClientId("api-key-owner".to_owned()),
+        };
+        assert_eq!(
+            host.dispatch(
+                original.clone(),
+                ClientCommand::TakeDriver {
+                    meta: meta("spoofed", "take-api-key-owner"),
+                    session_id: session_id.clone(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let request = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            async move {
+                host.submit_provider_api_key(
+                    original,
+                    &session_id,
+                    "openai",
+                    ProviderApiKey::from_terminal_input("request-only-secret".to_owned())
+                        .expect("key"),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), mutation.started.notified())
+            .await
+            .expect("store started");
+        request.abort();
+        assert!(
+            request
+                .await
+                .expect_err("request cancellation")
+                .is_cancelled()
+        );
+
+        let mut takeover = tokio::spawn({
+            let host = host.clone();
+            let session_id = session_id.clone();
+            async move {
+                host.dispatch(
+                    BoundClient {
+                        client_id: ClientId("api-key-replacement".to_owned()),
+                    },
+                    ClientCommand::TakeDriver {
+                        meta: meta("spoofed", "take-api-key-replacement"),
+                        session_id,
+                    },
+                )
+                .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut takeover)
+                .await
+                .is_err(),
+            "takeover must wait while the irreversible store owns lifecycle"
+        );
+        mutation.release();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), takeover)
+                .await
+                .expect("takeover completed")
+                .expect("takeover task"),
+            CommandOutcome::Accepted
+        );
+        assert!(mutation.persisted.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn oauth_and_api_key_mutations_share_one_global_store_boundary() {
+        let oauth_mutation = BlockingCredentialMutation::new();
+        let api_mutation = BlockingCredentialMutation::new();
+        let fixture = AuthFixture::with_persistence(Arc::clone(&oauth_mutation));
+        let store = {
+            let api_mutation = Arc::clone(&api_mutation);
+            Arc::new(move |_provider: String, _api_key: ProviderApiKey| api_mutation.run())
+                as Arc<ProviderApiKeyStore>
+        };
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 2,
+                max_deduplicated_requests: 64,
+            },
+            Arc::new(StubFactory::new()),
+            Arc::new(StubQueries {
+                auth: Some(Arc::clone(&fixture)),
+                ..StubQueries::default()
+            }),
+        )
+        .expect("host")
+        .with_provider_api_key_store(store);
+        let auth_session = SessionId("oauth-mutation".to_owned());
+        let api_session = SessionId("api-mutation".to_owned());
+        let driver = BoundClient {
+            client_id: ClientId("mutation-driver".to_owned()),
+        };
+        for session_id in [&auth_session, &api_session] {
+            host.prepare_session(
+                CreateSessionRequest {
+                    session_id: session_id.clone(),
+                    workspace: format!("workspace-{}", session_id.0),
+                    model: None,
+                },
+                false,
+            )
+            .await
+            .expect("session");
+            assert_eq!(
+                host.dispatch(
+                    driver.clone(),
+                    ClientCommand::TakeDriver {
+                        meta: meta("spoofed", &format!("take-{}", session_id.0)),
+                        session_id: session_id.clone(),
+                    },
+                )
+                .await,
+                CommandOutcome::Accepted
+            );
+        }
+        let mut auth_events = host
+            .subscribe(driver.clone(), Some(auth_session.clone()), None)
+            .await
+            .expect("auth events");
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::BeginProviderAuth {
+                    meta: meta("spoofed", "begin-global-auth"),
+                    session_id: auth_session.clone(),
+                    provider: "github_copilot".to_owned(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let attempt_id = {
+            let entries = host
+                .provider_auth
+                .entries
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pending_provider_auth_id(entries.values().next().expect("pending auth")).clone()
+        };
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::CompleteProviderAuth {
+                    meta: meta("spoofed", "complete-global-auth"),
+                    session_id: auth_session,
+                    provider: "github_copilot".to_owned(),
+                    attempt_id,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        fixture.completion.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(1), oauth_mutation.started.notified())
+            .await
+            .expect("OAuth persistence started");
+
+        let api_request = tokio::spawn({
+            let host = host.clone();
+            async move {
+                host.submit_provider_api_key(
+                    driver,
+                    &api_session,
+                    "openai",
+                    ProviderApiKey::from_terminal_input("another-request-secret".to_owned())
+                        .expect("key"),
+                )
+                .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), api_mutation.started.notified())
+                .await
+                .is_err(),
+            "API-key persistence must wait for OAuth persistence globally"
+        );
+        oauth_mutation.release();
+        tokio::time::timeout(Duration::from_secs(1), api_mutation.started.notified())
+            .await
+            .expect("API-key persistence started after OAuth release");
+        api_mutation.release();
+        let submission = tokio::time::timeout(Duration::from_secs(1), api_request)
+            .await
+            .expect("API-key request completed")
+            .expect("API-key task")
+            .expect("API-key submission");
+        assert!(submission.stored);
+        assert!(oauth_mutation.persisted.load(Ordering::Acquire));
+        assert!(api_mutation.persisted.load(Ordering::Acquire));
+        let (success, message) = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::ProviderAuthFinished {
+                    success, message, ..
+                } = auth_events
+                    .recv()
+                    .await
+                    .expect("auth event")
+                    .expect("auth result")
+                {
+                    break (success, message);
+                }
+            }
+        })
+        .await
+        .expect("auth completion event");
+        assert!(!success);
+        assert!(message.contains("credentials were stored"));
+        assert!(message.contains("retry activation"));
     }
 
     #[test]

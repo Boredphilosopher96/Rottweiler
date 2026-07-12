@@ -6,6 +6,8 @@ import { join } from "node:path"
 const MAX_EDITOR_BYTES = 2 * 1024 * 1024
 const MAX_CLIPBOARD_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_PROCESS_DIAGNOSTIC_BYTES = 64 * 1024
+const MAX_PROVIDER_AUTH_URL_BYTES = 4 * 1024
+const MAX_CLIPBOARD_TEXT_BYTES = 4 * 1024
 
 export interface DesktopNotification {
   readonly title: string
@@ -31,6 +33,14 @@ export interface ImagePasteAdapter {
   readImage(): Promise<ClipboardImage | null>
 }
 
+export interface ExternalUrlAdapter {
+  open(url: string): Promise<void>
+}
+
+export interface TextClipboardAdapter {
+  writeText(value: string): Promise<void>
+}
+
 export interface TerminalLifecycle {
   suspend(): void
   resume(): void
@@ -39,6 +49,7 @@ export interface TerminalLifecycle {
 export interface ProcessExecutionOptions {
   readonly inheritTerminal?: boolean
   readonly maximumStdoutBytes?: number
+  readonly stdin?: Uint8Array
   readonly timeoutMs?: number
 }
 
@@ -75,6 +86,18 @@ export const noExternalEditor: EditorAdapter = {
 export const noImagePaste: ImagePasteAdapter = {
   async readImage() {
     return null
+  },
+}
+
+export const noExternalUrl: ExternalUrlAdapter = {
+  async open() {
+    throw new Error("opening a browser is unavailable")
+  },
+}
+
+export const noTextClipboard: TextClipboardAdapter = {
+  async writeText() {
+    throw new Error("text clipboard access is unavailable")
   },
 }
 
@@ -183,6 +206,85 @@ export function createDesktopNotificationAdapter(
         // Desktop integration is intentionally best-effort. Missing binaries,
         // headless sessions, and denied notification permissions stay silent.
       }
+    },
+  }
+}
+
+/** Opens a validated provider-auth URL through an argv-only native launcher. */
+export function createExternalUrlAdapter(
+  options: PlatformAdapterOptions = {},
+): ExternalUrlAdapter {
+  const platform = options.platform ?? process.platform
+  const executor = options.executor ?? systemProcessExecutor
+  return {
+    async open(source) {
+      const url = providerAuthUrl(source)
+      const invocation =
+        platform === "darwin"
+          ? (["open", ["-u", url]] as const)
+          : platform === "linux"
+            ? (["xdg-open", [url]] as const)
+            : platform === "win32"
+              ? ([
+                  "rundll32.exe",
+                  ["url.dll,FileProtocolHandler", url],
+                ] as const)
+              : null
+      if (invocation === null) {
+        throw new Error("opening a browser is unsupported on this platform")
+      }
+      const result = await executor.run(invocation[0], invocation[1], {
+        maximumStdoutBytes: MAX_PROCESS_DIAGNOSTIC_BYTES,
+        timeoutMs: 5_000,
+      })
+      if (result.status !== 0) throw new Error("the browser launcher failed")
+    },
+  }
+}
+
+/** Writes bounded challenge text through stdin, never through a shell or argv. */
+export function createTextClipboardAdapter(
+  options: PlatformAdapterOptions = {},
+): TextClipboardAdapter {
+  const platform = options.platform ?? process.platform
+  const executor = options.executor ?? systemProcessExecutor
+  return {
+    async writeText(value) {
+      const bytes = clipboardText(value)
+      const executionOptions = {
+        maximumStdoutBytes: MAX_PROCESS_DIAGNOSTIC_BYTES,
+        stdin: bytes,
+        timeoutMs: 2_000,
+      } as const
+      if (platform === "darwin") {
+        const result = await executor.run("pbcopy", [], executionOptions)
+        if (result.status !== 0) throw new Error("the clipboard writer failed")
+        return
+      }
+      if (platform === "linux") {
+        for (const [executable, args] of [
+          ["wl-copy", ["--type", "text/plain;charset=utf-8"]],
+          ["xclip", ["-selection", "clipboard", "-in"]],
+        ] as const) {
+          try {
+            const result = await executor.run(
+              executable,
+              args,
+              executionOptions,
+            )
+            if (result.status === 0) return
+          } catch {
+            // Try the next native clipboard implementation.
+          }
+        }
+        throw new Error("no supported clipboard writer is available")
+      }
+      if (platform === "win32") {
+        const result = await executor.run("clip.exe", [], executionOptions)
+        if (result.status !== 0) throw new Error("the clipboard writer failed")
+        return
+      }
+      throw new Error("text clipboard access is unsupported on this platform")
     },
   }
 }
@@ -322,6 +424,47 @@ function matchesImageSignature(bytes: Uint8Array, mediaType: string): boolean {
   return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
 }
 
+function providerAuthUrl(source: string): string {
+  const bytes = new TextEncoder().encode(source)
+  if (
+    bytes.length === 0 ||
+    bytes.length > MAX_PROVIDER_AUTH_URL_BYTES ||
+    source.trim() !== source ||
+    /[\u0000-\u001f\u007f]/.test(source)
+  ) {
+    throw new Error("provider authentication URL is invalid")
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(source)
+  } catch {
+    throw new Error("provider authentication URL is invalid")
+  }
+  const normalized = parsed.toString()
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname.length === 0 ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    new TextEncoder().encode(normalized).length > MAX_PROVIDER_AUTH_URL_BYTES
+  ) {
+    throw new Error("provider authentication URL is not a safe HTTPS URL")
+  }
+  return normalized
+}
+
+function clipboardText(value: string): Uint8Array {
+  const bytes = new TextEncoder().encode(value)
+  if (
+    bytes.length === 0 ||
+    bytes.length > MAX_CLIPBOARD_TEXT_BYTES ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    throw new Error("clipboard text is invalid or exceeds its size limit")
+  }
+  return bytes
+}
+
 function executeProcess(
   executable: string,
   args: readonly string[],
@@ -332,7 +475,9 @@ function executeProcess(
     const maximum = options.maximumStdoutBytes ?? MAX_PROCESS_DIAGNOSTIC_BYTES
     const child = spawn(executable, [...args], {
       shell: false,
-      stdio: inherit ? "inherit" : ["ignore", "pipe", "ignore"],
+      stdio: inherit
+        ? "inherit"
+        : [options.stdin === undefined ? "ignore" : "pipe", "pipe", "ignore"],
     })
     const chunks: Buffer[] = []
     let size = 0
@@ -354,6 +499,13 @@ function executeProcess(
       }
       chunks.push(Buffer.from(chunk))
     })
+    if (!inherit && options.stdin !== undefined) {
+      child.stdin?.on("error", () => {
+        // A native clipboard process may exit before consuming stdin. Its
+        // process status remains the bounded, user-facing failure signal.
+      })
+      child.stdin?.end(options.stdin)
+    }
     child.once("error", reject)
     child.once("close", (status) => {
       if (timeout !== null) {

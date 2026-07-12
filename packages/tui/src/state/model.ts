@@ -10,7 +10,10 @@ import type {
   Cost,
   CostSnapshot,
   EngineError,
+  McpApprovalReview,
+  McpServerDescriptor,
   PlanArtifact,
+  PermissionStateDescriptor,
   PromptDump,
   ProviderAuthKind,
   ProviderAuthChallenge,
@@ -156,6 +159,9 @@ export interface CommandAcknowledgement {
     | "command_descriptors_listed"
     | "models_listed"
     | "settings_listed"
+    | "mcp_servers_listed"
+    | "mcp_server_approval_reviewed"
+    | "permissions_listed"
     | "provider_auth_started"
     | "provider_configured"
     | "provider_auth_finished"
@@ -385,6 +391,9 @@ export interface RottweilerState {
   readonly providerAuth: ProviderAuthProjection
   readonly modelCatalogCached: boolean
   readonly settings: readonly UserSettingChoice[]
+  readonly mcpServers: readonly McpServerDescriptor[]
+  readonly mcpApprovalReview: McpApprovalReview | null
+  readonly permissions: PermissionStateDescriptor | null
   readonly workspaceFiles: readonly WorkspaceFileChoice[]
   readonly workspacePreview: WorkspacePreviewProjection | null
   readonly workspaceStatus: WorkspaceStatusProjection | null
@@ -450,6 +459,9 @@ export function createInitialState(): RottweilerState {
     providerAuth: { pending: null, last: null },
     modelCatalogCached: false,
     settings: [],
+    mcpServers: [],
+    mcpApprovalReview: null,
+    permissions: null,
     workspaceFiles: [],
     workspacePreview: null,
     workspaceStatus: null,

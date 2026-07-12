@@ -5,7 +5,7 @@ import { createRottweilerApp } from "../src/app"
 import type { ClientCommand, EngineEvent } from "../src/protocol"
 import { PROTOCOL_VERSION } from "../../../protocol/types"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
-import { daylightTheme } from "../src/theme"
+import { daylightTheme, kennelTheme, themeCatalog, type RottweilerTheme } from "../src/theme"
 
 const initialEvent = {
   type: "text_delta",
@@ -18,6 +18,27 @@ const initialEvent = {
   turn_id: "turn-tui-test",
   text: "hello",
 } satisfies EngineEvent
+
+function rgba(hex: string): [number, number, number, number] {
+  return [
+    Number.parseInt(hex.slice(1, 3), 16),
+    Number.parseInt(hex.slice(3, 5), 16),
+    Number.parseInt(hex.slice(5, 7), 16),
+    255,
+  ]
+}
+
+function expectCoherentTheme(app: ReturnType<typeof createRottweilerApp>, theme: RottweilerTheme) {
+  expect(app.backgroundColor.toInts()).toEqual(rgba(theme.background))
+  expect(app.main.backgroundColor.toInts()).toEqual(rgba(theme.background))
+  expect(app.transcript.backgroundColor.toInts()).toEqual(rgba(theme.background))
+  expect(app.contextPanel.backgroundColor.toInts()).toEqual(rgba(theme.panel))
+  expect(app.composer.backgroundColor.toInts()).toEqual(rgba(theme.panel))
+  expect(app.reviewPanel.backgroundColor.toInts()).toEqual(rgba(theme.panel))
+  expect(app.interactionPanel.backgroundColor.toInts()).toEqual(rgba(theme.panelRaised))
+  expect(app.picker.backgroundColor.toInts()).toEqual(rgba(theme.panelRaised))
+  expect(app.statusLine.bg.toInts()).toEqual(rgba(theme.panel))
+}
 
 describe("Rottweiler OpenTUI shell", () => {
   let renderer: TestRenderer | undefined
@@ -57,10 +78,67 @@ describe("Rottweiler OpenTUI shell", () => {
     await setup.renderOnce()
 
     const backgrounds = setup.captureSpans().lines.flatMap((line) =>
-      line.spans.map((span) => span.bg.toInts()),
+      line.spans.map((span) => span.bg.toInts())
     )
     expect(backgrounds).toContainEqual([247, 245, 239, 255])
     expect(backgrounds).not.toContainEqual([11, 13, 18, 255])
+  })
+
+  test("previews the dynamic theme catalog coherently, reverts on Escape, and persists on confirm", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      theme: kennelTheme,
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.composer.value = "draft survives retheme"
+
+    app.openThemePicker()
+    expect(app.picker.select.options.map((option) => option.value)).toEqual(
+      themeCatalog.map((theme) => `theme:${theme.name}`),
+    )
+    const daylight = app.picker.select.options.findIndex(
+      (option) => option.value === "theme:daylight",
+    )
+    app.picker.select.setSelectedIndex(daylight)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("Themes · arrows preview · Enter confirms")
+    expectCoherentTheme(app, daylightTheme)
+    expect(app.composer.value).toBe("draft survives retheme")
+
+    setup.mockInput.pressEscape()
+    await Bun.sleep(100)
+    await setup.renderOnce()
+    expect(app.picker.visible).toBeFalse()
+    expectCoherentTheme(app, kennelTheme)
+    expect(app.composer.value).toBe("draft survives retheme")
+    expect(commands).toHaveLength(0)
+
+    app.openThemePicker()
+    app.picker.select.setSelectedIndex(
+      app.picker.select.options.findIndex((option) => option.value === "theme:daylight"),
+    )
+    app.picker.select.selectCurrent()
+    await Bun.sleep(10)
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "set_setting",
+      key: "ui.theme",
+      value: "daylight",
+    }))
+    expect(app.picker.visible).toBeFalse()
+    expectCoherentTheme(app, daylightTheme)
+
+    setup.resize(64, 14)
+    app.openModePicker()
+    await setup.renderOnce()
+    expect(app.picker.visible).toBeTrue()
+    expectCoherentTheme(app, daylightTheme)
+    expect(setup.captureCharFrame()).toContain("Modes")
   })
 
   test("submits with plain Enter while modified Enter and Ctrl+J insert newlines", async () => {
@@ -847,10 +925,32 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     expect(app.statusLine.plainText).toContain("model copilot/gpt-5")
     expect(app.statusLine.plainText).not.toContain("copilot/copilot")
-    expect(emitted).toContainEqual(expect.objectContaining({
+    app.handleEvent({
+      type: "conversation_turn_committed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "2",
+        emitted_at: "2026-01-01T00:00:01Z"
+      },
+      agent_turn: "1",
+      turn: {
+        role: "assistant",
+        blocks: [{ type: "text", text: "fallback response" }],
+        meta: {
+          model: "openai/gpt-5-fallback",
+          synthetic: false,
+          summary: false
+        }
+      }
+    })
+    expect(app.state.provider).toBe("openai")
+    expect(app.state.model).toBe("openai/gpt-5-fallback")
+    expect(app.statusLine.plainText).toContain("model openai/gpt-5-fallback")
+    expect(app.statusLine.plainText).not.toContain("openai/openai")
+    expect(emitted).not.toContainEqual(expect.objectContaining({
       type: "set_setting",
       key: "project.models.default",
-      value: "copilot/gpt-5",
     }))
 
     app.openSettingsPicker()
@@ -885,10 +985,198 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(paletteCommand?.description).toContain("Project · Deploy project")
   })
 
+  test("reviews, confirms, and enables a live MCP server through typed commands", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openMcpPicker()
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({ type: "list_mcp_servers" }))
+    app.picker.select.selectCurrent()
+    await setup.mockInput.typeText("docs.remote")
+    setup.mockInput.pressEnter()
+    await setup.mockInput.typeText("https://example.com/mcp")
+    setup.mockInput.pressEnter()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "add_mcp_http_server",
+      name: "docs.remote",
+      endpoint: "https://example.com/mcp",
+    }))
+
+    app.handleEvent({
+      type: "mcp_servers_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui",
+        request_id: "mcp-list",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      servers: [{
+        name: "docs.remote",
+        enabled: false,
+        approved: false,
+        state: { type: "disabled" },
+        tool_count: 0,
+        resource_count: 0,
+        prompt_count: 0,
+      }],
+    })
+    const reviewIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "mcp.review.docs.remote",
+    )
+    app.picker.select.setSelectedIndex(reviewIndex)
+    app.picker.select.selectCurrent()
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({
+      type: "review_mcp_server",
+      name: "docs.remote",
+    }))
+
+    const fingerprint = "a".repeat(64)
+    app.handleEvent({
+      type: "mcp_server_approval_reviewed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui",
+        request_id: "mcp-review",
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      session_id: "session-local",
+      review: {
+        server: "docs.remote",
+        transport: "streamable_http",
+        endpoint: "https://example.com/mcp",
+        origin: "user",
+        defer_tools: true,
+        fingerprint,
+        previously_approved: false,
+      },
+    })
+    const approveIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "mcp.approve.docs.remote",
+    )
+    expect(app.picker.select.options[approveIndex]?.description).toContain(fingerprint)
+    app.picker.select.setSelectedIndex(approveIndex)
+    app.picker.select.selectCurrent()
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({
+      type: "approve_mcp_server",
+      name: "docs.remote",
+      fingerprint,
+    }))
+
+    app.handleEvent({
+      type: "mcp_servers_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui",
+        request_id: "mcp-approved",
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "session-local",
+      servers: [{
+        name: "docs.remote",
+        enabled: false,
+        approved: true,
+        state: { type: "disabled" },
+        tool_count: 0,
+        resource_count: 0,
+        prompt_count: 0,
+      }],
+    })
+    const enableIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "mcp.toggle.docs.remote",
+    )
+    app.picker.select.setSelectedIndex(enableIndex)
+    app.picker.select.selectCurrent()
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({
+      type: "set_mcp_server_enabled",
+      name: "docs.remote",
+      enabled: true,
+    }))
+    expect(emitted.some((command) => command.type === "send_message")).toBe(false)
+  })
+
+  test("manages typed permission rows without transcript JSON or manual ids", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(setup.renderer, {
+      sessionId: "session-permissions",
+      clientId: "permission-driver",
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    setup.renderer.root.add(app)
+
+    app.openPermissionPicker()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "list_permissions",
+      session_id: "session-permissions",
+    }))
+    app.handleEvent({
+      type: "permissions_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "permission-driver",
+        request_id: "permission-list",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-permissions",
+      permissions: {
+        default: "ask",
+        effective_rules: [{ id: "effective:one", pattern: "bash(rm *)", action: "deny" }],
+        project_rules: [],
+        session_rules: [{ id: "session:one", pattern: "bash(cargo test*)", action: "ask" }],
+        approvals: [{
+          id: "session:opaque-approval",
+          scope: "session",
+          tool_name: "read",
+          summary: "exact-invocation=hidden capabilities=ReadFilesystem approval=none",
+        }],
+        truncated: false,
+      },
+    })
+    expect(app.picker.select.options.map((option) => option.value)).toContain(
+      "permissions.effective.effective:one",
+    )
+
+    const removeIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "permissions.remove.session:one",
+    )
+    app.picker.select.setSelectedIndex(removeIndex)
+    app.picker.select.selectCurrent()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "remove_session_permission_rule",
+      rule_id: "session:one",
+    }))
+
+    const revokeIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "permissions.revoke.session:opaque-approval",
+    )
+    app.picker.select.setSelectedIndex(revokeIndex)
+    app.picker.select.selectCurrent()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "revoke_permission_approval",
+      approval_id: "session:opaque-approval",
+      scope: "session",
+    }))
+    expect(emitted.some((command) => command.type === "send_message")).toBe(false)
+  })
+
   test("quick-connects fresh built-in providers through connection-scoped auth prompts", async () => {
     const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
+    const openedUrls: string[] = []
+    const copiedText: string[] = []
     const app = createRottweilerApp(renderer, {
       initialState: {
         ...createInitialState(),
@@ -919,6 +1207,16 @@ describe("Rottweiler OpenTUI shell", () => {
         emitted.push(command)
         return { type: "accepted" }
       },
+      externalUrl: {
+        async open(url) {
+          openedUrls.push(url)
+    }
+      },
+      textClipboard: {
+        async writeText(value) {
+          copiedText.push(value)
+        }
+      }
     })
     renderer.root.add(app)
 
@@ -969,6 +1267,32 @@ describe("Rottweiler OpenTUI shell", () => {
     }))
     expect(app.picker.title).toContain("Authenticate github_copilot")
     expect(app.picker.select.options[0]?.description).toContain("ABCD-1234")
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "provider-auth.open",
+      "provider-auth.copy-code",
+      "provider-auth.copy-url",
+      "provider-auth.waiting",
+      "provider-auth.cancel",
+    ])
+    app.picker.select.setSelectedIndex(0)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(openedUrls).toEqual(["https://github.com/login/device"])
+
+    app.picker.select.setSelectedIndex(1)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(copiedText).toEqual(["ABCD-1234"])
+
+    app.picker.select.setSelectedIndex(2)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(copiedText).toEqual(["ABCD-1234", "https://github.com/login/device"])
+    expect(app.state.providerAuth.pending?.challenge).toEqual({
+      kind: "device_flow",
+      verification_uri: "https://github.com/login/device",
+      user_code: "ABCD-1234",
+    })
 
     app.handleEvent({
       type: "provider_auth_finished",
@@ -998,6 +1322,171 @@ describe("Rottweiler OpenTUI shell", () => {
       type: "configure_builtin_provider",
       provider: "openai_codex",
     }))
+  })
+
+  test("offers activation retry and credential replacement for unreachable providers", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const activations: string[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        providers: [{
+          name: "openai_codex",
+          authKind: "oauth",
+          nextAction: "select_models",
+          configured: true,
+          authenticated: true,
+          reachable: false,
+          modelCount: 0,
+          status: "provider model discovery rejected the stored credential",
+        }],
+      },
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+      async onProviderActivate(provider) {
+        activations.push(provider)
+      },
+    })
+    renderer.root.add(app)
+
+    app.openProviderPicker()
+    app.picker.select.selectCurrent()
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "provider-recovery.activate",
+      "provider-recovery.reauthenticate",
+    ])
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(activations).toEqual(["openai_codex"])
+
+    app.openProviderPicker()
+    app.picker.select.selectCurrent()
+    const reauthenticate = app.picker.select.options.findIndex(
+      (option) => option.value === "provider-recovery.reauthenticate",
+    )
+    app.picker.select.setSelectedIndex(reauthenticate)
+    app.picker.select.selectCurrent()
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "begin_provider_auth",
+      provider: "openai_codex",
+    }))
+  })
+
+  test("offers OAuth browser and URL actions with sanitized adapter failures", async () => {
+    const setup = await createTestRenderer({
+      width: 100,
+      height: 24,
+      useThread: false,
+    })
+    renderer = setup.renderer
+    const copied: string[] = []
+    const authorizationUrl =
+      "https://auth.example.test/authorize?state=challenge-canary"
+    const app = createRottweilerApp(renderer, {
+      onCommand() {
+        return { type: "accepted" }
+      },
+      externalUrl: {
+        async open() {
+          throw new Error(`launcher leaked ${authorizationUrl}`)
+        },
+      },
+      textClipboard: {
+        async writeText(value) {
+          copied.push(value)
+        },
+      },
+    })
+    renderer.root.add(app)
+    app.handleEvent({
+      type: "provider_auth_started",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: "begin-codex",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      attempt_id: "attempt-oauth",
+      provider: "openai_codex",
+      challenge: {
+        kind: "oauth",
+        authorization_url: authorizationUrl,
+        redirect_uri: "http://127.0.0.1:1455/callback",
+      },
+      warnings: [],
+    })
+
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "provider-auth.open",
+      "provider-auth.copy-url",
+      "provider-auth.waiting",
+      "provider-auth.cancel",
+    ])
+    app.picker.select.setSelectedIndex(0)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const error = app.state.errors.at(-1)
+    expect(error?.code).toBe("provider_auth_browser_failed")
+    expect(error?.message).toContain("Copy URL")
+    expect(error?.message).not.toContain("challenge-canary")
+    expect(error?.message).not.toContain("launcher leaked")
+
+    const copyUrl = app.picker.select.options.findIndex(
+      (option) => option.value === "provider-auth.copy-url",
+    )
+    app.picker.select.setSelectedIndex(copyUrl)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(copied).toEqual([authorizationUrl])
+    expect(
+      app.picker.select.options.find(
+        (option) => option.value === "provider-auth.waiting",
+      )?.description,
+    ).toContain("URL copied")
+  })
+
+  test("masks and clears non-protocol provider API keys, including custom providers", async () => {
+    const setup = await createTestRenderer({
+      width: 100,
+      height: 24,
+      useThread: false
+    })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const submissions: Array<{ provider: string; apiKey: string }> = []
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+      async onProviderApiKey(provider, apiKey) {
+        submissions.push({ provider, apiKey })
+        return { stored: true, activated: false, warnings: [] }
+      }
+    })
+    renderer.root.add(app)
+    const canary = "rw-secret-canary-tui"
+    app.openProviderApiKeyPrompt("company-openai")
+    await setup.mockInput.typeText(canary)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).not.toContain(canary)
+    expect(setup.captureCharFrame()).toContain("•".repeat(canary.length))
+    expect(JSON.stringify(app.state)).not.toContain(canary)
+    expect(JSON.stringify(commands)).not.toContain(canary)
+
+    setup.mockInput.pressEnter()
+    await Bun.sleep(10)
+    expect(submissions).toEqual([
+      { provider: "company-openai", apiKey: canary }
+    ])
+    expect(app.picker.input.value).toBe("")
+    expect(app.state.errors.at(-1)?.code).toBe("provider_activation_pending")
+    expect(JSON.stringify(app.state)).not.toContain(canary)
   })
 
   test("surfaces a correlated rejected model switch as a bounded visible error", async () => {
@@ -1062,7 +1551,7 @@ describe("Rottweiler OpenTUI shell", () => {
     }))
   })
 
-  test("bounds no-op model persistence correlations and persists the newest alias", async () => {
+  test("leaves accepted model persistence to the host transaction", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const commands: ClientCommand[] = []
@@ -1091,29 +1580,22 @@ describe("Rottweiler OpenTUI shell", () => {
     }
     const switches = commands.filter((command) => command.type === "switch_model")
     expect(switches).toHaveLength(130)
-    const persistedBefore = commands.filter(
-      (command) => command.type === "set_setting" && command.key === "project.models.default",
-    ).length
-    const firstRequest = switches[0]?.meta.request_id
     const lastRequest = switches.at(-1)?.meta.request_id
-    for (const [sequence, causedBy] of [["1", firstRequest], ["2", lastRequest]] as const) {
-      app.handleEvent({
-        type: "model_changed",
-        meta: {
-          protocol_version: PROTOCOL_VERSION,
-          session_id: "session-local",
-          sequence_id: sequence,
-          emitted_at: "2026-01-01T00:00:00Z",
-          caused_by: causedBy,
-        },
-        model: "fast",
-      })
-    }
+    app.handleEvent({
+      type: "model_changed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+        caused_by: lastRequest,
+      },
+      model: "fast",
+    })
     const persisted = commands.filter(
       (command) => command.type === "set_setting" && command.key === "project.models.default",
     )
-    expect(persisted).toHaveLength(persistedBefore + 1)
-    expect(persisted.at(-1)).toEqual(expect.objectContaining({ value: "fast" }))
+    expect(persisted).toHaveLength(0)
   })
 
   test("ignores stale @ search responses by request id", async () => {

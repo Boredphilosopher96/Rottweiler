@@ -1393,8 +1393,13 @@ impl CliSessionFactory {
             },
             runtime.handle,
         );
-        Ok(if let Some(model_catalog) = runtime.model_catalog {
+        let session = if let Some(model_catalog) = runtime.model_catalog {
             session.with_model_catalog(model_catalog)
+        } else {
+            session
+        };
+        Ok(if let Some(mcp) = runtime.mcp {
+            session.with_mcp(mcp)
         } else {
             session
         })
@@ -1842,6 +1847,9 @@ impl HostQueryService for CliSessionFactory {
                 };
                 config_loader.persist_tui_mcp_enabled(server, enabled)?;
                 config_loader.load()
+            } else if let Some(server) = key.strip_prefix("mcp.add_http.") {
+                config_loader.persist_tui_mcp_http_server(server, &value)?;
+                config_loader.load()
             } else {
                 config_loader.persist_tui_setting(&key, &value)
             }
@@ -1871,6 +1879,21 @@ impl HostQueryService for CliSessionFactory {
         ))
     }
 
+    async fn persist_project_model_selection(
+        &self,
+        session: &SessionDescriptor,
+        model: &ModelAlias,
+    ) -> Result<(), HostError> {
+        let workspace = self.workspace_for_session(session)?;
+        let loader = self.settings_loader_for(&workspace);
+        let model = model.0.clone();
+        tokio::task::spawn_blocking(move || loader.persist_tui_project_model(&model))
+            .await
+            .map_err(|_| HostError::Persistence("project model worker failed".to_owned()))?
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        Ok(())
+    }
+
     async fn begin_provider_auth(&self, provider: &str) -> Result<ProviderAuthAttempt, HostError> {
         match begin_provider_login(provider)
             .await
@@ -1882,16 +1905,27 @@ impl HostQueryService for CliSessionFactory {
                     redirect_uri: login.redirect_uri().to_owned(),
                 };
                 let warnings = login.warnings().to_vec();
+                let provider = provider.to_owned();
                 let completion = Box::pin(async move {
-                    let result = login
-                        .complete()
+                    let prepared = login
+                        .prepare()
                         .await
                         .map_err(|error| HostError::Query(error.to_string()))?;
-                    Ok(ProviderAuthCompletion {
-                        provider: result.provider,
-                        message: "provider authentication completed".to_owned(),
-                        warnings: result.warnings,
-                    })
+                    Ok(ProviderAuthCompletion::new(
+                        provider,
+                        "provider authentication completed".to_owned(),
+                        Vec::new(),
+                    )
+                    .with_persistence(move || {
+                        prepared
+                            .persist()
+                            .map(|result| result.warnings)
+                            .map_err(|_| {
+                                HostError::Persistence(
+                                    "provider credential storage failed".to_owned(),
+                                )
+                            })
+                    }))
                 });
                 Ok(ProviderAuthAttempt::new(
                     challenge,
@@ -1908,16 +1942,27 @@ impl HostQueryService for CliSessionFactory {
                 let warnings = login.warnings().to_vec();
                 let cancellation = ProviderLoginCancellation::default();
                 let poll_cancellation = cancellation.clone();
+                let provider = provider.to_owned();
                 let completion = Box::pin(async move {
-                    let result = login
-                        .complete(&poll_cancellation)
+                    let prepared = login
+                        .prepare(&poll_cancellation)
                         .await
                         .map_err(|error| HostError::Query(error.to_string()))?;
-                    Ok(ProviderAuthCompletion {
-                        provider: result.provider,
-                        message: "provider authentication completed".to_owned(),
-                        warnings: result.warnings,
-                    })
+                    Ok(ProviderAuthCompletion::new(
+                        provider,
+                        "provider authentication completed".to_owned(),
+                        Vec::new(),
+                    )
+                    .with_persistence(move || {
+                        prepared
+                            .persist()
+                            .map(|result| result.warnings)
+                            .map_err(|_| {
+                                HostError::Persistence(
+                                    "provider credential storage failed".to_owned(),
+                                )
+                            })
+                    }))
                 });
                 Ok(ProviderAuthAttempt::new(
                     challenge,
@@ -2050,7 +2095,11 @@ fn overlay_catalog_current(
     selected_model: Option<&str>,
     resolved_model: Option<&str>,
 ) {
-    if let Some(current) = resolved_model.or(selected_model) {
+    let current = selected_model
+        .filter(|selected| selected.contains('/'))
+        .or(resolved_model)
+        .or(selected_model);
+    if let Some(current) = current {
         for model in &mut catalog.models {
             model.current = model.id == current
                 || catalog.aliases.iter().any(|alias| {
@@ -3312,6 +3361,11 @@ mod tests {
         assert!(catalog.aliases[0].current);
         assert!(!catalog.models[0].current);
         assert!(catalog.models[1].current);
+
+        overlay_catalog_current(&mut catalog, Some("primary/model"), Some("fallback/model"));
+        assert!(!catalog.aliases[0].current);
+        assert!(catalog.models[0].current);
+        assert!(!catalog.models[1].current);
     }
 
     fn factory(root: &Path, workspace: &Path) -> CliSessionFactory {

@@ -20,8 +20,10 @@ pub use rw_types::config::{
 };
 pub use rw_types::{
     AccountingAttribution, AttachmentData, CommandDescriptor, CommandSource, ContextItemId,
-    ContextSnapshot, CostSnapshot, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
-    ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, PlanDecision, PromptDump,
+    ContextSnapshot, CostSnapshot, McpApprovalReview, McpServerDescriptor, McpServerState, ModeId,
+    ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot,
+    ModelDescriptor, PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
+    PermissionRuleDescriptor, PermissionStateDescriptor, PlanDecision, PromptDump,
     ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor, ProviderNextAction,
     ReviewFileDecision, ReviewFileStatus, SessionReview, SessionReviewFile, UserSettingDescriptor,
     WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
@@ -30,11 +32,12 @@ pub use rw_types::{
 
 pub use admin::{
     AdminError, DEFAULT_MODEL_CATALOG_URL, EMBEDDED_UPDATE_BASE_URL, GitHubCopilotLogin,
-    GitHubCopilotLoginResult, ModelCatalogRefresh, OAuthLogin, OAuthLoginResult, ProviderApiKey,
-    ProviderLogin, ProviderLoginCancellation, ResolvedProviderApiKey, UpdateNetworkClient,
-    begin_oauth_login, begin_provider_login, default_provider_api_key_credential_id,
-    prepare_update_network, refresh_model_catalog, resolve_provider_api_key,
-    store_provider_api_key, validate_stored_provider_credential,
+    GitHubCopilotLoginResult, ModelCatalogRefresh, OAuthLogin, OAuthLoginResult,
+    PreparedGitHubCopilotCredential, PreparedOAuthCredential, ProviderApiKey, ProviderLogin,
+    ProviderLoginCancellation, ResolvedProviderApiKey, UpdateNetworkClient, begin_oauth_login,
+    begin_provider_login, default_provider_api_key_credential_id, prepare_update_network,
+    refresh_model_catalog, resolve_provider_api_key, store_provider_api_key,
+    validate_stored_provider_credential,
 };
 pub use engine::{
     AgentLoopError, AgentTurnStatus, BudgetLedgerQuery, BudgetLedgerTotals, CommandToolCall,
@@ -52,9 +55,9 @@ pub use engine::{
 };
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
-    ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostQueryService,
-    HostedSession, PreparedForkOperation, ProviderAuthAttempt, ProviderAuthCompletion,
-    SessionFactory,
+    ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostMcpService,
+    HostQueryService, HostedSession, PreparedForkOperation, ProviderApiKeySubmission,
+    ProviderAuthAttempt, ProviderAuthCompletion, SessionFactory,
 };
 pub use init::{
     DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,

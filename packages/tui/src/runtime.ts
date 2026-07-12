@@ -68,6 +68,13 @@ export interface RuntimeApp {
 
 export interface RuntimeEngineClient {
   postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome | null>
+  submitProviderApiKey?(
+    sessionId: string,
+    provider: string,
+    apiKey: string,
+    signal?: AbortSignal,
+  ): Promise<{ readonly stored: true; readonly activated: boolean; readonly warnings: readonly string[] }>
+  activateProvider?(sessionId: string, provider: string, signal?: AbortSignal): Promise<void>
   subscribe(options: EngineSubscriptionOptions): Promise<void>
 }
 
@@ -289,6 +296,34 @@ export class TuiEngineRuntime {
       }
       return null
     }
+  }
+
+  async submitProviderApiKey(
+    provider: string,
+    apiKey: string,
+  ): Promise<{ readonly stored: true; readonly activated: boolean; readonly warnings: readonly string[] }> {
+    await this.#ready
+    if (!this.#driverReady || this.#subscriptionController === null) {
+      throw new EngineRuntimeError("the session driver is not ready")
+    }
+    if (this.#config.replayMode || this.#client.submitProviderApiKey === undefined) {
+      throw new EngineRuntimeError("provider credential submission is unavailable")
+    }
+    return await this.#client.submitProviderApiKey(
+      this.#sessionId,
+      provider,
+      apiKey,
+      this.#subscriptionController.signal,
+    )
+  }
+
+  async activateProvider(provider: string): Promise<void> {
+    await this.#ready
+    if (!this.#driverReady || this.#subscriptionController === null
+      || this.#client.activateProvider === undefined || this.#config.replayMode) {
+      throw new EngineRuntimeError("provider activation is unavailable")
+    }
+    await this.#client.activateProvider(this.#sessionId, provider, this.#subscriptionController.signal)
   }
 
   async stop(): Promise<void> {

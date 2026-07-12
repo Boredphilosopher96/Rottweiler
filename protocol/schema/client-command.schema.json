@@ -794,6 +794,234 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "type": {
+          "type": "string",
+          "const": "list_mcp_servers"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "add_mcp_http_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name",
+        "endpoint"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "review_mcp_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "approve_mcp_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name",
+        "fingerprint"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "set_mcp_server_enabled"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name",
+        "enabled"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_permissions"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/$defs/PermissionAction"
+        },
+        "type": {
+          "type": "string",
+          "const": "add_session_permission_rule"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "pattern",
+        "action"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "remove_session_permission_rule"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "rule_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "approval_id": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/PermissionApprovalScope"
+        },
+        "type": {
+          "type": "string",
+          "const": "revoke_permission_approval"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "approval_id",
+        "scope"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "provider": {
           "type": "string"
         },
@@ -1253,6 +1481,23 @@
       "enum": [
         "accept",
         "revert"
+      ]
+    },
+    "PermissionAction": {
+      "description": "Permission decision exposed on the interactive protocol without coupling\nclients to configuration-file types.",
+      "type": "string",
+      "enum": [
+        "ask",
+        "allow",
+        "deny"
+      ]
+    },
+    "PermissionApprovalScope": {
+      "description": "Scope of a remembered exact approval.",
+      "type": "string",
+      "enum": [
+        "session",
+        "project"
       ]
     },
     "ProviderAuthAttemptId": {

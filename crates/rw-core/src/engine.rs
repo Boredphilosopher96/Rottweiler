@@ -42,11 +42,13 @@ use rw_types::{
     ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId,
     ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModeId, ModelAlias,
-    PROTOCOL_VERSION, PlanArtifact, PlanDecision, PromptDump, PromptTool, Question, QuestionId,
-    QuestionOption, QuestionResponseKind, RequestId, ReviewFileDecision, RewindTarget, Role,
-    SequenceId, SessionId, SessionMode, SessionReview, ShellId, StoredAttachment, SubagentId,
-    ToolCallId, ToolOutput, ToolOutputPart, ToolOutputStream, Turn, TurnAccounting, TurnId,
-    TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
+    PROTOCOL_VERSION, PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
+    PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump,
+    PromptTool, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
+    ReviewFileDecision, RewindTarget, Role, SequenceId, SessionId, SessionMode, SessionReview,
+    ShellId, StoredAttachment, SubagentId, ToolCallId, ToolOutput, ToolOutputPart,
+    ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
+    UnrestorablePath, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -57,6 +59,24 @@ use crate::{
     InitDepth, PermissionApprover, PermissionGate, PermissionOutcome, PermissionRequest,
     ProviderRuntime, apply_init_plan, plan_init,
 };
+
+const fn provider_thinking_to_config(thinking: ThinkingLevel) -> rw_types::config::ThinkingLevel {
+    match thinking {
+        ThinkingLevel::Off => rw_types::config::ThinkingLevel::Off,
+        ThinkingLevel::Low => rw_types::config::ThinkingLevel::Low,
+        ThinkingLevel::Medium => rw_types::config::ThinkingLevel::Medium,
+        ThinkingLevel::High => rw_types::config::ThinkingLevel::High,
+    }
+}
+
+const fn config_thinking_to_provider(thinking: rw_types::config::ThinkingLevel) -> ThinkingLevel {
+    match thinking {
+        rw_types::config::ThinkingLevel::Off => ThinkingLevel::Off,
+        rw_types::config::ThinkingLevel::Low => ThinkingLevel::Low,
+        rw_types::config::ThinkingLevel::Medium => ThinkingLevel::Medium,
+        rw_types::config::ThinkingLevel::High => ThinkingLevel::High,
+    }
+}
 
 mod decimal_u64 {
     use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
@@ -105,6 +125,11 @@ const MAX_PLUGIN_MESSAGE_BYTES: usize = 256 * 1024;
 const MAX_PLUGIN_STATUS_BYTES: usize = 16 * 1024;
 const MAX_PLUGIN_NOTIFICATION_TITLE_BYTES: usize = 64;
 const MAX_PLUGIN_NOTIFICATION_MESSAGE_BYTES: usize = 16 * 1024;
+const MAX_PERMISSION_RULES_PER_SCOPE: usize = 128;
+const MAX_PERMISSION_APPROVALS: usize = 256;
+const MAX_PERMISSION_PATTERN_BYTES: usize = 2 * 1024;
+const MAX_PERMISSION_ID_BYTES: usize = 192;
+const MAX_PERMISSION_LABEL_BYTES: usize = 512;
 
 #[derive(Clone, Debug)]
 struct PreparedUserMessage {
@@ -291,10 +316,19 @@ pub trait ModelDriver: Send + Sync {
 
     /// Activates a provider whose credentials became available after this
     /// session runtime was assembled.
-    async fn activate_provider(&self, provider: &str) -> Result<(), AgentLoopError> {
+    async fn activate_provider(
+        &self,
+        provider: &str,
+        _selected_model: Option<&str>,
+    ) -> Result<(), AgentLoopError> {
         Err(AgentLoopError::InvalidConfiguration(format!(
             "provider {provider:?} cannot be activated by this model runtime"
         )))
+    }
+
+    /// Resolves the session thinking effort for a newly selected model.
+    fn thinking_for_model(&self, _model: &str, fallback: ThinkingLevel) -> ThinkingLevel {
+        fallback
     }
 
     /// Whether one exact provider route is configured for an alias.
@@ -414,9 +448,27 @@ impl ModelDriver for ProviderRuntime {
             .map_err(|error| AgentLoopError::Provider(error.to_string()))
     }
 
-    async fn activate_provider(&self, provider: &str) -> Result<(), AgentLoopError> {
+    async fn activate_provider(
+        &self,
+        provider: &str,
+        selected_model: Option<&str>,
+    ) -> Result<(), AgentLoopError> {
         ProviderRuntime::activate_provider(self, provider)
-            .map_err(|error| AgentLoopError::Provider(error.to_string()))
+            .map_err(|error| AgentLoopError::Provider(error.to_string()))?;
+        if let Some(model) = selected_model.filter(|model| {
+            model
+                .split_once('/')
+                .is_some_and(|(owner, _)| owner == provider)
+        }) {
+            self.refresh_concrete_model(model)
+                .await
+                .map_err(|error| AgentLoopError::Provider(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn thinking_for_model(&self, model: &str, fallback: ThinkingLevel) -> ThinkingLevel {
+        self.thinking_for_model(model).unwrap_or(fallback)
     }
 
     fn has_provider_for_alias(&self, alias: &str, provider: &str) -> bool {
@@ -693,6 +745,7 @@ enum PendingEvent {
     ModelChanged {
         model: ModelAlias,
         provider: Option<String>,
+        thinking: ThinkingLevel,
     },
     ModeChanged {
         mode: SessionMode,
@@ -1173,10 +1226,15 @@ impl PendingEvent {
                 meta,
                 driver_client_id,
             },
-            Self::ModelChanged { model, provider } => EngineEvent::ModelChanged {
+            Self::ModelChanged {
+                model,
+                provider,
+                thinking,
+            } => EngineEvent::ModelChanged {
                 meta,
                 model,
                 provider,
+                thinking: Some(provider_thinking_to_config(thinking)),
             },
             Self::ModeChanged { mode } => EngineEvent::ModeChanged {
                 meta,
@@ -1322,6 +1380,7 @@ pub struct SessionSnapshot {
     pub completed_turns: u64,
     pub model_alias: String,
     pub provider: Option<String>,
+    pub thinking: ThinkingLevel,
     pub mode: SessionMode,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
@@ -1354,6 +1413,7 @@ pub struct SessionRecoveredState {
     pub interrupted_compaction: bool,
     pub model_alias: Option<String>,
     pub provider: Option<String>,
+    pub thinking: Option<ThinkingLevel>,
     pub mode: SessionMode,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
@@ -1462,6 +1522,9 @@ fn recovered_pending_event(
         | EngineEvent::CommandDescriptorsListed { .. }
         | EngineEvent::ModelsListed { .. }
         | EngineEvent::SettingsListed { .. }
+        | EngineEvent::McpServersListed { .. }
+        | EngineEvent::McpServerApprovalReviewed { .. }
+        | EngineEvent::PermissionsListed { .. }
         | EngineEvent::ProviderAuthStarted { .. }
         | EngineEvent::ProviderConfigured { .. }
         | EngineEvent::ProviderAuthFinished { .. }
@@ -1814,10 +1877,14 @@ fn recovered_pending_event(
             roots: roots.clone(),
         },
         EngineEvent::ModelChanged {
-            model, provider, ..
+            model,
+            provider,
+            thinking,
+            ..
         } => PendingEvent::ModelChanged {
             model: model.clone(),
             provider: provider.clone(),
+            thinking: config_thinking_to_provider(thinking.unwrap_or_default()),
         },
         EngineEvent::ModeChanged { mode, .. } => PendingEvent::ModeChanged {
             mode: parse_session_mode(&mode.0)
@@ -1903,6 +1970,7 @@ pub fn project_session_events(
     let mut accounting = Vec::new();
     let mut model_alias = None;
     let mut selected_provider = None;
+    let mut selected_thinking = None;
     let mut mode = SessionMode::Execute;
     let mut pending_plan = None;
     let mut approved_plan = None;
@@ -2245,9 +2313,14 @@ pub fn project_session_events(
             } => {
                 driver_client_id = Some(driver.clone());
             }
-            PendingEvent::ModelChanged { model, provider } => {
+            PendingEvent::ModelChanged {
+                model,
+                provider,
+                thinking,
+            } => {
                 model_alias = Some(model.0.clone());
                 selected_provider.clone_from(provider);
+                selected_thinking = Some(*thinking);
             }
             PendingEvent::ModeChanged { mode: changed } => {
                 mode = *changed;
@@ -2396,6 +2469,7 @@ pub fn project_session_events(
         interrupted_compaction,
         model_alias,
         provider: selected_provider,
+        thinking: selected_thinking,
         mode,
         pending_plan,
         approved_plan,
@@ -4114,8 +4188,12 @@ impl SessionHandle {
     /// # Errors
     ///
     /// Returns a sanitized model-runtime error if activation fails.
-    pub async fn activate_provider(&self, provider: &str) -> Result<(), AgentLoopError> {
-        self.model.activate_provider(provider).await
+    pub async fn activate_provider(
+        &self,
+        provider: &str,
+        selected_model: Option<&str>,
+    ) -> Result<(), AgentLoopError> {
+        self.model.activate_provider(provider, selected_model).await
     }
 
     /// Mints the narrow machine capability for one approved logical plugin.
@@ -4716,6 +4794,7 @@ struct ActorState {
     budgeter: Budgeter,
     model_alias: String,
     provider: Option<String>,
+    thinking: ThinkingLevel,
     mode: SessionMode,
     pending_plan: Option<PlanArtifact>,
     approved_plan: Option<PlanArtifact>,
@@ -4741,6 +4820,7 @@ impl ActorState {
         session_id: SessionId,
         event_clock: Arc<dyn EventClock>,
         default_model_alias: &str,
+        default_thinking: ThinkingLevel,
         recovered: &SessionRecoveredState,
     ) -> Self {
         Self {
@@ -4773,6 +4853,7 @@ impl ActorState {
                 .clone()
                 .unwrap_or_else(|| default_model_alias.to_owned()),
             provider: recovered.provider.clone(),
+            thinking: recovered.thinking.unwrap_or(default_thinking),
             mode: recovered.mode,
             pending_plan: recovered.pending_plan.clone(),
             approved_plan: recovered.approved_plan.clone(),
@@ -4862,6 +4943,7 @@ async fn run_actor(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
         &config.model_alias,
+        config.thinking,
         &config.recovered,
     );
     let interrupted_turn = config.recovered.interrupted_turn;
@@ -5016,6 +5098,15 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::ListModels { meta, .. }
         | ClientCommand::ListSettings { meta, .. }
         | ClientCommand::SetSetting { meta, .. }
+        | ClientCommand::ListMcpServers { meta, .. }
+        | ClientCommand::AddMcpHttpServer { meta, .. }
+        | ClientCommand::ReviewMcpServer { meta, .. }
+        | ClientCommand::ApproveMcpServer { meta, .. }
+        | ClientCommand::SetMcpServerEnabled { meta, .. }
+        | ClientCommand::ListPermissions { meta, .. }
+        | ClientCommand::AddSessionPermissionRule { meta, .. }
+        | ClientCommand::RemoveSessionPermissionRule { meta, .. }
+        | ClientCommand::RevokePermissionApproval { meta, .. }
         | ClientCommand::BeginProviderAuth { meta, .. }
         | ClientCommand::ConfigureBuiltinProvider { meta, .. }
         | ClientCommand::CompleteProviderAuth { meta, .. }
@@ -5064,6 +5155,15 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::ListCommands { session_id, .. }
         | ClientCommand::ListSettings { session_id, .. }
         | ClientCommand::SetSetting { session_id, .. }
+        | ClientCommand::ListMcpServers { session_id, .. }
+        | ClientCommand::AddMcpHttpServer { session_id, .. }
+        | ClientCommand::ReviewMcpServer { session_id, .. }
+        | ClientCommand::ApproveMcpServer { session_id, .. }
+        | ClientCommand::SetMcpServerEnabled { session_id, .. }
+        | ClientCommand::ListPermissions { session_id, .. }
+        | ClientCommand::AddSessionPermissionRule { session_id, .. }
+        | ClientCommand::RemoveSessionPermissionRule { session_id, .. }
+        | ClientCommand::RevokePermissionApproval { session_id, .. }
         | ClientCommand::BeginProviderAuth { session_id, .. }
         | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
         | ClientCommand::CompleteProviderAuth { session_id, .. }
@@ -5923,7 +6023,174 @@ fn requires_driver(command: &ClientCommand) -> bool {
             | ClientCommand::GetCost { .. }
             | ClientCommand::GetSessionReview { .. }
             | ClientCommand::DumpPrompt { .. }
+            | ClientCommand::ListPermissions { .. }
     )
+}
+
+const fn permission_action(decision: PermissionDecision) -> PermissionAction {
+    match decision {
+        PermissionDecision::Ask => PermissionAction::Ask,
+        PermissionDecision::Allow => PermissionAction::Allow,
+        PermissionDecision::Deny => PermissionAction::Deny,
+    }
+}
+
+const fn permission_decision(action: PermissionAction) -> PermissionDecision {
+    match action {
+        PermissionAction::Ask => PermissionDecision::Ask,
+        PermissionAction::Allow => PermissionDecision::Allow,
+        PermissionAction::Deny => PermissionDecision::Deny,
+    }
+}
+
+fn permission_rule_id(scope: &str, rule: &PermissionRule) -> String {
+    let mut digest = blake3::Hasher::new();
+    digest.update(b"rottweiler-permission-rule-row-v1\0");
+    digest.update(scope.as_bytes());
+    digest.update(b"\0");
+    digest.update(format!("{:?}", rule.action).as_bytes());
+    digest.update(b"\0");
+    digest.update(rule.pattern.as_bytes());
+    format!("{scope}:{}", &digest.finalize().to_hex()[..24])
+}
+
+fn bounded_permission_rule(scope: &str, rule: &PermissionRule) -> Option<PermissionRuleDescriptor> {
+    (rule.pattern.len() <= MAX_PERMISSION_PATTERN_BYTES
+        && !rule.pattern.chars().any(char::is_control))
+    .then(|| PermissionRuleDescriptor {
+        id: permission_rule_id(scope, rule),
+        pattern: rule.pattern.clone(),
+        action: permission_action(rule.action),
+    })
+}
+
+fn permission_state(permissions: &PermissionGate) -> PermissionStateDescriptor {
+    let snapshot = permissions.snapshot();
+    let mut truncated = false;
+    let mut collect_rules = |scope: &str, rules: &[PermissionRule]| {
+        let mut rows = Vec::new();
+        for rule in rules {
+            if rows.len() >= MAX_PERMISSION_RULES_PER_SCOPE {
+                truncated = true;
+                break;
+            }
+            if let Some(row) = bounded_permission_rule(scope, rule) {
+                rows.push(row);
+            } else {
+                truncated = true;
+            }
+        }
+        rows
+    };
+    let effective_rules = collect_rules("effective", &snapshot.rules);
+    let session_rules = collect_rules("session", &snapshot.session_rules);
+    let remembered = permissions.approval_snapshot();
+    let mut approvals = Vec::new();
+    for (scope, rows) in [
+        (PermissionApprovalScope::Session, remembered.session),
+        (PermissionApprovalScope::Project, remembered.project),
+    ] {
+        for approval in rows {
+            if approvals.len() >= MAX_PERMISSION_APPROVALS {
+                truncated = true;
+                break;
+            }
+            if approval.id.len() > MAX_PERMISSION_ID_BYTES
+                || approval.tool_name.len() > MAX_PERMISSION_LABEL_BYTES
+                || approval.canonical_summary.len() > MAX_PERMISSION_LABEL_BYTES
+                || approval.id.chars().any(char::is_control)
+                || approval.tool_name.chars().any(char::is_control)
+                || approval.canonical_summary.chars().any(char::is_control)
+            {
+                truncated = true;
+                continue;
+            }
+            approvals.push(PermissionApprovalDescriptor {
+                id: approval.id,
+                scope,
+                tool_name: approval.tool_name,
+                summary: approval.canonical_summary,
+            });
+        }
+    }
+    PermissionStateDescriptor {
+        default: permission_action(snapshot.default),
+        effective_rules,
+        // Project configuration cannot grant permission authority. Remembered
+        // project approvals are represented separately above.
+        project_rules: Vec::new(),
+        session_rules,
+        approvals,
+        truncated,
+    }
+}
+
+fn apply_permission_command(
+    command: &ClientCommand,
+    permissions: &PermissionGate,
+) -> Result<PermissionStateDescriptor, String> {
+    match command {
+        ClientCommand::ListPermissions { .. } => {}
+        ClientCommand::AddSessionPermissionRule {
+            pattern, action, ..
+        } => {
+            if pattern.is_empty()
+                || pattern.len() > MAX_PERMISSION_PATTERN_BYTES
+                || pattern.chars().any(char::is_control)
+            {
+                return Err("permission rule is empty or exceeds its safety limit".to_owned());
+            }
+            permissions.add_session_rule(PermissionRule {
+                pattern: pattern.clone(),
+                action: permission_decision(*action),
+            })?;
+        }
+        ClientCommand::RemoveSessionPermissionRule { rule_id, .. } => {
+            if rule_id.is_empty() || rule_id.len() > MAX_PERMISSION_ID_BYTES {
+                return Err("permission rule id is invalid".to_owned());
+            }
+            let snapshot = permissions.snapshot();
+            let pattern = snapshot
+                .session_rules
+                .iter()
+                .find(|rule| permission_rule_id("session", rule) == *rule_id)
+                .map(|rule| rule.pattern.clone())
+                .ok_or_else(|| "permission rule is no longer present".to_owned())?;
+            if !permissions.remove_session_rule(&pattern) {
+                return Err("permission rule is no longer present".to_owned());
+            }
+        }
+        ClientCommand::RevokePermissionApproval {
+            approval_id, scope, ..
+        } => {
+            if approval_id.is_empty() || approval_id.len() > MAX_PERMISSION_ID_BYTES {
+                return Err("permission approval id is invalid".to_owned());
+            }
+            let approvals = permissions.approval_snapshot();
+            let known = match scope {
+                PermissionApprovalScope::Session => approvals.session,
+                PermissionApprovalScope::Project => approvals.project,
+            }
+            .iter()
+            .any(|approval| approval.id == *approval_id);
+            if !known {
+                return Err("permission approval is no longer present".to_owned());
+            }
+            let removed = match scope {
+                PermissionApprovalScope::Session => {
+                    permissions.revoke_session_approvals(Some(approval_id))
+                }
+                PermissionApprovalScope::Project => permissions
+                    .revoke_project_approvals(Some(approval_id))
+                    .map_err(|_| "project approval revocation failed".to_owned())?,
+            };
+            if removed != 1 {
+                return Err("permission approval is no longer present".to_owned());
+            }
+        }
+        _ => return Err("command is not a permission-management operation".to_owned()),
+    }
+    Ok(permission_state(permissions))
 }
 
 fn unsupported_in_m2(command: &ClientCommand) -> bool {
@@ -6684,6 +6951,55 @@ async fn handle_actor_command(
                 }
             }
 
+            if matches!(
+                &command,
+                ClientCommand::ListPermissions { .. }
+                    | ClientCommand::AddSessionPermissionRule { .. }
+                    | ClientCommand::RemoveSessionPermissionRule { .. }
+                    | ClientCommand::RevokePermissionApproval { .. }
+            ) {
+                let mutating = !matches!(&command, ClientCommand::ListPermissions { .. });
+                let result = if mutating
+                    && (state.running.is_some()
+                        || state.active_shell.is_some()
+                        || config.tools.session_activity(&state.session_id).is_some())
+                {
+                    Err("permission mutations require an idle session".to_owned())
+                } else {
+                    apply_permission_command(&command, &config.permissions)
+                };
+                match result {
+                    Ok(permissions) => {
+                        let accepted = CommandOutcome::Accepted;
+                        send_ack(state, events, &meta, session, accepted.clone());
+                        send_connection_event(
+                            events,
+                            &meta.client_id,
+                            EngineEvent::PermissionsListed {
+                                meta: query_meta(state, &meta),
+                                session_id: state.session_id.clone(),
+                                permissions,
+                            },
+                        );
+                        let _ = respond.send(accepted);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Ok(ProtocolCompletion::Unit));
+                        }
+                    }
+                    Err(message) => {
+                        let outcome = protocol_rejection("permission_operation_failed", message);
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Err(AgentLoopError::InvalidConfiguration(
+                                "permission operation failed".to_owned(),
+                            )));
+                        }
+                    }
+                }
+                return;
+            }
+
             let attach_gap = if let ClientCommand::AttachSession {
                 last_seen_sequence, ..
             } = &command
@@ -6911,6 +7227,17 @@ async fn handle_actor_command(
             send_ack(state, events, &meta, session, accepted.clone());
             let _ = respond.send(accepted);
             match command {
+                ClientCommand::ListPermissions { .. }
+                | ClientCommand::AddSessionPermissionRule { .. }
+                | ClientCommand::RemoveSessionPermissionRule { .. }
+                | ClientCommand::RevokePermissionApproval { .. }
+                | ClientCommand::ListMcpServers { .. }
+                | ClientCommand::AddMcpHttpServer { .. }
+                | ClientCommand::ReviewMcpServer { .. }
+                | ClientCommand::ApproveMcpServer { .. }
+                | ClientCommand::SetMcpServerEnabled { .. } => {
+                    unreachable!("host query commands return through their typed query branch")
+                }
                 ClientCommand::AttachSession { role, .. } => {
                     state
                         .client_roles
@@ -6993,6 +7320,7 @@ async fn handle_actor_command(
                 ClientCommand::SwitchModel {
                     model, provider, ..
                 } => {
+                    let thinking = config.model.thinking_for_model(&model.0, state.thinking);
                     let result = emit(
                         state,
                         events,
@@ -7000,12 +7328,14 @@ async fn handle_actor_command(
                         PendingEvent::ModelChanged {
                             model: model.clone(),
                             provider: provider.clone(),
+                            thinking,
                         },
                     )
                     .await;
                     if result.is_ok() {
                         state.model_alias = model.0;
                         state.provider = provider;
+                        state.thinking = thinking;
                     }
                     if let Some(complete) = completion.take() {
                         let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
@@ -8064,6 +8394,7 @@ async fn handle_actor_command(
                 completed_turns: state.completed_turns,
                 model_alias: state.model_alias.clone(),
                 provider: state.provider.clone(),
+                thinking: state.thinking,
                 mode: state.mode,
                 pending_plan: state.pending_plan.clone(),
                 approved_plan: state.approved_plan.clone(),
@@ -8514,6 +8845,7 @@ fn prepare_turn_start(
         .flatten();
     let mut turn_config =
         config.with_model_route_and_mode(model_alias.clone(), provider, state.mode);
+    turn_config.thinking = state.thinking;
     if let Some(allowed_tools) = allowed_tools {
         turn_config.tools = Arc::new(
             config
@@ -12409,7 +12741,15 @@ mod tests {
         }
 
         fn has_model_alias(&self, alias: &str) -> bool {
-            matches!(alias, "fast" | "slow")
+            matches!(alias, "fast" | "slow") || alias.contains('/')
+        }
+
+        fn thinking_for_model(&self, model: &str, fallback: ThinkingLevel) -> ThinkingLevel {
+            if model == "slow" {
+                ThinkingLevel::High
+            } else {
+                fallback
+            }
         }
 
         fn has_provider_for_alias(&self, alias: &str, provider: &str) -> bool {
@@ -14367,6 +14707,20 @@ mod tests {
             };
             if matches(&event.kind) {
                 return event;
+            }
+        }
+    }
+
+    async fn next_permission_state(
+        receiver: &mut SessionSubscription,
+    ) -> PermissionStateDescriptor {
+        loop {
+            let event = timeout(Duration::from_secs(3), receiver.recv())
+                .await
+                .expect("permission event timeout")
+                .expect("permission event channel");
+            if let EngineEvent::PermissionsListed { permissions, .. } = event {
+                return permissions;
             }
         }
     }
@@ -18592,6 +18946,174 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
+    async fn typed_permission_inventory_is_observer_safe_and_mutations_are_driver_gated() {
+        let root = TempDir::new().expect("tempdir");
+        let permissions = Arc::new(
+            PermissionGate::from_config(rw_types::config::PermissionConfig {
+                default: PermissionDecision::Ask,
+                rules: vec![PermissionRule {
+                    pattern: "bash(rm *)".to_owned(),
+                    action: PermissionDecision::Deny,
+                }],
+            })
+            .with_workspace_roots([root.path()]),
+        );
+        permissions
+            .add_session_rule(PermissionRule {
+                pattern: "bash(cargo test*)".to_owned(),
+                action: PermissionDecision::Ask,
+            })
+            .expect("session rule");
+        assert_eq!(
+            permissions
+                .authorize(
+                    PermissionRequest {
+                        id: "remember-session".to_owned(),
+                        tool_name: "read".to_owned(),
+                        arguments: json!({"path":"secret-never-listed"}),
+                        capabilities: vec![ToolCapability::ReadFilesystem],
+                        approval_diff: None,
+                    },
+                    &StaticApprover(ApprovalDecision::AllowSession),
+                )
+                .await,
+            PermissionOutcome::Allowed
+        );
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(PendingModel),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Ask,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.permissions = Arc::clone(&permissions);
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let session_id = SessionId("fixture-session".to_owned());
+        let mut driver_events = handle.subscribe_client(ClientId("driver".to_owned()), None);
+        let mut observer_events = handle.subscribe_client(ClientId("observer".to_owned()), None);
+        for (client, role) in [
+            ("driver", ClientRole::Driver),
+            ("observer", ClientRole::Observer),
+        ] {
+            assert_eq!(
+                handle
+                    .dispatch(ClientCommand::AttachSession {
+                        meta: protocol_meta(client, &format!("attach-{client}")),
+                        session_id: session_id.clone(),
+                        last_seen_sequence: None,
+                        role,
+                    })
+                    .await
+                    .expect("attach"),
+                CommandOutcome::Accepted
+            );
+        }
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::ListPermissions {
+                    meta: protocol_meta("observer", "observer-list"),
+                    session_id: session_id.clone(),
+                })
+                .await
+                .expect("observer list"),
+            CommandOutcome::Accepted
+        );
+        let listed = next_permission_state(&mut observer_events).await;
+        assert_eq!(listed.default, PermissionAction::Ask);
+        assert_eq!(listed.effective_rules.len(), 1);
+        assert!(listed.project_rules.is_empty());
+        assert_eq!(listed.session_rules.len(), 1);
+        assert_eq!(listed.approvals.len(), 1);
+        assert_eq!(listed.approvals[0].scope, PermissionApprovalScope::Session);
+        let encoded = serde_json::to_string(&listed).expect("permission inventory JSON");
+        assert!(!encoded.contains("secret-never-listed"));
+
+        assert!(matches!(
+            handle
+                .dispatch(ClientCommand::AddSessionPermissionRule {
+                    meta: protocol_meta("observer", "observer-add"),
+                    session_id: session_id.clone(),
+                    pattern: "write(**)".to_owned(),
+                    action: PermissionAction::Allow,
+                })
+                .await
+                .expect("observer mutation"),
+            CommandOutcome::Rejected { .. }
+        ));
+        assert_eq!(permissions.snapshot().session_rules.len(), 1);
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AddSessionPermissionRule {
+                    meta: protocol_meta("driver", "driver-add"),
+                    session_id: session_id.clone(),
+                    pattern: "write(**)".to_owned(),
+                    action: PermissionAction::Allow,
+                })
+                .await
+                .expect("driver add"),
+            CommandOutcome::Accepted
+        );
+        let added = next_permission_state(&mut driver_events).await;
+        let added_rule = added
+            .session_rules
+            .iter()
+            .find(|rule| rule.pattern == "write(**)")
+            .expect("typed added row");
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::RemoveSessionPermissionRule {
+                    meta: protocol_meta("driver", "driver-remove"),
+                    session_id: session_id.clone(),
+                    rule_id: added_rule.id.clone(),
+                })
+                .await
+                .expect("driver remove"),
+            CommandOutcome::Accepted
+        );
+        let removed = next_permission_state(&mut driver_events).await;
+        assert!(
+            removed
+                .session_rules
+                .iter()
+                .all(|rule| rule.pattern != "write(**)")
+        );
+        let approval = removed.approvals.first().expect("remembered approval");
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::RevokePermissionApproval {
+                    meta: protocol_meta("driver", "driver-revoke"),
+                    session_id,
+                    approval_id: approval.id.clone(),
+                    scope: approval.scope,
+                })
+                .await
+                .expect("driver revoke"),
+            CommandOutcome::Accepted
+        );
+        let revoked = next_permission_state(&mut driver_events).await;
+        assert!(revoked.approvals.is_empty());
+    }
+
+    #[test]
+    fn typed_permission_inventory_is_bounded_and_marks_truncation() {
+        let permissions = PermissionGate::new(PermissionDecision::Ask);
+        for index in 0..MAX_PERMISSION_RULES_PER_SCOPE + 5 {
+            permissions
+                .add_session_rule(PermissionRule {
+                    pattern: format!("bash(command-{index}*)"),
+                    action: PermissionDecision::Ask,
+                })
+                .expect("bounded fixture rule");
+        }
+        let state = permission_state(&permissions);
+        assert_eq!(state.session_rules.len(), MAX_PERMISSION_RULES_PER_SCOPE);
+        assert!(state.truncated);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn plugin_machine_capability_preserves_driver_queue_and_durable_order() {
         let root = TempDir::new().expect("tempdir");
         let sink = Arc::new(RecordingSink::default());
@@ -21671,6 +22193,10 @@ mod tests {
             handle.snapshot().await.expect("model snapshot").model_alias,
             "slow"
         );
+        assert_eq!(
+            handle.snapshot().await.expect("thinking snapshot").thinking,
+            ThinkingLevel::High
+        );
         assert!(matches!(
             handle
                 .dispatch(ClientCommand::SwitchModel {
@@ -21704,6 +22230,21 @@ mod tests {
                 .as_deref(),
             Some("offline")
         );
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SwitchModel {
+                    meta: protocol_meta("driver", "switch-concrete-model"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    model: ModelAlias("openai/live-model".to_owned()),
+                    provider: None,
+                })
+                .await
+                .expect("switch concrete model"),
+            CommandOutcome::Accepted
+        );
+        let concrete = handle.snapshot().await.expect("concrete model snapshot");
+        assert_eq!(concrete.model_alias, "openai/live-model");
+        assert_eq!(concrete.thinking, ThinkingLevel::High);
         let durable = handle
             .event_sink
             .read_after(None)
@@ -21714,14 +22255,20 @@ mod tests {
                 .expect("project model")
                 .model_alias
                 .as_deref(),
-            Some("slow")
+            Some("openai/live-model")
         );
         assert_eq!(
             project_session_events(&durable)
                 .expect("project provider")
                 .provider
                 .as_deref(),
-            Some("offline")
+            None
+        );
+        assert_eq!(
+            project_session_events(&durable)
+                .expect("project thinking")
+                .thinking,
+            Some(ThinkingLevel::High)
         );
     }
 

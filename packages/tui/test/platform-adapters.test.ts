@@ -6,7 +6,9 @@ import { join } from "node:path"
 import {
   createDesktopNotificationAdapter,
   createExternalEditorAdapter,
+  createExternalUrlAdapter,
   createImagePasteAdapter,
+  createTextClipboardAdapter,
   parseCommandLine,
   type ProcessExecutionOptions,
   type ProcessExecutionResult,
@@ -122,6 +124,55 @@ describe("production TUI platform adapters", () => {
     })
   })
 
+  test("opens only bounded HTTPS auth URLs through a native argv launcher", async () => {
+    const executor = new RecordingExecutor()
+    const adapter = createExternalUrlAdapter({ platform: "darwin", executor })
+    await adapter.open("https://auth.example.test/authorize?state=one%20two")
+
+    expect(executor.calls[0]).toMatchObject({
+      executable: "open",
+      args: ["-u", "https://auth.example.test/authorize?state=one%20two"],
+    })
+    expect(executor.calls[0]?.args).toHaveLength(2)
+    await expect(adapter.open("javascript:alert(1)")).rejects.toThrow(
+      "safe HTTPS",
+    )
+    await expect(
+      adapter.open("https://user:secret@example.test/login"),
+    ).rejects.toThrow("safe HTTPS")
+    await expect(
+      adapter.open(`https://example.test/${"x".repeat(4_096)}`),
+    ).rejects.toThrow("invalid")
+    expect(executor.calls).toHaveLength(1)
+  })
+
+  test("copies bounded challenge text over stdin with a Linux native fallback", async () => {
+    const executor = new RecordingExecutor()
+    executor.handler = async (executable) => {
+      if (executable === "wl-copy") throw new Error("Wayland unavailable")
+      return { status: 0, stdout: new Uint8Array() }
+    }
+    const adapter = createTextClipboardAdapter({ platform: "linux", executor })
+    await adapter.writeText("ABCD-1234")
+
+    expect(executor.calls.map((call) => call.executable)).toEqual([
+      "wl-copy",
+      "xclip",
+    ])
+    expect(executor.calls[1]?.args).toEqual(["-selection", "clipboard", "-in"])
+    expect(executor.calls.flatMap((call) => call.args)).not.toContain(
+      "ABCD-1234",
+    )
+    expect(new TextDecoder().decode(executor.calls[1]?.options?.stdin)).toBe(
+      "ABCD-1234",
+    )
+    await expect(adapter.writeText(`A${"x".repeat(4_096)}`)).rejects.toThrow(
+      "size limit",
+    )
+    await expect(adapter.writeText("code\u0000tail")).rejects.toThrow("invalid")
+    expect(executor.calls).toHaveLength(2)
+  })
+
   test("reads a bounded signature-checked Linux clipboard image with graceful fallback", async () => {
     const executor = new RecordingExecutor()
     executor.handler = async (executable) => {
@@ -153,7 +204,8 @@ describe("production TUI platform adapters", () => {
     executor.handler = async (_executable, args) => {
       const script = args.join(" ")
       const match = /POSIX file \"([^\"]+)\"/.exec(script)
-      if (match?.[1] === undefined) throw new Error("missing clipboard destination")
+      if (match?.[1] === undefined)
+        throw new Error("missing clipboard destination")
       await writeFile(match[1], PNG)
       return { status: 0, stdout: new Uint8Array() }
     }

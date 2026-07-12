@@ -202,6 +202,13 @@ impl ProviderRuntime {
         &self.default_alias
     }
 
+    /// Configured thinking effort for a provider-neutral alias. Concrete
+    /// selections intentionally inherit the actor's durable session effort.
+    #[must_use]
+    pub fn thinking_for_model(&self, model: &str) -> Option<ThinkingLevel> {
+        self.alias_thinking.get(model).copied()
+    }
+
     /// Model-bound provider suitable for direct recording or a live smoke test.
     #[must_use]
     pub fn provider(&self, candidate: &str) -> Option<Arc<dyn Provider>> {
@@ -583,24 +590,20 @@ impl ProviderRuntime {
         mut request: ProviderRequest,
     ) -> Result<BoxEventStream, RouterError> {
         let model = self
-            .models
+            .dynamic_models
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(candidate)
             .map(|model| model.model.clone())
-            .or_else(|| {
-                self.dynamic_models
-                    .read()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(candidate)
-                    .map(|model| model.model.clone())
-            })
+            .or_else(|| self.models.get(candidate).map(|model| model.model.clone()))
             .ok_or_else(|| RouterError::AliasNotConfigured(candidate.to_owned()))?;
-        let provider = self.providers.get(candidate).cloned().or_else(|| {
-            self.dynamic_providers
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(candidate)
-                .cloned()
-        });
+        let provider = self
+            .dynamic_providers
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(candidate)
+            .cloned()
+            .or_else(|| self.providers.get(candidate).cloned());
         let provider =
             provider.ok_or_else(|| RouterError::AliasNotConfigured(candidate.to_owned()))?;
         request.model = model;
@@ -624,12 +627,34 @@ impl ProviderRuntime {
         &self,
         candidate: &str,
     ) -> Result<(), ProviderFactoryError> {
-        if self.models.contains_key(candidate)
-            || self
-                .dynamic_models
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains_key(candidate)
+        self.prepare_concrete_model_inner(candidate, false).await
+    }
+
+    /// Re-discovers and rebinds an exact concrete model after its provider's
+    /// credentials or endpoint have been replaced.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized error when discovery or adapter construction fails.
+    pub async fn refresh_concrete_model(
+        &self,
+        candidate: &str,
+    ) -> Result<(), ProviderFactoryError> {
+        self.prepare_concrete_model_inner(candidate, true).await
+    }
+
+    async fn prepare_concrete_model_inner(
+        &self,
+        candidate: &str,
+        force: bool,
+    ) -> Result<(), ProviderFactoryError> {
+        if !force
+            && (self.models.contains_key(candidate)
+                || self
+                    .dynamic_models
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .contains_key(candidate))
         {
             return Ok(());
         }
@@ -690,14 +715,6 @@ impl ProviderRuntime {
     /// Returns a sanitized composition error if the provider is unknown or its
     /// newly stored authentication material still cannot be resolved.
     pub fn activate_provider(&self, provider: &str) -> Result<(), ProviderFactoryError> {
-        if self
-            .discovery_providers
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(provider)
-        {
-            return Ok(());
-        }
         let activated = self.provider_activator.activate(provider)?;
         self.redactor.merge_from(&activated.redactor);
         self.connections
@@ -708,6 +725,22 @@ impl ProviderRuntime {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(provider.to_owned(), activated.discovery_provider);
+        self.dynamic_providers
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|candidate, _| {
+                candidate
+                    .split_once('/')
+                    .is_none_or(|(owner, _)| owner != provider)
+            });
+        self.dynamic_models
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|candidate, _| {
+                candidate
+                    .split_once('/')
+                    .is_none_or(|(owner, _)| owner != provider)
+            });
         Ok(())
     }
 

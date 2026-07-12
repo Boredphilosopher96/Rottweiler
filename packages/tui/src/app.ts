@@ -1,6 +1,7 @@
 import {
   BoxRenderable,
   CliRenderEvents,
+  SelectRenderableEvents,
   type KeyEvent,
   type RenderContext,
   type TreeSitterClient,
@@ -28,11 +29,15 @@ import {
 } from "./keybindings"
 import {
   noExternalEditor,
+  noExternalUrl,
   noImagePaste,
   noNotifications,
+  noTextClipboard,
   type EditorAdapter,
+  type ExternalUrlAdapter,
   type ImagePasteAdapter,
   type NotificationAdapter,
+  type TextClipboardAdapter,
 } from "./platform"
 import {
   PROTOCOL_VERSION,
@@ -44,6 +49,8 @@ import {
   type EngineEvent,
   type PlanDecision,
   type ModeId,
+  type PermissionAction,
+  type PermissionApprovalScope,
 } from "./protocol"
 import {
   createInitialState,
@@ -54,7 +61,7 @@ import {
   type RottweilerState,
   type ToolProjection,
 } from "./state"
-import { createSyntaxStyle, kennelTheme, type RottweilerTheme } from "./theme"
+import { createSyntaxStyle, kennelTheme, themeByName, themeCatalog, type RottweilerTheme } from "./theme"
 import { isRecord, isSessionForkedEvent, type WireEngineEvent } from "./transport"
 
 export interface RottweilerAppOptions {
@@ -65,12 +72,23 @@ export interface RottweilerAppOptions {
   readonly onCommand?: (
     command: ClientCommand,
   ) => void | CommandOutcome | null | Promise<void | CommandOutcome | null>
+  readonly onProviderApiKey?: (
+    provider: string,
+    apiKey: string
+  ) => Promise<{
+    readonly stored: true
+    readonly activated: boolean
+    readonly warnings: readonly string[]
+  }>
+  readonly onProviderActivate?: (provider: string) => Promise<void>
   readonly requestId?: () => string
   readonly theme?: RottweilerTheme
   readonly treeSitterClient?: TreeSitterClient
   readonly notifications?: NotificationAdapter
   readonly editor?: EditorAdapter
   readonly imagePaste?: ImagePasteAdapter
+  readonly externalUrl?: ExternalUrlAdapter
+  readonly textClipboard?: TextClipboardAdapter
   readonly terminalHandover?: TerminalHandoverAdapter
   readonly onSessionSelect?: (sessionId: string) => void | Promise<void>
   /** Historical presentation is observer-only; the composer and mutating interactions are hidden. */
@@ -84,7 +102,15 @@ export interface TerminalHandoverAdapter {
   resume(): void
 }
 
-type PickerKind = "palette" | "commands" | "files" | "modes" | "models" | "providers" | "providerAuth" | "sessions" | "settings"
+type PickerKind =
+  | "palette" | "commands" | "files" | "mcp"
+  | "mcpInput"
+  | "modes" | "models" | "providers" | "providerAuth" | "providerApiKey"
+  | "providerRecovery"
+  | "permissions"
+  | "permissionInput"
+  | "sessions" | "settings"
+  | "themes"
 type ProjectionKind = "commands" | "models" | "sessions" | "files"
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 
@@ -92,6 +118,18 @@ type CommandChoice = RottweilerState["commands"][number]
 type ModelPickerChoice =
   | { readonly kind: "alias"; readonly alias: RottweilerState["modelAliases"][number] }
   | { readonly kind: "model"; readonly model: RottweilerState["models"][number] }
+  | {
+      readonly kind: "thinking"
+      readonly setting: RottweilerState["settings"][number]
+      readonly value: string
+    }
+
+type PermissionPickerAction =
+  | { readonly kind: "refresh" }
+  | { readonly kind: "add"; readonly action: PermissionAction }
+  | { readonly kind: "remove"; readonly ruleId: string }
+  | { readonly kind: "revoke"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
+  | { readonly kind: "info" }
 
 const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
   { name: "help", description: "List available commands", usage: "/help" },
@@ -121,23 +159,51 @@ interface PaletteAction {
   readonly run: () => void
 }
 
+type ProviderAuthPickerAction =
+  | { readonly kind: "open_url"; readonly value: string }
+  | { readonly kind: "copy_url"; readonly value: string }
+  | { readonly kind: "copy_code"; readonly value: string }
+  | { readonly kind: "cancel" }
+  | { readonly kind: "waiting" }
+
+type McpPickerAction =
+  | { readonly kind: "add" }
+  | { readonly kind: "toggle"; readonly server: string; readonly enabled: boolean }
+  | { readonly kind: "review"; readonly server: string }
+  | { readonly kind: "approve"; readonly server: string; readonly fingerprint: string }
+
 export class RottweilerApp extends BoxRenderable {
-  readonly transcript: TranscriptRenderable
-  readonly contextPanel: ContextPanelRenderable
-  readonly interactionPanel: InteractionPanelRenderable
-  readonly reviewPanel: ReviewPanelRenderable
-  readonly picker: FuzzyPickerRenderable<unknown>
-  readonly composer: ComposerRenderable
-  readonly statusLine: StatusLineRenderable
-  readonly banner: StateBannerRenderable
-  readonly main: BoxRenderable
+  transcript!: TranscriptRenderable
+  contextPanel!: ContextPanelRenderable
+  interactionPanel!: InteractionPanelRenderable
+  reviewPanel!: ReviewPanelRenderable
+  picker!: FuzzyPickerRenderable<unknown>
+  composer!: ComposerRenderable
+  statusLine!: StatusLineRenderable
+  banner!: StateBannerRenderable
+  main!: BoxRenderable
 
   #state: RottweilerState
   #options: Required<
-    Pick<RottweilerAppOptions, "sessionId" | "clientId" | "requestId" | "notifications" | "editor" | "imagePaste">
+    Pick<
+      RottweilerAppOptions,
+      | "sessionId"
+      | "clientId"
+      | "requestId"
+      | "notifications"
+      | "editor"
+      | "imagePaste"
+      | "externalUrl"
+      | "textClipboard"
+    >
   > &
     RottweilerAppOptions
-  #syntaxStyle: ReturnType<typeof createSyntaxStyle>
+  #syntaxStyle!: ReturnType<typeof createSyntaxStyle>
+  #theme: RottweilerTheme
+  #treeSitterClient: TreeSitterClient | undefined
+  #themeBeforePreview: RottweilerTheme | null = null
+  #themePreviewCommitted = false
+  #rethemeInProgress = false
   #sessionId: string
   #terminalFocused = true
   #pickerKind: PickerKind | null = null
@@ -156,9 +222,16 @@ export class RottweilerApp extends BoxRenderable {
   #pickerAnchored = false
   #pickerQuery = ""
   #modelProviderFilter: string | null = null
+  #providerApiKeyProvider: string | null = null
+  #providerRecoveryProvider: RottweilerState["providers"][number] | null = null
+  #providerAuthActionInFlight = false
+  #providerAuthActionNotice: string | null = null
+  #storedProviderKeys = new Set<string>()
+  #providerApiKeyPending: string | null = null
+  #mcpDraftName: string | null = null
   #reviewOpen = false
   #pendingReviewSelection: string | null = null
-  #postSubmitPicker: "models" | "providers" | "settings" | null = null
+  #postSubmitPicker: "models" | "providers" | "settings" | "permissions" | "mcp" | null = null
   #terminalSuspended = false
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
@@ -166,7 +239,6 @@ export class RottweilerApp extends BoxRenderable {
   #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
   #pendingModelSwitchRequests = new Set<string>()
-  #pendingModelSelections = new Map<string, string>()
   #keybindings: CompiledKeybindings
   #inputMode: InputMode
   #vimFocus: VimFocus = "composer"
@@ -185,8 +257,8 @@ export class RottweilerApp extends BoxRenderable {
         ? this.#keybindings.resolve("review", key)
         : focusOwner === "interaction"
           ? null
-          : this.#keybindings.resolve("global", key) ??
-            this.#keybindings.resolve(this.#keybindingContext(), key)
+          : ( this.#keybindings.resolve("global", key) ??
+            this.#keybindings.resolve(this.#keybindingContext(), key))
     if (action !== null && this.#handleKeybindingAction(action)) {
       key.preventDefault()
       key.stopPropagation()
@@ -222,10 +294,13 @@ export class RottweilerApp extends BoxRenderable {
       notifications: options.notifications ?? noNotifications,
       editor: options.editor ?? noExternalEditor,
       imagePaste: options.imagePaste ?? noImagePaste,
+      externalUrl: options.externalUrl ?? noExternalUrl,
+      textClipboard: options.textClipboard ?? noTextClipboard,
     }
     this.#keybindings = compileKeybindings(options.keybindings)
     this.#inputMode = this.#keybindings.preset === "vim" ? "normal" : "standard"
-    this.#syntaxStyle = createSyntaxStyle(theme)
+    this.#theme = theme
+    this.#treeSitterClient = options.treeSitterClient
     this.#sessionId = this.#options.sessionId
     const initialState = options.initialState ?? createInitialState()
     this.#state =
@@ -240,83 +315,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#state = reduceRottweilerState(this.#state, engineEvent(options.initialEvent))
     }
 
-    this.banner = new StateBannerRenderable(ctx, theme)
-    this.main = new BoxRenderable(ctx, {
-      id: "main-content",
-      width: "100%",
-      flexGrow: 1,
-      minHeight: 1,
-      flexDirection: "row",
-      backgroundColor: theme.background,
-      gap: 1,
-    })
-    this.transcript = new TranscriptRenderable(ctx, theme, {
-      syntaxStyle: this.#syntaxStyle,
-      ...(options.treeSitterClient === undefined
-        ? {}
-        : { treeSitterClient: options.treeSitterClient }),
-      overscan: 3,
-    })
-    this.contextPanel = new ContextPanelRenderable(ctx, theme, {
-      onOpenDiff: (path) => this.#openChangedFileDiff(path),
-    })
-    this.main.add(this.transcript)
-    this.main.add(this.contextPanel)
-
-    this.interactionPanel = new InteractionPanelRenderable(
-      ctx,
-      theme,
-      this.#syntaxStyle,
-      {
-        onApproval: (tool, decision) => this.#approve(tool, decision),
-        onAnswer: (question, values) => this.#answer(question, values),
-        onPlanReview: (decision) => this.#reviewPlan(decision),
-      },
-      options.treeSitterClient,
-    )
-    this.reviewPanel = new ReviewPanelRenderable(
-      ctx,
-      theme,
-      this.#syntaxStyle,
-      {
-        onDecision: (file, decision) =>
-          void this.#reviewFile(file.path, file.currentHash, decision),
-        onClose: () => this.#closeReview(),
-      },
-      options.treeSitterClient,
-    )
-    this.picker = new FuzzyPickerRenderable(ctx, theme, (query) => {
-      if (this.#pickerKind === "sessions") {
-        this.#scheduleSessionSearch(query)
-      }
-    })
-    this.picker.position = "absolute"
-    this.picker.top = 2
-    this.picker.left = "15%"
-    this.picker.width = "70%"
-    this.composer = new ComposerRenderable(ctx, theme, {
-      editor: this.#options.editor,
-      imagePaste: this.#options.imagePaste,
-      onSubmit: (content, attachments) => this.#sendMessage(content, attachments),
-      onFileMention: (query) => this.openFilePicker(query, true),
-      onInput: (value) => this.#updateComposerAutocomplete(value),
-      onSubmitted: () => {
-        const picker = this.#postSubmitPicker
-        this.#postSubmitPicker = null
-        if (picker === "models") this.openModelPicker()
-        else if (picker === "providers") this.openProviderPicker()
-        else if (picker === "settings") this.openSettingsPicker()
-      },
-    })
-    this.statusLine = new StatusLineRenderable(ctx, theme)
-
-    this.add(this.banner)
-    this.add(this.main)
-    this.add(this.reviewPanel)
-    this.add(this.interactionPanel)
-    this.add(this.composer)
-    this.add(this.statusLine)
-    this.add(this.picker)
+    this.#createThemedSurface(theme)
     ctx.on(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     ctx.on(CliRenderEvents.BLUR, this.#onTerminalBlur)
     ctx.keyInput.on("keypress", this.#onGlobalKey)
@@ -326,6 +325,140 @@ export class RottweilerApp extends BoxRenderable {
     } else if (!this.#state.replay.active) {
       this.#focusForInputMode()
     }
+  }
+
+  #createThemedSurface(theme: RottweilerTheme): void {
+    const rebuilding = this.getChildrenCount() > 0
+    const draft = rebuilding ? this.composer.value : ""
+    const attachments = rebuilding ? [...this.composer.attachments] : []
+    const scrollTop = rebuilding ? this.transcript.scroller.scrollTop : 0
+    const pickerWasVisible = rebuilding && this.picker.visible
+    const pickerKind = this.#pickerKind
+    const pickerQuery = rebuilding ? this.picker.input.value : ""
+    const pickerSelection = rebuilding
+      ? this.picker.select.getSelectedOption()?.value
+      : undefined
+    if (rebuilding) {
+      for (const child of this.getChildren()) {
+        this.remove(child)
+        child.destroyRecursively()
+      }
+      this.#syntaxStyle.destroy()
+    }
+
+    this.#rethemeInProgress = true
+    this.#theme = theme
+    this.backgroundColor = theme.background
+    this.#syntaxStyle = createSyntaxStyle(theme)
+    this.banner = new StateBannerRenderable(this.ctx, theme)
+    this.main = new BoxRenderable(this.ctx, {
+      id: "main-content",
+      width: "100%",
+      flexGrow: 1,
+      minHeight: 1,
+      flexDirection: "row",
+      backgroundColor: theme.background,
+      gap: 1,
+    })
+    this.transcript = new TranscriptRenderable(this.ctx, theme, {
+      syntaxStyle: this.#syntaxStyle,
+      ...(this.#treeSitterClient === undefined
+        ? {}
+        : { treeSitterClient: this.#treeSitterClient }),
+      overscan: 3,
+    })
+    this.contextPanel = new ContextPanelRenderable(this.ctx, theme, {
+      onOpenDiff: (path) => this.#openChangedFileDiff(path),
+    })
+    this.main.add(this.transcript)
+    this.main.add(this.contextPanel)
+    this.interactionPanel = new InteractionPanelRenderable(
+      this.ctx,
+      theme,
+      this.#syntaxStyle,
+      {
+        onApproval: (tool, decision) => this.#approve(tool, decision),
+        onAnswer: (question, values) => this.#answer(question, values),
+        onPlanReview: (decision) => this.#reviewPlan(decision),
+      },
+      this.#treeSitterClient,
+    )
+    this.reviewPanel = new ReviewPanelRenderable(
+      this.ctx,
+      theme,
+      this.#syntaxStyle,
+      {
+        onDecision: (file, decision) =>
+          void this.#reviewFile(file.path, file.currentHash, decision),
+        onClose: () => this.#closeReview(),
+      },
+      this.#treeSitterClient,
+    )
+    this.picker = new FuzzyPickerRenderable(this.ctx, theme, (query) => {
+      if (this.#pickerKind === "sessions") this.#scheduleSessionSearch(query)
+    })
+    this.picker.select.on(SelectRenderableEvents.SELECTION_CHANGED, () => {
+      if ((this.#pickerKind !== "themes" && this.#pickerKind !== "settings") || this.#rethemeInProgress) return
+      const id = this.picker.select.getSelectedOption()?.value
+      if (typeof id !== "string") return
+      const name = id.startsWith("theme:")
+        ? id.slice("theme:".length)
+        : id.startsWith("ui.theme:")
+          ? id.slice("ui.theme:".length)
+          : null
+      if (name === null) return
+      const selected = themeByName(name)
+      if (selected !== undefined) {
+        if (this.#themeBeforePreview === null) this.#themeBeforePreview = this.#theme
+        this.#previewTheme(selected)
+      }
+    })
+    this.picker.position = "absolute"
+    this.picker.top = 2
+    this.picker.left = "15%"
+    this.picker.width = "70%"
+    this.composer = new ComposerRenderable(this.ctx, theme, {
+      editor: this.#options.editor,
+      imagePaste: this.#options.imagePaste,
+      onSubmit: (content, submittedAttachments) =>
+        this.#sendMessage(content, submittedAttachments),
+      onFileMention: (query) => this.openFilePicker(query, true),
+      onInput: (value) => this.#updateComposerAutocomplete(value),
+      onSubmitted: () => this.#openPostSubmitPicker(),
+    })
+    this.statusLine = new StatusLineRenderable(this.ctx, theme)
+    this.add(this.banner)
+    this.add(this.main)
+    this.add(this.reviewPanel)
+    this.add(this.interactionPanel)
+    this.add(this.composer)
+    this.add(this.statusLine)
+    this.add(this.picker)
+    this.setState(this.#state)
+    this.composer.value = draft
+    for (const attachment of attachments) this.composer.addAttachment(attachment)
+    this.transcript.setScrollOffset(scrollTop)
+
+    if (pickerWasVisible && pickerKind !== null) {
+      this.#refreshPicker()
+      const selectedIndex = this.picker.select.options.findIndex(
+        (option) => option.value === pickerSelection,
+      )
+      if (selectedIndex >= 0) this.picker.select.setSelectedIndex(selectedIndex)
+      this.picker.input.value = pickerQuery
+    }
+    this.#rethemeInProgress = false
+    if (this.picker.visible && !this.#pickerAnchored) this.picker.input.focus()
+  }
+
+  #openPostSubmitPicker(): void {
+    const picker = this.#postSubmitPicker
+    this.#postSubmitPicker = null
+    if (picker === "models") this.openModelPicker()
+    else if (picker === "providers") this.openProviderPicker()
+    else if (picker === "settings") this.openSettingsPicker()
+    else if (picker === "permissions") this.openPermissionPicker()
+    else if (picker === "mcp") this.openMcpPicker()
   }
 
   get state(): RottweilerState {
@@ -346,7 +479,11 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingReviewSelection = null
       this.#reviewOpen = false
       this.#pendingModelSwitchRequests.clear()
-      this.#pendingModelSelections.clear()
+      this.#providerApiKeyProvider = null
+      this.#providerRecoveryProvider = null
+      this.#storedProviderKeys.clear()
+      this.#providerAuthActionInFlight = false
+      this.#providerAuthActionNotice = null
       this.reviewPanel.closePresentation()
     }
     this.#sessionId = sessionId
@@ -463,7 +600,6 @@ export class RottweilerApp extends BoxRenderable {
         ? next.commandAcks[commandRequestId]?.outcome
         : null
     if (modelSwitchOutcome?.type === "rejected") {
-      if (commandRequestId !== null) this.#pendingModelSelections.delete(commandRequestId)
       this.#projectRejection(modelSwitchOutcome)
     }
     this.#notify(previous, next)
@@ -524,6 +660,8 @@ export class RottweilerApp extends BoxRenderable {
       const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
       const attemptId = typeof eventRecord.attempt_id === "string" ? eventRecord.attempt_id : null
       if (provider === null || attemptId === null) return
+      this.#providerAuthActionInFlight = false
+      this.#providerAuthActionNotice = null
       this.#command({
         type: "complete_provider_auth",
         provider,
@@ -531,29 +669,18 @@ export class RottweilerApp extends BoxRenderable {
       })
       this.openProviderAuthPicker()
     }
-    if (event.type === "model_changed" && isRecord(eventRecord.meta)) {
-      const causedBy =
-        typeof eventRecord.meta.caused_by === "string" ? eventRecord.meta.caused_by : null
-      const concrete = causedBy === null ? undefined : this.#pendingModelSelections.get(causedBy)
-      if (causedBy !== null) this.#pendingModelSelections.delete(causedBy)
-      if (concrete !== undefined) {
-        this.#command({ type: "set_setting", key: "project.models.default", value: concrete })
-      }
-    }
     if (event.type === "provider_configured") {
       const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
       if (provider === null) return
       if (eventRecord.auth_kind === "oauth" || eventRecord.auth_kind === "device_flow") {
         this.#command({ type: "begin_provider_auth", provider })
       } else if (eventRecord.auth_kind === "api_key") {
-        this.#projectClientError(
-          "provider_api_key_cli_required",
-          `Provider profile created. API keys never enter the replayable UI protocol; run rw auth set-key ${provider}`,
-          true,
-        )
+        this.openProviderApiKeyPrompt(provider)
       }
     }
     if (event.type === "provider_auth_finished") {
+      this.#providerAuthActionInFlight = false
+      this.#providerAuthActionNotice = null
       if (eventRecord.success === true) {
         this.#requestModels(true)
         this.openProviderPicker()
@@ -579,6 +706,10 @@ export class RottweilerApp extends BoxRenderable {
   setState(state: RottweilerState): void {
     const previousFocusOwner = this.#visibleFocusOwner()
     this.#state = state
+    if (state.providerAuth.pending === null) {
+      this.#providerAuthActionInFlight = false
+      this.#providerAuthActionNotice = null
+    }
     this.transcript.update(state)
     this.contextPanel.update(state)
     this.contextPanel.visible =
@@ -638,6 +769,7 @@ export class RottweilerApp extends BoxRenderable {
     if (!this.#modelsRequested) {
       this.#requestModels()
     }
+    this.#command({ type: "list_settings" })
     this.#refreshPicker()
   }
 
@@ -661,6 +793,30 @@ export class RottweilerApp extends BoxRenderable {
     this.#refreshPicker()
   }
 
+  openProviderRecoveryPicker(provider: RottweilerState["providers"][number]): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#providerRecoveryProvider = provider
+    this.#pickerKind = "providerRecovery"
+    this.#refreshPicker()
+  }
+
+  openProviderApiKeyPrompt(provider: string): void {
+    if (this.#state.replay.active || provider.length === 0) return
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "providerApiKey"
+    this.#providerApiKeyProvider = provider
+    this.picker.openSecret(`Enter ${provider} API key`, (apiKey) => {
+      const selectedProvider = this.#providerApiKeyProvider
+      this.closePicker()
+      if (selectedProvider !== null)
+        void this.#submitProviderApiKey(selectedProvider, apiKey)
+    })
+  }
+
   openSettingsPicker(): void {
     this.#pickerAnchored = false
     this.#pickerQuery = ""
@@ -668,6 +824,131 @@ export class RottweilerApp extends BoxRenderable {
     this.#pickerKind = "settings"
     this.#command({ type: "list_settings" })
     this.#refreshPicker()
+  }
+
+  openPermissionPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "permissions"
+    this.#command({ type: "list_permissions" })
+    this.#refreshPicker()
+  }
+
+  openMcpPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "mcp"
+    this.#command({ type: "list_mcp_servers" })
+    this.#refreshPicker()
+  }
+
+  #openMcpNamePrompt(): void {
+    this.#pickerKind = "mcpInput"
+    this.picker.openTextPrompt(
+      "Add remote MCP server",
+      "server name",
+      (name) => {
+        if (!/^[A-Za-z0-9._-]{1,96}$/.test(name)) {
+          this.#projectClientError(
+            "mcp_name_invalid",
+            "MCP server name is invalid"
+          )
+          return
+        }
+        this.#mcpDraftName = name
+        this.picker.openTextPrompt(
+          "Remote MCP endpoint",
+          "https://example.com/mcp",
+          (endpoint) => {
+            const server = this.#mcpDraftName
+            this.#mcpDraftName = null
+            this.closePicker()
+            if (server === null) return
+            let parsed: URL
+            try {
+              parsed = new URL(endpoint)
+            } catch {
+              this.#projectClientError(
+                "mcp_endpoint_invalid",
+                "MCP endpoint must be an absolute HTTPS URL"
+              )
+              return
+            }
+            if (
+              parsed.protocol !== "https:" ||
+              parsed.username !== "" ||
+              parsed.password !== "" ||
+              parsed.search !== "" ||
+              parsed.hash !== ""
+            ) {
+              this.#projectClientError(
+                "mcp_endpoint_invalid",
+                "MCP endpoint must be HTTPS without credentials, query, or fragment"
+              )
+              return
+            }
+            this.#command({ type: "add_mcp_http_server", name: server, endpoint })
+            this.openMcpPicker()
+          }
+        )
+      }
+    )
+  }
+
+  #openPermissionPatternPrompt(
+    action: PermissionAction
+  ): void {
+    this.#pickerKind = "permissionInput"
+    this.picker.openTextPrompt(
+      `Add ${action} permission rule`,
+      "tool(glob), e.g. bash(cargo test*)",
+      (pattern) => {
+        this.closePicker()
+        this.#command({ type: "add_session_permission_rule", pattern, action })
+      }
+    )
+  }
+
+  openThemePicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#themeBeforePreview = this.#theme
+    this.#themePreviewCommitted = false
+    this.#pickerKind = "themes"
+    this.#rethemeInProgress = true
+    this.#refreshPicker()
+    const selectedIndex = this.picker.select.options.findIndex(
+      (option) => option.value === `theme:${this.#theme.name}`,
+    )
+    if (selectedIndex >= 0) this.picker.select.setSelectedIndex(selectedIndex)
+    this.#rethemeInProgress = false
+  }
+
+  #previewTheme(theme: RottweilerTheme): void {
+    if (theme.name === this.#theme.name) return
+    this.#createThemedSurface(theme)
+  }
+
+  async #confirmTheme(theme: RottweilerTheme): Promise<void> {
+    const outcome = await this.#emit({
+      type: "set_setting",
+      meta: this.#meta(),
+      session_id: this.#sessionId,
+      key: "ui.theme",
+      value: theme.name,
+    })
+    if (outcome?.type !== "accepted") {
+      if (outcome?.type === "rejected") this.#projectRejection(outcome)
+      else this.#projectClientError("theme_persistence_failed", "theme could not be persisted", true)
+      this.closePicker()
+      return
+    }
+    this.#themePreviewCommitted = true
+    this.#themeBeforePreview = theme
+    this.closePicker()
   }
 
   openModePicker(): void {
@@ -703,12 +984,24 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   closePicker(): void {
+    const restoreTheme =
+      (this.#pickerKind === "themes" || this.#pickerKind === "settings")
+        && !this.#themePreviewCommitted
+        ? this.#themeBeforePreview
+        : null
     this.#pickerKind = null
     this.picker.close()
     this.#pickerAnchored = false
     this.#pickerQuery = ""
     this.#pendingWorkspaceSearchRequest = null
     this.#pendingFilePreview = null
+    this.#providerApiKeyProvider = null
+    this.#providerRecoveryProvider = null
+    this.#themeBeforePreview = null
+    this.#themePreviewCommitted = false
+    if (restoreTheme !== null && restoreTheme.name !== this.#theme.name) {
+      this.#createThemedSurface(restoreTheme)
+    }
     if (this.#keybindings.preset === "vim") this.#vimFocus = this.#vimFocusBeforePicker
     if (!this.#state.replay.active) this.#focusForInputMode()
     if (this.#keybindings.preset === "vim") {
@@ -1102,7 +1395,7 @@ export class RottweilerApp extends BoxRenderable {
             if (requestId !== null) {
               this.#pendingFilePreview = { path: file.path, requestId }
             }
-          },
+          }
         )
         break
       case "models":
@@ -1137,6 +1430,18 @@ export class RottweilerApp extends BoxRenderable {
               .join(" · "),
             value: { kind: "model" as const, model },
           })),
+          ...(this.#modelProviderFilter === null
+            ? this.#state.settings
+                .filter((setting) => setting.key.startsWith("models.thinking."))
+                .flatMap((setting) =>
+                  setting.choices.map((value) => ({
+                    id: `thinking:${setting.key}:${value}`,
+                    label: `Thinking · ${value}`,
+                    description: `${value === setting.value ? "current · " : ""}${setting.label} · persists for new sessions`,
+                    value: { kind: "thinking" as const, setting, value },
+                  })),
+                )
+            : []),
         ]
         const modelError = this.#projectionErrors.models
         if (modelError !== undefined) {
@@ -1179,6 +1484,15 @@ export class RottweilerApp extends BoxRenderable {
                 type: "switch_model",
                 model: selection.alias.alias,
                 provider: null,
+              })
+              this.closePicker()
+              return
+            }
+            if (selection.kind === "thinking") {
+              this.#command({
+                type: "set_setting",
+                key: selection.setting.key,
+                value: selection.value
               })
               this.closePicker()
               return
@@ -1226,7 +1540,11 @@ export class RottweilerApp extends BoxRenderable {
                 provider.reachable ? "reachable" : "unreachable",
                 `${provider.modelCount} model${provider.modelCount === 1 ? "" : "s"}`,
                 provider.nextAction.replaceAll("_", " "),
-                provider.status ?? "",
+              this.#storedProviderKeys.has(
+                provider.name)
+                ? "credential stored · select to refresh activation"
+                : "",
+              provider.status ?? "",
               ].filter(Boolean).join(" · "),
               value: provider,
             }))
@@ -1264,6 +1582,10 @@ export class RottweilerApp extends BoxRenderable {
               this.closePicker()
               return
             }
+            if (provider.authenticated && !provider.reachable) {
+              this.openProviderRecoveryPicker(provider)
+              return
+            }
             switch (provider.nextAction) {
               case "select_models":
                 this.openModelPicker(provider.name)
@@ -1272,11 +1594,11 @@ export class RottweilerApp extends BoxRenderable {
                 this.#command({ type: "begin_provider_auth", provider: provider.name })
                 break
               case "api_key_cli":
-                this.#projectClientError(
-                  "provider_api_key_cli_required",
-                  `API keys never enter the replayable UI protocol; run rw auth set-key ${provider.name}`,
-                  true,
-                )
+                if (this.#storedProviderKeys.has(provider.name)) {
+                  void this.#retryProviderActivation(provider.name)
+                } else {
+                  this.openProviderApiKeyPrompt(provider.name)
+                }
                 break
               case "configure":
                 this.#command({ type: "configure_builtin_provider", provider: provider.name })
@@ -1289,8 +1611,42 @@ export class RottweilerApp extends BoxRenderable {
                 )
                 break
             }
-          },
+          }
         )
+        break
+      }
+      case "providerRecovery": {
+        const provider = this.#providerRecoveryProvider
+        if (provider === null) {
+          this.openProviderPicker()
+          break
+        }
+        const items: PickerItem<"activate" | "reauthenticate">[] = [
+          {
+            id: "provider-recovery.activate",
+            label: "Retry activation",
+            description: "Rebuild the provider with the stored credential",
+            value: "activate",
+          },
+        ]
+        if (provider.authKind !== "none") {
+          items.push({
+            id: "provider-recovery.reauthenticate",
+            label: provider.authKind === "api_key" ? "Replace API key" : "Re-authenticate",
+            description: "Replace the stored credential for this provider",
+            value: "reauthenticate",
+          })
+        }
+        this.#openPicker(`Recover ${provider.name}`, items, (item) => {
+          if (item.value === "activate") {
+            void this.#retryProviderActivation(provider.name)
+          } else if (provider.authKind === "api_key") {
+            this.openProviderApiKeyPrompt(provider.name)
+          } else {
+            this.closePicker()
+            this.#command({ type: "begin_provider_auth", provider: provider.name })
+          }
+        })
         break
       }
       case "providerAuth": {
@@ -1299,56 +1655,251 @@ export class RottweilerApp extends BoxRenderable {
           this.openProviderPicker()
           break
         }
-        const prompt = pending.challenge.kind === "oauth"
-          ? `Open ${pending.challenge.authorization_url} · callback ${pending.challenge.redirect_uri}`
-          : `Open ${pending.challenge.verification_uri} · enter code ${pending.challenge.user_code}`
+        const authUrl =
+          pending.challenge.kind === "oauth"
+            ? pending.challenge.authorization_url
+            : pending.challenge.verification_uri
+        const prompt =
+          pending.challenge.kind === "oauth"
+            ? `Authorize in your browser · callback ${pending.challenge.redirect_uri}`
+            : `Open the verification page · enter code ${pending.challenge.user_code}`
+        const items: PickerItem<ProviderAuthPickerAction>[] = [
+          {
+            id: "provider-auth.open",
+            label: "Open browser",
+            description: prompt,
+            searchText: `open browser ${prompt}`,
+            value: { kind: "open_url", value: authUrl },
+          },
+        ]
+        if (pending.challenge.kind === "device_flow") {
+          items.push({
+            id: "provider-auth.copy-code",
+            label: "Copy code",
+            description: pending.challenge.user_code,
+            searchText: `copy code ${pending.challenge.user_code}`,
+            value: { kind: "copy_code", value: pending.challenge.user_code },
+          })
+        }
+        items.push(
+          {
+            id: "provider-auth.copy-url",
+            label: "Copy URL",
+            description: authUrl,
+            searchText: `copy url ${authUrl}`,
+            value: { kind: "copy_url", value: authUrl },
+          },
+          {
+            id: "provider-auth.waiting",
+            label: "Waiting for authentication…",
+            description: this.#providerAuthActionNotice ?? prompt,
+            searchText: prompt,
+            value: { kind: "waiting" },
+          },
+          {
+            id: "provider-auth.cancel",
+            label: "Cancel authentication",
+            description: pending.warnings.join(" · "),
+            value: { kind: "cancel" },
+          },
+        )
         this.#openPicker(
           `Authenticate ${pending.provider}`,
-          [
-            {
-              id: "provider-auth.waiting",
-              label: "Waiting for authentication…",
-              description: prompt,
-              searchText: prompt,
-              value: false,
-            },
-            {
-              id: "provider-auth.cancel",
-              label: "Cancel authentication",
-              description: pending.warnings.join(" · "),
-              value: true,
-            },
-          ],
+          items,
           (item) => {
-            if (item.value !== true) return
-            this.#command({
-              type: "cancel_provider_auth",
-              provider: pending.provider,
-              attemptId: pending.attemptId,
-            })
+            if (item.value.kind === "cancel") {
+              this.#providerAuthActionNotice = null
+              this.#command({
+                type: "cancel_provider_auth",
+                provider: pending.provider,
+                attemptId: pending.attemptId,
+              })
+            } else if (item.value.kind !== "waiting") {
+              void this.#runProviderAuthAction(
+                pending.provider,
+                pending.attemptId,
+                item.value,
+              )
+            }
           },
         )
         break
       }
-      case "settings": {
-        const items = this.#state.settings.flatMap((setting) =>
-          setting.choices.map((value) => ({
-            id: `${setting.key}:${value}`,
-            label: `${setting.label} → ${value}`,
-            description: `${value === setting.value ? "current · " : ""}${setting.provenance}${setting.appliesImmediately ? " · live" : " · next session"}`,
-            value: { setting, value },
-          })),
+      case "providerApiKey":
+        if (this.#providerApiKeyPending !== null) {
+          this.#openPicker(
+            `Provider credential · ${this.#providerApiKeyPending}`,
+            [{ id: "provider-key.pending", label: "Storing and activating…", description: "Authenticated secret channel", value: null }],
+            () => {},
+          )
+        }
+        break
+      case "permissionInput":
+        break
+      case "mcpInput":
+        break
+      case "mcp": {
+        const review = this.#state.mcpApprovalReview
+        const items: PickerItem<McpPickerAction>[] = [
+          { id: "mcp.add", label: "Add remote HTTP server", description: "HTTPS only · registers live and starts disabled", value: { kind: "add" } },
+          ...(review === null ? [] : [{
+            id: `mcp.approve.${review.server}`,
+            label: `Approve reviewed configuration · ${review.server}`,
+            description: `${review.transport} · ${review.endpoint ?? "local process"} · fingerprint ${review.fingerprint}`,
+            value: { kind: "approve", server: review.server, fingerprint: review.fingerprint },
+          }] satisfies PickerItem<McpPickerAction>[]),
+          ...this.#state.mcpServers.flatMap<PickerItem<McpPickerAction>>((server) => [
+            {
+              id: `mcp.review.${server.name}`,
+              label: `Review approval · ${server.name}`,
+              description: `${server.approved ? "approved" : "approval required"} · ${server.state.type} · ${server.tool_count} tools`,
+              value: { kind: "review", server: server.name },
+            },
+            ...(server.approved || server.enabled ? [{
+              id: `mcp.toggle.${server.name}`,
+              label: `${server.enabled ? "Disable" : "Enable"} · ${server.name}`,
+              description: `${server.state.type} · applies to this live session and persists after validation`,
+              value: { kind: "toggle", server: server.name, enabled: server.enabled },
+            }] satisfies PickerItem<McpPickerAction>[] : []),
+          ])
+          ]
+        this.#openPicker(
+          "MCP connections",
+          items,
+          (item) => {
+            const action = item.value
+            if (action.kind === "add") this.#openMcpNamePrompt()
+            else if (action.kind === "toggle") {
+              this.#command({ type: "set_mcp_server_enabled", name: action.server, enabled: !action.enabled })
+            } else if (action.kind === "review") {
+              this.#command({ type: "review_mcp_server", name: action.server })
+            } else if (action.kind === "approve") {
+              this.#command({ type: "approve_mcp_server", name: action.server, fingerprint: action.fingerprint })
+            }
+          }
         )
+        break
+      }
+      case "permissions":
+        {
+          const permissions = this.#state.permissions
+          const items: PickerItem<PermissionPickerAction>[] = [
+            {
+              id: "permissions.refresh",
+              label: permissions === null
+                ? "Loading permission state…"
+                : `Default · ${permissions.default}`,
+              description: permissions?.truncated === true
+                ? "Inventory truncated · refresh after removing entries"
+                : "Refresh effective rules and remembered approvals",
+              value: { kind: "refresh" },
+            },
+            ...(["allow", "ask", "deny"] as const).map((action) => ({
+              id: `permissions.add.${action}`,
+              label: `Add ${action} rule`,
+              description: "Session-scoped tool(argument glob)",
+              value: { kind: "add", action } as const,
+            })),
+            ...(permissions?.effective_rules ?? []).map((rule) => ({
+              id: `permissions.effective.${rule.id}`,
+              label: `${rule.action} · ${rule.pattern}`,
+              description: "Effective trusted configuration · read-only",
+              value: { kind: "info" } as const,
+            })),
+            ...(permissions?.project_rules ?? []).map((rule) => ({
+              id: `permissions.project.${rule.id}`,
+              label: `${rule.action} · ${rule.pattern}`,
+              description: "Project rule · read-only",
+              value: { kind: "info" } as const,
+            })),
+            ...(permissions?.session_rules ?? []).map((rule) => ({
+              id: `permissions.remove.${rule.id}`,
+              label: `Remove · ${rule.pattern}`,
+              description: `Session ${rule.action} rule · select to remove`,
+              value: { kind: "remove", ruleId: rule.id } as const,
+            })),
+            ...(permissions?.approvals ?? []).map((approval) => ({
+              id: `permissions.revoke.${approval.id}`,
+              label: `Revoke · ${approval.tool_name}`,
+              description: `${approval.scope} approval · ${approval.summary}`,
+              value: {
+                kind: "revoke",
+                approvalId: approval.id,
+                scope: approval.scope,
+              } as const,
+            })),
+          ]
+        this.#openPicker(
+          "Permission rules",
+          items,
+          (item) => {
+            const action = item.value
+            if (action.kind === "refresh") this.#command({ type: "list_permissions" })
+            else if (action.kind === "add") this.#openPermissionPatternPrompt(action.action)
+            else if (action.kind === "remove") {
+              this.#command({ type: "remove_session_permission_rule", ruleId: action.ruleId })
+            } else if (action.kind === "revoke") {
+              this.#command({
+                type: "revoke_permission_approval",
+                approvalId: action.approvalId,
+                scope: action.scope,
+              })
+            }
+          }
+        )
+        }
+        break
+      case "settings": {
+        type SettingPickerAction =
+          | { kind: "theme"; theme: RottweilerTheme }
+          | { kind: "setting"; setting: RottweilerState["settings"][number]; value: string }
+        const items: PickerItem<SettingPickerAction>[] = []
+        for (const setting of this.#state.settings) {
+          if (setting.key === "ui.theme") {
+            for (const theme of themeCatalog) {
+              items.push({
+                id: `ui.theme:${theme.name}`,
+                label: `Theme → ${theme.name}`,
+                description: `${theme.name === this.#theme.name ? "current · " : ""}live preview · ${setting.provenance}`,
+                value: { kind: "theme", theme },
+              })
+            }
+            continue
+          }
+          for (const value of setting.choices) {
+            items.push({
+              id: `${setting.key}:${value}`,
+              label: `${setting.label} → ${value}`,
+              description: `${value === setting.value ? "current · " : ""}${setting.provenance}${setting.appliesImmediately ? " · live" : " · next session"}`,
+              value: { kind: "setting", setting, value },
+            })
+          }
+        }
         this.#openPicker("Settings", items, (item) => {
-          const selection = item.value as {
-            setting: RottweilerState["settings"][number]
-            value: string
+          const selection = item.value
+          if (selection.kind === "theme") {
+            if (this.#themeBeforePreview === null) this.#themeBeforePreview = this.#theme
+            this.#previewTheme(selection.theme)
+            void this.#confirmTheme(selection.theme)
+            return
           }
           this.#command({
             type: "set_setting",
             key: selection.setting.key,
             value: selection.value,
           })
+        })
+        break
+      }
+      case "themes": {
+        const items: PickerItem<RottweilerTheme>[] = themeCatalog.map((theme) => ({
+          id: `theme:${theme.name}`,
+          label: `${theme.name === this.#theme.name ? "● " : ""}${theme.name}`,
+          description: `${theme.background} · ${theme.foreground} · ${theme.accent}`,
+          value: theme,
+        }))
+        this.#openPicker("Themes · arrows preview · Enter confirms", items, (item) => {
+          void this.#confirmTheme(item.value)
         })
         break
       }
@@ -1489,11 +2040,11 @@ export class RottweilerApp extends BoxRenderable {
       { id: "settings.open", title: "Settings", category: "Settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
       { id: "mode.list", title: "Switch mode", category: "Agent", description: "Choose discuss, plan, or execute", run: open(() => this.openModePicker()) },
       { id: "review.open", title: "Review changes", category: "Session", description: "Open the cumulative session diff", run: open(() => this.openReview()) },
-      { id: "permissions.manage", title: "Permission settings", category: "Settings", description: "Inspect approvals and session rules", run: prefill("/permissions") },
-      { id: "permissions.list", title: "List permission rules", category: "Settings", description: "Show effective session permission rules", run: submit("/permissions list") },
-      { id: "permissions.approvals", title: "List remembered approvals", category: "Settings", description: "Show remembered approval bindings", run: submit("/permissions approvals") },
-      { id: "permissions.add", title: "Add permission rule", category: "Settings", description: "Add a session-scoped rule", run: prefill("/permissions add") },
-      { id: "permissions.remove", title: "Remove permission rule", category: "Settings", description: "Remove a session-scoped rule", run: prefill("/permissions remove") },
+      { id: "permissions.manage", title: "Permission settings", category: "Settings", description: "Inspect, add, and remove session rules", run: open(() => this.openPermissionPicker()) },
+      { id: "permissions.list", title: "List permission rules", category: "Settings", description: "Show effective session permission rules", run: open(() => this.openPermissionPicker()) },
+      { id: "permissions.approvals", title: "List remembered approvals", category: "Settings", description: "Show remembered approval bindings", run: open(() => this.openPermissionPicker()) },
+      { id: "permissions.add", title: "Add permission rule", category: "Settings", description: "Add a session-scoped rule", run: open(() => this.openPermissionPicker()) },
+      { id: "permissions.remove", title: "Remove permission rule", category: "Settings", description: "Remove a session-scoped rule", run: open(() => this.openPermissionPicker()) },
       { id: "permissions.clear", title: "Clear session permissions", category: "Settings", description: "Clear this session's remembered rules", run: prefill("/permissions clear-session") },
       { id: "trust.manage", title: "Folder trust settings", category: "Settings", description: "Inspect, grant, or revoke workspace trust", run: prefill("/trust") },
       { id: "trust.status", title: "Show folder trust", category: "Settings", description: "Inspect the current workspace trust state", run: submit("/trust status") },
@@ -1515,7 +2066,7 @@ export class RottweilerApp extends BoxRenderable {
       actions.splice(
         mcpIndex,
         0,
-        { id: "mcp.manage", title: "MCP connections", category: "Settings", description: "Inspect, enable, disable, or approve MCP servers", run: prefill("/mcp") },
+        { id: "mcp.manage", title: "MCP connections", category: "Settings", description: "Inspect, add, enable, disable, or approve MCP servers", run: open(() => this.openMcpPicker()) },
         { id: "mcp.status", title: "Show MCP status", category: "Settings", description: "List every MCP connection and its state", run: submit("/mcp status") },
         { id: "mcp.enable", title: "Enable MCP server", category: "Settings", description: "Enable a configured MCP connection", run: prefill("/mcp enable") },
         { id: "mcp.disable", title: "Disable MCP server", category: "Settings", description: "Disable a configured MCP connection", run: prefill("/mcp disable") },
@@ -1674,6 +2225,16 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (sessionAction?.type === "settings") {
       this.#postSubmitPicker = "settings"
+      this.closePicker()
+      return true
+    }
+    if (sessionAction?.type === "permissions") {
+      this.#postSubmitPicker = "permissions"
+      this.closePicker()
+      return true
+    }
+    if (sessionAction?.type === "mcp") {
+      this.#postSubmitPicker = "mcp"
       this.closePicker()
       return true
     }
@@ -1846,6 +2407,130 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
+  async #submitProviderApiKey(provider: string, apiKey: string): Promise<void> {
+    this.#providerApiKeyPending = provider
+    this.#pickerKind = "providerApiKey"
+    this.#refreshPicker()
+    try {
+      const result = await this.#options.onProviderApiKey?.(provider, apiKey)
+      if (result === undefined)
+        throw new Error("credential transport unavailable")
+      this.#requestModels(true)
+      if (result.activated) {
+        this.#storedProviderKeys.delete(provider)
+      } else {
+        if (this.#storedProviderKeys.size >= 32) {
+          const oldest = this.#storedProviderKeys.values().next().value
+          if (oldest !== undefined) this.#storedProviderKeys.delete(oldest)
+        }
+        this.#storedProviderKeys.add(provider)
+        this.#projectClientError(
+          "provider_activation_pending",
+          "credential stored securely, but activation is pending; select the provider again to refresh without re-entering the key",
+          true
+        )
+      }
+      this.openProviderPicker()
+      for (const warning of result.warnings.slice(0, 16)) {
+        this.#projectClientError("provider_credential_warning", warning)
+      }
+    } catch {
+      this.#projectClientError(
+        "provider_credential_failed",
+        "provider credential submission failed; verify the key and try again",
+        true
+      )
+      this.openProviderPicker()
+    } finally {
+      this.#providerApiKeyPending = null
+    }
+  }
+
+  async #retryProviderActivation(provider: string): Promise<void> {
+    this.#providerApiKeyPending = provider
+    this.#pickerKind = "providerApiKey"
+    this.#refreshPicker()
+    try {
+      if (this.#options.onProviderActivate === undefined) throw new Error("activation unavailable")
+      await this.#options.onProviderActivate(provider)
+      this.#storedProviderKeys.delete(provider)
+      this.#requestModels(true)
+      this.openProviderPicker()
+    } catch {
+      this.#projectClientError(
+        "provider_activation_failed",
+        "credential remains stored securely, but activation failed; retry from /providers",
+        true,
+      )
+      this.openProviderPicker()
+    } finally {
+      this.#providerApiKeyPending = null
+    }
+  }
+
+  async #runProviderAuthAction(
+    provider: string,
+    attemptId: string,
+    action: ProviderAuthPickerAction,
+  ): Promise<void> {
+    if (this.#providerAuthActionInFlight) return
+    const pending = this.#state.providerAuth.pending
+    if (
+      pending === null ||
+      pending.provider !== provider ||
+      pending.attemptId !== attemptId
+    )
+      return
+    this.#providerAuthActionInFlight = true
+    let failureCode = "provider_auth_action_failed"
+    let failureMessage =
+      "provider authentication action failed; copy the URL manually"
+    try {
+      switch (action.kind) {
+        case "open_url":
+          failureCode = "provider_auth_browser_failed"
+          failureMessage =
+            "couldn't open a browser; use Copy URL and open it manually"
+          await this.#options.externalUrl.open(action.value)
+          this.#providerAuthActionNotice =
+            "Browser opened · waiting for authentication"
+          break
+        case "copy_code":
+          failureCode = "provider_auth_copy_failed"
+          failureMessage =
+            "couldn't copy the device code; enter the displayed code manually"
+          await this.#options.textClipboard.writeText(action.value)
+          this.#providerAuthActionNotice =
+            "Code copied · waiting for authentication"
+          break
+        case "copy_url":
+          failureCode = "provider_auth_copy_failed"
+          failureMessage =
+            "couldn't copy the URL; open the displayed URL manually"
+          await this.#options.textClipboard.writeText(action.value)
+          this.#providerAuthActionNotice =
+            "URL copied · waiting for authentication"
+          break
+        case "cancel":
+        case "waiting":
+          return
+      }
+    } catch {
+      this.#providerAuthActionNotice = null
+      this.#projectClientError(failureCode, failureMessage, true)
+    } finally {
+      this.#providerAuthActionInFlight = false
+      const current = this.#state.providerAuth.pending
+      if (
+        this.#pickerKind === "providerAuth" &&
+        current?.provider === provider &&
+        current.attemptId === attemptId
+      ) {
+        this.#refreshPicker()
+      }
+    }
+  }
+
   async #requestFork(atTurn: string | null): Promise<boolean> {
     const meta = this.#meta()
     this.#pendingForkRequests.add(meta.request_id)
@@ -1883,6 +2568,19 @@ export class RottweilerApp extends BoxRenderable {
       | { readonly type: "list_models"; readonly refresh: boolean }
       | { readonly type: "list_settings" }
       | { readonly type: "set_setting"; readonly key: string; readonly value: string }
+      | { readonly type: "list_mcp_servers" }
+      | { readonly type: "add_mcp_http_server"; readonly name: string; readonly endpoint: string }
+      | { readonly type: "review_mcp_server"; readonly name: string }
+      | { readonly type: "approve_mcp_server"; readonly name: string; readonly fingerprint: string }
+      | { readonly type: "set_mcp_server_enabled"; readonly name: string; readonly enabled: boolean }
+      | { readonly type: "list_permissions" }
+      | { readonly type: "add_session_permission_rule"; readonly pattern: string; readonly action: PermissionAction }
+      | { readonly type: "remove_session_permission_rule"; readonly ruleId: string }
+      | { readonly type: "revoke_permission_approval"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
+      | { readonly type: "list_permissions" }
+      | { readonly type: "add_session_permission_rule"; readonly pattern: string; readonly action: PermissionAction }
+      | { readonly type: "remove_session_permission_rule"; readonly ruleId: string }
+      | { readonly type: "revoke_permission_approval"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
       | { readonly type: "begin_provider_auth"; readonly provider: string }
       | { readonly type: "configure_builtin_provider"; readonly provider: string }
       | { readonly type: "complete_provider_auth" | "cancel_provider_auth"; readonly provider: string; readonly attemptId: string }
@@ -1907,15 +2605,7 @@ export class RottweilerApp extends BoxRenderable {
         const oldest = this.#pendingModelSwitchRequests.values().next().value
         if (oldest !== undefined) this.#pendingModelSwitchRequests.delete(oldest)
       }
-      if (this.#pendingModelSelections.size >= MAX_PENDING_MODEL_SWITCH_REQUESTS) {
-        const oldest = this.#pendingModelSelections.keys().next().value
-        if (oldest !== undefined) this.#pendingModelSelections.delete(oldest)
-      }
       this.#pendingModelSwitchRequests.add(meta.request_id)
-      const selection = command.model.includes("/") || command.provider === null
-        ? command.model
-        : `${command.provider}/${command.model}`
-      this.#pendingModelSelections.set(meta.request_id, selection)
     } else if (command.type === "list_sessions" || command.type === "search_sessions") {
       this.#latestSessionsRequest = meta.request_id
     }
@@ -1929,10 +2619,34 @@ export class RottweilerApp extends BoxRenderable {
         break
       case "list_commands":
       case "list_settings":
+      case "list_mcp_servers":
+      case "list_permissions":
         dispatched = { type: command.type, meta, session_id: this.#sessionId }
         break
       case "set_setting":
+      case "add_mcp_http_server":
+      case "review_mcp_server":
+      case "approve_mcp_server":
+      case "set_mcp_server_enabled":
+      case "add_session_permission_rule":
         dispatched = { ...command, meta, session_id: this.#sessionId }
+        break
+      case "remove_session_permission_rule":
+        dispatched = {
+          type: command.type,
+          meta,
+          session_id: this.#sessionId,
+          rule_id: command.ruleId,
+        }
+        break
+      case "revoke_permission_approval":
+        dispatched = {
+          type: command.type,
+          meta,
+          session_id: this.#sessionId,
+          approval_id: command.approvalId,
+          scope: command.scope,
+        }
         break
       case "begin_provider_auth":
       case "configure_builtin_provider":
@@ -1995,7 +2709,6 @@ export class RottweilerApp extends BoxRenderable {
         if (projectionKind(type) === null) {
           if (type === "switch_model") {
             this.#pendingModelSwitchRequests.delete(requestId)
-            this.#pendingModelSelections.delete(requestId)
           }
           this.#projectRejection(outcome)
         } else {
@@ -2006,7 +2719,6 @@ export class RottweilerApp extends BoxRenderable {
         if (projectionKind(type) === null) {
           if (type === "switch_model") {
             this.#pendingModelSwitchRequests.delete(requestId)
-            this.#pendingModelSelections.delete(requestId)
           }
           this.#projectClientError(`${type}_unavailable`, message, true)
         } else {
@@ -2018,7 +2730,6 @@ export class RottweilerApp extends BoxRenderable {
       if (projectionKind(type) === null) {
         if (type === "switch_model") {
           this.#pendingModelSwitchRequests.delete(requestId)
-          this.#pendingModelSelections.delete(requestId)
         }
         this.#projectClientError(`${type}_failed`, message, true)
       } else {
@@ -2213,6 +2924,8 @@ type SessionAction =
   | { readonly type: "models" }
   | { readonly type: "providers" }
   | { readonly type: "settings" }
+  | { readonly type: "permissions" }
+  | { readonly type: "mcp" }
   | { readonly type: "invalid"; readonly message: string }
 
 function parseSessionAction(content: string): SessionAction | null {
@@ -2238,6 +2951,12 @@ function parseSessionAction(content: string): SessionAction | null {
       ? { type: "settings" }
       : { type: "invalid", message: "usage: /settings" }
   }
+  if (command === "/permissions") {
+    return tokens.length === 1 ? { type: "permissions" } : null
+  }
+  if (command === "/mcp") {
+    return tokens.length === 1 ? { type: "mcp" } : null
+  }
   if (command !== "/fork") return null
   if (tokens.length === 1) return { type: "fork", atTurn: null }
   if (tokens.length !== 2 || !isU64(tokens[1] ?? "")) {
@@ -2247,7 +2966,8 @@ function parseSessionAction(content: string): SessionAction | null {
 }
 
 function isU64(value: string): boolean {
-  return /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n
+  return ( /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n
+  )
 }
 
 function projectionKind(type: ClientCommand["type"]): ProjectionKind | null {

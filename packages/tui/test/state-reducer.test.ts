@@ -884,6 +884,38 @@ describe("pure TUI state reducer", () => {
     expect(state.lastSequence).toBeNull()
   })
 
+  test("projects typed permission inventories as connection-scoped state", () => {
+    const permissions = {
+      default: "ask" as const,
+      effective_rules: [{ id: "effective:one", pattern: "bash(rm *)", action: "deny" as const }],
+      project_rules: [],
+      session_rules: [{ id: "session:one", pattern: "bash(cargo test*)", action: "ask" as const }],
+      approvals: [{
+        id: "session:opaque",
+        scope: "session" as const,
+        tool_name: "bash",
+        summary: "exact-invocation=hidden",
+      }],
+      truncated: false,
+    }
+    const state = reduce(createInitialState(), {
+      type: "permissions_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client-state",
+        request_id: "permission-request",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-1",
+      permissions,
+    })
+    expect(state.permissions).toEqual(permissions)
+    expect(state.commandAcks["permission-request"]).toMatchObject({
+      responseType: "permissions_listed",
+      sessionId: "session-1",
+    })
+  })
+
   test("projects turns, tools, questions, snapshots, mode, model, and shell state", () => {
     const context = {
       turn_id: "4",

@@ -395,6 +395,81 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "servers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpServerDescriptor"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "mcp_servers_listed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "servers"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "review": {
+          "$ref": "#/$defs/McpApprovalReview"
+        },
+        "type": {
+          "type": "string",
+          "const": "mcp_server_approval_reviewed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "review"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "permissions": {
+          "$ref": "#/$defs/PermissionStateDescriptor"
+        },
+        "type": {
+          "type": "string",
+          "const": "permissions_listed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "permissions"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "attempt_id": {
           "$ref": "#/$defs/ProviderAuthAttemptId"
         },
@@ -1641,6 +1716,17 @@
             "null"
           ],
           "default": null
+        },
+        "thinking": {
+          "description": "Durable per-session effort applied to this selection, including\nconcrete provider/model routes.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ThinkingLevel"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "type": {
           "type": "string",
@@ -3212,6 +3298,276 @@
         "applies_immediately"
       ]
     },
+    "McpServerDescriptor": {
+      "description": "One server in the live session MCP inventory.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/$defs/McpServerState"
+        },
+        "tool_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "resource_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "prompt_count": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "name",
+        "enabled",
+        "approved",
+        "state",
+        "tool_count",
+        "resource_count",
+        "prompt_count"
+      ]
+    },
+    "McpServerState": {
+      "description": "Bounded live state of one MCP server. Transport credentials and process\nenvironment are intentionally never exposed on the interactive protocol.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "disabled"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "connecting"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ready"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "approval_required"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "failed"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "stopping"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "McpApprovalReview": {
+      "description": "Exact, redacted configuration identity presented before MCP approval.",
+      "type": "object",
+      "properties": {
+        "server": {
+          "type": "string"
+        },
+        "transport": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "type": "string"
+        },
+        "defer_tools": {
+          "type": "boolean"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "previously_approved": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "server",
+        "transport",
+        "origin",
+        "defer_tools",
+        "fingerprint",
+        "previously_approved"
+      ]
+    },
+    "PermissionStateDescriptor": {
+      "description": "Bounded permission inventory for one live session.",
+      "type": "object",
+      "properties": {
+        "default": {
+          "$ref": "#/$defs/PermissionAction"
+        },
+        "effective_rules": {
+          "description": "Effective immutable rules assembled from trusted user configuration.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDescriptor"
+          }
+        },
+        "project_rules": {
+          "description": "Project rule authority is intentionally empty while project permission\nconfig remains forbidden; the typed field makes that policy explicit.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDescriptor"
+          }
+        },
+        "session_rules": {
+          "description": "Ephemeral rules added by the current session's driver.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDescriptor"
+          }
+        },
+        "approvals": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PermissionApprovalDescriptor"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "default",
+        "effective_rules",
+        "project_rules",
+        "session_rules",
+        "approvals",
+        "truncated"
+      ]
+    },
+    "PermissionAction": {
+      "description": "Permission decision exposed on the interactive protocol without coupling\nclients to configuration-file types.",
+      "type": "string",
+      "enum": [
+        "ask",
+        "allow",
+        "deny"
+      ]
+    },
+    "PermissionRuleDescriptor": {
+      "description": "Stable, typed rule row rendered by permission-management clients.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "Opaque stable id accepted by remove operations. Clients never rebuild it.",
+          "type": "string"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/$defs/PermissionAction"
+        }
+      },
+      "required": [
+        "id",
+        "pattern",
+        "action"
+      ]
+    },
+    "PermissionApprovalDescriptor": {
+      "description": "Opaque remembered approval metadata. Invocation arguments and fingerprints\nare deliberately absent.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/PermissionApprovalScope"
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "scope",
+        "tool_name",
+        "summary"
+      ]
+    },
+    "PermissionApprovalScope": {
+      "description": "Scope of a remembered exact approval.",
+      "type": "string",
+      "enum": [
+        "session",
+        "project"
+      ]
+    },
     "ProviderAuthAttemptId": {
       "description": "Connection-scoped identifier of one provider authentication attempt.",
       "type": "string"
@@ -3864,6 +4220,31 @@
       "enum": [
         "approve",
         "reject"
+      ]
+    },
+    "ThinkingLevel": {
+      "description": "Provider-neutral thinking effort selected by a model alias or session.",
+      "oneOf": [
+        {
+          "description": "Do not request provider reasoning output.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Prefer the provider's least expensive reasoning mode.",
+          "type": "string",
+          "const": "low"
+        },
+        {
+          "description": "Prefer a balanced reasoning mode.",
+          "type": "string",
+          "const": "medium"
+        },
+        {
+          "description": "Prefer the provider's strongest reasoning mode.",
+          "type": "string",
+          "const": "high"
+        }
       ]
     },
     "ShellId": {

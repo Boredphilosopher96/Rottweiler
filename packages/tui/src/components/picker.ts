@@ -27,8 +27,63 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   #onQuery: ((query: string) => void) | undefined
   #anchored = false
   #desiredHeight = 12
+  #secretMode = false
+  #textMode = false
+  #secretValue = ""
+  #onSecretSubmit: ((secret: string) => void) | undefined
+  #onTextSubmit: ((value: string) => void) | undefined
+  #textMaxBytes = 2048
   #onKey = (key: KeyEvent) => {
     if (!this.visible) return
+
+
+    if (this.#textMode && !key.ctrl && !key.meta && !key.option) {
+      if (key.name === "return" || key.name === "kpenter") {
+        const value = this.input.value.trim()
+        if (value.length > 0) {
+          const onSubmit = this.#onTextSubmit
+          this.#clearInputModes()
+          onSubmit?.(value)
+        }
+      } else if (key.name === "backspace" || key.name === "delete") {
+        this.input.value = Array.from(this.input.value).slice(0, -1).join("")
+      } else if (isPrintableInput(key.sequence)) {
+        const candidate = this.input.value + key.sequence
+        if (new TextEncoder().encode(candidate).length <= this.#textMaxBytes) {
+          this.input.value = candidate
+        }
+      } else {
+        return
+      }
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+
+    if (this.#secretMode) {
+      const plain = !key.ctrl && !key.meta && !key.option
+      if (plain && (key.name === "return" || key.name === "kpenter")) {
+        if (this.#secretValue.length > 0) {
+          const secret = this.#secretValue
+          const onSubmit = this.#onSecretSubmit
+          this.#clearInputModes()
+          onSubmit?.(secret)
+        }
+      } else if (plain && (key.name === "backspace" || key.name === "delete")) {
+        this.#secretValue = Array.from(this.#secretValue).slice(0, -1).join("")
+        this.#renderSecretMask()
+      } else if (plain && isPrintableInput(key.sequence)) {
+        if (new TextEncoder().encode(this.#secretValue).length + new TextEncoder().encode(key.sequence).length <= 8 * 1024) {
+          this.#secretValue += key.sequence
+          this.#renderSecretMask()
+        }
+      } else {
+        return
+      }
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
 
     const plain = !key.ctrl && !key.meta && !key.option && !key.shift
     const controlOnly = key.ctrl && !key.meta && !key.option && !key.shift
@@ -60,6 +115,36 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       key.preventDefault()
       key.stopPropagation()
     }
+  }
+  #onPaste = (event: { bytes: Uint8Array; preventDefault(): void; stopPropagation(): void }) => {
+    if (!this.visible || (!this.#secretMode && !this.#textMode)) return
+    let pasted: string
+    try {
+      pasted = new TextDecoder("utf-8", { fatal: true }).decode(event.bytes)
+    } catch {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    if (!isPrintableInput(pasted)) {
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    if (this.#textMode) {
+      const candidate = this.input.value + pasted
+      if (new TextEncoder().encode(candidate).length <= this.#textMaxBytes) {
+        this.input.value = candidate
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      return
+    }
+    const bytes = new TextEncoder().encode(this.#secretValue + pasted)
+    if (bytes.length <= 8 * 1024) this.#secretValue += pasted
+    this.#renderSecretMask()
+    event.preventDefault()
+    event.stopPropagation()
   }
 
   constructor(
@@ -146,6 +231,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       event.stopPropagation()
     }
     ctx.keyInput.on("keypress", this.#onKey)
+    ctx.keyInput.on("paste", this.#onPaste)
   }
 
   open(
@@ -153,6 +239,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     items: readonly PickerItem<T>[],
     onSelect: (item: PickerItem<T>) => void,
   ): void {
+    this.#clearInputModes()
     this.#configurePresentation(false, items.length)
     this.title = ` ${title} `
     this.#items = items
@@ -160,6 +247,41 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.input.value = ""
     this.#filter("", false)
     this.visible = true
+    this.input.focus()
+  }
+
+  openSecret(title: string, onSubmit: (secret: string) => void): void {
+    this.#clearInputModes()
+    this.#secretMode = true
+    this.#onSecretSubmit = onSubmit
+    this.#configurePresentation(false, 0)
+    this.title = ` ${title} `
+    this.#items = []
+    this.#filtered = []
+    this.select.options = []
+    this.select.visible = false
+    this.input.placeholder = "API key (hidden)"
+    this.input.value = ""
+    this.visible = true
+    this.height = 5
+    this.input.focus()
+  }
+
+  openTextPrompt(title: string, placeholder: string, onSubmit: (value: string) => void, maxBytes = 2048): void {
+    this.#clearInputModes()
+    this.#textMode = true
+    this.#onTextSubmit = onSubmit
+    this.#textMaxBytes = Math.max(1, Math.min(maxBytes, 8192))
+    this.#configurePresentation(false, 0)
+    this.title = ` ${title} `
+    this.#items = []
+    this.#filtered = []
+    this.select.options = []
+    this.select.visible = false
+    this.input.placeholder = placeholder
+    this.input.value = ""
+    this.visible = true
+    this.height = 5
     this.input.focus()
   }
 
@@ -244,13 +366,36 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.visible = false
     this.input.blur()
     this.input.visible = true
+    this.select.visible = true
+    this.input.placeholder = "type to filter…"
     this.#anchored = false
     this.#onSelect = undefined
+    this.#clearInputModes()
+    this.#items = []
+    this.#filtered = []
+    this.select.options = []
+    this.input.value = ""
   }
 
   override destroy(): void {
     this.ctx.keyInput.off("keypress", this.#onKey)
+    this.ctx.keyInput.off("paste", this.#onPaste)
     super.destroy()
+  }
+
+  #renderSecretMask(): void {
+    const length = Array.from(this.#secretValue).length
+    this.input.value = `${"•".repeat(Math.min(length, 64))}${length > 64 ? "…" : ""}`
+  }
+
+  #clearInputModes(): void {
+    this.#secretValue = ""
+    this.#secretMode = false
+    this.#onSecretSubmit = undefined
+    this.#textMode = false
+    this.#onTextSubmit = undefined
+    this.#textMaxBytes = 2048
+    this.input.value = ""
   }
 
   #configurePresentation(anchored: boolean, itemCount: number): void {
@@ -347,6 +492,17 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     const index = this.#scrollOffset() + Math.floor(localRow / 2)
     return index >= 0 && index < this.select.options.length ? index : null
   }
+}
+
+function isPrintableInput(value: string): boolean {
+  return value.length > 0 && Array.from(value).every((character) => {
+    const code = character.codePointAt(0) ?? 0
+    return !(
+      code < 0x20 ||
+      (code >= 0x7f && code <= 0x9f) ||
+      /[\p{Cf}\p{Zl}\p{Zp}]/u.test(character)
+    )
+  })
 }
 
 export function fuzzyScore(query: string, candidate: string): number | null {
