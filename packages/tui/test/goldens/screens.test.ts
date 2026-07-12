@@ -64,6 +64,7 @@ function fixtureState(): RottweilerState {
       used_tokens: "6400",
       usable_tokens: "32000",
       reserved_tokens: "4000",
+      context_window_known: true,
       cache_breakpoints: [{ after_item_id: "policy" }, { after_item_id: "tools" }],
       items: [
         {

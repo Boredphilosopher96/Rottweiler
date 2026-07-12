@@ -216,6 +216,55 @@ describe("M4 retained components", () => {
     expect(app.interactionPanel.prompt.plainText).toContain("UNSANDBOXED EXECUTION")
   })
 
+  test("keeps approval waiting loud and surfaces a rejected approval round trip", async () => {
+    const setup = await createTestRenderer({ width: 112, height: 24, useThread: false })
+    renderer = setup.renderer
+    const state: RottweilerState = {
+      ...createInitialState(),
+      tools: {
+        bash: {
+          toolCallId: "bash",
+          turnId: "1",
+          name: "bash",
+          args: { command: "cargo test" },
+          status: "awaiting_approval",
+          capabilities: ["execute"],
+          rationale: "Run tests",
+          diff: null,
+          chunks: [],
+          output: null,
+          isError: null,
+          callIndex: 0,
+        },
+      },
+    }
+    const app = createRottweilerApp(renderer, {
+      initialState: state,
+      onCommand(command) {
+        if (command.type !== "approve_tool") return { type: "accepted" }
+        return {
+          type: "rejected",
+          error: {
+            category: "tool",
+            code: "driver_lease_required",
+            message: "only the active driver can approve tools",
+            retryable: true,
+          },
+        }
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.banner.plainText).toContain("Waiting for approval · bash")
+    expect(app.statusLine.plainText).toContain("approval bash")
+
+    app.interactionPanel.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.state.errors.at(-1)?.code).toBe("driver_lease_required")
+    expect(app.banner.plainText).toContain("only the active driver can approve tools")
+  })
+
   test("renders a completed submitted plan and routes explicit approval", async () => {
     const setup = await createTestRenderer({ width: 112, height: 30, useThread: false })
     renderer = setup.renderer

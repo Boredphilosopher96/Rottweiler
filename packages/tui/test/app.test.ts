@@ -490,6 +490,66 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options.map((option) => option.value)).toContain("commands.truncated")
   })
 
+  test("keeps local slash commands usable while a rejected live catalog is loud and retryable", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    let attempts = 0
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        if (command.type !== "list_commands") return { type: "accepted" }
+        attempts += 1
+        return {
+          type: "rejected",
+          error: {
+            category: "protocol",
+            code: "catalog_unavailable",
+            message: "driver lease rejected the command catalog",
+            retryable: true,
+          },
+        }
+      },
+    })
+    renderer.root.add(app)
+
+    await setup.mockInput.typeText("/")
+    await Bun.sleep(0)
+
+    expect(app.picker.select.options.map((option) => option.value)).toContain("commands.error")
+    expect(app.picker.select.options.map((option) => option.value)).toContain("help")
+    expect(app.picker.select.options[0]?.description).toContain(
+      "driver lease rejected the command catalog",
+    )
+    expect(app.banner.plainText).toContain("couldn't load commands")
+
+    app.picker.select.setSelectedIndex(0)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(attempts).toBe(2)
+  })
+
+  test("renders model projection failures in both model and provider pickers", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        if (command.type !== "list_models") return { type: "accepted" }
+        return Promise.reject(new Error("provider discovery timed out"))
+      },
+    })
+    renderer.root.add(app)
+
+    app.openModelPicker()
+    await Bun.sleep(0)
+    expect(app.picker.select.options[0]?.value).toBe("models.error")
+    expect(app.picker.select.options[0]?.description).toContain("provider discovery timed out")
+
+    app.closePicker()
+    app.openProviderPicker()
+    await Bun.sleep(0)
+    expect(app.picker.select.options[0]?.value).toBe("providers.error")
+    expect(app.picker.select.options[0]?.description).toContain("provider discovery timed out")
+  })
+
   test("explains empty provider and model configuration instead of opening blank pickers", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer

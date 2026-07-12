@@ -710,6 +710,9 @@ export class StatusLineRenderable extends TextRenderable {
   }
 
   update(state: RottweilerState): void {
+    const waitingApproval = Object.values(state.tools).find(
+      (tool) => tool.status === "awaiting_approval",
+    )
     const context =
       state.context === null
         ? "ctx —"
@@ -727,6 +730,7 @@ export class StatusLineRenderable extends TextRenderable {
           ]),
       ...(state.replay.active ? ["◉ replay"] : []),
       ...(state.replay.active ? [] : [`◉ ${state.mode ?? "execute"}`]),
+      ...(waitingApproval === undefined ? [] : [`approval ${waitingApproval.name}`]),
       `model ${state.provider === null ? (state.model ?? "fast") : `${state.provider}/${state.model ?? "fast"}`}`,
       context,
       formatSessionCost(state.cost),
@@ -758,6 +762,9 @@ export class StateBannerRenderable extends TextRenderable {
     const latestBudget = state.budgets.at(-1)
     const latestError = state.errors.at(-1)
     const latestPluginNotification = state.pluginNotifications.at(-1)
+    const waitingApproval = Object.values(state.tools).find(
+      (tool) => tool.status === "awaiting_approval",
+    )
     if (latestError !== undefined) {
       this.visible = true
       this.fg = this.#theme.danger
@@ -766,6 +773,10 @@ export class StateBannerRenderable extends TextRenderable {
       this.visible = true
       this.fg = this.#theme.danger
       this.content = `Budget hard cap · ${latestBudget.scope} ${latestBudget.current}/${latestBudget.limit}`
+    } else if (waitingApproval !== undefined) {
+      this.visible = true
+      this.fg = this.#theme.warning
+      this.content = `Waiting for approval · ${waitingApproval.name}`
     } else if (state.replay.active) {
       this.visible = true
       this.fg = this.#theme.info

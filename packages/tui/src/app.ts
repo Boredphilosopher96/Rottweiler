@@ -85,6 +85,7 @@ export interface TerminalHandoverAdapter {
 }
 
 type PickerKind = "palette" | "commands" | "files" | "modes" | "models" | "providers" | "sessions"
+type ProjectionKind = "commands" | "models" | "sessions" | "files"
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 
 type CommandChoice = RottweilerState["commands"][number]
@@ -144,8 +145,10 @@ export class RottweilerApp extends BoxRenderable {
   #latestReviewRequest: string | null = null
   #latestCommandsRequest: string | null = null
   #latestModelsRequest: string | null = null
+  #latestSessionsRequest: string | null = null
   #commandsRequested = false
   #modelsRequested = false
+  #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
   #pickerAnchored = false
   #pickerQuery = ""
   #modelProviderFilter: string | null = null
@@ -328,6 +331,12 @@ export class RottweilerApp extends BoxRenderable {
     if (sessionId !== this.#sessionId) {
       this.#latestWorkspaceStatusRequest = null
       this.#latestReviewRequest = null
+      this.#latestCommandsRequest = null
+      this.#latestModelsRequest = null
+      this.#latestSessionsRequest = null
+      this.#commandsRequested = false
+      this.#modelsRequested = false
+      this.#projectionErrors = {}
       this.#pendingReviewSelection = null
       this.#reviewOpen = false
       this.#pendingModelSwitchRequests.clear()
@@ -417,14 +426,26 @@ export class RottweilerApp extends BoxRenderable {
       this.#latestModelsRequest !== null &&
       commandRequestId !== this.#latestModelsRequest
     ) return
+    if (
+      (event.type === "sessions_listed" || event.type === "sessions_search_ready") &&
+      this.#latestSessionsRequest !== null &&
+      commandRequestId !== this.#latestSessionsRequest
+    ) return
     if (event.type === "command_descriptors_listed") {
       this.#commandsRequested = false
       this.#latestCommandsRequest = null
+      this.#clearProjectionError("commands")
     }
     if (event.type === "models_listed") {
       this.#modelsRequested = false
       this.#latestModelsRequest = null
+      this.#clearProjectionError("models")
     }
+    if (event.type === "sessions_listed" || event.type === "sessions_search_ready") {
+      this.#clearProjectionError("sessions")
+      this.#latestSessionsRequest = null
+    }
+    if (event.type === "workspace_files_found") this.#clearProjectionError("files")
     const previous = this.#state
     const next = reduceRottweilerState(previous, engineEvent(event))
     this.setState(next)
@@ -899,17 +920,33 @@ export class RottweilerApp extends BoxRenderable {
         )
         break
       case "commands":
-        this.#openPicker(
-          this.#state.commandsTruncated ? "Commands · results truncated" : "Commands",
-          this.#slashCommandChoices().map((command) => ({
+        const commandError = this.#projectionErrors.commands
+        const commandItems: PickerItem<CommandChoice | null>[] = [
+          ...(commandError === undefined
+            ? []
+            : [{
+                id: "commands.error",
+                label: "Couldn't load live commands",
+                description: `${commandError} · select to retry`,
+                value: null,
+              }]),
+          ...this.#slashCommandChoices().map((command) => ({
             id: command.name,
             label: `/${command.name}`,
             description: command.description,
             searchText: command.usage,
             value: command,
           })),
+        ]
+        this.#openPicker(
+          this.#state.commandsTruncated ? "Commands · results truncated" : "Commands",
+          commandItems,
           (item) => {
-            const command = item.value as RottweilerState["commands"][number]
+            const command = item.value as CommandChoice | null
+            if (command === null) {
+              this.#requestCommands()
+              return
+            }
             const clearAnchoredTrigger = () => {
               if (this.#pickerAnchored) this.composer.value = ""
             }
@@ -943,16 +980,32 @@ export class RottweilerApp extends BoxRenderable {
         )
         break
       case "files":
-        this.#openPicker(
-          "Workspace files",
-          this.#state.workspaceFiles.map((file) => ({
+        const fileError = this.#projectionErrors.files
+        const fileItems: PickerItem<RottweilerState["workspaceFiles"][number] | null>[] = [
+          ...(fileError === undefined
+            ? []
+            : [{
+                id: "files.error",
+                label: "Couldn't search workspace files",
+                description: `${fileError} · select to retry`,
+                value: null,
+              }]),
+          ...this.#state.workspaceFiles.map((file) => ({
             id: file.path,
             label: file.isDirectory ? `▸ ${file.path}` : file.path,
             description: file.isDirectory ? "directory" : "attach file",
             value: file,
           })),
+        ]
+        this.#openPicker(
+          "Workspace files",
+          fileItems,
           (item) => {
-            const file = item.value as RottweilerState["workspaceFiles"][number]
+            const file = item.value as RottweilerState["workspaceFiles"][number] | null
+            if (file === null) {
+              this.openFilePicker(this.#pickerQuery, this.#pickerAnchored)
+              return
+            }
             if (file.isDirectory) {
               const query = `${file.path.replace(/\/$/, "")}/`
               if (this.#pickerAnchored) {
@@ -996,6 +1049,15 @@ export class RottweilerApp extends BoxRenderable {
               .join(" · "),
             value: model,
           }))
+        const modelError = this.#projectionErrors.models
+        if (modelError !== undefined) {
+          modelItems.unshift({
+            id: "models.error",
+            label: "Couldn't load models",
+            description: `${modelError} · select to retry`,
+            value: null,
+          })
+        }
         if (modelItems.length === 0) {
           modelItems.push({
             id: "models.empty",
@@ -1012,6 +1074,10 @@ export class RottweilerApp extends BoxRenderable {
           (item) => {
             const model = item.value as RottweilerState["models"][number] | null
             if (model === null) {
+              if (item.id === "models.error") {
+                this.#requestModels()
+                return
+              }
               this.#projectClientError(
                 "models_unavailable",
                 "no configured model routes are available; configure a provider and model alias",
@@ -1043,6 +1109,15 @@ export class RottweilerApp extends BoxRenderable {
             description: `${count} model route${count === 1 ? "" : "s"}`,
             value: provider,
           }))
+        const providerError = this.#projectionErrors.models
+        if (providerError !== undefined) {
+          providerItems.unshift({
+            id: "providers.error",
+            label: "Couldn't load providers",
+            description: `${providerError} · select to retry`,
+            value: null,
+          })
+        }
         if (providerItems.length === 0) {
           providerItems.push({
             id: "providers.empty",
@@ -1056,6 +1131,10 @@ export class RottweilerApp extends BoxRenderable {
           providerItems,
           (item) => {
             if (item.value === null) {
+              if (item.id === "providers.error") {
+                this.#requestModels()
+                return
+              }
               this.#projectClientError(
                 "providers_unavailable",
                 "no configured provider routes are available; authenticate and configure a provider",
@@ -1103,19 +1182,39 @@ export class RottweilerApp extends BoxRenderable {
         )
         break
       case "sessions":
-        this.#openPicker(
-          this.#state.sessionSearch?.truncated === true
-            ? "Sessions · results truncated"
-            : "Sessions",
-          this.#state.sessions.map((session) => ({
+        const sessionError = this.#projectionErrors.sessions
+        const sessionItems: PickerItem<RottweilerState["sessions"][number] | null>[] = [
+          ...(sessionError === undefined
+            ? []
+            : [{
+                id: "sessions.error",
+                label: "Couldn't load sessions",
+                description: `${sessionError} · select to retry`,
+                value: null,
+              }]),
+          ...this.#state.sessions.map((session) => ({
             id: session.sessionId,
             label: session.workspaceName,
             description: `${session.model}${session.shellActive ? " · shell active" : ""}`,
             searchText: `${session.sessionId} ${session.workspaceName} ${session.model}`,
             value: session,
           })),
+        ]
+        this.#openPicker(
+          this.#state.sessionSearch?.truncated === true
+            ? "Sessions · results truncated"
+            : "Sessions",
+          sessionItems,
           (item) => {
-            const session = item.value as RottweilerState["sessions"][number]
+            const session = item.value as RottweilerState["sessions"][number] | null
+            if (session === null) {
+              const query = this.picker.input.value.trim()
+              this.#latestSessionsRequest =
+                query.length === 0
+                  ? this.#command({ type: "list_sessions" })
+                  : this.#command({ type: "search_sessions", query, limit: 100 })
+              return
+            }
             void this.#options.onSessionSelect?.(session.sessionId)
             this.closePicker()
           },
@@ -1303,11 +1402,13 @@ export class RottweilerApp extends BoxRenderable {
 
   #requestCommands(): void {
     this.#commandsRequested = true
+    this.#clearProjectionError("commands")
     this.#latestCommandsRequest = this.#command({ type: "list_commands" })
   }
 
   #requestModels(): void {
     this.#modelsRequested = true
+    this.#clearProjectionError("models")
     this.#latestModelsRequest = this.#command({ type: "list_models" })
   }
 
@@ -1330,9 +1431,9 @@ export class RottweilerApp extends BoxRenderable {
       this.#sessionSearchTimer = null
       if (this.#pickerKind === "sessions" && this.picker.input.value === query) {
         if (query.trim().length === 0) {
-          this.#command({ type: "list_sessions" })
+          this.#latestSessionsRequest = this.#command({ type: "list_sessions" })
         } else {
-          this.#command({ type: "search_sessions", query, limit: 100 })
+          this.#latestSessionsRequest = this.#command({ type: "search_sessions", query, limit: 100 })
         }
       }
     }, 80)
@@ -1437,14 +1538,35 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #approve(tool: ToolProjection, decision: ApprovalDecision): void {
-    this.#emit({
-      type: "approve_tool",
-      meta: this.#meta(),
-      session_id: this.#sessionId,
-      tool_call_id: tool.toolCallId,
-      decision,
-      binding: approvalBinding(tool.diff),
-    })
+    void this.#submitApproval(tool, decision)
+  }
+
+  async #submitApproval(tool: ToolProjection, decision: ApprovalDecision): Promise<void> {
+    try {
+      const outcome = await this.#emit({
+        type: "approve_tool",
+        meta: this.#meta(),
+        session_id: this.#sessionId,
+        tool_call_id: tool.toolCallId,
+        decision,
+        binding: approvalBinding(tool.diff),
+      })
+      if (outcome?.type === "rejected") {
+        this.#projectRejection(outcome)
+      } else if (outcome === null) {
+        this.#projectClientError(
+          "tool_approval_unavailable",
+          `the engine did not acknowledge the ${tool.name} approval decision`,
+          true,
+        )
+      }
+    } catch (error) {
+      this.#projectClientError(
+        "tool_approval_failed",
+        `couldn't deliver the ${tool.name} approval decision: ${safeErrorMessage(error)}`,
+        true,
+      )
+    }
   }
 
   #answer(question: QuestionProjection, values: readonly string[]): void {
@@ -1568,48 +1690,115 @@ export class RottweilerApp extends BoxRenderable {
         if (oldest !== undefined) this.#pendingModelSwitchRequests.delete(oldest)
       }
       this.#pendingModelSwitchRequests.add(meta.request_id)
+    } else if (command.type === "list_sessions" || command.type === "search_sessions") {
+      this.#latestSessionsRequest = meta.request_id
     }
+    let dispatched: ClientCommand
     switch (command.type) {
       case "list_models":
       case "list_sessions":
-        this.#emit({ type: command.type, meta })
+        dispatched = { type: command.type, meta }
         break
       case "list_commands":
-        this.#emit({ type: command.type, meta, session_id: this.#sessionId })
+        dispatched = { type: command.type, meta, session_id: this.#sessionId }
         break
       case "search_sessions":
-        this.#emit({ ...command, meta })
+        dispatched = { ...command, meta }
         break
       case "get_session_review":
       case "get_workspace_status":
-        this.#emit({ type: command.type, meta, session_id: this.#sessionId })
+        dispatched = { type: command.type, meta, session_id: this.#sessionId }
         break
       case "get_workspace_diff":
-        this.#emit({ ...command, meta, session_id: this.#sessionId })
+        dispatched = { ...command, meta, session_id: this.#sessionId }
         break
       case "search_workspace_files":
-        this.#emit({
+        dispatched = {
           ...command,
           meta,
           session_id: this.#sessionId,
-        })
+        }
         break
       case "preview_workspace_file":
-        this.#emit({
+        dispatched = {
           ...command,
           meta,
           session_id: this.#sessionId,
-        })
+        }
         break
       case "switch_model":
-        this.#emit({
+        dispatched = {
           ...command,
           meta,
           session_id: this.#sessionId,
-        })
+        }
         break
     }
+    void this.#emitProjectionCommand(command.type, dispatched, meta.request_id)
     return meta.request_id
+  }
+
+  async #emitProjectionCommand(
+    type: ClientCommand["type"],
+    command: ClientCommand,
+    requestId: string,
+  ): Promise<void> {
+    try {
+      const outcome = await this.#emit(command)
+      if (outcome?.type === "rejected") {
+        if (projectionKind(type) === null) {
+          if (type === "switch_model") this.#pendingModelSwitchRequests.delete(requestId)
+          this.#projectRejection(outcome)
+        } else {
+          this.#recordProjectionFailure(type, requestId, outcome.error.message)
+        }
+      } else if (outcome === null) {
+        const message = "the engine did not acknowledge the request"
+        if (projectionKind(type) === null) {
+          if (type === "switch_model") this.#pendingModelSwitchRequests.delete(requestId)
+          this.#projectClientError(`${type}_unavailable`, message, true)
+        } else {
+          this.#recordProjectionFailure(type, requestId, message)
+        }
+      }
+    } catch (error) {
+      const message = safeErrorMessage(error)
+      if (projectionKind(type) === null) {
+        if (type === "switch_model") this.#pendingModelSwitchRequests.delete(requestId)
+        this.#projectClientError(`${type}_failed`, message, true)
+      } else {
+        this.#recordProjectionFailure(type, requestId, message)
+      }
+    }
+  }
+
+  #recordProjectionFailure(type: ClientCommand["type"], requestId: string, message: string): void {
+    const kind = projectionKind(type)
+    if (kind === null || !this.#isCurrentProjectionRequest(kind, requestId)) return
+    if (kind === "commands") {
+      this.#commandsRequested = false
+      this.#latestCommandsRequest = null
+    } else if (kind === "models") {
+      this.#modelsRequested = false
+      this.#latestModelsRequest = null
+    }
+    this.#projectionErrors = { ...this.#projectionErrors, [kind]: message }
+    this.#projectClientError(`${kind}_projection_failed`, `couldn't load ${kind}: ${message}`, true)
+  }
+
+  #isCurrentProjectionRequest(kind: ProjectionKind, requestId: string): boolean {
+    if (kind === "commands") return this.#latestCommandsRequest === requestId
+    if (kind === "models") return this.#latestModelsRequest === requestId
+    if (kind === "sessions") return this.#latestSessionsRequest === requestId
+    if (kind === "files") return this.#pendingWorkspaceSearchRequest === requestId
+    return true
+  }
+
+  #clearProjectionError(kind: ProjectionKind): void {
+    if (this.#projectionErrors[kind] === undefined) return
+    const next = { ...this.#projectionErrors }
+    delete next[kind]
+    this.#projectionErrors = next
   }
 
   #meta() {
@@ -1798,6 +1987,28 @@ function parseSessionAction(content: string): SessionAction | null {
 
 function isU64(value: string): boolean {
   return /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n
+}
+
+function projectionKind(type: ClientCommand["type"]): ProjectionKind | null {
+  switch (type) {
+    case "list_commands":
+      return "commands"
+    case "list_models":
+      return "models"
+    case "list_sessions":
+    case "search_sessions":
+      return "sessions"
+    case "search_workspace_files":
+      return "files"
+    default:
+      return null
+  }
+}
+
+function safeErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message.length > 0
+    ? error.message
+    : "the request could not be delivered to the engine"
 }
 
 function approvalBinding(diff: unknown): ApprovalBinding | null {

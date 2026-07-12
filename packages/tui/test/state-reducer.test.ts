@@ -785,6 +785,7 @@ describe("pure TUI state reducer", () => {
       used_tokens: "10",
       usable_tokens: "100",
       reserved_tokens: "20",
+      context_window_known: true,
       cache_breakpoints: [],
       items: [],
     } satisfies ContextSnapshot
