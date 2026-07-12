@@ -245,6 +245,7 @@ export class RottweilerApp extends BoxRenderable {
   #inputMode: InputMode
   #vimFocus: VimFocus = "composer"
   #vimFocusBeforePicker: Exclude<VimFocus, "picker"> = "composer"
+  #destroyed = false
   #onTerminalFocus = () => {
     this.#terminalFocused = true
   }
@@ -499,6 +500,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   handleEvent(event: WireEngineEvent): void {
+    if (this.#destroyed) return
     const eventRecord = event as unknown as Record<string, unknown>
     const commandRequestId =
       isRecord(eventRecord.meta) && typeof eventRecord.meta.request_id === "string"
@@ -758,6 +760,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   setState(state: RottweilerState): void {
+    if (this.#destroyed) return
     const previousFocusOwner = this.#visibleFocusOwner()
     this.#state = state
     if (state.providerAuth.pending === null) {
@@ -1075,6 +1078,8 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   override destroy(): void {
+    if (this.#destroyed) return
+    this.#destroyed = true
     this.#clearPendingShellTimer()
     this.#clearPluginNotificationTimer()
     this.#clearSessionSearchTimer()

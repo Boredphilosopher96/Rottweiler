@@ -22,6 +22,13 @@ import time
 
 PROMPT_READY_MARKER = b"rw_perf_prompt_ready=1\n"
 FINGERPRINT = re.compile(rb"/mcp approve ([A-Za-z0-9_.-]+) ([0-9a-f]{64})")
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+MCP_STATUS_ROW = re.compile(
+    r"^- (?P<id>[A-Za-z0-9_.-]+) · (?P<state>.+?) · "
+    r"(?P<tools>\d+) tools · (?P<resources>\d+) resources · "
+    r"(?P<prompts>\d+) prompts$",
+    re.MULTILINE,
+)
 
 
 def isolated_env(home: pathlib.Path, temporary: pathlib.Path) -> dict[str, str]:
@@ -164,9 +171,18 @@ def approve_exact_mcp_configs(
             provider_script,
             f"/mcp approve {server} {fingerprint}",
         )
-        if b'"config_approved":true' not in confirmation.stdout:
+        human_confirmation = (
+            f"MCP server {server} is approved.\nConfiguration: new approval saved\n"
+        ).encode("utf-8")
+        if human_confirmation not in confirmation.stdout:
             raise RuntimeError(
-                f"MCP {server} approval was not durably installed: {confirmation.stdout!r}"
+                f"MCP {server} did not confirm its saved approval: {confirmation.stdout!r}"
+            )
+        ledger_path = pathlib.Path(env["ROTTWEILER_HOME"]) / "mcp-approvals-v1.json"
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        if ledger.get("approvals", {}).get(server) != fingerprint:
+            raise RuntimeError(
+                f"MCP {server} approval was not durably installed: {ledger!r}"
             )
     ledger_path = pathlib.Path(env["ROTTWEILER_HOME"]) / "mcp-approvals-v1.json"
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
@@ -175,30 +191,21 @@ def approve_exact_mcp_configs(
 
 
 def parse_status(stdout: bytes, server_names: list[str]) -> None:
-    statuses: object | None = None
-    text = stdout.decode("utf-8", errors="replace")
-    decoder = json.JSONDecoder()
-    for start, character in enumerate(text):
-        if character != "[":
-            continue
-        with contextlib.suppress(json.JSONDecodeError):
-            value, _ = decoder.raw_decode(text[start:])
-            if isinstance(value, list) and all(
-                isinstance(entry, dict) and isinstance(entry.get("id"), str)
-                for entry in value
-            ):
-                statuses = value
-    if not isinstance(statuses, list) or len(statuses) != len(server_names):
+    text = ANSI_ESCAPE.sub("", stdout.decode("utf-8", errors="replace")).replace(
+        "\r", ""
+    )
+    matches = list(MCP_STATUS_ROW.finditer(text))
+    statuses = {match.group("id"): match.groupdict() for match in matches}
+    if len(matches) != len(server_names) or set(statuses) != set(server_names):
         raise RuntimeError(f"/mcp status omitted three real catalogs: {stdout!r}")
-    by_name = {entry.get("id"): entry for entry in statuses if isinstance(entry, dict)}
     for server in server_names:
-        status = by_name.get(server)
-        if status is None or status.get("state") != "ready":
+        status = statuses[server]
+        if status["state"] != "ready":
             raise RuntimeError(f"MCP {server} was not ready: {statuses!r}")
         if (
-            status.get("tool_count") != 3
-            or status.get("resource_count") != 1
-            or status.get("prompt_count") != 1
+            int(status["tools"]) != 3
+            or int(status["resources"]) != 1
+            or int(status["prompts"]) != 1
         ):
             raise RuntimeError(f"MCP {server} catalog evidence was incomplete: {status!r}")
 

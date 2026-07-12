@@ -898,6 +898,55 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(attempts).toBe(2)
   })
 
+  test("ignores late projection failures and engine events after OpenTUI destroys the application", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    let finishProjection!: (outcome: CommandOutcome) => void
+    const deferredProjection = new Promise<CommandOutcome>((resolve) => {
+      finishProjection = resolve
+    })
+    let postDestroyCommands = 0
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        if (command.type === "list_commands") return deferredProjection
+        postDestroyCommands += 1
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openCommandPicker()
+    renderer.destroy()
+    renderer = undefined
+    finishProjection({
+      type: "rejected",
+      error: {
+        category: "protocol",
+        code: "runtime_stopped",
+        message: "the projection was cancelled during teardown",
+        retryable: true,
+      },
+    })
+    await Bun.sleep(0)
+
+    expect(app.state.errors).toHaveLength(0)
+
+    app.handleEvent({
+      type: "command_finished",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      name: "status",
+      message: "actor idle · queue empty",
+      unrestorable_paths: [],
+    })
+    expect(app.state.transcript).toHaveLength(0)
+    expect(postDestroyCommands).toBe(0)
+  })
+
   test("renders model projection failures in both model and provider pickers", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer

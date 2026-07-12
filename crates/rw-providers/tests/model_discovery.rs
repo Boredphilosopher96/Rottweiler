@@ -55,6 +55,47 @@ async fn fixture_server(bodies: Vec<String>) -> (Url, tokio::task::JoinHandle<Ve
     )
 }
 
+async fn unavailable_catalog_server(
+    status: &'static str,
+) -> (Url, tokio::task::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap_or_else(|error| panic!("fixture listener must bind: {error}"));
+    let address = listener
+        .local_addr()
+        .unwrap_or_else(|error| panic!("fixture address must resolve: {error}"));
+    let task = tokio::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .unwrap_or_else(|error| panic!("fixture request must connect: {error}"));
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream
+                .read(&mut chunk)
+                .await
+                .unwrap_or_else(|error| panic!("fixture request must read: {error}"));
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let response =
+            format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        stream
+            .write_all(response.as_bytes())
+            .await
+            .unwrap_or_else(|error| panic!("fixture response must write: {error}"));
+        String::from_utf8_lossy(&request).to_ascii_lowercase()
+    });
+    (
+        Url::parse(&format!("http://{address}/"))
+            .unwrap_or_else(|error| panic!("fixture URL must parse: {error}")),
+        task,
+    )
+}
+
 fn openai_provider(endpoint: Url, auth: AuthMaterial) -> OpenAiCompatibleProvider {
     OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         name: "openai-fixture".to_owned(),
@@ -104,6 +145,29 @@ async fn openai_discovers_sorted_models_with_auth() {
         .unwrap_or_else(|error| panic!("fixture server must finish: {error}"));
     assert!(requests[0].starts_with("get /v1/models http/1.1"));
     assert!(requests[0].contains("authorization: bearer private-openai-token"));
+}
+
+#[tokio::test]
+async fn loopback_inference_route_without_models_endpoint_is_static() {
+    let (origin, server) = unavailable_catalog_server("501 Not Implemented").await;
+    let provider = openai_provider(
+        origin
+            .join("v1/chat/completions")
+            .unwrap_or_else(|error| panic!("fixture endpoint must join: {error}")),
+        AuthMaterial::None,
+    );
+
+    assert!(
+        provider
+            .discover_models()
+            .await
+            .unwrap_or_else(|error| panic!("missing loopback catalog must be optional: {error}"))
+            .is_none()
+    );
+    let request = server
+        .await
+        .unwrap_or_else(|error| panic!("fixture server must finish: {error}"));
+    assert!(request.starts_with("get /v1/models http/1.1"));
 }
 
 #[tokio::test]

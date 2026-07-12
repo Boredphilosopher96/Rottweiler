@@ -237,11 +237,14 @@ impl OpenAiCompatibleProvider {
         Ok(())
     }
 
-    async fn discover_models_impl(&self) -> Result<DiscoveredProviderCatalog, ProviderError> {
+    async fn discover_models_impl(
+        &self,
+    ) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
         require_network(self.config.network_policy)?;
         let material = self.config.auth.material().await?;
         let subscription = matches!(material, crate::AuthMaterial::OpenAiSubscription { .. });
         let endpoint = discovery_endpoint(&self.config.endpoint, subscription)?;
+        let optional_loopback_catalog = is_loopback(&endpoint) && !subscription;
         let mut headers = HeaderMap::new();
         material.apply_openai(&mut headers)?;
         let response = self
@@ -251,6 +254,20 @@ impl OpenAiCompatibleProvider {
             .send()
             .await
             .map_err(transport_error)?;
+        if optional_loopback_catalog
+            && matches!(
+                response.status(),
+                reqwest::StatusCode::NOT_FOUND
+                    | reqwest::StatusCode::METHOD_NOT_ALLOWED
+                    | reqwest::StatusCode::NOT_IMPLEMENTED
+            )
+        {
+            // Local OpenAI-compatible servers frequently expose inference
+            // without implementing `GET /models`. That is a static route, not
+            // a failed live catalog. Public and subscription endpoints remain
+            // authoritative and still fail closed on the same statuses.
+            return Ok(None);
+        }
         if let Some(error) = response_error(&response) {
             return Err(error);
         }
@@ -260,10 +277,10 @@ impl OpenAiCompatibleProvider {
         } else {
             parse_openai_models(&bytes)?
         };
-        Ok(DiscoveredProviderCatalog {
+        Ok(Some(DiscoveredProviderCatalog {
             provider: self.config.name.clone(),
             models,
-        })
+        }))
     }
 }
 
@@ -557,7 +574,7 @@ impl Provider for OpenAiCompatibleProvider {
     }
 
     async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
-        self.discover_models_impl().await.map(Some)
+        self.discover_models_impl().await
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
