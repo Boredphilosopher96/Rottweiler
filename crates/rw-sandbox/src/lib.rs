@@ -763,9 +763,11 @@ fn seatbelt_profile(policy: &SandboxPolicy) -> String {
         .map(|index| format!("(subpath (param \"RW_SECRET_{index}\"))"))
         .collect::<Vec<_>>()
         .join(" ");
-    let secret_rule = (!secret_roots.is_empty())
-        .then(|| format!("(deny file-read* (require-any {secret_roots}))"))
-        .unwrap_or_default();
+    let secret_rule = if secret_roots.is_empty() {
+        String::new()
+    } else {
+        format!("(deny file-read* (require-any {secret_roots}))")
+    };
     format!(
         "(version 1) (allow default) {read_rule} {secret_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
     )
