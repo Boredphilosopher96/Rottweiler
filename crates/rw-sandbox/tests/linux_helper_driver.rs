@@ -7,10 +7,22 @@ fn main() {
     use std::path::Path;
     use std::process::Command;
 
-    use rw_sandbox::{NetworkPolicy, SandboxPolicy, maybe_run_helper, shell_launch_plan};
+    use rw_sandbox::{
+        NetworkPolicy, SandboxPolicy, SandboxSupport, maybe_run_helper, probe, shell_launch_plan,
+    };
 
     if maybe_run_helper(std::env::args_os()).expect("sandbox helper dispatch") {
         unreachable!("sandbox helper replaces the process")
+    }
+
+    let capability = probe();
+    if capability.support != SandboxSupport::Enforced {
+        assert!(
+            std::env::var_os("ROTTWEILER_REQUIRE_LINUX_SANDBOX").is_none(),
+            "privileged Linux gate requires sandbox enforcement: {capability:?}"
+        );
+        eprintln!("skipping helper-driver acceptance: {capability:?}");
+        return;
     }
 
     let held_descriptors = (0..16)
