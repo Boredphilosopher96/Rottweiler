@@ -24,6 +24,8 @@ pub const CREDENTIAL_BACKEND_ENV: &str = "ROTTWEILER_CREDENTIAL_BACKEND";
 const LEGACY_KEYCHAIN_SERVICE: &str = "dev.rottweiler.credentials";
 const KEYCHAIN_VAULT_VERSION: u8 = 1;
 const CREDENTIAL_FILE_VERSION: u8 = 1;
+#[cfg(target_os = "macos")]
+const PASSIVE_KEYCHAIN_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// A value that must not appear in diagnostics or gain serialization by accident.
 ///
@@ -414,12 +416,49 @@ fn read_keychain_item(
     service: &str,
     identifier: &str,
 ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+    #[cfg(target_os = "macos")]
+    {
+        let service = service.to_owned();
+        let identifier = identifier.to_owned();
+        bounded_keychain_read(PASSIVE_KEYCHAIN_READ_TIMEOUT, move || {
+            read_keychain_item_blocking(&service, &identifier)
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    read_keychain_item_blocking(service, identifier)
+}
+
+fn read_keychain_item_blocking(
+    service: &str,
+    identifier: &str,
+) -> Result<Option<Secret<String>>, KeychainUnavailable> {
     let entry = keyring::Entry::new(service, identifier).map_err(|_| KeychainUnavailable)?;
     match entry.get_password() {
         Ok(value) => Ok(Some(Secret::new(value))),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(_) => Err(KeychainUnavailable),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn bounded_keychain_read<F>(
+    timeout: std::time::Duration,
+    read: F,
+) -> Result<Option<Secret<String>>, KeychainUnavailable>
+where
+    F: FnOnce() -> Result<Option<Secret<String>>, KeychainUnavailable> + Send + 'static,
+{
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("rottweiler-keychain-read".to_owned())
+        .spawn(move || {
+            let _ = sender.send(read());
+        })
+        .map_err(|_| KeychainUnavailable)?;
+    receiver
+        .recv_timeout(timeout)
+        .unwrap_or(Err(KeychainUnavailable))
 }
 
 fn write_keychain_item(
@@ -486,9 +525,6 @@ impl CredentialKeychain for OsKeychain {
         let mut cache = process_vault_cache()
             .lock()
             .map_err(|_| KeychainUnavailable)?;
-        if matches!(&*cache, ProcessVaultCache::Unavailable) {
-            return Err(KeychainUnavailable);
-        }
         match write_keychain_item(KEYCHAIN_VAULT_SERVICE, identifier, secret) {
             Ok(()) => {
                 *cache = ProcessVaultCache::Loaded(Some(secret.expose_secret().clone()));
@@ -505,7 +541,7 @@ impl CredentialKeychain for OsKeychain {
         if identifier != KEYCHAIN_VAULT_ID || os_keychain_disabled() {
             return Err(KeychainUnavailable);
         }
-        read_keychain_item(KEYCHAIN_VAULT_SERVICE, identifier)
+        read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, identifier)
     }
 
     fn get_legacy(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
@@ -934,8 +970,7 @@ where
         }
         match &cache.vault {
             CachedVault::Malformed => return Err(VaultAccessError::Malformed),
-            CachedVault::Unavailable => return Err(VaultAccessError::Unavailable),
-            CachedVault::Loaded(_) | CachedVault::Unloaded => {}
+            CachedVault::Loaded(_) | CachedVault::Unavailable | CachedVault::Unloaded => {}
         }
 
         let _write_lock = match acquire_vault_write_lock() {
@@ -1323,6 +1358,9 @@ mod tests {
         keychain_backend_is_file,
     };
 
+    #[cfg(target_os = "macos")]
+    use super::bounded_keychain_read;
+
     #[derive(Debug, Default, Clone)]
     struct TestEnvironment(BTreeMap<String, String>);
 
@@ -1368,6 +1406,19 @@ mod tests {
             values.insert(identifier.to_owned(), secret.expose_secret().clone());
             Ok(())
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn passive_keychain_reads_are_bounded_when_authorization_blocks() {
+        let started = std::time::Instant::now();
+        let result = bounded_keychain_read(std::time::Duration::from_millis(10), || {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            Ok(Some(Secret::new("late-secret".to_owned())))
+        });
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
     }
 
     #[derive(Clone, Default)]
@@ -1970,6 +2021,49 @@ mod tests {
         }
 
         assert_eq!(keychain.calls(), vec![format!("get:{KEYCHAIN_VAULT_ID}")]);
+    }
+
+    #[test]
+    fn explicit_store_retries_after_a_passive_vault_read_was_unavailable() {
+        let root = tempdir().expect("temporary directory should be created");
+        let keychain = RecordingKeychain::default();
+        keychain
+            .0
+            .lock()
+            .expect("recording keychain should lock")
+            .vault_get_unavailable = true;
+        let manager = CredentialManager::with_backends(
+            TestEnvironment::default(),
+            keychain.clone(),
+            root.path().join("credentials.toml"),
+        );
+
+        assert!(matches!(
+            manager.resolve(&CredentialReference::new("provider-a")),
+            Err(CredentialError::KeychainUnavailable { .. })
+        ));
+        keychain
+            .0
+            .lock()
+            .expect("recording keychain should lock")
+            .vault_get_unavailable = false;
+
+        let stored = manager
+            .store(
+                &CredentialReference::new("provider-a"),
+                &Secret::new("replacement".to_owned()),
+            )
+            .expect("an explicit store should retry the secure vault");
+
+        assert_eq!(stored.source(), &CredentialSource::OsKeychain);
+        assert_eq!(
+            keychain.calls(),
+            vec![
+                format!("get:{KEYCHAIN_VAULT_ID}"),
+                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
+                format!("set:{KEYCHAIN_VAULT_ID}"),
+            ]
+        );
     }
 
     #[test]
