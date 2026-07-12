@@ -68,6 +68,7 @@ pub async fn refresh_models_dev_with_proxy_auth(
     proxies: &ProxySettings,
     proxy_authentication: Option<&ProxyAuthentication>,
 ) -> Result<ModelsRefreshReport, ProviderError> {
+    crate::http::require_process_network()?;
     let source = parse_source_url(source)?;
     let proxy = proxies
         .resolve_global(&source)

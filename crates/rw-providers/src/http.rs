@@ -737,7 +737,10 @@ pub(crate) fn build_client_with_proxy_auth(
     proxy: Option<&Url>,
     proxy_authentication: Option<&ProxyAuthentication>,
 ) -> Result<reqwest::Client, ProviderError> {
-    require_process_network()?;
+    // Client construction is local and does not open a socket. Enforcing the
+    // process guard here makes unrelated parallel tests/runtime composition
+    // fail while an offline guard is alive. Every actual request boundary
+    // must enforce the guard immediately before sending instead.
     // Never let reqwest's ambient system-proxy discovery create an undocumented
     // precedence path. ProxySettings has already resolved explicit/env/NO_PROXY.
     let mut builder = reqwest::Client::builder()

@@ -24,6 +24,10 @@ fn request() -> ProviderRequest {
 
 #[tokio::test]
 async fn reasoning_only_openai_model_rejects_off_before_opening_a_socket() {
+    // Adapter composition is local and must remain deterministic while a
+    // concurrent replay/offline guard is active. Request validation still
+    // runs before the guarded transport boundary.
+    let _process_guard = deny_outbound_network_for_process();
     let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
         name: "reasoning-only".to_owned(),
         endpoint: Url::parse("http://127.0.0.1:9/v1/responses")

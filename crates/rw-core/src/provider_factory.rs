@@ -699,6 +699,7 @@ impl ProviderRuntime {
             return Ok(());
         }
         let activated = self.provider_activator.activate(provider)?;
+        self.redactor.merge_from(&activated.redactor);
         self.connections
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2187,6 +2188,7 @@ struct ProviderConnection {
 struct ActivatedProvider {
     connection: ProviderConnection,
     discovery_provider: Arc<dyn Provider>,
+    redactor: FixtureRedactor,
 }
 
 trait ProviderActivator: Send + Sync {
@@ -2218,6 +2220,7 @@ where
         "__activation".clone_into(&mut isolated.models.default);
         isolated.models.thinking.clear();
         let runtime = self.factory.build(&isolated)?;
+        let redactor = runtime.redactor.clone();
         let mut connections = runtime
             .connections
             .into_inner()
@@ -2238,6 +2241,7 @@ where
         Ok(ActivatedProvider {
             connection,
             discovery_provider,
+            redactor,
         })
     }
 }

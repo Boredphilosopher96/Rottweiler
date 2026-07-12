@@ -1918,6 +1918,9 @@ async fn terminate_and_wait_process_group(child_id: Option<u32>) -> Result<(), T
             Err(rustix::io::Errno::SRCH) => return Ok(()),
             Ok(()) => {}
             Err(error) => {
+                if macos_terminal_group_probe(error, raw_pid.as_raw_nonzero().get()).await {
+                    return Ok(());
+                }
                 return Err(ToolError::Command(format!(
                     "could not verify command process-group exit: {error}"
                 )));
@@ -1932,6 +1935,82 @@ async fn terminate_and_wait_process_group(child_id: Option<u32>) -> Result<(), T
         }
         sleep(Duration::from_millis(10)).await;
     }
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_terminal_group_probe(error: rustix::io::Errno, process_group: i32) -> bool {
+    // Darwin may report EPERM for zombie-only groups, but EPERM can also mean
+    // that a live member has different credentials. Never infer which case it
+    // is from an earlier signal attempt; require an independent membership
+    // snapshot that proves there are no executable members.
+    error == rustix::io::Errno::PERM
+        && matches!(
+            macos_process_group_has_no_live_members(process_group).await,
+            Some(true)
+        )
+}
+
+#[cfg(target_os = "macos")]
+async fn macos_process_group_has_no_live_members(process_group: i32) -> Option<bool> {
+    const OUTPUT_CAP: usize = 256 * 1024;
+    // Invoke the trusted absolute system binary without a shell or caller
+    // environment, and bound every resource before treating its output as a
+    // security decision. `None` is an unknown result and remains fail-closed.
+    let mut command = Command::new("/bin/ps");
+    command
+        .args(["-axo", "pgid=,stat="])
+        .env_clear()
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let collected = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut output = Vec::new();
+        stdout
+            .take((OUTPUT_CAP + 1) as u64)
+            .read_to_end(&mut output)
+            .await
+            .ok()?;
+        if output.len() > OUTPUT_CAP {
+            return None;
+        }
+        let status = child.wait().await.ok()?;
+        status.success().then_some(output)
+    })
+    .await;
+    let Ok(Some(output)) = collected else {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_millis(100), child.wait()).await;
+        return None;
+    };
+    parse_macos_process_group_status(&output, process_group)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_process_group_status(output: &[u8], process_group: i32) -> Option<bool> {
+    let output = std::str::from_utf8(output).ok()?;
+    let mut saw_process = false;
+    for line in output.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split_ascii_whitespace();
+        let pgid = fields.next()?.parse::<i32>().ok()?;
+        let status = fields.next()?;
+        if fields.next().is_some() {
+            return None;
+        }
+        saw_process = true;
+        if pgid == process_group && !status.starts_with('Z') {
+            return Some(false);
+        }
+    }
+    saw_process.then_some(true)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+const async fn macos_terminal_group_probe(_error: rustix::io::Errno, _process_group: i32) -> bool {
+    false
 }
 
 #[cfg(not(unix))]
@@ -2296,6 +2375,50 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_group_status_accepts_only_absent_or_all_zombie_members() {
+        assert_eq!(
+            parse_macos_process_group_status(b"7 Ss\n42 Z\n42 Z+\n", 42),
+            Some(true)
+        );
+        assert_eq!(
+            parse_macos_process_group_status(b"7 Ss\n9 R\n", 42),
+            Some(true)
+        );
+        assert_eq!(
+            parse_macos_process_group_status(b"42 Z\n42 S\n", 42),
+            Some(false)
+        );
+        assert_eq!(parse_macos_process_group_status(b"42\n", 42), None);
+        assert_eq!(parse_macos_process_group_status(b"", 42), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn fake_eperm_with_a_live_group_remains_fail_closed() {
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
+        let mut command = Command::new("/bin/sleep");
+        command
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        let mut child = command.spawn().expect("live process-group fixture");
+        let process_group = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .expect("fixture process group");
+        assert!(
+            !macos_terminal_group_probe(rustix::io::Errno::PERM, process_group).await,
+            "EPERM with a demonstrably live member must remain fail-closed"
+        );
+        terminate_process_group(child.id());
+        child.wait().await.expect("reap live process-group fixture");
+    }
 
     #[cfg(unix)]
     #[test]

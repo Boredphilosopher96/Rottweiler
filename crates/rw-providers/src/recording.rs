@@ -194,6 +194,19 @@ impl FixtureRedactor {
         self.register_value(value.to_owned());
     }
 
+    /// Merges another trusted registry without exposing credential values.
+    /// Providers composed after in-app authentication use this to extend the
+    /// already-running engine's redaction boundary.
+    pub fn merge_from(&self, other: &Self) {
+        let values = match other.secrets.read() {
+            Ok(secrets) => secrets.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        for value in values {
+            self.register_value(value);
+        }
+    }
+
     /// Number of non-empty known secrets registered for fixture sanitization.
     /// This exposes no credential material and supports acceptance assertions
     /// that every preflighted credential reached the recording boundary.

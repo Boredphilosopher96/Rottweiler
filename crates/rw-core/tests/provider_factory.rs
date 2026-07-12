@@ -485,6 +485,7 @@ async fn newly_stored_provider_credential_activates_catalog_selection_and_dispat
             .iter()
             .any(|provider| provider.name == "extra")
     );
+    assert_eq!(runtime.fixture_redactor().registered_secret_count(), 0);
 
     credentials
         .store(
@@ -495,6 +496,7 @@ async fn newly_stored_provider_credential_activates_catalog_selection_and_dispat
     runtime
         .activate_provider("extra")
         .unwrap_or_else(|error| panic!("provider must hot-activate: {error}"));
+    assert_eq!(runtime.fixture_redactor().registered_secret_count(), 1);
     let catalog = rw_core::ModelCatalogSource::discover(&runtime)
         .await
         .unwrap_or_else(|error| panic!("refreshed catalog must discover: {error}"));

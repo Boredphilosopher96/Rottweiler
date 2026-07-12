@@ -7,7 +7,7 @@ use std::{
         Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -48,15 +48,15 @@ use rw_core::runtime_support::{
 use rw_core::{
     AccountingAttribution, ActorSubagentSessionFactory, AgentLoopError, BudgetLedgerQuery,
     BudgetLedgerTotals, CachedModelCatalog, ClientId, Config, EngineEvent, EventClock, EventMeta,
-    FolderTrustController, FolderTrustOperation, MessageDisposition, ModelCatalogSnapshot,
-    ModelCatalogSource, ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator,
-    MutationCheckpointOutcome, PermissionGate, ProviderFactory, ProviderModelCatalogSource,
-    ProviderNativeWebSearcher, QuestionId, ReviewFileDecision, RewindCheckpoint,
-    SESSION_EVENT_VERSION, SequenceId, SessionActor, SessionActorConfig, SessionCommandAction,
-    SessionCommandContext, SessionCommandOutput, SessionEventSink, SessionReview, SpawnAgentTool,
-    SubagentLimits, SubagentMetadataStore, SubagentOrchestrator, SubagentSessionFactory,
-    SystemEventClock, ToolOutputStream, TurnStatus, UnrestorablePath, Usage,
-    WorktreeSubagentSessionFactory, base_agent_system_turn, builtin_command_registry,
+    FolderTrustController, FolderTrustOperation, MessageDisposition, ModelCatalogError,
+    ModelCatalogSnapshot, ModelCatalogSource, ModelDriver, MutationCheckpoint,
+    MutationCheckpointCoordinator, MutationCheckpointOutcome, PermissionGate, ProviderFactory,
+    ProviderModelCatalogSource, ProviderNativeWebSearcher, QuestionId, ReviewFileDecision,
+    RewindCheckpoint, SESSION_EVENT_VERSION, SequenceId, SessionActor, SessionActorConfig,
+    SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,
+    SessionReview, SpawnAgentTool, SubagentLimits, SubagentMetadataStore, SubagentOrchestrator,
+    SubagentSessionFactory, SystemEventClock, ToolOutputStream, TurnStatus, UnrestorablePath,
+    Usage, WorktreeSubagentSessionFactory, base_agent_system_turn, builtin_command_registry,
     builtin_hook_dispatcher, load_instruction_stack, load_nested_instruction_stack,
     project_session_events,
 };
@@ -2228,15 +2228,27 @@ pub(crate) async fn compose_hosted_actor(
     ) = match options.provider_mode {
         HostedProviderMode::Live => {
             let pricing = load_effective_pricing_table().await?;
-            match ProviderFactory::system(options.credentials_path, pricing)
-                .with_extension_providers(
-                    plugin_runtime
-                        .iter()
-                        .flat_map(|runtime| runtime.providers.iter())
-                        .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider))),
-                )
-                .build(&options.config)
-            {
+            let extension_providers = plugin_runtime
+                .iter()
+                .flat_map(|runtime| runtime.providers.iter())
+                .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider)))
+                .collect::<Vec<_>>();
+            let factory = ProviderFactory::system(options.credentials_path, pricing)
+                .with_extension_providers(extension_providers);
+            let user_config_path = extension_credentials_path.with_file_name("config.toml");
+            let project_config_path = workspace.join(".rottweiler/config.toml");
+            let fallback_catalog: Arc<dyn ModelCatalogSource> =
+                Arc::new(ReloadingHostedCatalogSource {
+                    factory: factory.clone(),
+                    base_config: options.config.clone(),
+                    user_config_path: user_config_path.clone(),
+                    project_config_path: project_config_path.clone(),
+                });
+            let (initial_model, initial_catalog, redactor): (
+                Arc<dyn ModelDriver>,
+                Arc<dyn ModelCatalogSource>,
+                FixtureRedactor,
+            ) = match factory.build(&options.config) {
                 Ok(runtime) => {
                     let runtime = Arc::new(runtime);
                     if let Err(error) =
@@ -2253,24 +2265,80 @@ pub(crate) async fn compose_hosted_actor(
                         })));
                     }
                     let redactor = runtime.fixture_redactor();
-                    let source: Arc<dyn ModelCatalogSource> = runtime.clone();
-                    (
-                        runtime,
-                        redactor,
-                        Some(Arc::new(CachedModelCatalog::new(source))),
-                    )
+                    let model: Arc<dyn ModelDriver> = runtime.clone();
+                    let catalog: Arc<dyn ModelCatalogSource> = runtime;
+                    (model, catalog, redactor)
                 }
-                Err(error) => (
-                    Arc::new(UnavailableHostedModel {
+                Err(error) => {
+                    let unavailable: Arc<dyn ModelDriver> = Arc::new(UnavailableHostedModel {
                         alias: persisted_model_alias.clone(),
                         reason: error.to_string(),
                         compaction: options.config.compaction.clone(),
                         budget: options.config.budget.clone(),
-                    }),
-                    fixture_redactor,
-                    None,
-                ),
-            }
+                    });
+                    (
+                        unavailable,
+                        fallback_catalog.clone(),
+                        fixture_redactor.clone(),
+                    )
+                }
+            };
+            let rebuild_factory = factory.clone();
+            let base_config = options.config.clone();
+            let rebuild_redactor = redactor.clone();
+            let searcher = built_tools.websearch.clone();
+            let rebuild: Arc<HostedModelRebuilder> = Arc::new(move |provider| {
+                let loaded =
+                    ConfigLoader::new(user_config_path.clone(), project_config_path.clone())
+                        .load()
+                        .map_err(|error| {
+                            AgentLoopError::InvalidConfiguration(format!(
+                                "provider activation configuration could not reload: {error}"
+                            ))
+                        })?
+                        .config;
+                let config = merge_reloaded_provider_config(base_config.clone(), loaded);
+                let config = prepare_provider_activation_config(config, provider)?;
+                let runtime = Arc::new(
+                    rebuild_factory
+                        .build(&config)
+                        .map_err(|error| AgentLoopError::Provider(error.to_string()))?,
+                );
+                let pre_runtime = Arc::clone(&runtime);
+                let pre_redactor = rebuild_redactor.clone();
+                let pre_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                    pre_redactor.merge_from(&pre_runtime.fixture_redactor());
+                });
+                let post_runtime = Arc::clone(&runtime);
+                let post_searcher = searcher.clone();
+                let post_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+                    if let Some(searcher) = &post_searcher {
+                        let runtime = Arc::clone(&post_runtime);
+                        searcher.bind_native_resolver(Some(Arc::new(move |alias| {
+                            runtime.native_web_searcher(alias)
+                        })));
+                    }
+                });
+                let model: Arc<dyn ModelDriver> = runtime.clone();
+                let catalog: Arc<dyn ModelCatalogSource> = runtime;
+                Ok(RebuiltHostedRuntime {
+                    model,
+                    catalog,
+                    pre_commit: Some(pre_commit),
+                    post_commit: Some(post_commit),
+                })
+            });
+            let model = Arc::new(RecomposableHostedModel::new(
+                initial_model,
+                initial_catalog,
+                rebuild,
+            ));
+            let source: Arc<dyn ModelCatalogSource> = model.clone();
+            (
+                model,
+                redactor,
+                Some(Arc::new(CachedModelCatalog::new(source))),
+            )
         }
         HostedProviderMode::DeterministicReplay {
             provider_name,
@@ -5712,6 +5780,274 @@ struct UnavailableHostedModel {
     reason: String,
     compaction: rw_core::CompactionConfig,
     budget: rw_core::BudgetConfig,
+}
+
+#[derive(Clone)]
+struct RebuiltHostedRuntime {
+    model: Arc<dyn ModelDriver>,
+    catalog: Arc<dyn ModelCatalogSource>,
+    pre_commit: Option<Arc<dyn Fn() + Send + Sync>>,
+    post_commit: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+struct ReloadingHostedCatalogSource {
+    factory: ProviderFactory,
+    base_config: Config,
+    user_config_path: PathBuf,
+    project_config_path: PathBuf,
+}
+
+#[async_trait]
+impl ModelCatalogSource for ReloadingHostedCatalogSource {
+    async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let user_config_path = self.user_config_path.clone();
+        let project_config_path = self.project_config_path.clone();
+        let base_config = self.base_config.clone();
+        let config = tokio::task::spawn_blocking(move || {
+            ConfigLoader::new(user_config_path, project_config_path)
+                .load()
+                .map(|loaded| merge_reloaded_provider_config(base_config, loaded.config))
+        })
+        .await
+        .map_err(|_| ModelCatalogError("provider configuration reload failed".to_owned()))?
+        .map_err(|_| {
+            ModelCatalogError("effective provider configuration is unavailable".to_owned())
+        })?;
+        self.factory
+            .discover_model_catalog(&config)
+            .await
+            .map_err(|error| ModelCatalogError(error.to_string()))
+    }
+}
+
+fn merge_reloaded_provider_config(mut base: Config, loaded: Config) -> Config {
+    for (name, provider) in loaded.providers {
+        base.providers.entry(name).or_insert(provider);
+    }
+    if base.models.aliases.is_empty() && !loaded.models.aliases.is_empty() {
+        base.models = loaded.models;
+    }
+    base
+}
+
+fn prepare_provider_activation_config(
+    mut config: Config,
+    provider: &str,
+) -> std::result::Result<Config, AgentLoopError> {
+    if !config.providers.contains_key(provider) {
+        return Err(AgentLoopError::InvalidConfiguration(format!(
+            "provider {provider:?} is not configured"
+        )));
+    }
+    if config.models.aliases.is_empty() {
+        let model = match provider {
+            "openai_codex" => "gpt-5.4-mini",
+            "github_copilot" | "openai" => "gpt-4.1",
+            "anthropic" => "claude-haiku-4-5",
+            _ => "catalog-discovery",
+        };
+        config.models.aliases.insert(
+            "__activation".to_owned(),
+            vec![format!("{provider}/{model}")],
+        );
+        "__activation".clone_into(&mut config.models.default);
+        config.models.thinking.clear();
+    }
+    Ok(config)
+}
+
+type HostedModelRebuilder =
+    dyn Fn(&str) -> std::result::Result<RebuiltHostedRuntime, AgentLoopError> + Send + Sync;
+
+/// Atomically replaces the startup fallback after quick-connect stores the
+/// sole provider's credential. Ordinary turns clone one stable driver and do
+/// not hold the lock across provider work.
+struct RecomposableHostedModel {
+    generation: RwLock<RebuiltHostedRuntime>,
+    rebuild: Arc<HostedModelRebuilder>,
+    activation: tokio::sync::Mutex<()>,
+    activation_deadline: Duration,
+    rebuild_inflight: Arc<AtomicBool>,
+}
+
+impl RecomposableHostedModel {
+    fn new(
+        inner: Arc<dyn ModelDriver>,
+        catalog: Arc<dyn ModelCatalogSource>,
+        rebuild: Arc<HostedModelRebuilder>,
+    ) -> Self {
+        Self::with_deadline(inner, catalog, rebuild, Duration::from_secs(5))
+    }
+
+    fn with_deadline(
+        inner: Arc<dyn ModelDriver>,
+        catalog: Arc<dyn ModelCatalogSource>,
+        rebuild: Arc<HostedModelRebuilder>,
+        activation_deadline: Duration,
+    ) -> Self {
+        Self {
+            generation: RwLock::new(RebuiltHostedRuntime {
+                model: inner,
+                catalog,
+                pre_commit: None,
+                post_commit: None,
+            }),
+            rebuild,
+            activation: tokio::sync::Mutex::new(()),
+            activation_deadline,
+            rebuild_inflight: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn current_generation(&self) -> RebuiltHostedRuntime {
+        self.generation
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn current(&self) -> Arc<dyn ModelDriver> {
+        self.current_generation().model
+    }
+}
+
+#[async_trait]
+impl ModelCatalogSource for RecomposableHostedModel {
+    async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let catalog = self.current_generation().catalog;
+        catalog.discover().await
+    }
+}
+
+#[async_trait]
+impl ModelDriver for RecomposableHostedModel {
+    fn stream(
+        &self,
+        alias: &str,
+        request: ProviderRequest,
+    ) -> std::result::Result<BoxEventStream, AgentLoopError> {
+        self.current().stream(alias, request)
+    }
+
+    fn stream_for_provider(
+        &self,
+        alias: &str,
+        provider: Option<&str>,
+        request: ProviderRequest,
+    ) -> std::result::Result<BoxEventStream, AgentLoopError> {
+        self.current().stream_for_provider(alias, provider, request)
+    }
+
+    fn context_metadata(&self, alias: &str) -> rw_core::ModelContextMetadata {
+        self.current().context_metadata(alias)
+    }
+
+    fn has_model_alias(&self, alias: &str) -> bool {
+        self.current().has_model_alias(alias)
+    }
+
+    async fn prepare_model(&self, alias: &str) -> std::result::Result<(), AgentLoopError> {
+        self.current().prepare_model(alias).await
+    }
+
+    async fn activate_provider(&self, provider: &str) -> std::result::Result<(), AgentLoopError> {
+        let _activation = self.activation.lock().await;
+        if self.current().activate_provider(provider).await.is_ok() {
+            return Ok(());
+        }
+        let rebuild = Arc::clone(&self.rebuild);
+        let provider = provider.to_owned();
+        let rebuild_provider = provider.clone();
+        if self
+            .rebuild_inflight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(AgentLoopError::Provider(
+                "provider activation rebuild is already in progress".to_owned(),
+            ));
+        }
+        let inflight = Arc::clone(&self.rebuild_inflight);
+        let rebuilt_runtime = tokio::time::timeout(
+            self.activation_deadline,
+            tokio::task::spawn_blocking(move || {
+                struct ClearInflight(Arc<AtomicBool>);
+                impl Drop for ClearInflight {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::Release);
+                    }
+                }
+                let _clear = ClearInflight(inflight);
+                rebuild(&rebuild_provider)
+            }),
+        )
+        .await
+        .map_err(|_| AgentLoopError::Provider("provider activation rebuild timed out".to_owned()))?
+        .map_err(|_| AgentLoopError::Provider("provider activation rebuild failed".to_owned()))??;
+        rebuilt_runtime.model.activate_provider(&provider).await?;
+        if let Some(pre_commit) = &rebuilt_runtime.pre_commit {
+            pre_commit();
+        }
+        *self
+            .generation
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = rebuilt_runtime;
+        if let Some(post_commit) = &self.current_generation().post_commit {
+            post_commit();
+        }
+        Ok(())
+    }
+
+    fn has_provider_for_alias(&self, alias: &str, provider: &str) -> bool {
+        self.current().has_provider_for_alias(alias, provider)
+    }
+
+    fn supports_vision(&self, alias: &str) -> bool {
+        self.current().supports_vision(alias)
+    }
+
+    fn compaction_config(&self) -> rw_core::CompactionConfig {
+        self.current().compaction_config()
+    }
+
+    fn budget_config(&self) -> rw_core::BudgetConfig {
+        self.current().budget_config()
+    }
+
+    fn cost(&self, alias: &str, usage: rw_core::ModelTokenUsage) -> rw_core::Cost {
+        self.current().cost(alias, usage)
+    }
+
+    fn cost_for_reported_model(
+        &self,
+        alias: &str,
+        reported_model: Option<&str>,
+        usage: rw_core::ModelTokenUsage,
+    ) -> rw_core::Cost {
+        self.current()
+            .cost_for_reported_model(alias, reported_model, usage)
+    }
+
+    fn cost_for_route(
+        &self,
+        alias: &str,
+        route: Option<&str>,
+        reported_model: Option<&str>,
+        usage: rw_core::ModelTokenUsage,
+    ) -> rw_core::Cost {
+        self.current()
+            .cost_for_route(alias, route, reported_model, usage)
+    }
+
+    fn qualified_model_for_route(
+        &self,
+        alias: &str,
+        route: Option<&str>,
+        reported_model: Option<&str>,
+    ) -> Option<String> {
+        self.current()
+            .qualified_model_for_route(alias, route, reported_model)
+    }
 }
 
 impl ModelDriver for UnavailableHostedModel {
@@ -10174,6 +10510,91 @@ mod tests {
 
     struct DropProbe(Arc<std::sync::atomic::AtomicBool>);
 
+    struct QuickConnectedModel;
+
+    struct ExistingRouteModel;
+
+    struct QuickCatalogSource(bool);
+
+    #[async_trait]
+    impl ModelCatalogSource for QuickCatalogSource {
+        async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            Ok(ModelCatalogSnapshot {
+                aliases: Vec::new(),
+                models: Vec::new(),
+                providers: Vec::new(),
+                cached: false,
+                truncated: self.0,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ModelDriver for QuickConnectedModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> std::result::Result<BoxEventStream, AgentLoopError> {
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(ProviderEvent::MessageStart {
+                    model: "openai/live-model".to_owned(),
+                }),
+                Ok(ProviderEvent::TextDelta {
+                    text: "quick-connect-ok".to_owned(),
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ])))
+        }
+
+        fn has_model_alias(&self, alias: &str) -> bool {
+            alias == "openai/live-model"
+        }
+
+        async fn activate_provider(
+            &self,
+            provider: &str,
+        ) -> std::result::Result<(), AgentLoopError> {
+            if provider == "openai" {
+                Ok(())
+            } else {
+                Err(AgentLoopError::InvalidConfiguration(
+                    "unexpected provider".to_owned(),
+                ))
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ModelDriver for ExistingRouteModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> std::result::Result<BoxEventStream, AgentLoopError> {
+            Ok(Box::pin(futures_util::stream::empty()))
+        }
+
+        fn has_model_alias(&self, alias: &str) -> bool {
+            alias == "local/base"
+        }
+    }
+
+    fn quick_connect_request() -> ProviderRequest {
+        ProviderRequest {
+            model: "ignored".to_owned(),
+            turns: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: 1,
+            temperature: None,
+            thinking: ThinkingLevel::Off,
+            cache_hint: None,
+        }
+    }
+
     impl Drop for DropProbe {
         fn drop(&mut self) {
             self.0.store(true, Ordering::Release);
@@ -10199,6 +10620,290 @@ mod tests {
         })
         .await
         .expect("aborted startup task should drop its in-flight resources");
+    }
+
+    #[tokio::test]
+    async fn sole_missing_credential_fallback_recomposes_after_quick_connect() {
+        let root = tempdir().expect("config root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        std::fs::create_dir(workspace.join(".rottweiler")).expect("project config directory");
+        std::fs::write(workspace.join(".rottweiler/config.toml"), b"")
+            .expect("empty project config");
+        let loader = ConfigLoader::new(
+            root.path().join("config.toml"),
+            workspace.join(".rottweiler/config.toml"),
+        )
+        .with_project_trust(false);
+        let fresh = loader.load().expect("fresh config").config;
+        assert!(fresh.providers.is_empty());
+        assert!(fresh.models.aliases.is_empty());
+        let unavailable: Arc<dyn ModelDriver> = Arc::new(UnavailableHostedModel {
+            alias: "openai/live-model".to_owned(),
+            reason: "credential was not found".to_owned(),
+            compaction: rw_core::CompactionConfig::default(),
+            budget: rw_core::BudgetConfig::default(),
+        });
+        let credential_stored = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stored = Arc::clone(&credential_stored);
+        let reload = loader.clone();
+        let rebuild: Arc<HostedModelRebuilder> = Arc::new(move |provider| {
+            let config = reload
+                .load()
+                .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?
+                .config;
+            let config = prepare_provider_activation_config(config, provider)?;
+            if !stored.load(Ordering::Acquire) {
+                return Err(AgentLoopError::Provider(
+                    "provider profile or credential was not found".to_owned(),
+                ));
+            }
+            assert_eq!(config.models.default, "__activation");
+            assert_eq!(
+                config.models.aliases["__activation"],
+                vec!["openai/gpt-4.1"]
+            );
+            Ok(RebuiltHostedRuntime {
+                model: Arc::new(QuickConnectedModel),
+                catalog: Arc::new(QuickCatalogSource(true)),
+                pre_commit: None,
+                post_commit: None,
+            })
+        });
+        let model =
+            RecomposableHostedModel::new(unavailable, Arc::new(QuickCatalogSource(false)), rebuild);
+        assert!(
+            model
+                .stream("openai/live-model", quick_connect_request())
+                .is_err()
+        );
+
+        loader
+            .configure_builtin_provider("openai")
+            .expect("fixed built-in profile must persist");
+        credential_stored.store(true, Ordering::Release);
+        model
+            .activate_provider("openai")
+            .await
+            .expect("quick-connect must atomically replace the fallback");
+        model
+            .prepare_model("openai/live-model")
+            .await
+            .expect("selected live model must prepare");
+        assert!(
+            ModelCatalogSource::discover(&model)
+                .await
+                .expect("activated catalog must refresh")
+                .truncated,
+            "the activated catalog source must replace the startup source"
+        );
+        let events = model
+            .stream("openai/live-model", quick_connect_request())
+            .expect("recomposed model must dispatch")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().any(|event| {
+            matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "quick-connect-ok")
+        }));
+    }
+
+    #[tokio::test]
+    async fn healthy_runtime_reloads_a_newly_configured_provider_on_activation() {
+        let root = tempdir().expect("config root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".rottweiler")).expect("project config directory");
+        std::fs::write(workspace.join(".rottweiler/config.toml"), b"")
+            .expect("empty project config");
+        let loader = ConfigLoader::new(
+            root.path().join("config.toml"),
+            workspace.join(".rottweiler/config.toml"),
+        )
+        .with_project_trust(false);
+        let mut base = Config::default();
+        base.models.default = "fast".to_owned();
+        base.models
+            .aliases
+            .insert("fast".to_owned(), vec!["local/base".to_owned()]);
+        base.providers.insert(
+            "local".to_owned(),
+            ProviderConfig {
+                kind: "openai_compatible".to_owned(),
+                base_url: Some("http://127.0.0.1:1/v1/chat/completions".to_owned()),
+                ..ProviderConfig::default()
+            },
+        );
+        let reload = loader.clone();
+        let rebuild: Arc<HostedModelRebuilder> = Arc::new(move |provider| {
+            let reloaded_config = reload
+                .load()
+                .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?
+                .config;
+            let merged = merge_reloaded_provider_config(base.clone(), reloaded_config);
+            assert!(merged.providers.contains_key("local"));
+            assert!(merged.providers.contains_key(provider));
+            assert_eq!(merged.models.default, "fast");
+            Ok(RebuiltHostedRuntime {
+                model: Arc::new(QuickConnectedModel),
+                catalog: Arc::new(QuickCatalogSource(true)),
+                pre_commit: None,
+                post_commit: None,
+            })
+        });
+        let model = RecomposableHostedModel::new(
+            Arc::new(ExistingRouteModel),
+            Arc::new(QuickCatalogSource(false)),
+            rebuild,
+        );
+        assert!(model.has_model_alias("local/base"));
+
+        loader
+            .configure_builtin_provider("openai")
+            .expect("new provider profile must persist");
+        model
+            .activate_provider("openai")
+            .await
+            .expect("healthy runtime must reload the new provider");
+        assert!(model.has_model_alias("openai/live-model"));
+        assert!(
+            ModelCatalogSource::discover(&model)
+                .await
+                .expect("new provider catalog must replace the old source")
+                .truncated
+        );
+        let events = model
+            .stream("openai/live-model", quick_connect_request())
+            .expect("new provider must dispatch without restart")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().any(|event| {
+            matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "quick-connect-ok")
+        }));
+    }
+
+    #[test]
+    fn reloaded_provider_merge_preserves_startup_precedence() {
+        let mut base = Config::default();
+        base.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                kind: "openai".to_owned(),
+                base_url: Some("https://startup.invalid/v1/responses".to_owned()),
+                ..ProviderConfig::default()
+            },
+        );
+        let mut loaded = Config::default();
+        loaded.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                kind: "anthropic".to_owned(),
+                base_url: Some("https://file.invalid/v1/messages".to_owned()),
+                ..ProviderConfig::default()
+            },
+        );
+        let merged = merge_reloaded_provider_config(base, loaded);
+        let provider = &merged.providers["openai"];
+        assert_eq!(provider.kind, "openai");
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://startup.invalid/v1/responses")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_provider_rebuild_is_bounded_and_does_not_swap_generation() {
+        let rebuild: Arc<HostedModelRebuilder> = Arc::new(move |_| {
+            std::thread::sleep(Duration::from_millis(150));
+            Ok(RebuiltHostedRuntime {
+                model: Arc::new(QuickConnectedModel),
+                catalog: Arc::new(QuickCatalogSource(true)),
+                pre_commit: None,
+                post_commit: None,
+            })
+        });
+        let model = Arc::new(RecomposableHostedModel::with_deadline(
+            Arc::new(ExistingRouteModel),
+            Arc::new(QuickCatalogSource(false)),
+            rebuild,
+            Duration::from_millis(10),
+        ));
+        let activation_model = Arc::clone(&model);
+        let activation =
+            tokio::spawn(async move { activation_model.activate_provider("openai").await });
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            tokio::time::sleep(Duration::from_millis(1)),
+        )
+        .await
+        .expect("blocking rebuild must not stall the runtime worker");
+        let error = activation
+            .await
+            .expect("activation task")
+            .expect_err("stalled rebuild must time out");
+        assert!(error.to_string().contains("timed out"));
+        let retry_started = std::time::Instant::now();
+        let retry = model
+            .activate_provider("openai")
+            .await
+            .expect_err("a detached rebuild must bound concurrent retries");
+        assert!(retry.to_string().contains("already in progress"));
+        assert!(retry_started.elapsed() < Duration::from_millis(50));
+        assert!(model.has_model_alias("local/base"));
+        assert!(
+            !ModelCatalogSource::discover(model.as_ref())
+                .await
+                .expect("old catalog remains available")
+                .truncated
+        );
+        tokio::time::sleep(Duration::from_millis(160)).await;
+    }
+
+    #[tokio::test]
+    async fn activation_swaps_model_and_catalog_as_one_generation() {
+        let callbacks = Arc::new(Mutex::new(Vec::new()));
+        let pre_callbacks = Arc::clone(&callbacks);
+        let post_callbacks = Arc::clone(&callbacks);
+        let rebuild: Arc<HostedModelRebuilder> = Arc::new(move |_| {
+            Ok(RebuiltHostedRuntime {
+                model: Arc::new(QuickConnectedModel),
+                catalog: Arc::new(QuickCatalogSource(true)),
+                pre_commit: Some(Arc::new({
+                    let callbacks = Arc::clone(&pre_callbacks);
+                    move || callbacks.lock().expect("pre callback log").push("pre")
+                })),
+                post_commit: Some(Arc::new({
+                    let callbacks = Arc::clone(&post_callbacks);
+                    move || callbacks.lock().expect("post callback log").push("post")
+                })),
+            })
+        });
+        let model = Arc::new(RecomposableHostedModel::new(
+            Arc::new(ExistingRouteModel),
+            Arc::new(QuickCatalogSource(false)),
+            rebuild,
+        ));
+        let activation_model = Arc::clone(&model);
+        let activation =
+            tokio::spawn(async move { activation_model.activate_provider("openai").await });
+        for _ in 0..100 {
+            let generation = model.current_generation();
+            let old_model = generation.model.has_model_alias("local/base");
+            let new_catalog = generation
+                .catalog
+                .discover()
+                .await
+                .expect("generation catalog")
+                .truncated;
+            assert_ne!(old_model, new_catalog, "mixed runtime generation observed");
+            tokio::task::yield_now().await;
+        }
+        activation
+            .await
+            .expect("activation task")
+            .expect("activation succeeds");
+        assert_eq!(
+            *callbacks.lock().expect("callback log"),
+            vec!["pre", "post"]
+        );
     }
 
     #[tokio::test]
