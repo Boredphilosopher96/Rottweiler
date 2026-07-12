@@ -513,11 +513,18 @@ impl<B: ProcessBackend> Supervisor<B> {
                         return Ok(());
                     }
                     RuntimeEvent::Engine(status) => {
-                        status.map_err(|source| SupervisorError::Wait {
+                        let status = status.map_err(|source| SupervisorError::Wait {
                             component: "engine",
                             source,
                         })?;
                         engine.take();
+                        // The authenticated ShutdownHost path exits the engine
+                        // successfully. Treat that as the user's one-app close,
+                        // then let the common cleanup reap the still-rendering
+                        // TUI instead of restarting both processes.
+                        if status.success() {
+                            return Ok(());
+                        }
                         if let Some(mut child) = tui.take() {
                             terminate_and_reap(&mut child, "TUI").await?;
                         }
@@ -1103,6 +1110,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum Scenario {
         EngineCrash,
+        EngineCleanExit,
         TuiCrash,
         ShutdownSignal,
         StartupSignal,
@@ -1204,11 +1212,15 @@ mod tests {
                 .expect("lifecycle")
                 .push(if engine { "spawn:engine" } else { "spawn:tui" }.to_owned());
             let (name, outcome, wait_error_once) = match (self.scenario, index, engine) {
+                (Scenario::EngineCleanExit, 0, true) => {
+                    ("engine-1", Some(ExitStatus::from_raw(0)), false)
+                }
                 (Scenario::EngineCrash | Scenario::EngineStartupFailure, 0, true) => {
                     ("engine-1", Some(ExitStatus::from_raw(1 << 8)), false)
                 }
                 (
                     Scenario::EngineCrash
+                    | Scenario::EngineCleanExit
                     | Scenario::ShutdownSignal
                     | Scenario::ReadinessFailure
                     | Scenario::EngineWaitError,
@@ -1241,7 +1253,7 @@ mod tests {
                 outcome,
                 exit_after_ready: matches!(
                     self.scenario,
-                    Scenario::EngineCrash | Scenario::EngineWaitError
+                    Scenario::EngineCrash | Scenario::EngineCleanExit | Scenario::EngineWaitError
                 ) && index == 0
                     && engine,
                 ready: Arc::clone(&self.ready),
@@ -1350,6 +1362,20 @@ mod tests {
         assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
         assert!(lifecycle.contains(&"signal:engine-2:Terminate".to_owned()));
         assert!(lifecycle.contains(&"wait:engine-2".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn clean_engine_exit_reaps_tui_without_restarting_the_app() {
+        let (specs, lifecycle) = run_scenario(Scenario::EngineCleanExit).await;
+        assert_eq!(specs.len(), 2);
+        assert_eq!(
+            &lifecycle[..3],
+            ["spawn:engine", "ready:engine", "spawn:tui"]
+        );
+        assert!(lifecycle.contains(&"wait:engine-1".to_owned()));
+        assert!(lifecycle.contains(&"signal:tui-1:Terminate".to_owned()));
+        assert!(lifecycle.contains(&"wait:tui-1".to_owned()));
+        assert!(!lifecycle.contains(&"backoff".to_owned()));
     }
 
     #[tokio::test]
