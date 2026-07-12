@@ -595,6 +595,12 @@ pub fn shell_launch_plan(
                 args.push(definition);
             }
         }
+        for (index, root) in sensitive_read_roots().iter().enumerate() {
+            args.push(OsString::from("-D"));
+            let mut definition = OsString::from(format!("RW_SECRET_{index}="));
+            definition.push(root.as_os_str());
+            args.push(definition);
+        }
         args.push(shell.as_os_str().to_owned());
         args.extend_from_slice(shell_args);
         Ok(LaunchPlan {
@@ -748,9 +754,46 @@ fn seatbelt_profile(policy: &SandboxPolicy) -> String {
             "(deny file-read* (require-not (require-any (literal \"/\") (literal \"/dev/null\") {writable} {readable})))"
         )
     });
+    let secret_roots = (0..sensitive_read_roots().len())
+        .map(|index| format!("(subpath (param \"RW_SECRET_{index}\"))"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let secret_rule = (!secret_roots.is_empty())
+        .then(|| format!("(deny file-read* (require-any {secret_roots}))"))
+        .unwrap_or_default();
     format!(
-        "(version 1) (allow default) {read_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
+        "(version 1) (allow default) {read_rule} {secret_rule} (deny file-write* (require-not (require-any (literal \"/dev/null\") {writable}))) {network}"
     )
+}
+
+#[cfg(target_os = "macos")]
+fn sensitive_read_roots() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    else {
+        return Vec::new();
+    };
+    [
+        ".ssh",
+        ".aws",
+        ".azure",
+        ".codex",
+        ".docker",
+        ".gnupg",
+        ".kube",
+        ".rottweiler",
+        ".config/gcloud",
+        ".config/gh",
+        ".config/opencode",
+        ".git-credentials",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+    ]
+    .into_iter()
+    .map(|suffix| home.join(suffix))
+    .collect()
 }
 
 /// Handles a Linux sandbox-helper invocation and replaces the current process
@@ -1387,6 +1430,32 @@ mod tests {
                 .evaluate("example.com", &[private]),
             EgressDecision::Allowed
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_broad_read_mode_explicitly_denies_user_credential_roots() {
+        let directory = tempdir().expect("temporary directory");
+        let policy = SandboxPolicy::new([directory.path()], NetworkPolicy::Deny).expect("policy");
+        let plan = shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/true"), &[])
+            .expect("launch plan");
+        let profile = plan
+            .args
+            .get(1)
+            .and_then(|value| value.to_str())
+            .expect("profile");
+        let sensitive = sensitive_read_roots();
+        assert!(!sensitive.is_empty());
+        for (index, root) in sensitive.iter().enumerate() {
+            assert!(profile.contains(&format!("(subpath (param \"RW_SECRET_{index}\"))")));
+            let expected = {
+                let mut value = OsString::from(format!("RW_SECRET_{index}="));
+                value.push(root);
+                value
+            };
+            assert!(plan.args.contains(&expected));
+        }
+        assert!(profile.contains("(deny file-read* (require-any"));
     }
 
     #[cfg(target_os = "macos")]
