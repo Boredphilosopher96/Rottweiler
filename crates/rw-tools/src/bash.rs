@@ -2009,8 +2009,11 @@ fn parse_macos_process_group_status(output: &[u8], process_group: i32) -> Option
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-async fn macos_terminal_group_probe(_error: rustix::io::Errno, _process_group: i32) -> bool {
-    false
+fn macos_terminal_group_probe(
+    _error: rustix::io::Errno,
+    _process_group: i32,
+) -> std::future::Ready<bool> {
+    std::future::ready(false)
 }
 
 #[cfg(not(unix))]
