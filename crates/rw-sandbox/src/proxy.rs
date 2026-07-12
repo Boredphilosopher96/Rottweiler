@@ -1,9 +1,13 @@
 use base64::Engine as _;
 use rustls::pki_types::ServerName;
 use std::collections::BTreeMap;
+#[cfg(target_os = "macos")]
+use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs as _};
 use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -23,6 +27,20 @@ const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_PLAIN_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_CLIENT_HELLO_BYTES: usize = 64 * 1024;
 const MAX_ACTIVE_CONNECTIONS: usize = 64;
+
+#[cfg(target_os = "macos")]
+fn live_proxy_ports() -> &'static Mutex<BTreeSet<u16>> {
+    static PORTS: OnceLock<Mutex<BTreeSet<u16>>> = OnceLock::new();
+    PORTS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn supervised_proxy_owns_port(port: u16) -> bool {
+    live_proxy_ports()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&port)
+}
 const TUNNEL_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Explicit corporate proxy selected after target-domain and SSRF policy.
@@ -330,6 +348,11 @@ impl SupervisedEgressProxy {
                 }
             }
         };
+        #[cfg(target_os = "macos")]
+        live_proxy_ports()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(address.port());
         Ok(Self {
             address,
             policy,
@@ -408,6 +431,11 @@ impl SupervisedEgressProxy {
 
 impl Drop for SupervisedEgressProxy {
     fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        live_proxy_ports()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.address.port());
         self.running.store(false, Ordering::Release);
         for stream in self
             .clients

@@ -577,6 +577,11 @@ pub fn shell_launch_plan(
     #[cfg(target_os = "macos")]
     {
         let _ = helper_executable;
+        if let NetworkPolicy::PolicyProxy { port, .. } = &policy.network
+            && !proxy::supervised_proxy_owns_port(*port)
+        {
+            return Err(SandboxError::PolicyProxyUnavailable);
+        }
         let mut args = vec![
             OsString::from("-p"),
             OsString::from(seatbelt_profile(policy)),
@@ -1384,7 +1389,30 @@ mod tests {
         )
         .expect("policy");
         #[cfg(target_os = "macos")]
-        assert!(shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &[]).is_ok());
+        {
+            assert!(matches!(
+                shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &[]),
+                Err(SandboxError::PolicyProxyUnavailable)
+            ));
+            let proxy = SupervisedEgressProxy::start(EgressPolicy::default()).expect("proxy");
+            let owned_policy = SandboxPolicy::new(
+                [directory.path()],
+                NetworkPolicy::PolicyProxy {
+                    port: proxy.address().port(),
+                    relay_path: None,
+                },
+            )
+            .expect("owned policy");
+            assert!(
+                shell_launch_plan(&owned_policy, Path::new("rw"), Path::new("/bin/sh"), &[])
+                    .is_ok()
+            );
+            drop(proxy);
+            assert!(matches!(
+                shell_launch_plan(&owned_policy, Path::new("rw"), Path::new("/bin/sh"), &[]),
+                Err(SandboxError::PolicyProxyUnavailable)
+            ));
+        }
         #[cfg(not(target_os = "macos"))]
         assert!(matches!(
             shell_launch_plan(&policy, Path::new("rw"), Path::new("/bin/sh"), &[]),
