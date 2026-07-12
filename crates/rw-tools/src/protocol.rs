@@ -3,13 +3,13 @@ use std::{
     ffi::OsString,
     io,
     path::{Path, PathBuf},
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     time::Duration,
 };
 
 use async_trait::async_trait;
 use rw_sandbox::{
-    EgressPolicy, LaunchPlan, NetworkPolicy, SandboxPolicy, SupervisedEgressProxy,
+    EgressPolicy, LaunchPlan, NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy,
     normalize_egress_domain, shell_launch_plan,
 };
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -42,6 +42,9 @@ const MAX_PROTOCOL_DOMAINS: usize = 32;
 /// Process-tree ownership retained independently from the protocol transport.
 #[async_trait]
 pub trait ProtocolProcessHandle: Send {
+    /// Briefly observe a natural direct-child exit without terminating it.
+    async fn observe_exit(&mut self, deadline: Duration) -> io::Result<Option<ExitStatus>>;
+
     /// Kill the whole process group and synchronously reap the direct child.
     async fn terminate_and_reap(&mut self, deadline: Duration) -> io::Result<()>;
 }
@@ -69,6 +72,7 @@ pub struct SandboxedProtocolLauncher {
     scratch: PathBuf,
     helper_executable: PathBuf,
     allowed_environment: BTreeSet<String>,
+    sandbox_unavailable: Option<String>,
 }
 
 impl SandboxedProtocolLauncher {
@@ -96,11 +100,17 @@ impl SandboxedProtocolLauncher {
             ));
         }
         let helper_executable = trusted_executable(helper_executable.as_ref(), &workspace_roots)?;
+        let capability = rw_sandbox::probe();
         Ok(Self {
             workspace_roots,
             scratch,
             helper_executable,
             allowed_environment: allowed_environment.into_iter().collect(),
+            sandbox_unavailable: (capability.support == SandboxSupport::Unavailable).then(|| {
+                capability.warning.unwrap_or_else(|| {
+                    "the operating system has no supported sandbox backend".to_owned()
+                })
+            }),
         })
     }
 
@@ -130,6 +140,12 @@ impl SandboxedProtocolLauncher {
 impl ProtocolChildLauncher for SandboxedProtocolLauncher {
     async fn spawn(&self, request: &ProtocolChildRequest) -> io::Result<SpawnedProtocolChild> {
         validate_request(request, &self.allowed_environment)?;
+        if let Some(reason) = &self.sandbox_unavailable {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("sandboxed protocol execution is unavailable: {reason}"),
+            ));
+        }
         let executable = trusted_executable(&request.executable, &self.workspace_roots)?;
         let identity = executable_identity(&executable)?;
         let cwd = self.cwd(request.working_directory.as_deref())?;
@@ -396,6 +412,13 @@ struct TokioProtocolHandle {
 
 #[async_trait]
 impl ProtocolProcessHandle for TokioProtocolHandle {
+    async fn observe_exit(&mut self, deadline: Duration) -> io::Result<Option<ExitStatus>> {
+        match tokio::time::timeout(deadline, self.child.wait()).await {
+            Ok(status) => status.map(Some),
+            Err(_) => Ok(None),
+        }
+    }
+
     async fn terminate_and_reap(&mut self, deadline: Duration) -> io::Result<()> {
         #[cfg(unix)]
         if let Some(group) = self
@@ -499,6 +522,33 @@ mod tests {
             .expect("environment must fail");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(!error.to_string().contains("canary"));
+    }
+
+    #[tokio::test]
+    async fn protocol_launcher_rejects_an_unavailable_sandbox_before_spawn() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let scratch = tempfile::tempdir().expect("scratch");
+        let helper = std::env::current_exe().expect("test executable");
+        let mut launcher = SandboxedProtocolLauncher::new(
+            &[workspace.path().to_path_buf()],
+            scratch.path(),
+            helper,
+            Vec::<String>::new(),
+        )
+        .expect("launcher");
+        launcher.sandbox_unavailable = Some("test sandbox backend is blocked".to_owned());
+
+        let error = launcher
+            .spawn(&request(ProtocolSandboxPolicy::default()))
+            .await
+            .err()
+            .expect("unsupported sandbox must fail closed");
+
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            error.to_string(),
+            "sandboxed protocol execution is unavailable: test sandbox backend is blocked"
+        );
     }
 
     #[test]

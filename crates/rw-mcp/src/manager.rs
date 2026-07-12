@@ -540,80 +540,7 @@ impl McpManager {
                 entry.generation = entry.generation.wrapping_add(1);
                 (entry.config.clone(), entry.generation)
             };
-            let connected =
-                tokio::time::timeout(self.limits.request_timeout, self.connector.connect(&config))
-                    .await;
-            let client = match connected {
-                Ok(Ok(client)) => client,
-                Ok(Err(error)) => {
-                    self.fail_generation(server, generation, &error).await;
-                    return Err(error);
-                }
-                Err(_) => {
-                    let error = McpError::Protocol("MCP connect timed out".to_owned());
-                    self.fail_generation(server, generation, &error).await;
-                    return Err(error);
-                }
-            };
-            let catalog =
-                tokio::time::timeout(self.limits.request_timeout, load_catalog(&*client)).await;
-            let (tools, resources, prompts) = match catalog {
-                Ok(Ok(values)) => values,
-                Ok(Err(error)) => {
-                    let _ = client.close(self.limits.shutdown_timeout).await;
-                    self.fail_generation(server, generation, &error).await;
-                    return Err(error);
-                }
-                Err(_) => {
-                    let error = McpError::Protocol("MCP catalog request timed out".to_owned());
-                    let _ = client.close(self.limits.shutdown_timeout).await;
-                    self.fail_generation(server, generation, &error).await;
-                    return Err(error);
-                }
-            };
-            let sanitized = sanitize_catalog(tools).and_then(|tools| {
-                Ok((
-                    tools,
-                    sanitize_catalog(resources)?,
-                    sanitize_catalog(prompts)?,
-                ))
-            });
-            let (tools, resources, prompts) = match sanitized {
-                Ok(values) => values,
-                Err(error) => {
-                    let _ = client.close(self.limits.shutdown_timeout).await;
-                    self.fail_generation(server, generation, &error).await;
-                    return Err(error);
-                }
-            };
-            let mut servers = self.servers.write().await;
-            let entry = servers
-                .get_mut(server)
-                .ok_or_else(|| McpError::UnknownServer(server.clone()))?;
-            if !entry.config.enabled || entry.generation != generation {
-                drop(servers);
-                let _ = client.close(self.limits.shutdown_timeout).await;
-                return Err(McpError::Protocol(
-                    "stale MCP connection was discarded".to_owned(),
-                ));
-            }
-            let fingerprint = catalog_fingerprint(&tools);
-            if entry.catalog_fingerprint.is_some() && entry.catalog_fingerprint != Some(fingerprint)
-            {
-                entry.pending_catalog = Some(tools);
-            } else {
-                entry.catalog_fingerprint = Some(fingerprint);
-                entry.tools = tools;
-            }
-            entry.resources = resources;
-            entry.prompts = prompts;
-            entry.client = Some(client);
-            entry.state = if entry.pending_catalog.is_some() {
-                ServerState::ApprovalRequired
-            } else {
-                ServerState::Ready
-            };
-            return Ok(());
+            return self.connect_generation(server, config, generation).await;
         }
         let client = {
             let mut servers = self.servers.write().await;
@@ -639,6 +566,110 @@ impl McpManager {
             );
         }
         close_result
+    }
+
+    /// Atomically transition a failed server to a new connection attempt.
+    ///
+    /// Returns `false` without changing `Ready`, `ApprovalRequired`, `Disabled`,
+    /// or in-flight state, so repeated durable approval cannot replace a live
+    /// client or undo an explicit disable.
+    pub async fn reconnect_if_failed(&self, server: &ServerId) -> Result<bool, McpError> {
+        let prepared = {
+            let mut servers = self.servers.write().await;
+            let entry = servers
+                .get_mut(server)
+                .ok_or_else(|| McpError::UnknownServer(server.clone()))?;
+            if !entry.config.enabled || !matches!(entry.state, ServerState::Failed { .. }) {
+                return Ok(false);
+            }
+            entry.state = ServerState::Connecting;
+            entry.generation = entry.generation.wrapping_add(1);
+            (entry.config.clone(), entry.generation)
+        };
+        self.connect_generation(server, prepared.0, prepared.1)
+            .await?;
+        Ok(true)
+    }
+
+    async fn connect_generation(
+        &self,
+        server: &ServerId,
+        config: McpServerConfig,
+        generation: u64,
+    ) -> Result<(), McpError> {
+        let connected =
+            tokio::time::timeout(self.limits.request_timeout, self.connector.connect(&config))
+                .await;
+        let client = match connected {
+            Ok(Ok(client)) => client,
+            Ok(Err(error)) => {
+                self.fail_generation(server, generation, &error).await;
+                return Err(error);
+            }
+            Err(_) => {
+                let error = McpError::Protocol("MCP connect timed out".to_owned());
+                self.fail_generation(server, generation, &error).await;
+                return Err(error);
+            }
+        };
+        let catalog =
+            tokio::time::timeout(self.limits.request_timeout, load_catalog(&*client)).await;
+        let (tools, resources, prompts) = match catalog {
+            Ok(Ok(values)) => values,
+            Ok(Err(error)) => {
+                let _ = client.close(self.limits.shutdown_timeout).await;
+                self.fail_generation(server, generation, &error).await;
+                return Err(error);
+            }
+            Err(_) => {
+                let error = McpError::Protocol("MCP catalog request timed out".to_owned());
+                let _ = client.close(self.limits.shutdown_timeout).await;
+                self.fail_generation(server, generation, &error).await;
+                return Err(error);
+            }
+        };
+        let sanitized = sanitize_catalog(tools).and_then(|tools| {
+            Ok((
+                tools,
+                sanitize_catalog(resources)?,
+                sanitize_catalog(prompts)?,
+            ))
+        });
+        let (tools, resources, prompts) = match sanitized {
+            Ok(values) => values,
+            Err(error) => {
+                let _ = client.close(self.limits.shutdown_timeout).await;
+                self.fail_generation(server, generation, &error).await;
+                return Err(error);
+            }
+        };
+        let mut servers = self.servers.write().await;
+        let entry = servers
+            .get_mut(server)
+            .ok_or_else(|| McpError::UnknownServer(server.clone()))?;
+        if !entry.config.enabled || entry.generation != generation {
+            drop(servers);
+            let _ = client.close(self.limits.shutdown_timeout).await;
+            return Err(McpError::Protocol(
+                "stale MCP connection was discarded".to_owned(),
+            ));
+        }
+        let fingerprint = catalog_fingerprint(&tools);
+        if entry.catalog_fingerprint.is_some() && entry.catalog_fingerprint != Some(fingerprint) {
+            entry.pending_catalog = Some(tools);
+        } else {
+            entry.catalog_fingerprint = Some(fingerprint);
+            entry.tools = tools;
+        }
+        entry.resources = resources;
+        entry.prompts = prompts;
+        entry.client = Some(client);
+        entry.state = if entry.pending_catalog.is_some() {
+            ServerState::ApprovalRequired
+        } else {
+            ServerState::Ready
+        };
+        Ok(())
     }
 
     pub async fn shutdown(&self) -> Vec<(ServerId, Result<(), McpError>)> {
@@ -855,6 +886,7 @@ mod tests {
     struct MockClient {
         schema_version: Arc<Mutex<u8>>,
         closed: AtomicBool,
+        fail_close: bool,
     }
 
     #[async_trait]
@@ -886,7 +918,11 @@ mod tests {
         }
         async fn close(&self, _timeout: Duration) -> Result<(), McpError> {
             self.closed.store(true, Ordering::Release);
-            Ok(())
+            if self.fail_close {
+                Err(McpError::Protocol("fixture close failed".to_owned()))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -963,6 +999,7 @@ mod tests {
                 Arc::new(MockClient {
                     schema_version: Arc::new(Mutex::new(1)),
                     closed: AtomicBool::new(false),
+                    fail_close: false,
                 }),
             );
         }
@@ -1054,6 +1091,7 @@ mod tests {
         let client = Arc::new(MockClient {
             schema_version: Arc::clone(&schema_version),
             closed: AtomicBool::new(false),
+            fail_close: false,
         });
         let connector = Arc::new(MockConnector {
             clients: Mutex::new(BTreeMap::from([(id.clone(), client)])),
@@ -1116,12 +1154,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_close_does_not_make_an_explicitly_disabled_server_reconnectable() {
+        let id = ServerId::new("close-failure").expect("id");
+        let client = Arc::new(MockClient {
+            schema_version: Arc::new(Mutex::new(1)),
+            closed: AtomicBool::new(false),
+            fail_close: true,
+        });
+        let connector = Arc::new(MockConnector {
+            clients: Mutex::new(BTreeMap::from([(id.clone(), client)])),
+        });
+        let manager = McpManager::new(
+            connector,
+            Arc::new(MemorySpool::default()),
+            Arc::new(CompactJsonEncoder),
+            McpLimits::default(),
+        );
+        manager
+            .register(McpServerConfig {
+                id: id.clone(),
+                transport: McpTransportConfig::Stdio {
+                    executable: "fixture".into(),
+                    args: vec![],
+                    working_directory: None,
+                    environment: vec![],
+                    sandbox: McpStdioSandboxPolicy::default(),
+                },
+                enabled: true,
+                defer_tools: true,
+                tool_capabilities: crate::McpToolCapabilityOverrides::default(),
+            })
+            .await
+            .expect("register");
+        assert!(manager.connect_all().await[0].1.is_ok());
+        manager
+            .set_enabled(&id, false)
+            .await
+            .expect_err("fixture close fails");
+        assert!(!manager.reconnect_if_failed(&id).await.expect("retry gate"));
+        let status = manager.statuses().await;
+        assert!(!status[0].enabled);
+        assert!(matches!(status[0].state, ServerState::Failed { .. }));
+    }
+
+    #[tokio::test]
     async fn disable_during_connect_cannot_resurrect_stale_generation() {
         let id = ServerId::new("racing").expect("id");
         let connector = Arc::new(BlockingConnector {
             client: Arc::new(MockClient {
                 schema_version: Arc::new(Mutex::new(1)),
                 closed: AtomicBool::new(false),
+                fail_close: false,
             }),
             started: Notify::new(),
             proceed: Notify::new(),

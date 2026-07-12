@@ -38,11 +38,6 @@ jobs:
         run: bun install --frozen-lockfile
         working-directory: packages/plugin-sdk
       - run: cargo test --locked --workspace --all-features
-      - name: M8 production-composition functional acceptance (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          cargo build --locked -p rw-cli --bin rw -p rw-mcp --features rw-mcp/test-support --bin rw-mcp-fixture
-          python3 crates/rw-cli/tests/m8_release_gate.py --rw target/debug/rw --fixture target/debug/rw-mcp-fixture --samples 1 --functional-only
       - run: cargo run --locked --quiet -p xtask -- codegen --check
       - run: python3 scripts/check-dependency-direction.py
       - run: python3 scripts/check-network-boundaries.py
@@ -98,11 +93,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
       - run: crates/rw-sandbox/tests/linux_security_gate.sh
+      - name: M8 production-composition functional acceptance
+        run: crates/rw-cli/tests/m8_release_gate_linux.sh
+        env:
+          ROTTWEILER_M8_FUNCTIONAL_ONLY: 1
+          ROTTWEILER_M8_PERF_SAMPLES: 1
 
   performance:
     name: Performance budgets (${{ matrix.platform }})
-    needs: test
+    needs: [test, security-tests]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -116,6 +118,8 @@ jobs:
       ROTTWEILER_CREDENTIAL_BACKEND: file
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
       - run: rustup override set 1.94.1
@@ -132,7 +136,14 @@ jobs:
       - run: crates/rw-cli/tests/m4_release_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m4.json
-      - run: crates/rw-cli/tests/m8_release_gate.sh
+      - name: M8 production-composition performance gate (Linux)
+        if: runner.os == 'Linux'
+        run: crates/rw-cli/tests/m8_release_gate_linux.sh
+        env:
+          ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
+      - name: M8 production-composition performance gate (macOS)
+        if: runner.os != 'Linux'
+        run: crates/rw-cli/tests/m8_release_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
       - run: bun run test:perf

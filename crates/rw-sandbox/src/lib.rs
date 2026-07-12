@@ -4,7 +4,7 @@
 //! policy into an argv-only launch plan consumed by `rw-tools`, and exposes the
 //! Linux helper entry point used immediately before `exec(2)`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
@@ -46,9 +46,29 @@ pub enum NetworkPolicy {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SandboxPolicy {
     write_roots: Vec<PathBuf>,
+    write_root_kinds: Vec<RootKind>,
     #[serde(default)]
     read_roots: Option<Vec<PathBuf>>,
+    #[serde(default)]
+    read_root_kinds: Option<Vec<RootKind>>,
     network: NetworkPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RootKind {
+    Directory,
+    NonDirectory,
+}
+
+impl RootKind {
+    fn for_metadata(metadata: &std::fs::Metadata) -> Self {
+        if metadata.is_dir() {
+            Self::Directory
+        } else {
+            Self::NonDirectory
+        }
+    }
 }
 
 impl SandboxPolicy {
@@ -64,7 +84,7 @@ impl SandboxPolicy {
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        let mut roots = BTreeSet::new();
+        let mut roots = BTreeMap::new();
         for root in write_roots {
             let supplied = root.as_ref();
             let canonical =
@@ -74,14 +94,24 @@ impl SandboxPolicy {
                         path: supplied.to_path_buf(),
                         source,
                     })?;
-            roots.insert(canonical);
+            let metadata =
+                canonical
+                    .metadata()
+                    .map_err(|source| SandboxError::InvalidWriteRoot {
+                        path: supplied.to_path_buf(),
+                        source,
+                    })?;
+            roots.insert(canonical, RootKind::for_metadata(&metadata));
         }
         if roots.is_empty() {
             return Err(SandboxError::NoWriteRoots);
         }
+        let (write_roots, write_root_kinds) = roots.into_iter().unzip();
         Ok(Self {
-            write_roots: roots.into_iter().collect(),
+            write_roots,
+            write_root_kinds,
             read_roots: None,
+            read_root_kinds: None,
             network,
         })
     }
@@ -104,7 +134,7 @@ impl SandboxPolicy {
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        let mut roots = BTreeSet::new();
+        let mut roots = BTreeMap::new();
         for root in read_roots {
             let supplied = root.as_ref();
             let canonical =
@@ -114,9 +144,18 @@ impl SandboxPolicy {
                         path: supplied.to_path_buf(),
                         source,
                     })?;
-            roots.insert(canonical);
+            let metadata =
+                canonical
+                    .metadata()
+                    .map_err(|source| SandboxError::InvalidReadRoot {
+                        path: supplied.to_path_buf(),
+                        source,
+                    })?;
+            roots.insert(canonical, RootKind::for_metadata(&metadata));
         }
-        self.read_roots = Some(roots.into_iter().collect());
+        let (read_roots, read_root_kinds) = roots.into_iter().unzip();
+        self.read_roots = Some(read_roots);
+        self.read_root_kinds = Some(read_root_kinds);
         Ok(self)
     }
 
@@ -137,7 +176,9 @@ impl SandboxPolicy {
     pub fn with_network(&self, network: NetworkPolicy) -> Self {
         Self {
             write_roots: self.write_roots.clone(),
+            write_root_kinds: self.write_root_kinds.clone(),
             read_roots: self.read_roots.clone(),
+            read_root_kinds: self.read_root_kinds.clone(),
             network,
         }
     }
@@ -148,7 +189,9 @@ impl SandboxPolicy {
     pub fn read_only(&self) -> Self {
         Self {
             write_roots: Vec::new(),
+            write_root_kinds: Vec::new(),
             read_roots: self.read_roots.clone(),
+            read_root_kinds: self.read_root_kinds.clone(),
             network: self.network.clone(),
         }
     }
@@ -749,6 +792,7 @@ mod linux {
     use std::convert::TryInto as _;
     use std::io;
     use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
+    use std::os::fd::AsFd as _;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
     use std::path::Path;
@@ -770,7 +814,8 @@ mod linux {
     };
 
     use super::{
-        NetworkPolicy, OsString, SandboxError, SandboxPolicy, audited_linux_tool, serde_json,
+        NetworkPolicy, OsString, RootKind, SandboxError, SandboxPolicy, audited_linux_tool,
+        serde_json,
     };
 
     pub(super) fn run_helper(args: &[OsString]) -> Result<std::convert::Infallible, SandboxError> {
@@ -955,29 +1000,44 @@ mod linux {
             .map_err(sandbox_backend)?
             .create()
             .map_err(sandbox_backend)?;
-        if let Some(read_roots) = &policy.read_roots {
-            for root in read_roots {
+        match (&policy.read_roots, &policy.read_root_kinds) {
+            (Some(read_roots), Some(read_root_kinds))
+                if read_roots.len() == read_root_kinds.len() =>
+            {
+                for (root, kind) in read_roots.iter().zip(read_root_kinds) {
+                    let root = open_landlock_root(root, *kind)?;
+                    let access = if *kind == RootKind::Directory {
+                        read
+                    } else {
+                        read & AccessFs::from_file(abi)
+                    };
+                    ruleset = ruleset
+                        .add_rule(PathBeneath::new(root, access))
+                        .map_err(sandbox_backend)?;
+                }
+            }
+            (None, None) => {
                 ruleset = ruleset
                     .add_rule(PathBeneath::new(
-                        PathFd::new(root).map_err(sandbox_backend)?,
+                        PathFd::new("/").map_err(sandbox_backend)?,
                         read,
                     ))
                     .map_err(sandbox_backend)?;
             }
-        } else {
-            ruleset = ruleset
-                .add_rule(PathBeneath::new(
-                    PathFd::new("/").map_err(sandbox_backend)?,
-                    read,
-                ))
-                .map_err(sandbox_backend)?;
+            _ => return Err(SandboxError::MalformedHelper),
         }
-        for root in &policy.write_roots {
+        if policy.write_roots.len() != policy.write_root_kinds.len() {
+            return Err(SandboxError::MalformedHelper);
+        }
+        for (root, kind) in policy.write_roots.iter().zip(&policy.write_root_kinds) {
+            let root = open_landlock_root(root, *kind)?;
+            let access = if *kind == RootKind::Directory {
+                all
+            } else {
+                all & AccessFs::from_file(abi)
+            };
             ruleset = ruleset
-                .add_rule(PathBeneath::new(
-                    PathFd::new(root).map_err(sandbox_backend)?,
-                    all,
-                ))
+                .add_rule(PathBeneath::new(root, access))
                 .map_err(sandbox_backend)?;
         }
         let status = ruleset.restrict_self().map_err(sandbox_backend)?;
@@ -990,12 +1050,28 @@ mod linux {
         Ok(())
     }
 
+    fn open_landlock_root(root: &Path, expected: RootKind) -> Result<PathFd, SandboxError> {
+        // Open first and classify the pinned descriptor.  The same descriptor
+        // becomes the Landlock rule parent, so a concurrent path swap cannot
+        // turn file-only authority into directory-wide authority.
+        let root = PathFd::new(root).map_err(sandbox_backend)?;
+        let metadata = rustix::fs::fstat(root.as_fd()).map_err(sandbox_backend)?;
+        let actual = if rustix::fs::FileType::from_raw_mode(metadata.st_mode).is_dir() {
+            RootKind::Directory
+        } else {
+            RootKind::NonDirectory
+        };
+        if actual != expected {
+            return Err(SandboxError::RootTypeChanged);
+        }
+        Ok(root)
+    }
+
     fn install_network_floor(policy_proxy: bool) -> Result<(), SandboxError> {
         let mut denied = [
             libc::SYS_bind,
             libc::SYS_accept,
             libc::SYS_accept4,
-            libc::SYS_socketpair,
             libc::SYS_io_uring_setup,
             libc::SYS_io_uring_enter,
             libc::SYS_io_uring_register,
@@ -1003,6 +1079,7 @@ mod linux {
         .into_iter()
         .map(|syscall| (syscall, Vec::new()))
         .collect::<BTreeMap<_, _>>();
+        denied.insert(libc::SYS_socketpair, local_stream_pair_rules()?);
         if policy_proxy {
             let non_inet = SeccompRule::new(vec![
                 SeccompCondition::new(
@@ -1050,6 +1127,61 @@ mod linux {
         seccompiler::apply_filter(&filter).map_err(sandbox_backend)
     }
 
+    fn local_stream_pair_rules() -> Result<Vec<SeccompRule>, SandboxError> {
+        // Local full-duplex stream pairs are process-local IPC used by Tokio
+        // and MCP transports; they cannot cross the empty network namespace.
+        // Datagram pairs are deliberately excluded because one endpoint can
+        // be reconnected to a pathname socket after creation. Exact type
+        // matching also rejects every flag except CLOEXEC and NONBLOCK.
+        let non_unix_pair = SeccompRule::new(vec![
+            SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Ne,
+                libc::AF_UNIX as u64,
+            )
+            .map_err(sandbox_backend)?,
+        ])
+        .map_err(sandbox_backend)?;
+        let mut invalid_unix_stream_type = vec![
+            SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Eq,
+                libc::AF_UNIX as u64,
+            )
+            .map_err(sandbox_backend)?,
+        ];
+        for allowed_type in [
+            libc::SOCK_STREAM,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK,
+            libc::SOCK_STREAM | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK,
+        ] {
+            invalid_unix_stream_type.push(
+                SeccompCondition::new(
+                    1,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::Ne,
+                    u64::try_from(allowed_type).map_err(sandbox_backend)?,
+                )
+                .map_err(sandbox_backend)?,
+            );
+        }
+        let invalid_unix_stream_type =
+            SeccompRule::new(invalid_unix_stream_type).map_err(sandbox_backend)?;
+        let nonzero_pair_protocol = SeccompRule::new(vec![
+            SeccompCondition::new(2, SeccompCmpArgLen::Dword, SeccompCmpOp::Ne, 0)
+                .map_err(sandbox_backend)?,
+        ])
+        .map_err(sandbox_backend)?;
+        Ok(vec![
+            non_unix_pair,
+            invalid_unix_stream_type,
+            nonzero_pair_protocol,
+        ])
+    }
+
     fn sandbox_backend(error: impl std::fmt::Display) -> SandboxError {
         SandboxError::Backend(error.to_string())
     }
@@ -1086,6 +1218,9 @@ pub enum SandboxError {
     /// At least one writable root is required.
     #[error("sandbox requires at least one writable root")]
     NoWriteRoots,
+    /// A root changed between policy approval and descriptor pinning.
+    #[error("sandbox filesystem root changed type before enforcement")]
+    RootTypeChanged,
     /// Platform support is absent or too weak.
     #[error("{0}")]
     Unavailable(String),

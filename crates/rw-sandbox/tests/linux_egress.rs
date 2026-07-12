@@ -4,6 +4,8 @@
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, TcpListener};
+use std::os::fd::AsRawFd as _;
+use std::os::unix::net::UnixDatagram;
 use std::path::Path;
 use std::process::Command;
 use std::thread;
@@ -16,6 +18,256 @@ use rw_sandbox::{
 use tempfile::tempdir;
 
 const REQUIRE_LINUX_SANDBOX_ENV: &str = "ROTTWEILER_REQUIRE_LINUX_SANDBOX";
+const UNIX_PAIR_CHILD_ENV: &str = "ROTTWEILER_SANDBOX_UNIX_PAIR_CHILD";
+const UNIX_DGRAM_TARGET_ENV: &str = "ROTTWEILER_SANDBOX_UNIX_DGRAM_TARGET";
+const FILE_READ_FIXTURE_ENV: &str = "ROTTWEILER_SANDBOX_FILE_READ_FIXTURE";
+const FILE_READ_OUTPUT_ENV: &str = "ROTTWEILER_SANDBOX_FILE_READ_OUTPUT";
+
+#[test]
+fn sandboxed_exact_file_read_child() {
+    let (Some(fixture), Some(output)) = (
+        std::env::var_os(FILE_READ_FIXTURE_ENV),
+        std::env::var_os(FILE_READ_OUTPUT_ENV),
+    ) else {
+        return;
+    };
+    let contents = std::fs::read(fixture).expect("read exact file root");
+    assert_eq!(contents, b"exact-file-fixture");
+    std::fs::write(output, b"exact-file-read").expect("write child result");
+}
+
+fn assert_socketpair_denied(
+    family: nix::sys::socket::AddressFamily,
+    kind: nix::sys::socket::SockType,
+    protocol: Option<nix::sys::socket::SockProtocol>,
+    flags: nix::sys::socket::SockFlag,
+) {
+    let error = nix::sys::socket::socketpair(family, kind, protocol, flags)
+        .expect_err("socketpair shape unexpectedly passed seccomp");
+    assert_eq!(
+        error,
+        nix::errno::Errno::EPERM,
+        "socketpair shape did not reach the seccomp rail"
+    );
+}
+
+#[test]
+fn sandboxed_unix_datagram_pair_cannot_reach_a_bound_path() {
+    let Some(target_path) = std::env::var_os(UNIX_DGRAM_TARGET_ENV) else {
+        return;
+    };
+    let target_address = nix::sys::socket::UnixAddr::new(Path::new(&target_path))
+        .expect("Unix datagram target address");
+    match nix::sys::socket::socketpair(
+        nix::sys::socket::AddressFamily::Unix,
+        nix::sys::socket::SockType::Datagram,
+        None,
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+    ) {
+        Err(error) => assert_eq!(
+            error,
+            nix::errno::Errno::EPERM,
+            "Unix datagram pair did not reach the seccomp socketpair rail"
+        ),
+        Ok((sender, _peer)) => {
+            nix::sys::socket::connect(sender.as_raw_fd(), &target_address)
+                .expect("vulnerable datagram pair connected to pathname socket");
+            nix::sys::socket::send(
+                sender.as_raw_fd(),
+                b"sandbox-bypass",
+                nix::sys::socket::MsgFlags::empty(),
+            )
+            .expect("vulnerable datagram pair sent to pathname socket");
+            panic!("Unix datagram socketpair bypassed the policy-proxy boundary");
+        }
+    }
+}
+
+#[test]
+fn sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake() {
+    if std::env::var_os(UNIX_PAIR_CHILD_ENV).is_none() {
+        return;
+    }
+
+    for flags in [
+        nix::sys::socket::SockFlag::empty(),
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        nix::sys::socket::SockFlag::SOCK_NONBLOCK,
+        nix::sys::socket::SockFlag::SOCK_CLOEXEC | nix::sys::socket::SockFlag::SOCK_NONBLOCK,
+    ] {
+        nix::sys::socket::socketpair(
+            nix::sys::socket::AddressFamily::Unix,
+            nix::sys::socket::SockType::Stream,
+            None,
+            flags,
+        )
+        .expect("valid Unix stream pair flag combination");
+    }
+    for family in [
+        nix::sys::socket::AddressFamily::Inet,
+        nix::sys::socket::AddressFamily::Inet6,
+    ] {
+        assert_socketpair_denied(
+            family,
+            nix::sys::socket::SockType::Stream,
+            None,
+            nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        );
+    }
+    for (kind, protocol, flags) in [
+        (
+            nix::sys::socket::SockType::Datagram,
+            None,
+            nix::sys::socket::SockFlag::SOCK_CLOEXEC,
+        ),
+        (
+            nix::sys::socket::SockType::SeqPacket,
+            None,
+            nix::sys::socket::SockFlag::SOCK_NONBLOCK,
+        ),
+        (
+            nix::sys::socket::SockType::Stream,
+            Some(nix::sys::socket::SockProtocol::Tcp),
+            nix::sys::socket::SockFlag::empty(),
+        ),
+        (
+            nix::sys::socket::SockType::Stream,
+            None,
+            nix::sys::socket::SockFlag::from_bits_retain(1 << 29),
+        ),
+    ] {
+        assert_socketpair_denied(nix::sys::socket::AddressFamily::Unix, kind, protocol, flags);
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("Tokio runtime");
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (client, server) = tokio::net::UnixStream::pair().expect("Unix pair");
+            client.writable().await.expect("client writable");
+            assert_eq!(
+                nix::unistd::write(&client, b"initialize").expect("client write"),
+                10
+            );
+            server.readable().await.expect("server readable");
+            let mut request = [0_u8; 10];
+            assert_eq!(
+                nix::unistd::read(server.as_raw_fd(), &mut request).expect("server read"),
+                request.len()
+            );
+            assert_eq!(&request, b"initialize");
+            server.writable().await.expect("server writable");
+            assert_eq!(
+                nix::unistd::write(&server, b"ready").expect("server write"),
+                5
+            );
+            client.readable().await.expect("client readable");
+            let mut response = [0_u8; 5];
+            assert_eq!(
+                nix::unistd::read(client.as_raw_fd(), &mut response).expect("client read"),
+                response.len()
+            );
+            assert_eq!(&response, b"ready");
+        })
+        .await
+        .expect("Tokio Unix-pair handshake timed out");
+    });
+}
+
+#[test]
+fn deny_and_proxy_modes_allow_only_unix_socketpairs_for_runtime_ipc() {
+    if !sandbox_available(&rw_sandbox::probe(), "deny-mode Unix IPC")
+        || !sandbox_available(&probe_policy_egress(), "policy-mode Unix IPC")
+    {
+        return;
+    }
+
+    let workspace = tempdir().expect("workspace");
+    let proxy =
+        SupervisedEgressProxy::start(EgressPolicy::new(["example.com"])).expect("policy proxy");
+    let relay_path = proxy.relay_path().expect("Linux relay path").to_path_buf();
+    let policies = [
+        SandboxPolicy::new([workspace.path()], NetworkPolicy::Deny).expect("deny policy"),
+        SandboxPolicy::new(
+            [workspace.path()],
+            NetworkPolicy::PolicyProxy {
+                port: proxy.address().port(),
+                relay_path: Some(relay_path),
+            },
+        )
+        .expect("proxy policy"),
+    ];
+
+    for policy in policies {
+        let args = [
+            OsString::from("--exact"),
+            OsString::from("sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake"),
+            OsString::from("--nocapture"),
+        ];
+        let mut command = test_helper_command(
+            &policy,
+            &std::env::current_exe().expect("current test executable"),
+            &args,
+        );
+        let status = command
+            .env(UNIX_PAIR_CHILD_ENV, "1")
+            .status()
+            .expect("sandboxed Tokio Unix-pair child");
+        assert!(
+            status.success(),
+            "sandboxed Unix-pair child exited {status}"
+        );
+    }
+}
+
+#[test]
+fn policy_proxy_blocks_unix_datagram_pair_path_bypass() {
+    if !sandbox_available(
+        &probe_policy_egress(),
+        "policy-mode Unix datagram isolation",
+    ) {
+        return;
+    }
+
+    let workspace = tempdir().expect("workspace");
+    let target_path = workspace.path().join("datagram-target.sock");
+    let target = UnixDatagram::bind(&target_path).expect("bound Unix datagram target");
+    target.set_nonblocking(true).expect("nonblocking target");
+    let proxy =
+        SupervisedEgressProxy::start(EgressPolicy::new(["example.com"])).expect("policy proxy");
+    let policy = SandboxPolicy::new(
+        [workspace.path()],
+        NetworkPolicy::PolicyProxy {
+            port: proxy.address().port(),
+            relay_path: Some(proxy.relay_path().expect("Linux relay path").to_path_buf()),
+        },
+    )
+    .expect("proxy policy");
+    let args = [
+        OsString::from("--exact"),
+        OsString::from("sandboxed_unix_datagram_pair_cannot_reach_a_bound_path"),
+        OsString::from("--nocapture"),
+    ];
+    let mut command = test_helper_command(
+        &policy,
+        &std::env::current_exe().expect("current test executable"),
+        &args,
+    );
+    let status = command
+        .env(UNIX_DGRAM_TARGET_ENV, &target_path)
+        .status()
+        .expect("sandboxed Unix datagram canary");
+    assert!(status.success(), "Unix datagram canary exited {status}");
+
+    let mut message = [0_u8; 32];
+    let error = target
+        .recv(&mut message)
+        .expect_err("sandboxed child reached the bound Unix datagram target");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+}
 
 #[test]
 fn policy_egress_probe_distinguishes_container_or_kernel_refusal() {
@@ -39,6 +291,99 @@ fn policy_egress_probe_distinguishes_container_or_kernel_refusal() {
     } else {
         assert_eq!(probe.support, SandboxSupport::Enforced);
     }
+}
+
+#[test]
+fn regular_file_read_roots_allow_exact_data_and_executable_files() {
+    if !sandbox_available(&rw_sandbox::probe(), "regular-file read roots") {
+        return;
+    }
+    let workspace = tempdir().expect("workspace");
+    let fixtures = tempdir().expect("fixtures");
+    let fixture = fixtures.path().join("fixture.txt");
+    std::fs::write(&fixture, b"exact-file-fixture").expect("fixture");
+    let output = workspace.path().join("read-result");
+    let executable = std::env::current_exe().expect("current test executable");
+    let policy = SandboxPolicy::new([workspace.path()], NetworkPolicy::Deny)
+        .and_then(|policy| {
+            policy.with_read_roots([
+                executable.as_path(),
+                fixture.as_path(),
+                Path::new("/usr/lib"),
+                Path::new("/etc/ld.so.cache"),
+            ])
+        })
+        .expect("file-root policy");
+    let args = [
+        OsString::from("--exact"),
+        OsString::from("sandboxed_exact_file_read_child"),
+        OsString::from("--nocapture"),
+    ];
+    let mut command = test_helper_command(&policy, &executable, &args);
+    let status = command
+        .env(FILE_READ_FIXTURE_ENV, &fixture)
+        .env(FILE_READ_OUTPUT_ENV, &output)
+        .status()
+        .expect("sandboxed exact-file child");
+    assert!(status.success(), "exact-file child exited {status}");
+    assert_eq!(
+        std::fs::read(output).expect("child result"),
+        b"exact-file-read"
+    );
+}
+
+#[test]
+fn regular_file_write_root_allows_only_that_file() {
+    if !sandbox_available(&rw_sandbox::probe(), "regular-file write roots") {
+        return;
+    }
+    let container = tempdir().expect("container");
+    let writable = container.path().join("approved.txt");
+    std::fs::write(&writable, b"before").expect("writable fixture");
+    let policy = SandboxPolicy::new([&writable], NetworkPolicy::Deny).expect("file-write policy");
+    let args = [
+        OsString::from("-c"),
+        OsString::from("printf changed > \"$1\""),
+        OsString::from("file-write-canary"),
+        writable.as_os_str().to_owned(),
+    ];
+    let status = test_helper_command(&policy, Path::new("/bin/sh"), &args)
+        .status()
+        .expect("regular-file write command");
+    assert!(status.success(), "file-write command exited {status}");
+    assert_eq!(std::fs::read(writable).expect("write result"), b"changed");
+}
+
+#[test]
+fn root_type_swaps_after_policy_creation_fail_closed() {
+    if !sandbox_available(&rw_sandbox::probe(), "root type-swap isolation") {
+        return;
+    }
+
+    let file_case = tempdir().expect("file case");
+    let file_root = file_case.path().join("root");
+    let old_file = file_case.path().join("old-file");
+    std::fs::write(&file_root, b"file").expect("file root");
+    let file_policy = SandboxPolicy::new([&file_root], NetworkPolicy::Deny).expect("file policy");
+    std::fs::rename(&file_root, old_file).expect("move file root");
+    std::fs::create_dir(&file_root).expect("replacement directory");
+    let status = test_helper_command(&file_policy, Path::new("/bin/true"), &[])
+        .status()
+        .expect("file-to-directory swap command");
+    assert!(!status.success(), "file-to-directory swap was accepted");
+
+    let directory_case = tempdir().expect("directory case");
+    let directory_root = directory_case.path().join("root");
+    let old_directory = directory_case.path().join("old-directory");
+    std::fs::create_dir(&directory_root).expect("directory root");
+    let directory_policy =
+        SandboxPolicy::new([&directory_root], NetworkPolicy::Deny).expect("directory policy");
+    std::fs::rename(&directory_root, old_directory).expect("move directory root");
+    std::fs::write(&directory_root, b"replacement file").expect("replacement file");
+    let status = test_helper_command(&directory_policy, Path::new("/bin/true"), &[])
+        .status()
+        .expect("directory-to-file swap command");
+    assert!(!status.success(), "directory-to-file swap was accepted");
 }
 
 #[test]

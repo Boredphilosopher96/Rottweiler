@@ -201,8 +201,24 @@ where
                 Some(handle),
             )))
         } else {
+            // Child stderr is deliberately not exposed because it is an
+            // untrusted extension channel and can contain secrets. An
+            // already-observed process status is safe, bounded evidence
+            // that distinguishes an early child exit from malformed MCP.
+            let early_exit = handle
+                .observe_exit(Duration::from_millis(50))
+                .await
+                .ok()
+                .flatten();
             let _ = handle.terminate_and_reap(Duration::from_secs(3)).await;
-            Err(protocol_failure())
+            early_exit.map_or_else(
+                || Err(protocol_failure()),
+                |status| {
+                    Err(McpError::Protocol(format!(
+                        "MCP process exited before protocol initialization ({status})"
+                    )))
+                },
+            )
         }
     }
 }
@@ -549,6 +565,129 @@ mod tests {
 
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    #[cfg(unix)]
+    struct AllowConnection;
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl McpConnectionApprovalPolicy for AllowConnection {
+        async fn approve(&self, _: &McpServerConfig) -> Result<(), McpError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    struct ShellLauncher(&'static str);
+
+    #[cfg(unix)]
+    struct ShellHandle(tokio::process::Child);
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl ProtocolProcessHandle for ShellHandle {
+        async fn observe_exit(
+            &mut self,
+            deadline: Duration,
+        ) -> io::Result<Option<std::process::ExitStatus>> {
+            match tokio::time::timeout(deadline, self.0.wait()).await {
+                Ok(status) => status.map(Some),
+                Err(_) => Ok(None),
+            }
+        }
+
+        async fn terminate_and_reap(&mut self, deadline: Duration) -> io::Result<()> {
+            let _ = self.0.start_kill();
+            tokio::time::timeout(deadline, self.0.wait())
+                .await
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::TimedOut, "test child did not exit")
+                })??;
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl ProtocolChildLauncher for ShellLauncher {
+        async fn spawn(
+            &self,
+            _: &ProtocolChildRequest,
+        ) -> io::Result<rw_tools::SpawnedProtocolChild> {
+            let mut child = tokio::process::Command::new("/bin/sh")
+                .args(["-c", self.0])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .spawn()?;
+            let stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| io::Error::other("test stdin unavailable"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| io::Error::other("test stdout unavailable"))?;
+            Ok(rw_tools::SpawnedProtocolChild {
+                stdin,
+                stdout,
+                handle: Box::new(ShellHandle(child)),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    fn stdio_config() -> McpServerConfig {
+        McpServerConfig {
+            id: ServerId::new("fixture").expect("server id"),
+            transport: McpTransportConfig::Stdio {
+                executable: "/bin/sh".into(),
+                args: vec![],
+                working_directory: None,
+                environment: vec![],
+                sandbox: crate::McpStdioSandboxPolicy::default(),
+            },
+            enabled: true,
+            defer_tools: true,
+            tool_capabilities: crate::McpToolCapabilityOverrides::default(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_connector_reports_bounded_natural_exit_without_child_stderr() {
+        let connector = SandboxedStdioConnector::new(
+            ShellLauncher("echo TOPSECRET >&2; exit 23"),
+            Arc::new(AllowConnection),
+        );
+        let error = connector
+            .connect(&stdio_config())
+            .await
+            .err()
+            .expect("early exit must fail");
+        let message = error.to_string();
+        assert!(message.contains("exit status: 23"));
+        assert!(!message.contains("TOPSECRET"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_connector_keeps_live_transport_failure_generic() {
+        let connector = SandboxedStdioConnector::new(
+            ShellLauncher("exec 1>&-; sleep 10"),
+            Arc::new(AllowConnection),
+        );
+        let error = connector
+            .connect(&stdio_config())
+            .await
+            .err()
+            .expect("closed live transport must fail");
+        assert_eq!(
+            error.to_string(),
+            "MCP protocol error: remote MCP protocol operation failed"
+        );
+    }
 
     #[tokio::test]
     async fn bounded_stdio_reader_rejects_an_oversized_line_before_delivery() {

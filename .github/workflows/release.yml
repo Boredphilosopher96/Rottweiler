@@ -84,7 +84,11 @@ jobs:
         run: |
           ROTTWEILER_PERF_OUTPUT=perf-results/headless.json ROTTWEILER_PERF_SAMPLES=500 crates/rw-cli/tests/perf_gate.sh
           ROTTWEILER_PERF_OUTPUT=perf-results/m4.json crates/rw-cli/tests/m4_release_gate.sh
-          ROTTWEILER_PERF_OUTPUT=perf-results/m8.json crates/rw-cli/tests/m8_release_gate.sh
+          if [ "$RUNNER_OS" = Linux ]; then
+            ROTTWEILER_PERF_OUTPUT=perf-results/m8.json crates/rw-cli/tests/m8_release_gate_linux.sh
+          else
+            ROTTWEILER_PERF_OUTPUT=perf-results/m8.json crates/rw-cli/tests/m8_release_gate.sh
+          fi
       - run: bun run test:perf
         working-directory: packages/tui
         env:

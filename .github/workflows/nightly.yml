@@ -40,6 +40,8 @@ jobs:
             platform: linux-x86_64
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
       - run: rustup override set 1.94.1
@@ -56,7 +58,14 @@ jobs:
       - run: crates/rw-cli/tests/m4_release_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m4.json
-      - run: crates/rw-cli/tests/m8_release_gate.sh
+      - name: M8 production-composition performance gate (Linux)
+        if: runner.os == 'Linux'
+        run: crates/rw-cli/tests/m8_release_gate_linux.sh
+        env:
+          ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
+      - name: M8 production-composition performance gate (macOS)
+        if: runner.os != 'Linux'
+        run: crates/rw-cli/tests/m8_release_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
       - run: bun run test:perf

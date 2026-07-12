@@ -2,13 +2,28 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-image="${ROTTWEILER_LINUX_SANDBOX_IMAGE:-rust:1.94-bookworm}"
+image="${ROTTWEILER_LINUX_SANDBOX_IMAGE:-docker.io/library/rust:1.94.1-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55}"
+run_id="$$-${RANDOM}"
+container="rottweiler-linux-sandbox-${run_id}"
+target_volume="rottweiler-linux-sandbox-target-${run_id}"
 
-docker run --rm --privileged \
+cleanup() {
+  docker rm --force "$container" >/dev/null 2>&1 || true
+  docker volume rm --force "$target_volume" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+docker volume create "$target_volume" >/dev/null
+
+docker run --name "$container" --rm --privileged \
   --mount "type=bind,source=${root},target=/workspace" \
   --mount type=volume,source=rottweiler-linux-sandbox-cargo,target=/usr/local/cargo/registry \
-  --mount type=volume,source=rottweiler-linux-sandbox-target,target=/workspace/target \
+  --mount "type=volume,source=${target_volume},target=/workspace/target" \
   --workdir /workspace \
+  --env CARGO_BUILD_JOBS=2 \
   --env CARGO_INCREMENTAL=0 \
   --env ROTTWEILER_REQUIRE_LINUX_SANDBOX=1 \
   "$image" \
