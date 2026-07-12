@@ -9,7 +9,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::os::fd::OwnedFd;
 
 use async_trait::async_trait;
 use rw_types::{
@@ -192,8 +195,102 @@ impl DirectoryIdentity {
 #[derive(Clone, Debug)]
 pub struct WorktreeIsolation {
     repository_root: PathBuf,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    repository_common_dir: PathBuf,
     private_root: PathBuf,
     limits: WorktreeLimits,
+    registry_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+struct WorktreeRegistryGuard {
+    _process: tokio::sync::OwnedMutexGuard<()>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    _cross_process: OwnedFd,
+}
+
+fn process_worktree_registry_gate(common_dir: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    static GATES: OnceLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut gates = GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    gates.retain(|_, gate| gate.strong_count() != 0);
+    if let Some(gate) = gates.get(common_dir).and_then(Weak::upgrade) {
+        return gate;
+    }
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    gates.insert(common_dir.to_path_buf(), Arc::downgrade(&gate));
+    gate
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_worktree_registry_lock(common_dir: &Path) -> Result<OwnedFd, ToolError> {
+    use rustix::fs::{FileType, Mode, OFlags};
+
+    const LOCK_NAME: &str = ".rottweiler-worktree.lock";
+    let directory = rustix::fs::open(
+        common_dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|source| ToolError::Io {
+        operation: "open Git common directory for worktree lock",
+        path: common_dir.to_path_buf(),
+        source: source.into(),
+    })?;
+    let (descriptor, created) = match rustix::fs::openat(
+        &directory,
+        LOCK_NAME,
+        OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    ) {
+        Ok(descriptor) => (descriptor, true),
+        Err(rustix::io::Errno::EXIST) => (
+            rustix::fs::openat(
+                &directory,
+                LOCK_NAME,
+                OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|source| ToolError::Io {
+                operation: "open existing Git worktree lock",
+                path: common_dir.join(LOCK_NAME),
+                source: source.into(),
+            })?,
+            false,
+        ),
+        Err(source) => {
+            return Err(ToolError::Io {
+                operation: "create Git worktree lock",
+                path: common_dir.join(LOCK_NAME),
+                source: source.into(),
+            });
+        }
+    };
+    if created {
+        rustix::fs::fchmod(&descriptor, Mode::from_raw_mode(0o600)).map_err(|source| {
+            ToolError::Io {
+                operation: "set Git worktree lock permissions",
+                path: common_dir.join(LOCK_NAME),
+                source: source.into(),
+            }
+        })?;
+    }
+    let stat = rustix::fs::fstat(&descriptor).map_err(|source| ToolError::Io {
+        operation: "inspect Git worktree lock",
+        path: common_dir.join(LOCK_NAME),
+        source: source.into(),
+    })?;
+    if !FileType::from_raw_mode(stat.st_mode).is_file()
+        || stat.st_uid != rustix::process::geteuid().as_raw()
+        || stat.st_nlink != 1
+        || (Mode::from_raw_mode(stat.st_mode).as_raw_mode() & 0o777) != 0o600
+    {
+        return Err(ToolError::Command(
+            "Git worktree lock must be one owner-private regular file".to_owned(),
+        ));
+    }
+    Ok(descriptor)
 }
 
 impl WorktreeIsolation {
@@ -278,10 +375,15 @@ impl WorktreeIsolation {
                 reported.display()
             )));
         }
+        let repository_common_dir = git_common_directory(&repository_root, &cancellation).await?;
+        let registry_gate = process_worktree_registry_gate(&repository_common_dir);
         Ok(Self {
             repository_root,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            repository_common_dir,
             private_root,
             limits,
+            registry_gate,
         })
     }
 
@@ -293,6 +395,46 @@ impl WorktreeIsolation {
     #[must_use]
     pub fn private_root(&self) -> &Path {
         &self.private_root
+    }
+
+    async fn lock_registry(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<WorktreeRegistryGuard, ToolError> {
+        let process = tokio::select! {
+            guard = Arc::clone(&self.registry_gate).lock_owned() => guard,
+            () = cancellation.cancelled() => return Err(ToolError::Cancelled),
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let cross_process = {
+            let descriptor = open_worktree_registry_lock(&self.repository_common_dir)?;
+            loop {
+                match rustix::fs::flock(
+                    &descriptor,
+                    rustix::fs::FlockOperation::NonBlockingLockExclusive,
+                ) {
+                    Ok(()) => break descriptor,
+                    Err(rustix::io::Errno::AGAIN) => {
+                        tokio::select! {
+                            () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+                            () = cancellation.cancelled() => return Err(ToolError::Cancelled),
+                        }
+                    }
+                    Err(source) => {
+                        return Err(ToolError::Io {
+                            operation: "lock Git worktree registry",
+                            path: self.repository_common_dir.join(".rottweiler-worktree.lock"),
+                            source: source.into(),
+                        });
+                    }
+                }
+            }
+        };
+        Ok(WorktreeRegistryGuard {
+            _process: process,
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            _cross_process: cross_process,
+        })
     }
 
     /// Rebinds an identity-pinned worktree from host-private session metadata.
@@ -326,6 +468,7 @@ impl WorktreeIsolation {
         cancellation: CancellationToken,
     ) -> Result<(), ToolError> {
         let lease = self.lease_from_record(record)?;
+        let _registry = self.lock_registry(&cancellation).await?;
         match std::fs::symlink_metadata(&lease.path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.ensure_worktree_unregistered(&lease.path, &cancellation)
@@ -376,6 +519,13 @@ impl WorktreeIsolation {
         &self,
         cancellation: CancellationToken,
     ) -> Result<WorktreeLease, ToolError> {
+        // `git worktree add` mutates the repository's shared worktree
+        // registry. Git does not provide one transaction spanning its
+        // discovery, allocation, registration, and our failure cleanup, so
+        // concurrent adds can transiently reject one otherwise independent
+        // child. Serialize only this short allocation boundary; child turns
+        // and worktree contents remain fully parallel after their leases exist.
+        let _registry = self.lock_registry(&cancellation).await?;
         cancellation.check()?;
         let head = run_git(
             &self.repository_root,
@@ -607,6 +757,7 @@ impl WorktreeIsolation {
         lease: &WorktreeLease,
         cancellation: CancellationToken,
     ) -> Result<bool, ToolError> {
+        let _registry = self.lock_registry(&cancellation).await?;
         self.verify_lease(lease, &cancellation).await?;
         let status = run_git(
             &lease.path,
@@ -667,6 +818,7 @@ impl WorktreeIsolation {
         if current.diff.as_ref() != Some(artifact) {
             return Ok(false);
         }
+        let _registry = self.lock_registry(&cancellation).await?;
         self.verify_lease(lease, &cancellation).await?;
         let output = run_git(
             &self.repository_root,
@@ -1921,6 +2073,84 @@ mod tests {
         }
         assert!(git(repo.path(), &["diff", "--binary", "HEAD", "--"]).is_empty());
         assert!(git(repo.path(), &["status", "--porcelain"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn separate_managers_serialize_overlapping_add_and_remove_registry_mutations() {
+        let repo = repository();
+        let private_one = tempfile::tempdir().expect("first private tempdir");
+        let private_two = tempfile::tempdir().expect("second private tempdir");
+        let first = isolation(repo.path(), private_one.path()).await;
+        let second = isolation(repo.path(), private_two.path()).await;
+        assert!(Arc::ptr_eq(&first.registry_gate, &second.registry_gate));
+
+        let existing = first
+            .create(CancellationToken::default())
+            .await
+            .expect("existing lease");
+        let held = first
+            .lock_registry(&CancellationToken::default())
+            .await
+            .expect("hold registry gate");
+        let create_manager = second.clone();
+        let create =
+            tokio::spawn(async move { create_manager.create(CancellationToken::default()).await });
+        let remove_manager = first.clone();
+        let remove = tokio::spawn(async move {
+            remove_manager
+                .cleanup_if_untouched(&existing, CancellationToken::default())
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert!(
+            !create.is_finished(),
+            "add bypassed the shared registry gate"
+        );
+        assert!(
+            !remove.is_finished(),
+            "remove bypassed the shared registry gate"
+        );
+        drop(held);
+
+        let created = create
+            .await
+            .expect("add task")
+            .expect("create after gate release");
+        assert!(
+            remove
+                .await
+                .expect("remove task")
+                .expect("remove after gate release")
+        );
+        assert!(
+            second
+                .cleanup_if_untouched(&created, CancellationToken::default())
+                .await
+                .expect("cleanup created lease")
+        );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn cross_process_registry_lock_refuses_a_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let repo = repository();
+        let private = tempfile::tempdir().expect("private tempdir");
+        let target = private.path().join("lock-target");
+        std::fs::write(&target, "must remain unchanged").expect("lock target");
+        symlink(&target, repo.path().join(".git/.rottweiler-worktree.lock"))
+            .expect("malicious lock symlink");
+        let manager = isolation(repo.path(), private.path()).await;
+        let error = manager
+            .create(CancellationToken::default())
+            .await
+            .expect_err("symlink lock must fail closed");
+        assert!(error.to_string().contains("Git worktree lock"));
+        assert_eq!(
+            std::fs::read_to_string(target).expect("unchanged target"),
+            "must remain unchanged"
+        );
     }
 
     #[tokio::test]

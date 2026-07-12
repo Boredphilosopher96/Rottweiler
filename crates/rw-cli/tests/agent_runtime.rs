@@ -148,12 +148,15 @@ fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
         String::from_utf8_lossy(&output.stdout)
     );
     let events = parse_stream(&output.stdout);
+    let spawned = events
+        .iter()
+        .filter(|event| matches!(event, EngineEvent::SubagentSpawned { .. }))
+        .count();
     assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, EngineEvent::SubagentSpawned { .. }))
-            .count(),
-        3
+        spawned,
+        3,
+        "expected three real child spawns; stderr: {}\nevents: {events:#?}",
+        String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
         events

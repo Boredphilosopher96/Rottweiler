@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Test (${{ matrix.os }})
@@ -98,6 +102,7 @@ jobs:
 
   performance:
     name: Performance budgets (${{ matrix.platform }})
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

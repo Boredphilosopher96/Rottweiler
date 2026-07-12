@@ -1176,6 +1176,33 @@ pub struct TokioCommandExecutor {
     safety: Arc<CommandSafetyClassifier>,
     #[cfg(test)]
     proxy_lifecycles: Option<Arc<Mutex<Vec<rw_sandbox::ProxyLifecycle>>>>,
+    #[cfg(all(test, unix))]
+    launch_gate_hook: Option<Arc<LaunchGateTestHook>>,
+}
+
+#[cfg(all(test, unix))]
+#[derive(Debug, Default)]
+struct LaunchGateTestHook {
+    child_id: std::sync::atomic::AtomicU32,
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(all(test, unix))]
+impl LaunchGateTestHook {
+    async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+
+    fn child_id(&self) -> Option<rustix::process::Pid> {
+        let raw_pid =
+            i32::try_from(self.child_id.load(std::sync::atomic::Ordering::Acquire)).ok()?;
+        rustix::process::Pid::from_raw(raw_pid)
+    }
 }
 
 impl TokioCommandExecutor {
@@ -1190,6 +1217,8 @@ impl TokioCommandExecutor {
             safety: Arc::new(CommandSafetyClassifier::default()),
             #[cfg(test)]
             proxy_lifecycles: None,
+            #[cfg(all(test, unix))]
+            launch_gate_hook: None,
         }
     }
 
@@ -1229,6 +1258,12 @@ impl TokioCommandExecutor {
         lifecycles: Arc<Mutex<Vec<rw_sandbox::ProxyLifecycle>>>,
     ) -> Self {
         self.proxy_lifecycles = Some(lifecycles);
+        self
+    }
+
+    #[cfg(all(test, unix))]
+    fn with_launch_gate_hook(mut self, hook: Arc<LaunchGateTestHook>) -> Self {
+        self.launch_gate_hook = Some(hook);
         self
     }
 }
@@ -1301,7 +1336,28 @@ impl CommandExecutor for TokioCommandExecutor {
                     return Err(error);
                 }
             };
-        if let Err(error) = launch_gate.write_all(b"armed\n").await {
+        #[cfg(all(test, unix))]
+        if let Some(hook) = &self.launch_gate_hook {
+            hook.child_id.store(
+                child_id.unwrap_or_default(),
+                std::sync::atomic::Ordering::Release,
+            );
+            hook.reached.notify_one();
+            hook.release.notified().await;
+        }
+        let launch_result = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                terminate_process_group(child_id);
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                terminate_and_wait_process_group(child_id).await?;
+                watchdog.disarm().await?;
+                return Err(ToolError::Cancelled);
+            }
+            result = launch_gate.write_all(b"armed\n") => result,
+        };
+        if let Err(error) = launch_result {
             terminate_process_group(child_id);
             let _ = child.start_kill();
             let _ = child.wait().await;
@@ -1329,7 +1385,7 @@ impl CommandExecutor for TokioCommandExecutor {
         let stderr_task = tokio::spawn(copy_stream(stderr, ToolOutputStream::Stderr, output));
 
         let status = tokio::select! {
-            status = child.wait() => status,
+            biased;
             watchdog_status = watchdog.wait_unexpected() => {
                 terminate_process_group(child_id);
                 let _ = child.start_kill();
@@ -1351,6 +1407,7 @@ impl CommandExecutor for TokioCommandExecutor {
                 finish_output_task(stderr_task).await?;
                 return Err(ToolError::Cancelled);
             }
+            status = child.wait() => status,
         };
         terminate_and_wait_process_group(child_id).await?;
         watchdog.disarm().await?;
@@ -2936,18 +2993,25 @@ sys.exit(92)
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn process_group_cancellation_kills_a_descendant_holding_the_pipes() {
+    async fn cancellation_before_launch_gate_never_releases_the_command() {
         let root = tempdir().expect("temp directory");
+        let sentinel = root.path().join("must-not-run");
+        let command = format!(
+            "printf launched > {}",
+            shell_words::quote(sentinel.to_string_lossy().as_ref())
+        );
         let cancellation = CancellationToken::default();
         let run_cancellation = cancellation.clone();
-        let executor = TokioCommandExecutor::default();
+        let hook = Arc::new(LaunchGateTestHook::default());
+        let run_hook = hook.clone();
+        let executor = TokioCommandExecutor::default().with_launch_gate_hook(run_hook);
         let run = tokio::spawn(async move {
             executor
                 .run(
                     CommandRequest {
                         sandbox: BashSandboxMode::Sandboxed,
                         network_domains: Vec::new(),
-                        command: "sleep 30 & wait".to_owned(),
+                        command,
                         cwd: root.path().to_path_buf(),
                         env: BTreeMap::new(),
                     },
@@ -2956,13 +3020,104 @@ sys.exit(92)
                 )
                 .await
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::timeout(Duration::from_secs(3), hook.wait_until_reached())
+            .await
+            .expect("launch-gate barrier timeout");
+        let child = hook.child_id().expect("guarded command pid");
+        cancellation.cancel();
+        hook.release();
+        let outcome = tokio::time::timeout(Duration::from_secs(3), run)
+            .await
+            .expect("bounded pre-launch cancellation")
+            .expect("executor join");
+        assert!(
+            matches!(outcome, Err(ToolError::Cancelled)),
+            "unexpected pre-launch cancellation outcome: {outcome:?}"
+        );
+        assert!(!sentinel.exists(), "cancelled command was released");
+        assert!(
+            matches!(
+                rustix::process::test_kill_process_group(child),
+                Err(rustix::io::Errno::SRCH)
+            ),
+            "cancelled guarded command group survived"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn process_group_cancellation_kills_a_descendant_holding_the_pipes() {
+        let root = tempdir().expect("temp directory");
+        let descendant_pid_file = root.path().join("descendant.pid");
+        let command = format!(
+            concat!(
+                "sleep 30 & descendant=$!; ",
+                "printf '%s\\n' \"$descendant\" > {}; ",
+                "printf 'descendant-ready\\n'; wait"
+            ),
+            shell_words::quote(descendant_pid_file.to_string_lossy().as_ref())
+        );
+        let cancellation = CancellationToken::default();
+        let run_cancellation = cancellation.clone();
+        let executor = TokioCommandExecutor::default();
+        let sink = Arc::new(RecordingSink::default());
+        let run_sink = sink.clone();
+        let run = tokio::spawn(async move {
+            executor
+                .run(
+                    CommandRequest {
+                        sandbox: BashSandboxMode::Sandboxed,
+                        network_domains: Vec::new(),
+                        command,
+                        cwd: root.path().to_path_buf(),
+                        env: BTreeMap::new(),
+                    },
+                    run_cancellation,
+                    run_sink,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let ready = sink
+                    .0
+                    .lock()
+                    .expect("recorded output")
+                    .iter()
+                    .map(|chunk| chunk.content.as_str())
+                    .collect::<String>()
+                    .contains("descendant-ready");
+                if ready {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("descendant readiness timeout");
+        let descendant = std::fs::read_to_string(&descendant_pid_file)
+            .expect("descendant pid file")
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .expect("descendant pid");
         cancellation.cancel();
         let outcome = tokio::time::timeout(Duration::from_secs(3), run)
             .await
             .expect("bounded cancellation")
             .expect("executor join");
-        assert!(matches!(outcome, Err(ToolError::Cancelled)));
+        assert!(
+            matches!(outcome, Err(ToolError::Cancelled)),
+            "unexpected cancellation outcome: {outcome:?}"
+        );
+        assert!(
+            matches!(
+                rustix::process::test_kill_process(descendant),
+                Err(rustix::io::Errno::SRCH)
+            ),
+            "cancelled descendant survived process-group teardown"
+        );
     }
 
     #[cfg(unix)]
