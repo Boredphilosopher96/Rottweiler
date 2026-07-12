@@ -244,6 +244,27 @@ pub trait ModelDriver: Send + Sync {
         request: ProviderRequest,
     ) -> Result<BoxEventStream, AgentLoopError>;
 
+    /// Streams through one exact configured provider when the user selected a
+    /// route explicitly. The default rejects provider-specific routing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the alias cannot be streamed through the selected
+    /// provider.
+    fn stream_for_provider(
+        &self,
+        alias: &str,
+        provider: Option<&str>,
+        request: ProviderRequest,
+    ) -> Result<BoxEventStream, AgentLoopError> {
+        match provider {
+            None => self.stream(alias, request),
+            Some(provider) => Err(AgentLoopError::InvalidConfiguration(format!(
+                "model alias {alias:?} cannot be routed through provider {provider:?}"
+            ))),
+        }
+    }
+
     /// Context/cache metadata known without a network call. Unknown context
     /// windows conservatively disable estimate-triggered auto-compaction.
     fn context_metadata(&self, _alias: &str) -> ModelContextMetadata {
@@ -253,6 +274,11 @@ pub trait ModelDriver: Send + Sync {
     /// Whether an alias is configured without making a provider request.
     fn has_model_alias(&self, alias: &str) -> bool {
         !alias.trim().is_empty()
+    }
+
+    /// Whether one exact provider route is configured for an alias.
+    fn has_provider_for_alias(&self, _alias: &str, _provider: &str) -> bool {
+        false
     }
 
     /// Whether an alias accepts provider-neutral image blocks.
@@ -318,6 +344,19 @@ impl ModelDriver for ProviderRuntime {
             .map_err(|error| AgentLoopError::Provider(error.to_string()))
     }
 
+    fn stream_for_provider(
+        &self,
+        alias: &str,
+        provider: Option<&str>,
+        request: ProviderRequest,
+    ) -> Result<BoxEventStream, AgentLoopError> {
+        match provider {
+            None => self.stream_alias(alias, request),
+            Some(provider) => self.stream_alias_provider(alias, provider, request),
+        }
+        .map_err(|error| AgentLoopError::Provider(error.to_string()))
+    }
+
     fn context_metadata(&self, alias: &str) -> ModelContextMetadata {
         self.resolved_alias_capabilities(alias).map_or_else(
             ModelContextMetadata::default,
@@ -331,6 +370,10 @@ impl ModelDriver for ProviderRuntime {
 
     fn has_model_alias(&self, alias: &str) -> bool {
         self.resolved_alias_capabilities(alias).is_some()
+    }
+
+    fn has_provider_for_alias(&self, alias: &str, provider: &str) -> bool {
+        ProviderRuntime::has_provider_for_alias(self, alias, provider)
     }
 
     fn supports_vision(&self, alias: &str) -> bool {
@@ -582,6 +625,7 @@ enum PendingEvent {
     },
     ModelChanged {
         model: ModelAlias,
+        provider: Option<String>,
     },
     ModeChanged {
         mode: SessionMode,
@@ -1058,7 +1102,11 @@ impl PendingEvent {
                 meta,
                 driver_client_id,
             },
-            Self::ModelChanged { model } => EngineEvent::ModelChanged { meta, model },
+            Self::ModelChanged { model, provider } => EngineEvent::ModelChanged {
+                meta,
+                model,
+                provider,
+            },
             Self::ModeChanged { mode } => EngineEvent::ModeChanged {
                 meta,
                 mode: ModeId(session_mode_name(mode).to_owned()),
@@ -1202,6 +1250,7 @@ pub struct SessionSnapshot {
     pub running: bool,
     pub completed_turns: u64,
     pub model_alias: String,
+    pub provider: Option<String>,
     pub mode: SessionMode,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
@@ -1233,6 +1282,7 @@ pub struct SessionRecoveredState {
     pub budgeter: Budgeter,
     pub interrupted_compaction: bool,
     pub model_alias: Option<String>,
+    pub provider: Option<String>,
     pub mode: SessionMode,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
@@ -1343,6 +1393,7 @@ fn recovered_pending_event(
         | EngineEvent::WorkspaceFilesFound { .. }
         | EngineEvent::WorkspaceFilePreviewReady { .. }
         | EngineEvent::WorkspaceStatusReady { .. }
+        | EngineEvent::WorkspaceDiffReady { .. }
         | EngineEvent::HostShutdown { .. } => {
             return Err(SessionProjectionError::ConnectionScopedEvent);
         }
@@ -1683,8 +1734,11 @@ fn recovered_pending_event(
             effective_from_turn: *effective_from_turn,
             roots: roots.clone(),
         },
-        EngineEvent::ModelChanged { model, .. } => PendingEvent::ModelChanged {
+        EngineEvent::ModelChanged {
+            model, provider, ..
+        } => PendingEvent::ModelChanged {
             model: model.clone(),
+            provider: provider.clone(),
         },
         EngineEvent::ModeChanged { mode, .. } => PendingEvent::ModeChanged {
             mode: parse_session_mode(&mode.0)
@@ -1769,6 +1823,7 @@ pub fn project_session_events(
     let mut pruned_tool_outputs = BTreeMap::new();
     let mut accounting = Vec::new();
     let mut model_alias = None;
+    let mut selected_provider = None;
     let mut mode = SessionMode::Execute;
     let mut pending_plan = None;
     let mut approved_plan = None;
@@ -2111,8 +2166,9 @@ pub fn project_session_events(
             } => {
                 driver_client_id = Some(driver.clone());
             }
-            PendingEvent::ModelChanged { model } => {
+            PendingEvent::ModelChanged { model, provider } => {
                 model_alias = Some(model.0.clone());
+                selected_provider.clone_from(provider);
             }
             PendingEvent::ModeChanged { mode: changed } => {
                 mode = *changed;
@@ -2260,6 +2316,7 @@ pub fn project_session_events(
         budgeter,
         interrupted_compaction,
         model_alias,
+        provider: selected_provider,
         mode,
         pending_plan,
         approved_plan,
@@ -3601,6 +3658,17 @@ impl SessionActorConfig {
         }
         configured
     }
+
+    fn with_model_route_and_mode(
+        &self,
+        model_alias: String,
+        provider: Option<String>,
+        mode: SessionMode,
+    ) -> Self {
+        let mut configured = self.with_model_alias_and_mode(model_alias, mode);
+        configured.recovered.provider = provider;
+        configured
+    }
 }
 
 fn mode_system_text(mode: SessionMode) -> &'static str {
@@ -4539,6 +4607,7 @@ struct ActorState {
     accounting: Vec<TurnAccounting>,
     budgeter: Budgeter,
     model_alias: String,
+    provider: Option<String>,
     mode: SessionMode,
     pending_plan: Option<PlanArtifact>,
     approved_plan: Option<PlanArtifact>,
@@ -4595,6 +4664,7 @@ impl ActorState {
                 .model_alias
                 .clone()
                 .unwrap_or_else(|| default_model_alias.to_owned()),
+            provider: recovered.provider.clone(),
             mode: recovered.mode,
             pending_plan: recovered.pending_plan.clone(),
             approved_plan: recovered.approved_plan.clone(),
@@ -4837,6 +4907,7 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::SearchWorkspaceFiles { meta, .. }
         | ClientCommand::PreviewWorkspaceFile { meta, .. }
         | ClientCommand::GetWorkspaceStatus { meta, .. }
+        | ClientCommand::GetWorkspaceDiff { meta, .. }
         | ClientCommand::ShutdownHost { meta, .. } => meta,
     }
 }
@@ -4873,7 +4944,8 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::ReviewFile { session_id, .. }
         | ClientCommand::SearchWorkspaceFiles { session_id, .. }
         | ClientCommand::PreviewWorkspaceFile { session_id, .. }
-        | ClientCommand::GetWorkspaceStatus { session_id, .. } => Some(session_id),
+        | ClientCommand::GetWorkspaceStatus { session_id, .. }
+        | ClientCommand::GetWorkspaceDiff { session_id, .. } => Some(session_id),
     }
 }
 
@@ -5767,7 +5839,11 @@ fn start_manual_compaction(
     let mut conversation = state.conversation.clone();
     let mut context_surgery = state.context_surgery.clone();
     let local_session_accounting = session_accounting_fallback(&state.accounting);
-    let config = Arc::new(config.with_model_alias_and_mode(state.model_alias.clone(), state.mode));
+    let config = Arc::new(config.with_model_route_and_mode(
+        state.model_alias.clone(),
+        state.provider.clone(),
+        state.mode,
+    ));
     let signals = turn_signals.clone();
     tokio::spawn(async move {
         let result = async {
@@ -6124,6 +6200,22 @@ async fn handle_actor_command(
                     let outcome = protocol_rejection(
                         "unknown_model_alias",
                         format!("model alias {:?} is not configured", model.0),
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::SwitchModel {
+                    model,
+                    provider: Some(provider),
+                    ..
+                } if !config.model.has_provider_for_alias(&model.0, provider) => {
+                    let outcome = protocol_rejection(
+                        "unknown_provider_route",
+                        format!(
+                            "model alias {:?} has no configured route through provider {:?}",
+                            model.0, provider
+                        ),
                     );
                     send_ack(state, events, &meta, session, outcome.clone());
                     let _ = respond.send(outcome);
@@ -6777,18 +6869,22 @@ async fn handle_actor_command(
                         let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
                     }
                 }
-                ClientCommand::SwitchModel { model, .. } => {
+                ClientCommand::SwitchModel {
+                    model, provider, ..
+                } => {
                     let result = emit(
                         state,
                         events,
                         &config.event_sink,
                         PendingEvent::ModelChanged {
                             model: model.clone(),
+                            provider: provider.clone(),
                         },
                     )
                     .await;
                     if result.is_ok() {
                         state.model_alias = model.0;
+                        state.provider = provider;
                     }
                     if let Some(complete) = completion.take() {
                         let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
@@ -7116,6 +7212,7 @@ async fn handle_actor_command(
                 | ClientCommand::SearchWorkspaceFiles { .. }
                 | ClientCommand::PreviewWorkspaceFile { .. }
                 | ClientCommand::GetWorkspaceStatus { .. }
+                | ClientCommand::GetWorkspaceDiff { .. }
                 | ClientCommand::ShutdownHost { .. }
                 | ClientCommand::Rewind {
                     target: RewindTarget::Checkpoint { .. },
@@ -7827,6 +7924,7 @@ async fn handle_actor_command(
                 running: state.running.is_some(),
                 completed_turns: state.completed_turns,
                 model_alias: state.model_alias.clone(),
+                provider: state.provider.clone(),
                 mode: state.mode,
                 pending_plan: state.pending_plan.clone(),
                 approved_plan: state.approved_plan.clone(),
@@ -8272,7 +8370,11 @@ fn prepare_turn_start(
         .as_deref()
         .unwrap_or(&state.model_alias)
         .to_owned();
-    let mut turn_config = config.with_model_alias_and_mode(model_alias.clone(), state.mode);
+    let provider = (model_alias == state.model_alias)
+        .then(|| state.provider.clone())
+        .flatten();
+    let mut turn_config =
+        config.with_model_route_and_mode(model_alias.clone(), provider, state.mode);
     if let Some(allowed_tools) = allowed_tools {
         turn_config.tools = Arc::new(
             config
@@ -10853,7 +10955,10 @@ async fn execute_compaction(
             thinking: config.thinking,
             cache_hint: None,
         };
-        let mut stream = match config.model.stream(&alias, request) {
+        let provider = (alias == config.model_alias)
+            .then_some(config.recovered.provider.as_deref())
+            .flatten();
+        let mut stream = match config.model.stream_for_provider(&alias, provider, request) {
             Ok(stream) => stream,
             Err(error) => {
                 last_error = Some(error);
@@ -11554,7 +11659,11 @@ async fn run_turn(
             thinking: config.thinking,
             cache_hint,
         };
-        let mut stream = match config.model.stream(&config.model_alias, request) {
+        let mut stream = match config.model.stream_for_provider(
+            &config.model_alias,
+            config.recovered.provider.as_deref(),
+            request,
+        ) {
             Ok(stream) => stream,
             Err(error) => {
                 send_event(
@@ -12143,6 +12252,10 @@ mod tests {
 
         fn has_model_alias(&self, alias: &str) -> bool {
             matches!(alias, "fast" | "slow")
+        }
+
+        fn has_provider_for_alias(&self, alias: &str, provider: &str) -> bool {
+            alias == "slow" && provider == "offline"
         }
 
         fn supports_vision(&self, alias: &str) -> bool {
@@ -21276,6 +21389,7 @@ mod tests {
                     meta: protocol_meta("driver", "unknown-model"),
                     session_id: SessionId("fixture-session".to_owned()),
                     model: ModelAlias("missing".to_owned()),
+                    provider: None,
                 })
                 .await
                 .expect("unknown model"),
@@ -21287,6 +21401,7 @@ mod tests {
                     meta: protocol_meta("driver", "switch-model"),
                     session_id: SessionId("fixture-session".to_owned()),
                     model: ModelAlias("slow".to_owned()),
+                    provider: None,
                 })
                 .await
                 .expect("switch model"),
@@ -21295,6 +21410,39 @@ mod tests {
         assert_eq!(
             handle.snapshot().await.expect("model snapshot").model_alias,
             "slow"
+        );
+        assert!(matches!(
+            handle
+                .dispatch(ClientCommand::SwitchModel {
+                    meta: protocol_meta("driver", "unknown-provider"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    model: ModelAlias("slow".to_owned()),
+                    provider: Some("missing".to_owned()),
+                })
+                .await
+                .expect("unknown provider"),
+            CommandOutcome::Rejected { error } if error.code == "unknown_provider_route"
+        ));
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SwitchModel {
+                    meta: protocol_meta("driver", "switch-provider"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    model: ModelAlias("slow".to_owned()),
+                    provider: Some("offline".to_owned()),
+                })
+                .await
+                .expect("switch provider"),
+            CommandOutcome::Accepted
+        );
+        assert_eq!(
+            handle
+                .snapshot()
+                .await
+                .expect("provider snapshot")
+                .provider
+                .as_deref(),
+            Some("offline")
         );
         let durable = handle
             .event_sink
@@ -21307,6 +21455,13 @@ mod tests {
                 .model_alias
                 .as_deref(),
             Some("slow")
+        );
+        assert_eq!(
+            project_session_events(&durable)
+                .expect("project provider")
+                .provider
+                .as_deref(),
+            Some("offline")
         );
     }
 

@@ -11,7 +11,7 @@ import { parseSseStream, type SseParserOptions } from "./sse"
 import {
   durableSequenceId,
   isRecord,
-  isWireEngineEvent,
+  normalizeWireEngineEvent,
   type AttachSessionCommand,
   type TransportConnectionUpdate,
   type WireEngineEvent,
@@ -178,8 +178,8 @@ export class EngineHttpSseClient {
         options.onConnection?.({ phase: "connected", attempt })
 
         for await (const frame of parseSseStream(response.body, this.#sse, options.signal)) {
-          const value: unknown = parseEventJson(frame.data)
-          if (!isWireEngineEvent(value)) {
+          const value = normalizeWireEngineEvent(parseEventJson(frame.data))
+          if (value === null) {
             throw new EngineTransportError("engine event stream emitted an invalid event")
           }
           await options.onEvent(value)

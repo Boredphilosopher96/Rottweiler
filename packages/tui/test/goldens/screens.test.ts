@@ -134,8 +134,8 @@ function fixtureState(): RottweilerState {
       { name: "rewind", description: "Restore a prior checkpoint", usage: "/rewind" },
     ],
     models: [
-      { alias: "fast", vision: true, thinking: true, toolCalling: true },
-      { alias: "deep", vision: false, thinking: true, toolCalling: true },
+      { alias: "fast", providers: ["openai_codex"], vision: true, thinking: true, toolCalling: true },
+      { alias: "deep", providers: ["github_copilot"], vision: false, thinking: true, toolCalling: true },
     ],
     sessions: [
       {
@@ -480,6 +480,7 @@ function scenarios(): ScreenScenario[] {
           ],
         },
       },
+      setup: (app) => app.openReview(),
     },
   ]
 }

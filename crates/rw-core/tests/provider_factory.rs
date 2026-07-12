@@ -578,6 +578,42 @@ async fn approved_extension_alias_stream_is_model_bound_and_replay_compatible() 
 }
 
 #[tokio::test]
+async fn explicit_provider_route_excludes_other_alias_candidates() {
+    let mut config = extension_config("alpha/model-a");
+    config.models.aliases.insert(
+        "fast".to_owned(),
+        vec!["alpha/model-a".to_owned(), "beta/model-b".to_owned()],
+    );
+    let runtime = extension_factory()
+        .with_extension_providers([
+            ("alpha/", extension_provider("alpha-private", None)),
+            ("beta/", extension_provider("beta-private", None)),
+        ])
+        .build(&config)
+        .unwrap_or_else(|error| panic!("two-provider extension runtime must build: {error}"));
+
+    assert!(runtime.has_provider_for_alias("fast", "alpha"));
+    assert!(runtime.has_provider_for_alias("fast", "beta"));
+    assert!(!runtime.has_provider_for_alias("fast", "missing"));
+    let events = runtime
+        .stream_alias_provider("fast", "beta", request("ignored"))
+        .unwrap_or_else(|error| panic!("explicit beta route must resolve: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().any(
+        |event| matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "extension:model-b")
+    ));
+    assert!(events.iter().all(
+        |event| !matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "extension:model-a")
+    ));
+    assert!(
+        runtime
+            .stream_alias_provider("fast", "missing", request("ignored"))
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn extension_metadata_is_preserved_and_unknown_pricing_stays_unpriced() {
     let capabilities = Capabilities {
         vision: true,

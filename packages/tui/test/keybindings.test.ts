@@ -261,6 +261,7 @@ describe("Vim TUI interaction", () => {
       }],
     }
     app.setState({ ...base, review })
+    app.openReview()
     expect(app.statusLine.plainText).toContain("NORMAL · review")
     setup.mockInput.pressKey("a", { shift: true })
     await Bun.sleep(1)
@@ -271,6 +272,8 @@ describe("Vim TUI interaction", () => {
       expect.objectContaining({ type: "review_file", decision: "revert" }),
     ])
 
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
     app.setState(base)
     expect(app.statusLine.plainText).toContain("NORMAL · composer")
     expect(app.composer.editor.focused).toBeTrue()

@@ -37,9 +37,9 @@ SHELL_STDIN_MARKER = "M4_SHELL_CHILD_STDIN_0a19"
 SHELL_INTERRUPT_MARKER = "M4_SHELL_CHILD_INTERRUPT_82bc"
 BLOCKED_TURN_MARKER = "M4_BLOCKED_AGENT_TURN_6d77"
 SHELL_SECRET_VALUE = "M4_SHELL_SECRET_d10f7e62"
-# OpenTUI's multiline Textarea maps Meta+Return to submit; plain Return inserts
-# a newline. Kitty encodes the meta modifier as the 1-based value 3.
-KITTY_SUBMIT = b"\x1b[13;3u"
+# The composer submits on plain Return; this is Kitty's unmodified Return
+# encoding, which remains unambiguous when a PTY's line discipline maps CR/LF.
+KITTY_SUBMIT = b"\x1b[13u"
 _origin_request_lock = threading.Lock()
 _origin_requests = 0
 
@@ -1177,6 +1177,54 @@ def ssh_loopback_gate(
             os.close(remote.fd)
         if not remote_closed_normally:
             cleanup_detached_remote(session_id)
+
+    term_session_id = "m4-ssh-loopback-sigterm-gate"
+    terminated = spawn_pty(
+        rw,
+        env,
+        workspace,
+        [
+            "--dangerously-trust",
+            "--remote",
+            host,
+            "--permission-mode",
+            "strict",
+            "--resume",
+            term_session_id,
+        ],
+    )
+    term_closed_normally = False
+    try:
+        term_ready = read_until(terminated, DRIVER_READY_MARKER, timeout=20)
+        if FIRST_PAINT_MARKER not in term_ready:
+            raise RuntimeError("SIGTERM remote TUI became driver-ready without first paint")
+        descriptor, remote_engine_pid = wait_for_detached_remote(term_session_id)
+        os.kill(terminated.pid, signal.SIGTERM)
+        exit_code = os.waitstatus_to_exitcode(wait_pid(terminated.pid, 8))
+        if exit_code != 0:
+            raise RuntimeError(f"attached remote SIGTERM exited with {exit_code}")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not process_exists(remote_engine_pid) and not descriptor.parent.exists():
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError(
+                "SIGTERM remote close leaked its engine or runtime directory: "
+                f"pid={remote_engine_pid} runtime={descriptor.parent}"
+            )
+        term_closed_normally = True
+        print(
+            "M4 SSH lifecycle: SIGTERM unwound the local TUI, tunnel, owned remote "
+            "engine, and runtime directory"
+        )
+    finally:
+        if not term_closed_normally:
+            terminate_process_tree(terminated.pid)
+        with contextlib.suppress(OSError):
+            os.close(terminated.fd)
+        if not term_closed_normally:
+            cleanup_detached_remote(term_session_id)
 
 
 def require_visible_markers(captured: bytes) -> None:

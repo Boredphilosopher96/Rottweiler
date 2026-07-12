@@ -404,6 +404,30 @@
         "meta": {
           "$ref": "#/$defs/CommandAckMeta"
         },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "diff": {
+          "$ref": "#/$defs/WorkspaceDiff"
+        },
+        "type": {
+          "type": "string",
+          "const": "workspace_diff_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "diff"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
         "type": {
           "type": "string",
           "const": "host_shutdown"
@@ -1421,6 +1445,14 @@
         },
         "model": {
           "$ref": "#/$defs/ModelAlias"
+        },
+        "provider": {
+          "description": "Exact provider route selected for this session, or `None` for the\nalias's automatic fallback chain.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
         },
         "type": {
           "type": "string",
@@ -2741,6 +2773,14 @@
         "alias": {
           "$ref": "#/$defs/ModelAlias"
         },
+        "providers": {
+          "description": "Locally configured provider names referenced by this alias, in\ndeterministic fallback order. Provider credentials are never exposed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
         "capabilities": {
           "$ref": "#/$defs/ModelCapabilities"
         }
@@ -2891,6 +2931,30 @@
         "workspace_name",
         "changed_paths",
         "truncated"
+      ]
+    },
+    "WorkspaceDiff": {
+      "description": "Bounded current-worktree diff for one exact workspace-relative path.",
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "unified_diff": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "binary": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "unified_diff",
+        "truncated",
+        "binary"
       ]
     },
     "EventMeta": {

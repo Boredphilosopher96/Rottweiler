@@ -34,7 +34,7 @@ use crate::{AgentLoopError, ModelDriver, SessionActor, SessionActorConfig, Sessi
 pub const DEFAULT_SUBAGENT_MAX_DEPTH: usize = 2;
 pub const DEFAULT_SUBAGENT_CONCURRENCY: usize = 4;
 pub const DEFAULT_SUBAGENT_MAX_TURNS: usize = 32;
-pub const DEFAULT_SUBAGENT_MAX_DURATION: Duration = Duration::from_secs(30 * 60);
+pub const DEFAULT_SUBAGENT_MAX_DURATION: Duration = Duration::from_mins(30);
 const MAX_SUBAGENT_FINAL_TEXT_BYTES: usize = 256 * 1024;
 const MAX_SUBAGENT_DIFF_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SUBAGENT_TOUCHED_FILES: usize = 4096;

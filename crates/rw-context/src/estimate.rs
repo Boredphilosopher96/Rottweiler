@@ -97,7 +97,7 @@ pub fn canonicalize_json(value: &Value) -> Value {
     match value {
         Value::Object(object) => {
             let mut entries: Vec<_> = object.iter().collect();
-            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_unstable_by_key(|(path, _)| *path);
             let mut canonical = Map::new();
             for (key, child) in entries {
                 canonical.insert(key.clone(), canonicalize_json(child));

@@ -216,7 +216,8 @@ export const contractFixture = {
         "request_id": "request-fixture"
       },
       "session_id": "session-fixture",
-      "model": "fast"
+      "model": "fast",
+      "provider": null
     },
     {
       "type": "compact",
@@ -762,7 +763,8 @@ export const contractFixture = {
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
-      "model": "fast"
+      "model": "fast",
+      "provider": null
     },
     {
       "type": "context_item_pinned",

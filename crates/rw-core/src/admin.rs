@@ -317,7 +317,7 @@ impl UpdateNetworkClient {
             || max_bytes == 0
             || max_bytes > 64 * 1024 * 1024
             || timeout.is_zero()
-            || timeout > Duration::from_secs(120)
+            || timeout > Duration::from_mins(2)
         {
             return Err(AdminError::new("signed update fetch request is invalid"));
         }

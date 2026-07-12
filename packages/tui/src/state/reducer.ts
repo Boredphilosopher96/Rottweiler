@@ -1,16 +1,21 @@
-import type { EngineEvent } from "../protocol"
+import type { EngineEvent, ToolOutput } from "../protocol"
 import { durableSequenceId, isRecord, type WireEngineEvent } from "../transport"
 import type { RottweilerAction } from "./actions"
 import {
   createInitialState,
   type RottweilerState,
   type StreamingTail,
+  type TodoProjection,
   type ToolProjection,
 } from "./model"
 
 const MAX_U64 = 18_446_744_073_709_551_615n
 export const MAX_SUBAGENT_TASK_BYTES = 1_024
 export const MAX_TERMINAL_SUBAGENT_HISTORY = 128
+export const MAX_TODO_ITEMS = 128
+export const MAX_TODO_ID_BYTES = 256
+export const MAX_TODO_CONTENT_BYTES = 4_096
+export const MAX_TODO_TOTAL_BYTES = 64 * 1_024
 const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "command_acknowledged",
   "context_snapshot_ready",
@@ -27,6 +32,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "workspace_files_found",
   "workspace_file_preview_ready",
   "workspace_status_ready",
+  "workspace_diff_ready",
   "host_shutdown",
   "session_created",
   "workspace_roots_changed",
@@ -86,6 +92,7 @@ const ACK_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "workspace_files_found",
   "workspace_file_preview_ready",
   "workspace_status_ready",
+  "workspace_diff_ready",
   "host_shutdown",
 ])
 
@@ -326,6 +333,8 @@ function applyKnownEvent(
         ...state,
         models: event.models.map((model) => ({
           alias: model.alias,
+          // Older compatible hosts did not emit provider metadata.
+          providers: model.providers ?? [],
           vision: model.capabilities.vision,
           thinking: model.capabilities.thinking,
           toolCalling: model.capabilities.tool_calling,
@@ -366,6 +375,17 @@ function applyKnownEvent(
           branch: event.status.branch ?? null,
           changedPaths: event.status.changed_paths,
           truncated: event.status.truncated,
+        },
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "workspace_diff_ready":
+      return {
+        ...state,
+        workspaceDiff: {
+          path: event.diff.path,
+          unifiedDiff: event.diff.unified_diff,
+          truncated: event.diff.truncated,
+          binary: event.diff.binary,
         },
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
       }
@@ -445,6 +465,7 @@ function applyKnownEvent(
               }),
         streamingTail: null,
         queuedMessages: [],
+        todos: target === null ? [] : deriveTodosFromTools(state.tools, target),
         subagents,
         subagentOrder: retainedSubagentIds,
       }
@@ -671,7 +692,13 @@ function applyKnownEvent(
         isError: event.is_error,
         callIndex: event.call_index,
       }
-      return { ...state, tools: { ...state.tools, [event.tool_call_id]: tool } }
+      const todos =
+        tool.name === "todo" && !event.is_error ? projectTodoOutput(event.output) : null
+      return {
+        ...state,
+        tools: { ...state.tools, [event.tool_call_id]: tool },
+        ...(todos === null ? {} : { todos }),
+      }
     }
     case "question_asked":
       return {
@@ -774,7 +801,7 @@ function applyKnownEvent(
         approvedPlan: event.decision === "approve" ? event.artifact : state.approvedPlan,
       }
     case "model_changed":
-      return { ...state, model: event.model }
+      return { ...state, model: event.model, provider: event.provider ?? null }
     case "user_shell_state_changed":
       return {
         ...state,
@@ -913,6 +940,102 @@ function projectSessionReview(review: {
   }
 }
 
+function deriveTodosFromTools(
+  tools: RottweilerState["tools"],
+  throughTurn: bigint,
+): readonly TodoProjection[] {
+  const candidates = Object.values(tools)
+    .flatMap((tool) => {
+      const turn = parseU64(tool.turnId)
+      return tool.name === "todo" && tool.status === "finished" && tool.isError === false && turn !== null && turn <= throughTurn
+        ? [{ tool, turn }]
+        : []
+    })
+    .sort((left, right) => {
+      if (left.turn < right.turn) return -1
+      if (left.turn > right.turn) return 1
+      if (left.tool.callIndex !== right.tool.callIndex) {
+        return left.tool.callIndex - right.tool.callIndex
+      }
+      return left.tool.toolCallId.localeCompare(right.tool.toolCallId)
+    })
+
+  let todos: readonly TodoProjection[] = []
+  for (const { tool } of candidates) {
+    if (tool.output === null) continue
+    const projected = projectTodoOutput(tool.output)
+    if (projected !== null) todos = projected
+  }
+  return todos
+}
+
+/** Accept only the exact bounded structured snapshot emitted by TodoTool. */
+function projectTodoOutput(output: ToolOutput): readonly TodoProjection[] | null {
+  const values =
+    output.type === "structured"
+      ? [output.value]
+      : output.type === "mixed"
+        ? output.parts.flatMap((part) => (part.type === "structured" ? [part.value] : []))
+        : []
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const projected = projectTodoValue(values[index])
+    if (projected !== null) return projected
+  }
+  return null
+}
+
+function projectTodoValue(value: unknown): readonly TodoProjection[] | null {
+  if (!isRecord(value)) return null
+  let payload: Record<string, unknown> = value
+  if ("data" in value || "truncated" in value) {
+    if (value.truncated !== false || !isRecord(value.data)) return null
+    payload = value.data
+  }
+  if (!Array.isArray(payload.items) || payload.items.length > MAX_TODO_ITEMS) return null
+  if (
+    typeof payload.count !== "number" ||
+    !Number.isSafeInteger(payload.count) ||
+    payload.count !== payload.items.length
+  ) {
+    return null
+  }
+
+  const encoder = new TextEncoder()
+  const ids = new Set<string>()
+  const projected: TodoProjection[] = []
+  let totalBytes = 0
+  for (const item of payload.items) {
+    if (
+      !isRecord(item) ||
+      typeof item.id !== "string" ||
+      typeof item.content !== "string" ||
+      !isTodoStatus(item.status) ||
+      item.id.length === 0 ||
+      item.content.length === 0 ||
+      ids.has(item.id)
+    ) {
+      return null
+    }
+    const idBytes = encoder.encode(item.id).byteLength
+    const contentBytes = encoder.encode(item.content).byteLength
+    totalBytes += idBytes + contentBytes
+    if (
+      idBytes > MAX_TODO_ID_BYTES ||
+      contentBytes > MAX_TODO_CONTENT_BYTES ||
+      totalBytes > MAX_TODO_TOTAL_BYTES
+    ) {
+      return null
+    }
+    ids.add(item.id)
+    projected.push({ id: item.id, content: item.content, status: item.status })
+  }
+  return projected
+}
+
+function isTodoStatus(value: unknown): value is TodoProjection["status"] {
+  return value === "pending" || value === "in_progress" || value === "completed" || value === "blocked"
+}
+
 function boundedUtf8(value: string, maxBytes: number): string {
   const encoder = new TextEncoder()
   const encoded = encoder.encode(value)
@@ -980,6 +1103,7 @@ function responseAck(
     | "workspace_files_found"
     | "workspace_file_preview_ready"
     | "workspace_status_ready"
+    | "workspace_diff_ready"
     | "host_shutdown",
   sessionId: string | null,
 ): RottweilerState["commandAcks"] {

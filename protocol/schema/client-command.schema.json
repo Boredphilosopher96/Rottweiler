@@ -288,6 +288,14 @@
         "model": {
           "$ref": "#/$defs/ModelAlias"
         },
+        "provider": {
+          "description": "When set, route only through this configured provider for the\nselected alias instead of using the alias's automatic fallback chain.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
         "type": {
           "type": "string",
           "const": "switch_model"
@@ -789,6 +797,36 @@
         "type",
         "meta",
         "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "get_workspace_diff"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "path",
+        "max_bytes"
       ]
     },
     {

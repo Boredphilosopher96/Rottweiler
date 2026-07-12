@@ -13,6 +13,7 @@ import {
   engineEvent,
   MAX_SUBAGENT_TASK_BYTES,
   MAX_TERMINAL_SUBAGENT_HISTORY,
+  MAX_TODO_CONTENT_BYTES,
   reduceRottweilerState,
   transportConnected,
   type RottweilerState,
@@ -59,6 +60,179 @@ function childResult(
 }
 
 describe("pure TUI state reducer", () => {
+  test("defaults missing providers from older model-list events", () => {
+    const state = reduce(createInitialState(), {
+      type: "models_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client-old",
+        request_id: "request-old",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      models: [
+        {
+          alias: "fast",
+          capabilities: {
+            tool_calling: true,
+            vision: false,
+            thinking: false,
+            cache_behavior: "none",
+          },
+        },
+      ],
+    })
+    expect(state.models).toEqual([
+      {
+        alias: "fast",
+        providers: [],
+        vision: false,
+        thinking: false,
+        toolCalling: true,
+      },
+    ])
+  })
+
+  test("projects only bounded successful todo tool snapshots", () => {
+    let state = reduce(createInitialState(), {
+      type: "tool_call_started",
+      meta: meta("1"),
+      turn_id: "2",
+      tool_call_id: "todo-valid",
+      name: "todo",
+      args: { action: "replace" },
+      call_index: 0,
+    })
+    state = reduce(state, {
+      type: "tool_call_finished",
+      meta: meta("2"),
+      turn_id: "2",
+      tool_call_id: "todo-valid",
+      output: {
+        type: "mixed",
+        parts: [
+          { type: "text", text: "[InProgress] audit: Audit TUI" },
+          {
+            type: "structured",
+            value: {
+              data: {
+                items: [
+                  { id: "audit", content: "Audit TUI", status: "in_progress" },
+                  { id: "tests", content: "Add tests", status: "pending" },
+                ],
+                count: 2,
+              },
+              truncated: false,
+            },
+          },
+        ],
+      },
+      is_error: false,
+      call_index: 0,
+    })
+    expect(state.todos).toEqual([
+      { id: "audit", content: "Audit TUI", status: "in_progress" },
+      { id: "tests", content: "Add tests", status: "pending" },
+    ])
+
+    state = reduce(state, {
+      type: "tool_call_started",
+      meta: meta("3"),
+      turn_id: "3",
+      tool_call_id: "todo-unbounded",
+      name: "todo",
+      args: { action: "replace" },
+      call_index: 0,
+    })
+    state = reduce(state, {
+      type: "tool_call_finished",
+      meta: meta("4"),
+      turn_id: "3",
+      tool_call_id: "todo-unbounded",
+      output: {
+        type: "structured",
+        value: {
+          items: [{ id: "huge", content: "x".repeat(MAX_TODO_CONTENT_BYTES + 1), status: "pending" }],
+          count: 1,
+        },
+      },
+      is_error: false,
+      call_index: 0,
+    })
+    expect(state.todos.map((todo) => todo.id)).toEqual(["audit", "tests"])
+
+    state = reduce(state, {
+      type: "tool_call_started",
+      meta: meta("5"),
+      turn_id: "4",
+      tool_call_id: "todo-malformed",
+      name: "todo",
+      args: { action: "replace" },
+      call_index: 0,
+    })
+    state = reduce(state, {
+      type: "tool_call_finished",
+      meta: meta("6"),
+      turn_id: "4",
+      tool_call_id: "todo-malformed",
+      output: {
+        type: "structured",
+        value: {
+          items: [
+            { id: "duplicate", content: "one", status: "pending" },
+            { id: "duplicate", content: "two", status: "unknown" },
+          ],
+          count: 2,
+        },
+      },
+      is_error: false,
+      call_index: 0,
+    })
+    expect(state.todos.map((todo) => todo.id)).toEqual(["audit", "tests"])
+  })
+
+  test("rederives the latest valid todo snapshot at a rewind boundary", () => {
+    let state = createInitialState()
+    for (const [sequence, turn, id, content] of [
+      ["1", "1", "first", "First task"],
+      ["3", "4", "later", "Later task"],
+    ] as const) {
+      state = reduce(state, {
+        type: "tool_call_started",
+        meta: meta(sequence),
+        turn_id: turn,
+        tool_call_id: `todo-${id}`,
+        name: "todo",
+        args: { action: "replace" },
+        call_index: 0,
+      })
+      state = reduce(state, {
+        type: "tool_call_finished",
+        meta: meta(String(Number(sequence) + 1)),
+        turn_id: turn,
+        tool_call_id: `todo-${id}`,
+        output: {
+          type: "mixed",
+          parts: [{
+            type: "structured",
+            value: { data: { items: [{ id, content, status: "pending" }], count: 1 }, truncated: false },
+          }],
+        },
+        is_error: false,
+        call_index: 0,
+      })
+    }
+    expect(state.todos.map((todo) => todo.id)).toEqual(["later"])
+
+    state = reduce(state, {
+      type: "conversation_rewound",
+      meta: meta("5"),
+      to_agent_turn: "1",
+      operation_id: "rewind-todos",
+      unrestorable_paths: [],
+    })
+    expect(state.todos).toEqual([{ id: "first", content: "First task", status: "pending" }])
+  })
+
   test("projects plugin status and bounded UI notifications as known durable events", () => {
     let state = reduce(createInitialState(), {
       type: "plugin_status_changed",

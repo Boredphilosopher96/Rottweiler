@@ -28,6 +28,18 @@ export function isWireEngineEvent(value: unknown): value is WireEngineEvent {
   return isRecord(value) && typeof value.type === "string"
 }
 
+/** Normalizes additive protocol metadata omitted by older compatible hosts. */
+export function normalizeWireEngineEvent(value: unknown): WireEngineEvent | null {
+  if (!isWireEngineEvent(value)) return null
+  if (value.type !== "models_listed" || !Array.isArray(value.models)) return value
+  return {
+    ...value,
+    models: value.models.map((model) =>
+      isRecord(model) && model.providers === undefined ? { ...model, providers: [] } : model,
+    ),
+  } as WireEngineEvent
+}
+
 export function isSessionForkedEvent(event: WireEngineEvent): event is SessionForkedEvent {
   if (event.type !== "session_forked" || !isRecord(event.child)) return false
   const child = event.child

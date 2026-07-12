@@ -55,7 +55,7 @@ import {
   type ToolProjection,
 } from "./state"
 import { createSyntaxStyle, kennelTheme, type RottweilerTheme } from "./theme"
-import { isSessionForkedEvent, type WireEngineEvent } from "./transport"
+import { isRecord, isSessionForkedEvent, type WireEngineEvent } from "./transport"
 
 export interface RottweilerAppOptions {
   readonly initialEvent?: EngineEvent
@@ -84,7 +84,8 @@ export interface TerminalHandoverAdapter {
   resume(): void
 }
 
-type PickerKind = "commands" | "files" | "modes" | "models" | "sessions"
+type PickerKind = "commands" | "files" | "modes" | "models" | "providers" | "sessions"
+const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 
 export class RottweilerApp extends BoxRenderable {
   readonly transcript: TranscriptRenderable
@@ -106,13 +107,27 @@ export class RottweilerApp extends BoxRenderable {
   #sessionId: string
   #terminalFocused = true
   #pickerKind: PickerKind | null = null
-  #pendingFilePreview: string | null = null
+  #pendingFilePreview: { readonly path: string; readonly requestId: string } | null = null
+  #pendingWorkspaceSearchRequest: string | null = null
+  #latestWorkspaceStatusRequest: string | null = null
+  #latestWorkspaceDiffRequest: string | null = null
+  #pendingWorkspaceDiffPath: string | null = null
+  #latestReviewRequest: string | null = null
+  #commandsRequested = false
+  #modelsRequested = false
+  #pickerAnchored = false
+  #pickerQuery = ""
+  #modelProviderFilter: string | null = null
+  #reviewOpen = false
+  #pendingReviewSelection: string | null = null
+  #postSubmitPicker: "models" | "providers" | null = null
   #terminalSuspended = false
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
   #sessionSearchTimer: ReturnType<typeof setTimeout> | null = null
   #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
+  #pendingModelSwitchRequests = new Set<string>()
   #keybindings: CompiledKeybindings
   #inputMode: InputMode
   #vimFocus: VimFocus = "composer"
@@ -191,7 +206,7 @@ export class RottweilerApp extends BoxRenderable {
       id: "main-content",
       width: "100%",
       flexGrow: 1,
-      minHeight: 5,
+      minHeight: 1,
       flexDirection: "row",
       backgroundColor: theme.background,
       gap: 1,
@@ -204,8 +219,7 @@ export class RottweilerApp extends BoxRenderable {
       overscan: 3,
     })
     this.contextPanel = new ContextPanelRenderable(ctx, theme, {
-      onPin: (itemId) => this.#command({ type: "pin_context", item_id: itemId }),
-      onEvict: (itemId) => this.#command({ type: "evict_context", item_id: itemId }),
+      onOpenDiff: (path) => this.#openChangedFileDiff(path),
     })
     this.main.add(this.transcript)
     this.main.add(this.contextPanel)
@@ -245,7 +259,14 @@ export class RottweilerApp extends BoxRenderable {
       editor: this.#options.editor,
       imagePaste: this.#options.imagePaste,
       onSubmit: (content, attachments) => this.#sendMessage(content, attachments),
-      onFileMention: (query) => this.openFilePicker(query),
+      onFileMention: (query) => this.openFilePicker(query, true),
+      onInput: (value) => this.#updateComposerAutocomplete(value),
+      onSubmitted: () => {
+        const picker = this.#postSubmitPicker
+        this.#postSubmitPicker = null
+        if (picker === "models") this.openModelPicker()
+        else if (picker === "providers") this.openProviderPicker()
+      },
     })
     this.statusLine = new StatusLineRenderable(ctx, theme)
 
@@ -260,7 +281,7 @@ export class RottweilerApp extends BoxRenderable {
     ctx.on(CliRenderEvents.BLUR, this.#onTerminalBlur)
     ctx.keyInput.on("keypress", this.#onGlobalKey)
     this.setState(this.#state)
-    if (this.#state.review !== null) {
+    if (this.#reviewOpen) {
       this.reviewPanel.files.focus()
     } else if (!this.#state.replay.active) {
       this.#focusForInputMode()
@@ -273,6 +294,14 @@ export class RottweilerApp extends BoxRenderable {
 
   /** Update command routing only after the runtime owns the new driver lease. */
   setSessionId(sessionId: string): void {
+    if (sessionId !== this.#sessionId) {
+      this.#latestWorkspaceStatusRequest = null
+      this.#latestReviewRequest = null
+      this.#pendingReviewSelection = null
+      this.#reviewOpen = false
+      this.#pendingModelSwitchRequests.clear()
+      this.reviewPanel.closePresentation()
+    }
     this.#sessionId = sessionId
     if (this.#state.replay.active && this.#state.replay.sessionId !== sessionId) {
       this.setState(enterReplayMode(createInitialState(), sessionId))
@@ -280,6 +309,11 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   handleEvent(event: WireEngineEvent): void {
+    const eventRecord = event as unknown as Record<string, unknown>
+    const commandRequestId =
+      isRecord(eventRecord.meta) && typeof eventRecord.meta.request_id === "string"
+        ? eventRecord.meta.request_id
+        : null
     if (event.type === "session_forked") {
       if (
         !isSessionForkedEvent(event) ||
@@ -295,9 +329,65 @@ export class RottweilerApp extends BoxRenderable {
     ) {
       return
     }
+    if (
+      event.type === "workspace_status_ready" &&
+      this.#latestWorkspaceStatusRequest !== null &&
+      commandRequestId !== this.#latestWorkspaceStatusRequest
+    ) {
+      return
+    }
+    if (event.type === "workspace_diff_ready") {
+      const diffPath =
+        isRecord(eventRecord.diff) && typeof eventRecord.diff.path === "string"
+          ? eventRecord.diff.path
+          : null
+      if (
+        this.#latestWorkspaceDiffRequest === null ||
+        commandRequestId !== this.#latestWorkspaceDiffRequest ||
+        diffPath !== this.#pendingWorkspaceDiffPath
+      ) return
+    }
+    if (
+      event.type === "session_review_ready" &&
+      this.#latestReviewRequest !== null &&
+      commandRequestId !== this.#latestReviewRequest
+    ) {
+      return
+    }
+    if (event.type === "workspace_files_found" && this.#pendingWorkspaceSearchRequest !== null) {
+      const requestId =
+        isRecord(event.meta) && typeof event.meta.request_id === "string"
+          ? event.meta.request_id
+          : null
+      if (requestId !== this.#pendingWorkspaceSearchRequest) return
+    }
+    if (event.type === "workspace_file_preview_ready") {
+      const requestId =
+        isRecord(event.meta) && typeof event.meta.request_id === "string"
+          ? event.meta.request_id
+          : null
+      const path =
+        isRecord(event.preview) && typeof event.preview.path === "string"
+          ? event.preview.path
+          : null
+      if (
+        this.#pendingFilePreview === null ||
+        requestId !== this.#pendingFilePreview.requestId ||
+        path !== this.#pendingFilePreview.path
+      ) return
+    }
     const previous = this.#state
     const next = reduceRottweilerState(previous, engineEvent(event))
     this.setState(next)
+    const modelSwitchOutcome =
+      event.type === "command_acknowledged" &&
+      commandRequestId !== null &&
+      this.#pendingModelSwitchRequests.delete(commandRequestId)
+        ? next.commandAcks[commandRequestId]?.outcome
+        : null
+    if (modelSwitchOutcome?.type === "rejected") {
+      this.#projectRejection(modelSwitchOutcome)
+    }
     this.#notify(previous, next)
     if (isSessionForkedEvent(event)) {
       void this.#transitionToFork(event.child.session_id)
@@ -327,6 +417,37 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingFilePreview = null
       this.closePicker()
     }
+    if (event.type === "session_review_ready" || event.type === "session_review_updated") {
+      const path = this.#pendingReviewSelection
+      if (path !== null) {
+        this.#pendingReviewSelection = null
+        if (!this.reviewPanel.selectPath(path)) {
+          this.#projectClientError(
+            "diff_unavailable",
+            `no retained session diff is available for ${path}`,
+          )
+          this.reviewPanel.showDiffMessage(path, "No retained session diff is available")
+        }
+      }
+    }
+    if (event.type === "workspace_diff_ready" && next.workspaceDiff !== null) {
+      this.#pendingWorkspaceDiffPath = null
+      this.reviewPanel.showWorkspaceDiff(
+        next.workspaceDiff.path,
+        next.workspaceDiff.unifiedDiff,
+        next.workspaceDiff.binary,
+        next.workspaceDiff.truncated,
+      )
+    }
+    if (
+      event.type === "tool_call_finished" ||
+      event.type === "conversation_rewound" ||
+      event.type === "session_review_updated" ||
+      event.type === "command_finished" ||
+      (event.type === "user_shell_state_changed" && !event.active)
+    ) {
+      this.#command({ type: "get_workspace_status" })
+    }
   }
 
   setState(state: RottweilerState): void {
@@ -337,9 +458,9 @@ export class RottweilerApp extends BoxRenderable {
     this.contextPanel.visible =
       !state.replay.active && (this.width === 0 ? this.ctx.width >= 100 : this.width >= 100)
     this.interactionPanel.update(state)
-    this.reviewPanel.update(state)
+    this.reviewPanel.update(state, this.#reviewOpen)
     this.composer.setQueuedMessages(state.queuedMessages)
-    this.composer.visible = !state.replay.active && state.review === null
+    this.composer.visible = !state.replay.active && !this.#reviewOpen
     const focusOwner = this.#visibleFocusOwner()
     if (
       (previousFocusOwner === "interaction" || previousFocusOwner === "review") &&
@@ -361,34 +482,66 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   openCommandPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
     this.#pickerKind = "commands"
-    if (this.#state.commands.length === 0) {
+    if (this.#state.commands.length === 0 && !this.#commandsRequested) {
+      this.#commandsRequested = true
       this.#command({ type: "list_commands" })
     }
     this.#refreshPicker()
   }
 
-  openFilePicker(query = ""): void {
+  openFilePicker(query = "", anchored = false): void {
+    this.#pickerAnchored = anchored
+    this.#pickerQuery = query
+    this.#positionPicker(anchored)
     this.#pickerKind = "files"
-    this.#command({ type: "search_workspace_files", query, limit: 100 })
+    this.#pendingWorkspaceSearchRequest =
+      this.#command({ type: "search_workspace_files", query, limit: 100 }) ?? null
     this.#refreshPicker()
-    this.picker.input.value = query
+    if (!anchored) this.picker.input.value = query
   }
 
-  openModelPicker(): void {
+  openModelPicker(provider: string | null = null): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#modelProviderFilter = provider
+    this.#positionPicker(false)
     this.#pickerKind = "models"
-    if (this.#state.models.length === 0) {
+    if (this.#state.models.length === 0 && !this.#modelsRequested) {
+      this.#modelsRequested = true
+      this.#command({ type: "list_models" })
+    }
+    this.#refreshPicker()
+  }
+
+  openProviderPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#modelProviderFilter = null
+    this.#positionPicker(false)
+    this.#pickerKind = "providers"
+    if (this.#state.models.length === 0 && !this.#modelsRequested) {
+      this.#modelsRequested = true
       this.#command({ type: "list_models" })
     }
     this.#refreshPicker()
   }
 
   openModePicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
     this.#pickerKind = "modes"
     this.#refreshPicker()
   }
 
   openSessionPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
     this.#pickerKind = "sessions"
     this.#command({ type: "list_sessions" })
     this.#refreshPicker()
@@ -403,12 +556,19 @@ export class RottweilerApp extends BoxRenderable {
       )
       return
     }
+    this.reviewPanel.showSessionReview()
+    this.#reviewOpen = true
+    this.setState(this.#state)
     this.#command({ type: "get_session_review" })
   }
 
   closePicker(): void {
     this.#pickerKind = null
     this.picker.close()
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#pendingWorkspaceSearchRequest = null
+    this.#pendingFilePreview = null
     if (this.#keybindings.preset === "vim") this.#vimFocus = this.#vimFocusBeforePicker
     if (!this.#state.replay.active) this.#focusForInputMode()
     if (this.#keybindings.preset === "vim") {
@@ -420,8 +580,11 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
-  protected override onResize(width: number, _height: number): void {
+  protected override onResize(width: number, height: number): void {
     this.contextPanel.visible = !this.#state.replay.active && width >= 100
+    this.composer.resizeForTerminal(height)
+    this.reviewPanel.resizeForTerminal(height)
+    if (this.#pickerAnchored) this.#positionPicker(true)
   }
 
   override destroy(): void {
@@ -437,12 +600,12 @@ export class RottweilerApp extends BoxRenderable {
 
   #keybindingContext(): KeybindingContext {
     if (this.#keybindings.preset === "standard") {
-      return this.#state.review === null ? "standard" : "review"
+      return this.#reviewOpen ? "review" : "standard"
     }
-    if (this.picker.visible) {
+    if (this.picker.visible && !this.#pickerAnchored) {
       return this.#inputMode === "insert" ? "picker_insert" : "picker_normal"
     }
-    if (this.#state.review !== null) return "review"
+    if (this.#reviewOpen) return "review"
     return this.#inputMode === "insert" ? "vim_insert" : "vim_normal"
   }
 
@@ -452,7 +615,7 @@ export class RottweilerApp extends BoxRenderable {
         this.closePicker()
         return true
       }
-      if (this.#state.review !== null) {
+      if (this.#reviewOpen) {
         this.#closeReview()
         return true
       }
@@ -494,7 +657,7 @@ export class RottweilerApp extends BoxRenderable {
         void this.composer.pasteImage()
         return true
       case "open_external_editor":
-        if (this.picker.visible || this.#state.review !== null) return false
+        if (this.picker.visible || this.#reviewOpen) return false
         void this.composer.openExternalEditor()
         return true
       case "enter_normal":
@@ -599,7 +762,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #focusForInputMode(): void {
     if (this.reviewPanel.visible) {
-      this.reviewPanel.files.focus()
+      this.reviewPanel.focusPresentation()
       return
     }
     if (this.interactionPanel.visible) {
@@ -611,7 +774,7 @@ export class RottweilerApp extends BoxRenderable {
       this.composer.focus()
       return
     }
-    if (this.picker.visible) {
+    if (this.picker.visible && !this.#pickerAnchored) {
       if (this.#inputMode === "insert") {
         this.picker.input.focus()
       } else {
@@ -639,8 +802,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #moveVertical(direction: 1 | -1): void {
     if (this.picker.visible) {
-      if (direction < 0) this.picker.select.moveUp()
-      else this.picker.select.moveDown()
+      this.picker.moveSelection(direction)
     } else if (this.#vimFocus === "composer") {
       if (direction < 0) this.composer.editor.moveCursorUp()
       else this.composer.editor.moveCursorDown()
@@ -655,8 +817,7 @@ export class RottweilerApp extends BoxRenderable {
 
   #moveToBoundary(end: boolean): void {
     if (this.picker.visible) {
-      const index = end ? this.picker.select.options.length - 1 : 0
-      if (index >= 0) this.picker.select.setSelectedIndex(index)
+      this.picker.moveToBoundary(end)
     } else if (this.#vimFocus === "composer") {
       if (end) this.composer.editor.gotoBufferEnd()
       else this.composer.editor.gotoBufferHome()
@@ -666,7 +827,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #visibleFocusOwner(): VimFocus | "interaction" | "review" {
-    if (this.picker.visible) return "picker"
+    if (this.picker.visible && !this.#pickerAnchored) return "picker"
     if (this.reviewPanel.visible) return "review"
     if (this.interactionPanel.visible) return "interaction"
     if (this.#state.replay.active) return "transcript"
@@ -678,7 +839,7 @@ export class RottweilerApp extends BoxRenderable {
       case "commands":
         this.#openPicker(
           "Commands",
-          this.#state.commands.map((command) => ({
+          this.#commandChoices().map((command) => ({
             id: command.name,
             label: `/${command.name}`,
             description: command.description,
@@ -687,14 +848,31 @@ export class RottweilerApp extends BoxRenderable {
           })),
           (item) => {
             const command = item.value as RottweilerState["commands"][number]
+            const clearAnchoredTrigger = () => {
+              if (this.#pickerAnchored) this.composer.value = ""
+            }
             if (command.name === "review") {
+              clearAnchoredTrigger()
               this.openReview()
               this.closePicker()
               return
             }
             if (command.name === "fork") {
+              clearAnchoredTrigger()
               void this.#requestFork(null)
               this.closePicker()
+              return
+            }
+            if (command.name === "models") {
+              clearAnchoredTrigger()
+              this.closePicker()
+              this.openModelPicker()
+              return
+            }
+            if (command.name === "providers") {
+              clearAnchoredTrigger()
+              this.closePicker()
+              this.openProviderPicker()
               return
             }
             this.composer.value = `/${command.name} `
@@ -713,31 +891,82 @@ export class RottweilerApp extends BoxRenderable {
           })),
           (item) => {
             const file = item.value as RottweilerState["workspaceFiles"][number]
-            if (!file.isDirectory) {
-              this.#pendingFilePreview = file.path
-              this.#command({ type: "preview_workspace_file", path: file.path, max_bytes: 1_000_000 })
+            if (file.isDirectory) {
+              const query = `${file.path.replace(/\/$/, "")}/`
+              if (this.#pickerAnchored) {
+                this.composer.value = this.composer.value.replace(
+                  /@[^\s]*$/,
+                  `@${query}`,
+                )
+              } else {
+                this.openFilePicker(query)
+              }
+              return
+            }
+            const requestId = this.#command({
+              type: "preview_workspace_file",
+              path: file.path,
+              max_bytes: 1_000_000,
+            })
+            if (requestId !== null) {
+              this.#pendingFilePreview = { path: file.path, requestId }
             }
           },
         )
         break
       case "models":
+        const models = this.#state.models.filter(
+          (model) =>
+            this.#modelProviderFilter === null ||
+            model.providers.includes(this.#modelProviderFilter),
+        )
         this.#openPicker(
-          "Models",
-          this.#state.models.map((model) => ({
+          this.#modelProviderFilter === null
+            ? "Models"
+            : `Models · ${this.#modelProviderFilter}`,
+          models.map((model) => ({
             id: model.alias,
             label: model.alias,
-            description: [model.toolCalling ? "tools" : "", model.vision ? "vision" : "", model.thinking ? "thinking" : ""]
+            description: [
+              ...(model.providers.length === 0 ? ["unconfigured"] : model.providers),
+              model.toolCalling ? "tools" : "",
+              model.vision ? "vision" : "",
+              model.thinking ? "thinking" : "",
+            ]
               .filter(Boolean)
               .join(" · "),
             value: model,
           })),
           (item) => {
             const model = item.value as RottweilerState["models"][number]
-            this.#command({ type: "switch_model", model: model.alias })
+            this.#command({
+              type: "switch_model",
+              model: model.alias,
+              provider: this.#modelProviderFilter,
+            })
             this.closePicker()
           },
         )
         break
+      case "providers": {
+        const providers = new Map<string, number>()
+        for (const model of this.#state.models) {
+          for (const provider of model.providers) {
+            providers.set(provider, (providers.get(provider) ?? 0) + 1)
+          }
+        }
+        this.#openPicker(
+          "Providers",
+          [...providers].sort(([left], [right]) => left.localeCompare(right)).map(([provider, count]) => ({
+            id: provider,
+            label: provider,
+            description: `${count} model route${count === 1 ? "" : "s"}`,
+            value: provider,
+          })),
+          (item) => this.openModelPicker(item.value),
+        )
+        break
+      }
       case "modes":
         this.#openPicker(
           "Modes",
@@ -801,14 +1030,94 @@ export class RottweilerApp extends BoxRenderable {
     items: readonly PickerItem<T>[],
     onSelect: (item: PickerItem<T>) => void,
   ): void {
-    this.picker.refresh(title, items as readonly PickerItem<unknown>[], (item) =>
-      onSelect(item as PickerItem<T>),
-    )
-    if (this.#keybindings.preset === "vim" && this.#vimFocus !== "picker") {
+    const select = (item: PickerItem<unknown>) => onSelect(item as PickerItem<T>)
+    if (this.#pickerAnchored) {
+      this.picker.refreshAnchored(
+        title,
+        items as readonly PickerItem<unknown>[],
+        this.#pickerQuery,
+        select,
+      )
+      this.#positionPicker(true)
+      this.composer.focus()
+    } else {
+      this.picker.refresh(title, items as readonly PickerItem<unknown>[], select)
+    }
+    if (
+      !this.#pickerAnchored &&
+      this.#keybindings.preset === "vim" &&
+      this.#vimFocus !== "picker"
+    ) {
       this.#vimFocusBeforePicker = this.#vimFocus
       this.#vimFocus = "picker"
       this.#setInputMode("insert")
     }
+  }
+
+  #commandChoices(): readonly RottweilerState["commands"][number][] {
+    const choices = [...this.#state.commands]
+    const names = new Set(choices.map((command) => command.name))
+    for (const command of [
+      { name: "models", description: "Switch the active model", usage: "/models" },
+      {
+        name: "providers",
+        description: "Choose a configured provider and model",
+        usage: "/providers",
+      },
+    ]) {
+      if (!names.has(command.name)) choices.push(command)
+    }
+    return choices
+  }
+
+  #updateComposerAutocomplete(value: string): void {
+    const slash = /^\/([^\s]*)$/.exec(value)
+    if (slash !== null) {
+      this.#pickerAnchored = true
+      this.#pickerQuery = slash[1] ?? ""
+      this.#positionPicker(true)
+      this.#pickerKind = "commands"
+      if (this.#state.commands.length === 0 && !this.#commandsRequested) {
+        this.#commandsRequested = true
+        this.#command({ type: "list_commands" })
+      }
+      this.#refreshPicker()
+      return
+    }
+    const mention = /(?:^|\s)@([^\s]*)$/.exec(value)
+    if (mention === null && this.#pickerAnchored) this.closePicker()
+  }
+
+  #positionPicker(anchored: boolean): void {
+    if (anchored) {
+      const composerTop = Math.max(
+        0,
+        this.ctx.height - this.statusLine.height - this.composer.height,
+      )
+      this.picker.constrainAnchoredHeight(composerTop)
+      this.picker.bottom = undefined
+      this.picker.top = Math.max(0, composerTop - this.picker.height)
+      this.picker.left = 0
+      this.picker.width = "100%"
+    } else {
+      this.picker.bottom = undefined
+      this.picker.top = 2
+      this.picker.left = "15%"
+      this.picker.width = "70%"
+    }
+  }
+
+  #openChangedFileDiff(path: string): void {
+    if (this.#state.replay.active || this.#state.shell.active) return
+    this.#reviewOpen = true
+    this.#pendingWorkspaceDiffPath = path
+    this.reviewPanel.showWorkspaceDiffMessage(path, "Loading changed-file diff…")
+    this.setState(this.#state)
+    this.#latestWorkspaceDiffRequest = this.#command({
+      type: "get_workspace_diff",
+      path,
+      max_bytes: 1_000_000,
+    })
   }
 
   #scheduleSessionSearch(query: string): void {
@@ -841,6 +1150,16 @@ export class RottweilerApp extends BoxRenderable {
       this.#projectInvalidSlashCommand(sessionAction.message)
       return false
     }
+    if (sessionAction?.type === "models") {
+      this.#postSubmitPicker = "models"
+      this.closePicker()
+      return true
+    }
+    if (sessionAction?.type === "providers") {
+      this.#postSubmitPicker = "providers"
+      this.closePicker()
+      return true
+    }
     if (sessionAction?.type === "review") {
       if (this.#state.shell.active) {
         this.#projectClientError(
@@ -849,12 +1168,22 @@ export class RottweilerApp extends BoxRenderable {
         )
         return false
       }
+      this.reviewPanel.showSessionReview()
+      this.#reviewOpen = true
+      this.setState(this.#state)
+      const meta = this.#meta()
+      this.#latestReviewRequest = meta.request_id
       const outcome = await this.#emit({
         type: "get_session_review",
-        meta: this.#meta(),
+        meta,
         session_id: this.#sessionId,
       })
-      if (outcome?.type !== "accepted") this.#projectRejection(outcome)
+      if (outcome?.type !== "accepted") {
+        this.#reviewOpen = false
+        this.reviewPanel.closePresentation()
+        this.setState(this.#state)
+        this.#projectRejection(outcome)
+      }
       return outcome?.type === "accepted"
     }
     if (sessionAction?.type === "fork") {
@@ -996,30 +1325,46 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #closeReview(): void {
-    if (this.#state.review === null) return
-    this.setState({ ...this.#state, review: null })
+    if (!this.#reviewOpen) return
+    this.#reviewOpen = false
+    this.#pendingReviewSelection = null
+    this.#pendingWorkspaceDiffPath = null
+    this.reviewPanel.closePresentation()
+    this.setState(this.#state)
     this.#focusForInputMode()
   }
 
   #command(
     command:
-      | { readonly type: "pin_context"; readonly item_id: string }
-      | { readonly type: "evict_context"; readonly item_id: string }
       | { readonly type: "search_workspace_files"; readonly query: string; readonly limit: number }
       | { readonly type: "preview_workspace_file"; readonly path: string; readonly max_bytes: number }
-      | { readonly type: "switch_model"; readonly model: string }
-      | { readonly type: "get_session_review" }
+      | { readonly type: "switch_model"; readonly model: string; readonly provider: string | null }
+      | { readonly type: "get_session_review" | "get_workspace_status" }
+      | { readonly type: "get_workspace_diff"; readonly path: string; readonly max_bytes: number }
       | { readonly type: "search_sessions"; readonly query: string; readonly limit: number }
       | { readonly type: "list_commands" | "list_models" | "list_sessions" },
-  ): void {
+  ): string | null {
     if (
       this.#state.replay.active &&
       command.type !== "list_sessions" &&
       command.type !== "search_sessions"
     ) {
-      return
+      return null
     }
     const meta = this.#meta()
+    if (command.type === "get_workspace_status") {
+      this.#latestWorkspaceStatusRequest = meta.request_id
+    } else if (command.type === "get_workspace_diff") {
+      this.#latestWorkspaceDiffRequest = meta.request_id
+    } else if (command.type === "get_session_review") {
+      this.#latestReviewRequest = meta.request_id
+    } else if (command.type === "switch_model") {
+      if (this.#pendingModelSwitchRequests.size >= MAX_PENDING_MODEL_SWITCH_REQUESTS) {
+        const oldest = this.#pendingModelSwitchRequests.values().next().value
+        if (oldest !== undefined) this.#pendingModelSwitchRequests.delete(oldest)
+      }
+      this.#pendingModelSwitchRequests.add(meta.request_id)
+    }
     switch (command.type) {
       case "list_commands":
       case "list_models":
@@ -1030,16 +1375,11 @@ export class RottweilerApp extends BoxRenderable {
         this.#emit({ ...command, meta })
         break
       case "get_session_review":
+      case "get_workspace_status":
         this.#emit({ type: command.type, meta, session_id: this.#sessionId })
         break
-      case "pin_context":
-      case "evict_context":
-        this.#emit({
-          type: command.type,
-          meta,
-          session_id: this.#sessionId,
-          item_id: command.item_id,
-        })
+      case "get_workspace_diff":
+        this.#emit({ ...command, meta, session_id: this.#sessionId })
         break
       case "search_workspace_files":
         this.#emit({
@@ -1063,6 +1403,7 @@ export class RottweilerApp extends BoxRenderable {
         })
         break
     }
+    return meta.request_id
   }
 
   #meta() {
@@ -1219,6 +1560,8 @@ export class RottweilerApp extends BoxRenderable {
 type SessionAction =
   | { readonly type: "review" }
   | { readonly type: "fork"; readonly atTurn: string | null }
+  | { readonly type: "models" }
+  | { readonly type: "providers" }
   | { readonly type: "invalid"; readonly message: string }
 
 function parseSessionAction(content: string): SessionAction | null {
@@ -1228,6 +1571,16 @@ function parseSessionAction(content: string): SessionAction | null {
     return tokens.length === 1
       ? { type: "review" }
       : { type: "invalid", message: "usage: /review" }
+  }
+  if (command === "/models") {
+    return tokens.length === 1
+      ? { type: "models" }
+      : { type: "invalid", message: "usage: /models" }
+  }
+  if (command === "/providers") {
+    return tokens.length === 1
+      ? { type: "providers" }
+      : { type: "invalid", message: "usage: /providers" }
   }
   if (command !== "/fork") return null
   if (tokens.length === 1) return { type: "fork", atTurn: null }

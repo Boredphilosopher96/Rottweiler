@@ -205,6 +205,10 @@ pub struct ModelCapabilities {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct ModelDescriptor {
     pub alias: ModelAlias,
+    /// Locally configured provider names referenced by this alias, in
+    /// deterministic fallback order. Provider credentials are never exposed.
+    #[serde(default)]
+    pub providers: Vec<String>,
     pub capabilities: ModelCapabilities,
 }
 
@@ -236,6 +240,15 @@ pub struct WorkspaceStatus {
     pub branch: Option<String>,
     pub changed_paths: Vec<String>,
     pub truncated: bool,
+}
+
+/// Bounded current-worktree diff for one exact workspace-relative path.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct WorkspaceDiff {
+    pub path: String,
+    pub unified_diff: String,
+    pub truncated: bool,
+    pub binary: bool,
 }
 
 /// One stable session workspace root. Durable/wire events use only virtual
@@ -656,6 +669,10 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
         model: ModelAlias,
+        /// When set, route only through this configured provider for the
+        /// selected alias instead of using the alias's automatic fallback chain.
+        #[serde(default)]
+        provider: Option<String>,
     },
     Compact {
         meta: CommandMeta,
@@ -755,6 +772,12 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
+    GetWorkspaceDiff {
+        meta: CommandMeta,
+        session_id: SessionId,
+        path: String,
+        max_bytes: u32,
+    },
     ShutdownHost {
         meta: CommandMeta,
     },
@@ -797,6 +820,7 @@ impl ClientCommand {
             | Self::SearchWorkspaceFiles { meta, .. }
             | Self::PreviewWorkspaceFile { meta, .. }
             | Self::GetWorkspaceStatus { meta, .. }
+            | Self::GetWorkspaceDiff { meta, .. }
             | Self::ShutdownHost { meta, .. } => meta,
         }
     }
@@ -836,6 +860,7 @@ impl ClientCommand {
             | Self::SearchWorkspaceFiles { meta, .. }
             | Self::PreviewWorkspaceFile { meta, .. }
             | Self::GetWorkspaceStatus { meta, .. }
+            | Self::GetWorkspaceDiff { meta, .. }
             | Self::ShutdownHost { meta, .. } => meta,
         }
     }
@@ -1181,6 +1206,11 @@ pub enum EngineEvent {
         session_id: SessionId,
         status: WorkspaceStatus,
     },
+    WorkspaceDiffReady {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        diff: WorkspaceDiff,
+    },
     HostShutdown {
         meta: CommandAckMeta,
     },
@@ -1448,6 +1478,10 @@ pub enum EngineEvent {
     ModelChanged {
         meta: EventMeta,
         model: ModelAlias,
+        /// Exact provider route selected for this session, or `None` for the
+        /// alias's automatic fallback chain.
+        #[serde(default)]
+        provider: Option<String>,
     },
     ContextItemPinned {
         meta: EventMeta,
@@ -1519,6 +1553,7 @@ impl EngineEvent {
             | Self::WorkspaceFilesFound { .. }
             | Self::WorkspaceFilePreviewReady { .. }
             | Self::WorkspaceStatusReady { .. }
+            | Self::WorkspaceDiffReady { .. }
             | Self::SubagentProgress { .. }
             | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }
@@ -1584,6 +1619,7 @@ impl EngineEvent {
             | Self::WorkspaceFilesFound { .. }
             | Self::WorkspaceFilePreviewReady { .. }
             | Self::WorkspaceStatusReady { .. }
+            | Self::WorkspaceDiffReady { .. }
             | Self::SubagentProgress { .. }
             | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }

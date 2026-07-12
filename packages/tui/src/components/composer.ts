@@ -19,6 +19,7 @@ export interface ComposerOptions {
   ) => boolean | Promise<boolean>
   readonly onFileMention: (query: string) => void
   readonly onInput?: (value: string) => void
+  readonly onSubmitted?: () => void
 }
 
 export class ComposerRenderable extends BoxRenderable {
@@ -35,9 +36,12 @@ export class ComposerRenderable extends BoxRenderable {
     super(ctx, {
       id: "composer",
       width: "100%",
-      minHeight: 4,
+      height: 4,
+      minHeight: 3,
       maxHeight: 9,
+      flexShrink: 0,
       flexDirection: "column",
+      overflow: "hidden",
       border: true,
       borderStyle: "rounded",
       borderColor: theme.border,
@@ -58,6 +62,9 @@ export class ComposerRenderable extends BoxRenderable {
       id: "composer-editor",
       width: "100%",
       flexGrow: 1,
+      flexShrink: 1,
+      minHeight: 1,
+      maxHeight: 5,
       initialValue: "",
       placeholder: "Message Rottweiler · @ files · ctrl+e $EDITOR",
       backgroundColor: theme.panel,
@@ -66,6 +73,22 @@ export class ComposerRenderable extends BoxRenderable {
       focusedTextColor: theme.foreground,
       placeholderColor: theme.subtle,
       wrapMode: "word",
+      scrollMargin: 0,
+      keyBindings: [
+        // OpenCode-style composer semantics: plain Enter sends; modified Enter
+        // remains available for drafting multiline prompts.
+        { name: "return", action: "submit" },
+        { name: "kpenter", action: "submit" },
+        { name: "return", shift: true, action: "newline" },
+        { name: "return", ctrl: true, action: "newline" },
+        { name: "return", meta: true, action: "newline" },
+        { name: "kpenter", shift: true, action: "newline" },
+        { name: "kpenter", ctrl: true, action: "newline" },
+        { name: "kpenter", meta: true, action: "newline" },
+        // Raw terminals encode Ctrl+J as LF; Kitty keyboard reports Ctrl+J.
+        { name: "linefeed", action: "newline" },
+        { name: "j", ctrl: true, action: "newline" },
+      ],
       onSubmit: () => this.submit(),
       onContentChange: () => this.#contentChanged(),
     })
@@ -87,6 +110,7 @@ export class ComposerRenderable extends BoxRenderable {
 
   set value(value: string) {
     this.editor.setText(value)
+    this.#refreshHeight()
   }
 
   get attachments(): readonly Attachment[] {
@@ -114,6 +138,7 @@ export class ComposerRenderable extends BoxRenderable {
         this.editor.clear()
         this.#attachments = []
         this.#refreshAttachments()
+        this.#options.onSubmitted?.()
       }
       return accepted
     } finally {
@@ -157,9 +182,15 @@ export class ComposerRenderable extends BoxRenderable {
       messages.length === 0
         ? ""
         : `Queued ${messages.length} · ${messages.map((message) => message.content).join(" · ")}`
+    this.#refreshHeight()
+  }
+
+  resizeForTerminal(_height: number): void {
+    this.#refreshHeight()
   }
 
   #contentChanged(): void {
+    this.#refreshHeight()
     const value = this.editor.plainText
     this.#options.onInput?.(value)
     const mention = /(?:^|\s)@([^\s]*)$/.exec(value)
@@ -183,5 +214,43 @@ export class ComposerRenderable extends BoxRenderable {
       this.#imagePreview = new ImageAttachmentRenderable(this.ctx, this.#theme, image)
       this.insertBefore(this.#imagePreview, this.editor)
     }
+    this.#refreshHeight()
   }
+
+  #refreshHeight(): void {
+    const terminalLimit = Math.max(3, Math.min(9, this.ctx.height - 3))
+    const editorWidth = Math.max(
+      1,
+      this.editor.width > 0
+        ? this.editor.width
+        : this.width > 4
+          ? this.width - 4
+          : this.ctx.width - 4,
+    )
+    const wrappedRows = estimateWrappedRows(this.editor.plainText, editorWidth)
+    const editorRows = Math.min(
+      5,
+      Math.max(1, this.editor.lineCount, this.editor.virtualLineCount, wrappedRows),
+    )
+    const fixedExtras =
+      (this.attachmentsText.visible ? 1 : 0) + (this.queueText.visible ? 1 : 0)
+    const imageRows = this.#imagePreview?.height ?? 0
+    // Preserve at least one editable row after borders and labels. A preview is
+    // decorative and must collapse before it can cover the active textarea.
+    const imageVisible = imageRows > 0 && terminalLimit - 2 - fixedExtras - 1 >= imageRows
+    if (this.#imagePreview !== null) this.#imagePreview.visible = imageVisible
+    const extras = fixedExtras + (imageVisible ? imageRows : 0)
+    this.height = Math.min(terminalLimit, Math.max(3, 2 + editorRows + extras))
+  }
+}
+
+function estimateWrappedRows(value: string, columns: number): number {
+  if (value.length === 0) return 1
+  return value.split("\n").reduce((rows, line) => {
+    // OpenTUI remains the source of truth once its EditorView has laid out.
+    // This immediate estimate lets the Yoga parent grow in the same input tick
+    // instead of waiting for a second render, including one long logical line.
+    const cells = Array.from(line).length
+    return rows + Math.max(1, Math.ceil(cells / columns))
+  }, 0)
 }

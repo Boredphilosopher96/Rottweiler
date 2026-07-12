@@ -365,8 +365,7 @@ fn decimal_rate_to_micros(number: &Number) -> Result<u64, &'static str> {
         |(mantissa, exponent)| {
             exponent
                 .parse::<i32>()
-                .map(|exponent| (mantissa, exponent))
-                .unwrap_or((mantissa, i32::MAX))
+                .map_or((mantissa, i32::MAX), |exponent| (mantissa, exponent))
         },
     );
     if exponent == i32::MAX {

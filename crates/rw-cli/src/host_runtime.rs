@@ -1,7 +1,7 @@
 //! CLI composition for the headless multi-session engine host.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write as _,
     path::{Component, Path, PathBuf},
@@ -10,20 +10,29 @@ use std::{
 };
 #[cfg(unix)]
 use std::{
+    ffi::OsStr,
     io::Read as _,
-    os::{fd::OwnedFd, unix::ffi::OsStrExt as _},
+    os::{
+        fd::OwnedFd,
+        unix::{ffi::OsStrExt as _, fs::PermissionsExt as _, process::CommandExt as _},
+    },
+    process::{Command, ExitStatus, Stdio},
+    sync::mpsc,
+    thread,
     time::Instant,
 };
 
 use async_trait::async_trait;
+#[cfg(unix)]
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rw_core::runtime_support::PricingTable;
 use rw_core::{
     AttachmentData, CommandDescriptor, CompletedForkOperation, Config, CreateSessionRequest,
     EngineEvent, ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError,
     HostQueryService, HostedSession, ModelAlias, ModelCacheBehavior, ModelCapabilities,
     ModelDescriptor, PreparedForkOperation, SessionDescriptor, SessionFactory, SessionId,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus, builtin_command_registry,
-    project_session_events,
+    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    builtin_command_registry, project_session_events,
 };
 use rw_store::config::ConfigLoader;
 use rw_store::session::{SessionEventLog, SessionIndex, UtcTimestamp};
@@ -39,11 +48,33 @@ use crate::{
 };
 
 const MAX_SEARCH_RESULTS: usize = 1_000;
+const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_SESSION_RESULTS: usize = 10_000;
+const MAX_PROVIDER_DISPLAY_NAME_BYTES: usize = 256;
 #[cfg(unix)]
 const MAX_SEARCH_ENTRIES: usize = 50_000;
+#[cfg(unix)]
+const MAX_IGNORE_FILE_BYTES: usize = 128 * 1024;
+#[cfg(unix)]
+const MAX_IGNORE_PATTERNS_PER_DIRECTORY: usize = 1_024;
+#[cfg(unix)]
+const MAX_IGNORE_PATTERN_BYTES: usize = 1_024;
+#[cfg(unix)]
+const MAX_GITDIR_POINTER_BYTES: usize = 4 * 1024;
+#[cfg(unix)]
+const MAX_GIT_STATUS_BYTES: usize = 512 * 1024;
+#[cfg(unix)]
+const MAX_CHANGED_PATHS: usize = 1_000;
+#[cfg(unix)]
+const GIT_STATUS_DEADLINE: Duration = Duration::from_millis(500);
+#[cfg(unix)]
+const GIT_READER_DEADLINE: Duration = Duration::from_millis(50);
+#[cfg(unix)]
+const GIT_DIFF_DEADLINE: Duration = Duration::from_millis(500);
 const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
 const QUERY_DEADLINE: Duration = Duration::from_millis(100);
+const WORKSPACE_STATUS_DEADLINE: Duration = Duration::from_millis(750);
+const WORKSPACE_DIFF_DEADLINE: Duration = Duration::from_secs(2);
 const FORK_JOURNAL_VERSION: u16 = 1;
 const MAX_COMPLETED_FORK_OPERATIONS: usize = 4_096;
 const MAX_PENDING_FORK_OPERATIONS: usize = 32;
@@ -1586,10 +1617,12 @@ impl HostQueryService for CliSessionFactory {
         for (alias, candidates) in &self.options.config.models.aliases {
             let capabilities =
                 conservative_alias_capabilities(candidates, &self.options.config, pricing.as_ref());
+            let providers = configured_alias_providers(candidates);
             descriptors.insert(
                 alias.clone(),
                 ModelDescriptor {
                     alias: ModelAlias(alias.clone()),
+                    providers,
                     capabilities,
                 },
             );
@@ -1598,6 +1631,7 @@ impl HostQueryService for CliSessionFactory {
             .entry(self.options.config.models.default.clone())
             .or_insert_with(|| ModelDescriptor {
                 alias: ModelAlias(self.options.config.models.default.clone()),
+                providers: Vec::new(),
                 capabilities: unknown_capabilities(),
             });
         Ok(descriptors.into_values().collect())
@@ -1664,12 +1698,46 @@ impl HostQueryService for CliSessionFactory {
         let workspace = self.workspace_for_session(session)?;
         let name = session.workspace_name.clone();
         tokio::time::timeout(
-            QUERY_DEADLINE,
+            WORKSPACE_STATUS_DEADLINE,
             tokio::task::spawn_blocking(move || read_workspace_status(&workspace, name)),
         )
         .await
         .map_err(|_| HostError::Query("workspace status deadline exceeded".to_owned()))?
         .map_err(|_| HostError::Query("workspace status worker failed".to_owned()))?
+    }
+
+    async fn workspace_diff(
+        &self,
+        session: &SessionDescriptor,
+        path: &str,
+        max_bytes: u32,
+    ) -> Result<WorkspaceDiff, HostError> {
+        let workspaces = self.workspace_roots_for_session(session)?;
+        let (root_index, relative) = split_virtual_path(path)?;
+        let workspace = workspaces
+            .get(root_index)
+            .cloned()
+            .ok_or_else(|| HostError::Query("workspace root index is not authorized".to_owned()))?;
+        let rendered_path = path.to_owned();
+        let maximum = usize::try_from(max_bytes)
+            .unwrap_or(usize::MAX)
+            .min(MAX_PREVIEW_BYTES);
+        if maximum == 0 {
+            return Err(HostError::Query(
+                "workspace diff byte limit must not be zero".to_owned(),
+            ));
+        }
+        tokio::time::timeout(
+            WORKSPACE_DIFF_DEADLINE,
+            tokio::task::spawn_blocking(move || {
+                let mut diff = read_workspace_diff(&workspace, &relative, maximum)?;
+                diff.path = rendered_path;
+                Ok(diff)
+            }),
+        )
+        .await
+        .map_err(|_| HostError::Query("workspace diff deadline exceeded".to_owned()))?
+        .map_err(|_| HostError::Query("workspace diff worker failed".to_owned()))?
     }
 }
 
@@ -1689,6 +1757,21 @@ fn unknown_capabilities() -> ModelCapabilities {
         thinking: false,
         cache_behavior: ModelCacheBehavior::None,
     }
+}
+
+fn configured_alias_providers(candidates: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    candidates
+        .iter()
+        .filter_map(|candidate| candidate.split_once('/').map(|(provider, _)| provider))
+        .filter(|provider| {
+            !provider.is_empty()
+                && provider.len() <= MAX_PROVIDER_DISPLAY_NAME_BYTES
+                && !provider.chars().any(char::is_control)
+        })
+        .filter(|provider| seen.insert((*provider).to_owned()))
+        .map(str::to_owned)
+        .collect()
 }
 
 fn conservative_alias_capabilities(
@@ -1904,30 +1987,369 @@ fn preview_file(
 }
 
 #[cfg(unix)]
+#[derive(Clone, Default)]
+struct IgnoreRules(Option<Arc<IgnoreRuleNode>>);
+
+#[cfg(unix)]
+struct IgnoreRuleNode {
+    matcher: Gitignore,
+    parent: Option<Arc<IgnoreRuleNode>>,
+}
+
+#[cfg(unix)]
+impl IgnoreRules {
+    fn with_matcher(&self, matcher: Gitignore) -> Self {
+        if matcher.is_empty() {
+            return self.clone();
+        }
+        Self(Some(Arc::new(IgnoreRuleNode {
+            matcher,
+            parent: self.0.clone(),
+        })))
+    }
+
+    fn is_ignored(&self, relative: &Path, is_directory: bool) -> bool {
+        let mut current = self.0.as_deref();
+        while let Some(node) = current {
+            let matched = node.matcher.matched(relative, is_directory);
+            if matched.is_ignore() {
+                return true;
+            }
+            if matched.is_whitelist() {
+                return false;
+            }
+            current = node.parent.as_deref();
+        }
+        false
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct WorkspaceIgnoreRules {
+    git: IgnoreRules,
+    tool: IgnoreRules,
+}
+
+#[cfg(unix)]
+impl WorkspaceIgnoreRules {
+    fn with_directory(
+        &self,
+        directory: &OwnedFd,
+        relative_directory: &Path,
+        root: bool,
+        workspace: &Path,
+    ) -> Result<Self, ()> {
+        let matcher_root = if relative_directory.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            relative_directory
+        };
+        let mut git_builder = GitignoreBuilder::new(matcher_root);
+        let mut git_patterns = 0_usize;
+        if root {
+            add_git_info_exclude(&mut git_builder, directory, workspace, &mut git_patterns)?;
+        }
+        add_ignore_file(
+            &mut git_builder,
+            directory,
+            Path::new(".gitignore"),
+            &mut git_patterns,
+        )?;
+        let git_matcher = git_builder.build().map_err(|_| ())?;
+
+        let mut tool_builder = GitignoreBuilder::new(matcher_root);
+        let mut tool_patterns = 0_usize;
+        add_ignore_file(
+            &mut tool_builder,
+            directory,
+            Path::new(".ignore"),
+            &mut tool_patterns,
+        )?;
+        let tool_matcher = tool_builder.build().map_err(|_| ())?;
+        Ok(Self {
+            git: self.git.with_matcher(git_matcher),
+            tool: self.tool.with_matcher(tool_matcher),
+        })
+    }
+
+    fn is_ignored(&self, relative: &Path, is_directory: bool) -> bool {
+        // Tool-specific whitelists must never revive paths excluded by Git.
+        self.git.is_ignored(relative, is_directory) || self.tool.is_ignored(relative, is_directory)
+    }
+}
+
+#[cfg(unix)]
+enum IgnoreFile {
+    Missing,
+    Content(String),
+    Unsafe,
+}
+
+#[cfg(unix)]
+enum GitInfoExclude {
+    Missing,
+    Strict(String),
+    External(String),
+}
+
+#[cfg(unix)]
+fn read_bounded_ignore_file(directory: &OwnedFd, relative: &Path) -> IgnoreFile {
+    let components = relative.components().collect::<Vec<_>>();
+    let Ok(mut parent) = rustix::fs::openat(
+        directory,
+        ".",
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    ) else {
+        return IgnoreFile::Unsafe;
+    };
+    let mut file = None;
+    for (index, component) in components.iter().enumerate() {
+        let Component::Normal(name) = component else {
+            return IgnoreFile::Unsafe;
+        };
+        let final_component = index.saturating_add(1) == components.len();
+        let mut flags = rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC;
+        if !final_component {
+            flags |= rustix::fs::OFlags::DIRECTORY;
+        }
+        match rustix::fs::openat(&parent, *name, flags, rustix::fs::Mode::empty()) {
+            Ok(opened) if final_component => file = Some(opened),
+            Ok(opened) => parent = opened,
+            Err(error) if error == rustix::io::Errno::NOENT => return IgnoreFile::Missing,
+            Err(_) => return IgnoreFile::Unsafe,
+        }
+    }
+    let Some(file) = file else {
+        return IgnoreFile::Unsafe;
+    };
+    let Ok(stat) = rustix::fs::fstat(&file) else {
+        return IgnoreFile::Unsafe;
+    };
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file()
+        || stat.st_size < 0
+        || usize::try_from(stat.st_size).map_or(true, |size| size > MAX_IGNORE_FILE_BYTES)
+    {
+        return IgnoreFile::Unsafe;
+    }
+    let mut bytes = Vec::new();
+    let Ok(maximum) = u64::try_from(MAX_IGNORE_FILE_BYTES) else {
+        return IgnoreFile::Unsafe;
+    };
+    if fs::File::from(file)
+        .take(maximum.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return IgnoreFile::Unsafe;
+    }
+    if bytes.len() > MAX_IGNORE_FILE_BYTES {
+        return IgnoreFile::Unsafe;
+    }
+    String::from_utf8(bytes).map_or(IgnoreFile::Unsafe, IgnoreFile::Content)
+}
+
+#[cfg(unix)]
+fn bounded_gitdir_path(content: &str, prefix: Option<&str>) -> Option<PathBuf> {
+    if content.len() > MAX_GITDIR_POINTER_BYTES {
+        return None;
+    }
+    let content = content.strip_suffix('\n').unwrap_or(content);
+    let content = content.strip_suffix('\r').unwrap_or(content);
+    let value = prefix.map_or(Some(content), |prefix| content.strip_prefix(prefix))?;
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return None;
+    }
+    Some(PathBuf::from(value))
+}
+
+#[cfg(unix)]
+fn open_linked_git_directory(base: &Path, path: &Path) -> Option<(PathBuf, OwnedFd)> {
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        base.join(path)
+    };
+    let canonical = fs::canonicalize(path).ok()?;
+    let directory = open_workspace_directory(&canonical).ok()?;
+    Some((canonical, directory))
+}
+
+#[cfg(unix)]
+fn linked_git_info_exclude(workspace: &Path, git_pointer: &str) -> Option<String> {
+    let gitdir = bounded_gitdir_path(git_pointer, Some("gitdir: "))?;
+    let (gitdir_path, gitdir) = open_linked_git_directory(workspace, &gitdir)?;
+    let common = match read_bounded_ignore_file(&gitdir, Path::new("commondir")) {
+        IgnoreFile::Missing => gitdir,
+        IgnoreFile::Content(content) => {
+            let common = bounded_gitdir_path(&content, None)?;
+            open_linked_git_directory(&gitdir_path, &common)?.1
+        }
+        IgnoreFile::Unsafe => return None,
+    };
+    match read_bounded_ignore_file(&common, Path::new("info/exclude")) {
+        IgnoreFile::Content(content) => Some(content),
+        IgnoreFile::Missing | IgnoreFile::Unsafe => None,
+    }
+}
+
+#[cfg(unix)]
+fn read_git_info_exclude(directory: &OwnedFd, workspace: &Path) -> Result<GitInfoExclude, ()> {
+    let metadata =
+        match rustix::fs::statat(directory, ".git", rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(metadata) => metadata,
+            Err(error) if error == rustix::io::Errno::NOENT => return Ok(GitInfoExclude::Missing),
+            Err(_) => return Err(()),
+        };
+    let kind = rustix::fs::FileType::from_raw_mode(metadata.st_mode);
+    if kind.is_dir() {
+        return match read_bounded_ignore_file(directory, Path::new(".git/info/exclude")) {
+            IgnoreFile::Missing => Ok(GitInfoExclude::Missing),
+            IgnoreFile::Content(content) => Ok(GitInfoExclude::Strict(content)),
+            IgnoreFile::Unsafe => Err(()),
+        };
+    }
+    if !kind.is_file() {
+        return Ok(GitInfoExclude::Missing);
+    }
+    let IgnoreFile::Content(pointer) = read_bounded_ignore_file(directory, Path::new(".git"))
+    else {
+        // An unavailable external gitdir must not make ordinary workspace
+        // files disappear from the picker.
+        return Ok(GitInfoExclude::Missing);
+    };
+    Ok(linked_git_info_exclude(workspace, &pointer)
+        .map_or(GitInfoExclude::Missing, GitInfoExclude::External))
+}
+
+#[cfg(unix)]
+fn valid_ignore_patterns(content: &str) -> bool {
+    let mut builder = GitignoreBuilder::new(".");
+    let mut patterns = 0;
+    add_ignore_patterns(&mut builder, content, &mut patterns).is_ok() && builder.build().is_ok()
+}
+
+#[cfg(unix)]
+fn add_git_info_exclude(
+    builder: &mut GitignoreBuilder,
+    directory: &OwnedFd,
+    workspace: &Path,
+    patterns: &mut usize,
+) -> Result<(), ()> {
+    match read_git_info_exclude(directory, workspace)? {
+        GitInfoExclude::Strict(content) => add_ignore_patterns(builder, &content, patterns),
+        GitInfoExclude::External(content) if valid_ignore_patterns(&content) => {
+            add_ignore_patterns(builder, &content, patterns)
+        }
+        GitInfoExclude::Missing | GitInfoExclude::External(_) => Ok(()),
+    }
+}
+
+#[cfg(unix)]
+fn add_ignore_file(
+    builder: &mut GitignoreBuilder,
+    directory: &OwnedFd,
+    relative: &Path,
+    patterns: &mut usize,
+) -> Result<(), ()> {
+    match read_bounded_ignore_file(directory, relative) {
+        IgnoreFile::Missing => Ok(()),
+        IgnoreFile::Content(content) => add_ignore_patterns(builder, &content, patterns),
+        IgnoreFile::Unsafe => Err(()),
+    }
+}
+
+#[cfg(unix)]
+fn add_ignore_patterns(
+    builder: &mut GitignoreBuilder,
+    content: &str,
+    patterns: &mut usize,
+) -> Result<(), ()> {
+    for (index, line) in content.lines().enumerate() {
+        if *patterns >= MAX_IGNORE_PATTERNS_PER_DIRECTORY {
+            return Err(());
+        }
+        let line = if index == 0 {
+            line.trim_start_matches('\u{feff}')
+        } else {
+            line
+        };
+        if line.len() > MAX_IGNORE_PATTERN_BYTES {
+            return Err(());
+        }
+        builder.add_line(None, line).map_err(|_| ())?;
+        *patterns = patterns.saturating_add(1);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn fuzzy_path_matches(path: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let mut path = path.chars();
+    query.chars().all(|needle| {
+        path.by_ref()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&needle))
+    })
+}
+
+#[cfg(unix)]
 fn search_workspace(
     workspace: &Path,
     query: &str,
     limit: usize,
 ) -> Result<(Vec<WorkspaceFileMatch>, bool), HostError> {
+    if query.len() > MAX_SEARCH_QUERY_BYTES {
+        return Ok((Vec::new(), true));
+    }
     let started = Instant::now();
-    let needle = query.to_ascii_lowercase();
     let root = open_workspace_directory(workspace)?;
-    let mut pending = vec![(root, PathBuf::new())];
-    let mut matches = Vec::new();
+    let mut pending = vec![(root, PathBuf::new(), WorkspaceIgnoreRules::default(), true)];
+    let mut matches: BTreeMap<String, bool> = BTreeMap::new();
     let mut visited = 0_usize;
     let mut truncated = false;
-    while let Some((directory, relative_directory)) = pending.pop() {
+    while let Some((directory, relative_directory, parent_rules, is_root)) = pending.pop() {
         if started.elapsed() >= QUERY_DEADLINE || visited >= MAX_SEARCH_ENTRIES {
             truncated = true;
             break;
         }
+        let Ok(rules) =
+            parent_rules.with_directory(&directory, &relative_directory, is_root, workspace)
+        else {
+            // An unsafe ignore control file makes this entire subtree
+            // indeterminate. Never expose entries by silently ignoring it.
+            truncated = true;
+            if !relative_directory.as_os_str().is_empty() {
+                let subtree = relative_directory.to_string_lossy();
+                matches.retain(|path, _| {
+                    path.as_str() != subtree.as_ref()
+                        && !path
+                            .strip_prefix(subtree.as_ref())
+                            .is_some_and(|suffix| suffix.starts_with('/'))
+                });
+            }
+            continue;
+        };
         let entries = rustix::fs::Dir::read_from(&directory)
             .map_err(|_| HostError::Query("workspace directory could not be read".to_owned()))?;
         for entry in entries {
+            if started.elapsed() >= QUERY_DEADLINE || visited >= MAX_SEARCH_ENTRIES {
+                truncated = true;
+                break;
+            }
             let entry = entry
                 .map_err(|_| HostError::Query("workspace directory read failed".to_owned()))?;
             let name = entry.file_name();
-            if matches!(name.to_bytes(), b"." | b"..") {
+            if matches!(name.to_bytes(), b"." | b".." | b".git") {
                 continue;
             }
             let name = std::ffi::OsStr::from_bytes(name.to_bytes());
@@ -1954,29 +2376,29 @@ fn search_workspace(
                 continue;
             }
             let relative = relative_directory.join(name_text);
-            if relative == Path::new(".git") || relative.starts_with(".git") {
+            if rules.is_ignored(&relative, file_type.is_dir()) {
                 continue;
             }
             let rendered = relative.to_string_lossy().into_owned();
-            if needle.is_empty() || rendered.to_ascii_lowercase().contains(&needle) {
-                matches.push(WorkspaceFileMatch {
-                    path: rendered,
-                    is_directory: file_type.is_dir(),
-                });
-                if matches.len() >= limit {
+            if fuzzy_path_matches(&rendered, query) {
+                matches.insert(rendered, file_type.is_dir());
+                if matches.len() > limit {
+                    let _ = matches.pop_last();
                     truncated = true;
-                    break;
                 }
             }
             if file_type.is_dir() {
-                pending.push((child, relative));
+                pending.push((child, relative, rules.clone(), false));
             }
         }
-        if truncated {
+        if started.elapsed() >= QUERY_DEADLINE || visited >= MAX_SEARCH_ENTRIES {
             break;
         }
     }
-    matches.sort_by(|left, right| left.path.cmp(&right.path));
+    let matches = matches
+        .into_iter()
+        .map(|(path, is_directory)| WorkspaceFileMatch { path, is_directory })
+        .collect();
     Ok((matches, truncated))
 }
 
@@ -1996,12 +2418,456 @@ fn read_workspace_status(
     workspace_name: String,
 ) -> Result<WorkspaceStatus, HostError> {
     let branch = read_git_branch(workspace)?;
+    let (changed_paths, truncated) = read_git_changed_paths(workspace);
     Ok(WorkspaceStatus {
         workspace_name,
         branch,
-        changed_paths: Vec::new(),
-        truncated: false,
+        changed_paths,
+        truncated,
     })
+}
+
+#[cfg(unix)]
+struct GitCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    overflow: bool,
+}
+
+#[cfg(unix)]
+fn resolve_git_executable_from_path(path: &OsStr, workspace: &Path) -> Option<PathBuf> {
+    let canonical_workspace = fs::canonicalize(workspace).ok()?;
+    std::env::split_paths(path)
+        .filter(|directory| directory.is_absolute())
+        .filter_map(|directory| fs::canonicalize(directory.join("git")).ok())
+        .find(|candidate| {
+            candidate.is_absolute()
+                && !candidate.starts_with(&canonical_workspace)
+                && fs::metadata(candidate).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                })
+        })
+}
+
+#[cfg(unix)]
+fn resolve_git_executable(workspace: &Path) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    resolve_git_executable_from_path(&path, workspace)
+}
+
+#[cfg(unix)]
+fn kill_git_process_group(child: &mut std::process::Child) {
+    if let Ok(raw_pid) = i32::try_from(child.id())
+        && let Some(pid) = rustix::process::Pid::from_raw(raw_pid)
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn run_bounded_git(
+    git: &Path,
+    workspace: &Path,
+    arguments: &[&OsStr],
+    maximum: usize,
+    deadline: Duration,
+) -> Option<GitCommandOutput> {
+    if !git.is_absolute() {
+        return None;
+    }
+    let root = open_workspace_directory(workspace).ok()?;
+    let root_stat = rustix::fs::fstat(&root).ok()?;
+    let mut command = Command::new(git);
+    command
+        .current_dir(workspace)
+        .arg("--no-optional-locks")
+        .args(["-c", "core.fsmonitor=false"])
+        .args(["-c", "core.untrackedCache=false"])
+        .args(["-c", "submodule.recurse=false"])
+        .args(["-c", "diff.external="])
+        .args(arguments)
+        .env("LC_ALL", "C")
+        .env("GIT_PAGER", "cat")
+        .env_remove("GIT_EXTERNAL_DIFF")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut overflow = false;
+        let mut buffer = [0_u8; 8 * 1024];
+        loop {
+            match stdout.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(Some((captured, overflow)));
+                    return;
+                }
+                Ok(read) => {
+                    let remaining = maximum.saturating_sub(captured.len());
+                    let retained = remaining.min(read);
+                    captured.extend_from_slice(&buffer[..retained]);
+                    overflow |= retained < read;
+                }
+                Err(_) => {
+                    let _ = sender.send(None);
+                    return;
+                }
+            }
+        }
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < deadline => {
+                thread::sleep(Duration::from_millis(1));
+            }
+            Ok(None) | Err(_) => {
+                kill_git_process_group(&mut child);
+                break None;
+            }
+        }
+    };
+    let status = status?;
+    let output = if let Ok(output) = receiver.recv_timeout(GIT_READER_DEADLINE) {
+        output
+    } else {
+        // A descendant inherited stdout after the Git leader exited.
+        // Kill the isolated process group, then allow one bounded drain.
+        kill_git_process_group(&mut child);
+        receiver.recv_timeout(GIT_READER_DEADLINE).ok().flatten()
+    };
+    let (stdout, overflow) = output?;
+    let identity_unchanged = open_workspace_directory(workspace)
+        .and_then(|current| {
+            rustix::fs::fstat(&current)
+                .map_err(|_| HostError::Query("workspace identity is unavailable".to_owned()))
+        })
+        .is_ok_and(|current| {
+            current.st_dev == root_stat.st_dev && current.st_ino == root_stat.st_ino
+        });
+    if !identity_unchanged {
+        return None;
+    }
+    Some(GitCommandOutput {
+        status,
+        stdout,
+        overflow,
+    })
+}
+
+#[cfg(unix)]
+fn read_git_changed_paths(workspace: &Path) -> (Vec<String>, bool) {
+    let Ok(root) = open_workspace_directory(workspace) else {
+        return (Vec::new(), true);
+    };
+    match rustix::fs::statat(&root, ".git", rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Err(error) if error == rustix::io::Errno::NOENT => return (Vec::new(), false),
+        Ok(stat) => {
+            let kind = rustix::fs::FileType::from_raw_mode(stat.st_mode);
+            if !kind.is_file() && !kind.is_dir() {
+                return (Vec::new(), true);
+            }
+        }
+        Err(_) => return (Vec::new(), true),
+    }
+    let Some(git) = resolve_git_executable(workspace) else {
+        return (Vec::new(), true);
+    };
+    let arguments = [
+        OsStr::new("status"),
+        OsStr::new("--porcelain=v1"),
+        OsStr::new("-z"),
+        OsStr::new("--untracked-files=all"),
+        OsStr::new("--ignored=no"),
+    ];
+    let Some(output) = run_bounded_git(
+        &git,
+        workspace,
+        &arguments,
+        MAX_GIT_STATUS_BYTES,
+        GIT_STATUS_DEADLINE,
+    ) else {
+        return (Vec::new(), true);
+    };
+    if !output.status.success() {
+        return (Vec::new(), true);
+    }
+    parse_git_status(&output.stdout, output.overflow)
+}
+
+#[cfg(not(unix))]
+fn read_git_changed_paths(_workspace: &Path) -> (Vec<String>, bool) {
+    (Vec::new(), false)
+}
+
+#[cfg(unix)]
+fn parse_git_status(bytes: &[u8], mut truncated: bool) -> (Vec<String>, bool) {
+    let complete_bytes = match bytes.iter().rposition(|byte| *byte == 0) {
+        Some(last_nul) => {
+            truncated |= last_nul.saturating_add(1) != bytes.len();
+            &bytes[..=last_nul]
+        }
+        None => {
+            return (Vec::new(), !bytes.is_empty() || truncated);
+        }
+    };
+    let mut paths = BTreeSet::new();
+    let mut records = complete_bytes.split(|byte| *byte == 0);
+    while let Some(record) = records.next() {
+        if record.is_empty() {
+            continue;
+        }
+        if record.len() < 4 || record[2] != b' ' {
+            truncated = true;
+            continue;
+        }
+        let status = &record[..2];
+        let path = &record[3..];
+        if status.iter().any(|code| matches!(*code, b'R' | b'C')) {
+            // Porcelain v1 -z follows a rename/copy destination with its
+            // source path. Only the destination is actionable in the UI.
+            if records.next().is_none() {
+                truncated = true;
+            }
+        }
+        let Ok(path) = std::str::from_utf8(path) else {
+            truncated = true;
+            continue;
+        };
+        let Ok(path) = safe_relative_path(path) else {
+            truncated = true;
+            continue;
+        };
+        if path
+            .components()
+            .any(|component| component.as_os_str() == ".git")
+        {
+            continue;
+        }
+        let Some(path) = path.to_str() else {
+            truncated = true;
+            continue;
+        };
+        paths.insert(path.to_owned());
+        if paths.len() >= MAX_CHANGED_PATHS {
+            truncated |= records.any(|record| !record.is_empty());
+            break;
+        }
+    }
+    (paths.into_iter().collect(), truncated)
+}
+
+#[cfg(unix)]
+// Keeping classification, identity-bound Git calls, and fail-closed branches
+// together makes the security order auditable.
+#[allow(clippy::too_many_lines)]
+fn read_workspace_diff(
+    workspace: &Path,
+    relative: &Path,
+    maximum: usize,
+) -> Result<WorkspaceDiff, HostError> {
+    let path = relative
+        .to_str()
+        .filter(|path| {
+            !path.is_empty()
+                && !path
+                    .chars()
+                    .any(|character| character.is_control() || character == '\0')
+        })
+        .ok_or_else(|| {
+            HostError::Query("workspace diff path is not safely renderable".to_owned())
+        })?;
+    let root = open_workspace_directory(workspace)?;
+    let git_marker = rustix::fs::statat(&root, ".git", rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|_| HostError::Query("workspace is not a readable Git repository".to_owned()))?;
+    let marker_kind = rustix::fs::FileType::from_raw_mode(git_marker.st_mode);
+    if !marker_kind.is_file() && !marker_kind.is_dir() {
+        return Err(HostError::Query(
+            "workspace Git metadata is unsafe".to_owned(),
+        ));
+    }
+    let git = resolve_git_executable(workspace)
+        .ok_or_else(|| HostError::Query("trusted Git executable is unavailable".to_owned()))?;
+    let relative_os = relative.as_os_str();
+    let tracked_arguments = [
+        OsStr::new("ls-files"),
+        OsStr::new("--error-unmatch"),
+        OsStr::new("--"),
+        relative_os,
+    ];
+    let tracked = run_bounded_git(&git, workspace, &tracked_arguments, 1, GIT_DIFF_DEADLINE)
+        .ok_or_else(|| HostError::Query("Git path classification failed".to_owned()))?;
+    if tracked.status.success() {
+        let arguments = [
+            OsStr::new("diff"),
+            OsStr::new("--no-ext-diff"),
+            OsStr::new("--no-textconv"),
+            OsStr::new("--no-color"),
+            OsStr::new("HEAD"),
+            OsStr::new("--"),
+            relative_os,
+        ];
+        let output = run_bounded_git(&git, workspace, &arguments, maximum, GIT_DIFF_DEADLINE)
+            .ok_or_else(|| HostError::Query("Git diff failed".to_owned()))?;
+        if !output.status.success() {
+            return Err(HostError::Query("Git diff failed".to_owned()));
+        }
+        let binary = output
+            .stdout
+            .windows(12)
+            .any(|window| window == b"Binary files")
+            || output
+                .stdout
+                .windows(16)
+                .any(|window| window == b"GIT binary patch");
+        let (unified_diff, truncated, invalid_utf8) =
+            if let Ok(diff) = String::from_utf8(output.stdout) {
+                let (diff, truncated) = bounded_diff_text(diff, maximum, output.overflow);
+                (diff, truncated, false)
+            } else {
+                let (diff, truncated) = bounded_diff_text(binary_diff(path), maximum, true);
+                (diff, truncated, true)
+            };
+        return Ok(WorkspaceDiff {
+            path: path.to_owned(),
+            unified_diff,
+            truncated,
+            binary: binary || invalid_utf8,
+        });
+    }
+    if tracked.status.code() != Some(1) {
+        return Err(HostError::Query(
+            "Git path classification failed".to_owned(),
+        ));
+    }
+
+    let ignored_arguments = [
+        OsStr::new("check-ignore"),
+        OsStr::new("--quiet"),
+        OsStr::new("--"),
+        relative_os,
+    ];
+    let ignored = run_bounded_git(&git, workspace, &ignored_arguments, 1, GIT_DIFF_DEADLINE)
+        .ok_or_else(|| HostError::Query("Git ignore classification failed".to_owned()))?;
+    if ignored.status.success() {
+        return Err(HostError::Query(
+            "workspace diff refuses Git-ignored files".to_owned(),
+        ));
+    }
+    if ignored.status.code() != Some(1) {
+        return Err(HostError::Query(
+            "Git ignore classification failed".to_owned(),
+        ));
+    }
+
+    let file = open_relative_regular_file(&root, relative)?;
+    let stat = rustix::fs::fstat(&file)
+        .map_err(|_| HostError::Query("workspace file metadata is unavailable".to_owned()))?;
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
+        return Err(HostError::Query(
+            "workspace diff accepts regular files only".to_owned(),
+        ));
+    }
+    let total = usize::try_from(stat.st_size).unwrap_or(usize::MAX);
+    let mut bytes = Vec::new();
+    fs::File::from(file)
+        .take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| HostError::Query("workspace file could not be read".to_owned()))?;
+    let source_truncated = total > maximum || bytes.len() > maximum;
+    bytes.truncate(maximum);
+    let executable = stat.st_mode & 0o111 != 0;
+    if bytes.contains(&0) {
+        let (unified_diff, truncated) =
+            bounded_diff_text(binary_diff(path), maximum, source_truncated);
+        return Ok(WorkspaceDiff {
+            path: path.to_owned(),
+            unified_diff,
+            truncated,
+            binary: true,
+        });
+    }
+    let Ok(content) = String::from_utf8(bytes) else {
+        let (unified_diff, truncated) = bounded_diff_text(binary_diff(path), maximum, true);
+        return Ok(WorkspaceDiff {
+            path: path.to_owned(),
+            unified_diff,
+            truncated,
+            binary: true,
+        });
+    };
+    let rendered = render_untracked_diff(path, &content, executable);
+    let (unified_diff, truncated) = bounded_diff_text(rendered, maximum, source_truncated);
+    Ok(WorkspaceDiff {
+        path: path.to_owned(),
+        unified_diff,
+        truncated,
+        binary: false,
+    })
+}
+
+#[cfg(not(unix))]
+fn read_workspace_diff(
+    _workspace: &Path,
+    _relative: &Path,
+    _maximum: usize,
+) -> Result<WorkspaceDiff, HostError> {
+    Err(HostError::Query(
+        "safe workspace diff is unavailable on this platform".to_owned(),
+    ))
+}
+
+#[cfg(unix)]
+fn render_untracked_diff(path: &str, content: &str, executable: bool) -> String {
+    let line_count = content.lines().count().max(1);
+    let mut diff = format!(
+        "diff --git a/{path} b/{path}\nnew file mode {}\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{line_count} @@\n",
+        if executable { "100755" } else { "100644" }
+    );
+    for line in content.split_inclusive('\n') {
+        diff.push('+');
+        diff.push_str(line);
+    }
+    if !content.is_empty() && !content.ends_with('\n') {
+        diff.push_str("\n\\ No newline at end of file\n");
+    }
+    if content.is_empty() {
+        diff.push_str("+\n");
+    }
+    diff
+}
+
+#[cfg(unix)]
+fn binary_diff(path: &str) -> String {
+    format!("diff --git a/{path} b/{path}\nBinary files /dev/null and b/{path} differ\n")
+}
+
+#[cfg(unix)]
+fn bounded_diff_text(mut text: String, maximum: usize, mut truncated: bool) -> (String, bool) {
+    if text.len() <= maximum {
+        return (text, truncated);
+    }
+    truncated = true;
+    let mut end = maximum;
+    while end > 0 && !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    end = text[..end].rfind('\n').map_or(0, |newline| newline + 1);
+    text.truncate(end);
+    (text, truncated)
 }
 
 #[cfg(unix)]
@@ -2163,6 +3029,345 @@ mod tests {
             driver_client_id: None,
             shell_active: false,
         }
+    }
+
+    #[cfg(unix)]
+    fn git(workspace: &Path, arguments: &[&str]) {
+        assert!(
+            Command::new("git")
+                .current_dir(workspace)
+                .args(arguments)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("git fixture command")
+                .success(),
+            "git {arguments:?}"
+        );
+    }
+
+    #[test]
+    fn model_descriptors_expose_extension_provider_names_in_fallback_order() {
+        let providers = configured_alias_providers(&[
+            "openai-work/gpt-5".to_owned(),
+            "extension-provider/model".to_owned(),
+            "copilot/gpt-4.1".to_owned(),
+            "openai-work/gpt-4.1".to_owned(),
+            "malformed".to_owned(),
+            "/missing-provider".to_owned(),
+            "bad\nprovider/model".to_owned(),
+            format!("{}/model", "x".repeat(MAX_PROVIDER_DISPLAY_NAME_BYTES + 1)),
+        ]);
+        assert_eq!(providers, ["openai-work", "extension-provider", "copilot"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_search_honors_git_nested_and_tool_ignore_files_but_keeps_hidden_files() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(workspace.join(".git/info")).expect("git marker");
+        fs::create_dir_all(workspace.join("ignored-dir")).expect("ignored directory");
+        fs::create_dir_all(workspace.join("nested")).expect("nested directory");
+        fs::write(
+            workspace.join(".gitignore"),
+            "ignored.txt\nignored-dir/*\nnested/*.rs\n",
+        )
+        .expect("gitignore");
+        fs::write(
+            workspace.join(".ignore"),
+            "*.tmp\n!keep.tmp\n!ignored-dir/keep.rs\n",
+        )
+        .expect("tool ignore");
+        fs::write(workspace.join(".git/info/exclude"), "info-excluded.rs\n")
+            .expect("git info exclude");
+        fs::write(workspace.join("ignored.txt"), "ignored").expect("ignored file");
+        fs::write(workspace.join("ignored-dir/secret.rs"), "ignored").expect("ignored child");
+        fs::write(workspace.join("ignored-dir/keep.rs"), "visible").expect("kept child");
+        fs::write(workspace.join("scratch.tmp"), "ignored").expect("tool ignored file");
+        fs::write(workspace.join("keep.tmp"), "visible").expect("tool whitelist");
+        fs::write(workspace.join("info-excluded.rs"), "ignored").expect("info ignored file");
+        fs::write(workspace.join(".hidden.rs"), "visible").expect("hidden file");
+        fs::write(workspace.join("nested/.gitignore"), "!visible.rs\n").expect("nested gitignore");
+        fs::write(workspace.join("nested/nested-ignored.rs"), "ignored")
+            .expect("nested ignored file");
+        fs::write(workspace.join("nested/visible.rs"), "visible").expect("visible file");
+        fs::write(workspace.join(".git/HEAD"), "ref: refs/heads/main\n").expect("git internals");
+
+        let (matches, truncated) = search_workspace(&workspace, "", 100).expect("search");
+        assert!(!truncated);
+        let paths = matches
+            .into_iter()
+            .map(|item| item.path)
+            .collect::<BTreeSet<_>>();
+        assert!(paths.contains(".hidden.rs"));
+        assert!(paths.contains("keep.tmp"));
+        assert!(paths.contains("nested/visible.rs"));
+        assert!(!paths.contains("ignored.txt"));
+        assert!(!paths.contains("ignored-dir/secret.rs"));
+        assert!(!paths.contains("ignored-dir/keep.rs"));
+        assert!(!paths.contains("scratch.tmp"));
+        assert!(!paths.contains("info-excluded.rs"));
+        assert!(!paths.contains("nested/nested-ignored.rs"));
+        assert!(paths.iter().all(|path| !path.starts_with(".git/")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_search_keeps_fuzzy_reachable_candidates_and_deterministic_bounds() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(workspace.join("src")).expect("source directory");
+        fs::write(workspace.join("src/main.rs"), "fn main() {}\n").expect("main source");
+        fs::write(workspace.join("alpha.rs"), "alpha\n").expect("alpha");
+        fs::write(workspace.join("beta.rs"), "beta\n").expect("beta");
+
+        let (fuzzy, truncated) = search_workspace(&workspace, "smr", 10).expect("fuzzy pool");
+        assert!(!truncated);
+        assert!(fuzzy.iter().any(|item| item.path == "src/main.rs"));
+
+        let (bounded, truncated) =
+            search_workspace(&workspace, "", 2).expect("bounded deterministic pool");
+        assert!(truncated);
+        assert_eq!(
+            bounded
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha.rs", "beta.rs"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_search_supports_linked_git_worktree_excludes() {
+        let root = tempdir().expect("root");
+        let repository = root.path().join("repository");
+        let workspace = root.path().join("linked-worktree");
+        fs::create_dir(&repository).expect("repository");
+        git(&repository, &["init", "--quiet"]);
+        git(&repository, &["config", "user.name", "Rottweiler Test"]);
+        git(
+            &repository,
+            &["config", "user.email", "test@example.invalid"],
+        );
+        fs::write(repository.join("tracked.rs"), "tracked\n").expect("tracked file");
+        git(&repository, &["add", "tracked.rs"]);
+        git(&repository, &["commit", "--quiet", "-m", "fixture"]);
+        git(
+            &repository,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "linked-fixture",
+                workspace.to_str().expect("UTF-8 worktree path"),
+            ],
+        );
+        fs::create_dir_all(repository.join(".git/info")).expect("Git info directory");
+        fs::write(repository.join(".git/info/exclude"), "excluded.rs\n").expect("common exclude");
+        fs::write(workspace.join("excluded.rs"), "excluded\n").expect("excluded file");
+        fs::write(workspace.join("visible.rs"), "visible\n").expect("visible file");
+
+        let (matches, truncated) = search_workspace(&workspace, "", 100).expect("search");
+        assert!(!truncated);
+        let paths = matches
+            .into_iter()
+            .map(|item| item.path)
+            .collect::<BTreeSet<_>>();
+        assert!(paths.contains("visible.rs"));
+        assert!(paths.contains("tracked.rs"));
+        assert!(!paths.contains("excluded.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_ignore_controls_fail_closed_for_only_the_affected_subtree() {
+        use std::os::unix::fs::symlink;
+
+        for fixture in ["symlink", "oversized", "invalid-utf8"] {
+            let root = tempdir().expect("root");
+            let workspace = root.path().join("workspace");
+            fs::create_dir_all(workspace.join("bad")).expect("bad subtree");
+            fs::write(workspace.join("safe.rs"), "safe").expect("safe sibling");
+            fs::write(workspace.join("bad/secret.rs"), "secret").expect("secret file");
+            match fixture {
+                "symlink" => {
+                    fs::write(root.path().join("outside-ignore"), "secret.rs\n")
+                        .expect("outside ignore");
+                    symlink(
+                        root.path().join("outside-ignore"),
+                        workspace.join("bad/.gitignore"),
+                    )
+                    .expect("ignore symlink");
+                }
+                "oversized" => fs::write(
+                    workspace.join("bad/.gitignore"),
+                    vec![b'x'; MAX_IGNORE_FILE_BYTES + 1],
+                )
+                .expect("oversized ignore"),
+                "invalid-utf8" => fs::write(workspace.join("bad/.gitignore"), [0xff, b'\n'])
+                    .expect("invalid ignore"),
+                _ => unreachable!(),
+            }
+
+            let (matches, truncated) = search_workspace(&workspace, "", 100).expect("search");
+            assert!(truncated, "{fixture}");
+            let paths = matches
+                .into_iter()
+                .map(|item| item.path)
+                .collect::<BTreeSet<_>>();
+            assert!(paths.contains("safe.rs"), "{fixture}");
+            assert!(!paths.contains("bad"), "{fixture}");
+            assert!(!paths.contains("bad/secret.rs"), "{fixture}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_status_reports_modified_and_untracked_but_not_ignored_paths() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        git(&workspace, &["init", "--quiet"]);
+        git(&workspace, &["config", "user.name", "Rottweiler Test"]);
+        git(
+            &workspace,
+            &["config", "user.email", "test@example.invalid"],
+        );
+        fs::write(workspace.join(".gitignore"), "ignored.log\n").expect("gitignore");
+        fs::write(workspace.join("tracked.rs"), "old\n").expect("tracked file");
+        git(&workspace, &["add", ".gitignore", "tracked.rs"]);
+        git(&workspace, &["commit", "--quiet", "-m", "fixture"]);
+        fs::write(workspace.join("tracked.rs"), "new\n").expect("modified file");
+        fs::write(workspace.join("untracked.rs"), "new\n").expect("untracked file");
+        fs::write(workspace.join("ignored.log"), "ignored\n").expect("ignored file");
+
+        let status = read_workspace_status(&workspace, "workspace".to_owned()).expect("status");
+        assert!(!status.truncated);
+        assert_eq!(status.changed_paths, ["tracked.rs", "untracked.rs"]);
+        assert!(status.branch.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_diff_covers_tracked_untracked_binary_ignored_and_truncated_files() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        git(&workspace, &["init", "--quiet"]);
+        git(&workspace, &["config", "user.name", "Rottweiler Test"]);
+        git(
+            &workspace,
+            &["config", "user.email", "test@example.invalid"],
+        );
+        fs::write(workspace.join(".gitignore"), "ignored.txt\n").expect("gitignore");
+        fs::write(workspace.join("tracked.txt"), "old\n").expect("tracked text");
+        fs::write(workspace.join("binary.bin"), [0, 1, 2]).expect("tracked binary");
+        git(
+            &workspace,
+            &["add", ".gitignore", "tracked.txt", "binary.bin"],
+        );
+        git(&workspace, &["commit", "--quiet", "-m", "fixture"]);
+        fs::write(workspace.join("tracked.txt"), "new\n").expect("modified text");
+        fs::write(workspace.join("binary.bin"), [0, 1, 3]).expect("modified binary");
+        fs::write(workspace.join("untracked.txt"), "hello\nworld\n").expect("untracked text");
+        fs::write(workspace.join("ignored.txt"), "secret\n").expect("ignored text");
+        fs::write(workspace.join("large.txt"), "line\n".repeat(1_000)).expect("large text");
+
+        let tracked =
+            read_workspace_diff(&workspace, Path::new("tracked.txt"), 8_192).expect("tracked diff");
+        assert!(!tracked.binary);
+        assert!(!tracked.truncated);
+        assert!(tracked.unified_diff.contains("-old"));
+        assert!(tracked.unified_diff.contains("+new"));
+
+        let untracked = read_workspace_diff(&workspace, Path::new("untracked.txt"), 8_192)
+            .expect("untracked diff");
+        assert!(!untracked.binary);
+        assert!(untracked.unified_diff.contains("--- /dev/null"));
+        assert!(untracked.unified_diff.contains("+hello"));
+
+        let binary =
+            read_workspace_diff(&workspace, Path::new("binary.bin"), 8_192).expect("binary diff");
+        assert!(binary.binary);
+        assert!(binary.unified_diff.contains("Binary files"));
+
+        let ignored = read_workspace_diff(&workspace, Path::new("ignored.txt"), 8_192)
+            .expect_err("ignored diff must fail closed");
+        assert!(ignored.to_string().contains("Git-ignored"));
+
+        let large =
+            read_workspace_diff(&workspace, Path::new("large.txt"), 128).expect("bounded diff");
+        assert!(large.truncated);
+        assert!(large.unified_diff.len() <= 128);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn porcelain_parser_keeps_rename_destination_and_rejects_unsafe_paths() {
+        let (paths, truncated) = parse_git_status(
+            b"R  new.rs\0old.rs\0?? nested/untracked.rs\0?? ../escape\0?? partial.rs",
+            false,
+        );
+        assert!(truncated);
+        assert_eq!(paths, ["nested/untracked.rs", "new.rs"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_resolution_rejects_relative_path_entries_and_workspace_executables() {
+        use std::{env, ffi::OsString, os::unix::fs::PermissionsExt as _};
+
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let trusted = root.path().join("trusted");
+        fs::create_dir(&workspace).expect("workspace");
+        fs::create_dir(&trusted).expect("trusted bin");
+        fs::write(trusted.join("git"), "#!/bin/sh\nexit 0\n").expect("fake git");
+        fs::set_permissions(trusted.join("git"), fs::Permissions::from_mode(0o700))
+            .expect("fake git mode");
+
+        assert!(resolve_git_executable_from_path(OsStr::new("relative-bin"), &workspace).is_none());
+        let mixed =
+            env::join_paths([PathBuf::from("relative-bin"), trusted.clone()]).expect("mixed PATH");
+        assert_eq!(
+            resolve_git_executable_from_path(&mixed, &workspace),
+            Some(fs::canonicalize(trusted.join("git")).expect("canonical git"))
+        );
+
+        let workspace_bin = workspace.join("bin");
+        fs::create_dir(&workspace_bin).expect("workspace bin");
+        fs::write(workspace_bin.join("git"), "#!/bin/sh\nexit 0\n").expect("workspace git");
+        fs::set_permissions(workspace_bin.join("git"), fs::Permissions::from_mode(0o700))
+            .expect("workspace git mode");
+        let workspace_path = OsString::from(workspace_bin);
+        assert!(resolve_git_executable_from_path(&workspace_path, &workspace).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_git_kills_descendants_that_keep_stdout_open() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        fs::create_dir(&workspace).expect("workspace");
+        let git = root.path().join("fake-git");
+        fs::write(
+            &git,
+            "#!/bin/sh\nsleep 5 &\nprintf '?? held.rs\\0'\nexit 0\n",
+        )
+        .expect("fake git");
+        fs::set_permissions(&git, fs::Permissions::from_mode(0o700)).expect("fake git mode");
+        let started = Instant::now();
+        let output = run_bounded_git(&git, &workspace, &[], 1024, Duration::from_secs(2))
+            .expect("bounded output");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert_eq!(output.stdout, b"?? held.rs\0");
+        assert!(!output.overflow);
     }
 
     #[tokio::test]
@@ -2497,6 +3702,7 @@ mod tests {
                     },
                     session_id: parent_id.clone(),
                     model: switched_model.clone(),
+                    provider: None,
                 })
                 .await
                 .expect("switch parent model after fork boundary"),

@@ -8,7 +8,7 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ImageAttachmentRenderable, fuzzyScore } from "../src/components"
+import { ContextPanelRenderable, ImageAttachmentRenderable, fuzzyScore } from "../src/components"
 import {
   PROTOCOL_VERSION,
   type ClientCommand,
@@ -96,7 +96,7 @@ describe("M4 retained components", () => {
     expect(app.transcript.mountedKeys.at(-1)).not.toContain(":0:")
   })
 
-  test("routes diff approval and context surgery through generated commands", async () => {
+  test("routes diff approval through generated commands", async () => {
     const setup = await createTestRenderer({ width: 112, height: 30, useThread: false })
     renderer = setup.renderer
     const commands: ClientCommand[] = []
@@ -126,25 +126,6 @@ describe("M4 retained components", () => {
           callIndex: 0,
         },
       },
-      context: {
-        turn_id: "1",
-        stable_prefix_hash: "hash",
-        used_tokens: "1",
-        usable_tokens: "10",
-        reserved_tokens: "1",
-        cache_breakpoints: [],
-        items: [
-          {
-            item_id: "context-1",
-            kind: "conversation",
-            label: "Turn one",
-            source: "session",
-            machine_local_path: null,
-            estimated_tokens: "10",
-            state: { pinned: false, evicted: false, summarized: false, pruned: false },
-          },
-        ],
-      },
     }
     const app = createRottweilerApp(renderer, {
       initialState: state,
@@ -158,8 +139,6 @@ describe("M4 retained components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
     app.interactionPanel.select.selectCurrent()
-    app.contextPanel.items.focus()
-    setup.mockInput.pressKey("p")
 
     expect(commands).toContainEqual({
       type: "approve_tool",
@@ -178,17 +157,6 @@ describe("M4 retained components", () => {
         diff_hash: "diff-hash",
       },
     })
-    expect(commands).toContainEqual({
-      type: "pin_context",
-      meta: {
-        protocol_version: PROTOCOL_VERSION,
-        client_id: "client-components",
-        request_id: "request-components",
-      },
-      session_id: "session-components",
-      item_id: "context-1",
-    })
-
     commands.length = 0
     app.setState({
       ...state,
@@ -483,6 +451,7 @@ describe("M4 retained components", () => {
       },
     })
     renderer.root.add(app)
+    app.openReview()
     await setup.renderOnce()
 
     expect(app.reviewPanel.visible).toBeTrue()
@@ -518,7 +487,7 @@ describe("M4 retained components", () => {
     await Bun.sleep(30)
     expect(app.reviewPanel.visible).toBeFalse()
     expect(app.composer.visible).toBeTrue()
-    expect(app.state.review).toBeNull()
+    expect(app.state.review).toEqual(review)
   })
 
   test("keeps one review decision in flight and surfaces a stale fingerprint rejection", async () => {
@@ -554,6 +523,7 @@ describe("M4 retained components", () => {
       },
     })
     renderer.root.add(app)
+    app.openReview()
     await setup.renderOnce()
 
     setup.mockInput.pressKey("r")
@@ -574,6 +544,144 @@ describe("M4 retained components", () => {
     expect(app.state.errors.at(-1)?.code).toBe("stale_review_fingerprint")
     expect(app.banner.plainText).toContain("file changed since this review")
     expect(app.reviewPanel.hint.plainText).not.toContain("pending")
+  })
+
+  test("shows only todos and changed files in the sidebar and opens exact paths", async () => {
+    const setup = await createTestRenderer({ width: 52, height: 24, useThread: false })
+    renderer = setup.renderer
+    const opened: string[] = []
+    const panel = new ContextPanelRenderable(renderer, kennelTheme, {
+      onOpenDiff: (path) => opened.push(path),
+    })
+    renderer.root.add(panel)
+    panel.update({
+      ...createInitialState(),
+      todos: [
+        { id: "audit", content: "Audit interactions", status: "in_progress" },
+        { id: "tests", content: "Add regression tests", status: "pending" },
+      ],
+      workspaceStatus: {
+        workspaceName: "Rottweiler",
+        branch: "main",
+        changedPaths: ["src/from-status.rs", "src/shared.rs"],
+        truncated: false,
+      },
+      review: {
+        sessionId: "session-sidebar",
+        files: [
+          {
+            path: "src/from-review.rs",
+            unifiedDiff: "+review",
+            status: "pending",
+            truncated: false,
+            unrestorableReason: null,
+            originalHash: "old",
+            currentHash: "new",
+          },
+          {
+            path: "src/shared.rs",
+            unifiedDiff: "+shared",
+            status: "pending",
+            truncated: false,
+            unrestorableReason: null,
+            originalHash: "old",
+            currentHash: "new",
+          },
+        ],
+      },
+    })
+    await setup.renderOnce()
+
+    expect(panel.todos.options.map((option) => option.value)).toEqual(["audit", "tests"])
+    expect(panel.changedFiles.options.map((option) => option.value)).toEqual([
+      "src/shared.rs",
+      "src/from-status.rs",
+    ])
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Todos")
+    expect(frame).toContain("Changed files")
+    expect(frame).not.toContain("context")
+
+    panel.changedFiles.focus()
+    panel.changedFiles.setSelectedIndex(0)
+    setup.mockInput.pressEnter()
+    expect(opened).toEqual(["src/shared.rs"])
+
+    await setup.mockMouse.click(panel.changedFiles.x + 2, panel.changedFiles.y + 1)
+    expect(opened).toEqual(["src/shared.rs", "src/from-status.rs"])
+  })
+
+  test("opens the exact retained diff from the default changed-files sidebar", async () => {
+    const setup = await createTestRenderer({ width: 112, height: 30, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      requestId: () => "workspace-diff-request",
+      onCommand: () => ({ type: "accepted" }),
+      initialState: {
+        ...createInitialState(),
+        workspaceStatus: {
+          workspaceName: "Rottweiler",
+          branch: "main",
+          changedPaths: ["src/first.rs", "src/exact.rs"],
+          truncated: false,
+        },
+        review: {
+          sessionId: "sidebar-diff",
+          files: [
+            {
+              path: "src/first.rs",
+              unifiedDiff: "--- a/src/first.rs\n+++ b/src/first.rs\n-old\n+first\n",
+              status: "pending",
+              truncated: false,
+              unrestorableReason: null,
+              originalHash: "old-first",
+              currentHash: "new-first",
+            },
+            {
+              path: "src/exact.rs",
+              unifiedDiff: "--- a/src/exact.rs\n+++ b/src/exact.rs\n-old\n+exact\n",
+              status: "pending",
+              truncated: false,
+              unrestorableReason: null,
+              originalHash: "old-exact",
+              currentHash: "new-exact",
+            },
+          ],
+        },
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    expect(app.reviewPanel.visible).toBeFalse()
+
+    app.contextPanel.changedFiles.focus()
+    app.contextPanel.changedFiles.setSelectedIndex(1)
+    setup.mockInput.pressEnter()
+    expect(app.reviewPanel.visible).toBeTrue()
+    app.handleEvent({
+      type: "workspace_diff_ready",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: "workspace-diff-request",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      diff: {
+        path: "src/exact.rs",
+        unified_diff: "--- a/src/exact.rs\n+++ b/src/exact.rs\n-old\n+exact\n",
+        truncated: false,
+        binary: false,
+      },
+    })
+    expect(app.reviewPanel.diff.diff).toContain("+exact")
+    expect(app.composer.visible).toBeFalse()
+
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.reviewPanel.visible).toBeFalse()
+    expect(app.composer.visible).toBeTrue()
+    expect(app.state.review?.files).toHaveLength(2)
   })
 
   test("searches sessions remotely while preserving instant local fuzzy filtering", async () => {

@@ -103,6 +103,15 @@ export interface ToolProjection {
   readonly callIndex: number
 }
 
+export type TodoStatusProjection = "pending" | "in_progress" | "completed" | "blocked"
+
+/** Bounded, display-safe projection of the session todo tool's latest successful snapshot. */
+export interface TodoProjection {
+  readonly id: string
+  readonly content: string
+  readonly status: TodoStatusProjection
+}
+
 export type SubagentStatus = "running" | SubagentTerminalStatus
 
 export interface SubagentProjection {
@@ -145,6 +154,7 @@ export interface CommandAcknowledgement {
     | "workspace_files_found"
     | "workspace_file_preview_ready"
     | "workspace_status_ready"
+    | "workspace_diff_ready"
     | "host_shutdown"
   readonly outcome: CommandOutcome | null
   readonly sessionId: string | null
@@ -229,6 +239,7 @@ export interface CommandChoice {
 
 export interface ModelChoice {
   readonly alias: string
+  readonly providers: readonly string[]
   readonly vision: boolean
   readonly thinking: boolean
   readonly toolCalling: boolean
@@ -254,6 +265,13 @@ export interface WorkspaceStatusProjection {
   readonly truncated: boolean
 }
 
+export interface WorkspaceDiffProjection {
+  readonly path: string
+  readonly unifiedDiff: string
+  readonly truncated: boolean
+  readonly binary: boolean
+}
+
 export interface WorkspaceRootsProjection {
   readonly generation: string
   readonly effectiveFromTurn: string
@@ -275,6 +293,7 @@ export interface RottweilerState {
   readonly streamingTail: StreamingTail | null
   readonly turns: Readonly<Record<string, TurnProjection>>
   readonly tools: Readonly<Record<string, ToolProjection>>
+  readonly todos: readonly TodoProjection[]
   /** Current parent-turn children, kept separate from durable transcript history. */
   readonly subagents: Readonly<Record<string, SubagentProjection>>
   readonly subagentOrder: readonly string[]
@@ -290,6 +309,7 @@ export interface RottweilerState {
   readonly pendingPlan: PlanArtifact | null
   readonly approvedPlan: PlanArtifact | null
   readonly model: string | null
+  readonly provider: string | null
   readonly driverClientId: string | null
   readonly shell: ShellProjection
   readonly compaction: CompactionProjection
@@ -305,6 +325,7 @@ export interface RottweilerState {
   readonly workspaceFiles: readonly WorkspaceFileChoice[]
   readonly workspacePreview: WorkspacePreviewProjection | null
   readonly workspaceStatus: WorkspaceStatusProjection | null
+  readonly workspaceDiff: WorkspaceDiffProjection | null
   readonly workspaceRoots: WorkspaceRootsProjection | null
 }
 
@@ -322,6 +343,7 @@ export function createInitialState(): RottweilerState {
     streamingTail: null,
     turns: {},
     tools: {},
+    todos: [],
     subagents: {},
     subagentOrder: [],
     questions: {},
@@ -336,6 +358,7 @@ export function createInitialState(): RottweilerState {
     pendingPlan: null,
     approvedPlan: null,
     model: null,
+    provider: null,
     driverClientId: null,
     shell: { shellId: null, active: false, status: null, capturedOutput: null },
     compaction: {
@@ -361,6 +384,7 @@ export function createInitialState(): RottweilerState {
     workspaceFiles: [],
     workspacePreview: null,
     workspaceStatus: null,
+    workspaceDiff: null,
     workspaceRoots: null,
   }
 }

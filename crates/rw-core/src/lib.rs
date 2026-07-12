@@ -20,8 +20,8 @@ pub use rw_types::{
     AccountingAttribution, AttachmentData, CommandDescriptor, ContextItemId, ContextSnapshot,
     CostSnapshot, ModeId, ModelAlias, ModelCacheBehavior, ModelCapabilities, ModelDescriptor,
     PlanDecision, PromptDump, ReviewFileDecision, ReviewFileStatus, SessionReview,
-    SessionReviewFile, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
-    WorkspaceStatus,
+    SessionReviewFile, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceRootDescriptor, WorkspaceStatus,
 };
 
 pub use admin::{

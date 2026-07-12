@@ -393,6 +393,56 @@ impl ProviderRuntime {
         }
         self.router.stream_alias(alias, request)
     }
+
+    /// Dispatches through exactly one configured provider for an alias.
+    /// Routes on other providers are intentionally excluded rather than used
+    /// as fallback after an explicit user selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the alias is absent or has no route for the
+    /// selected provider.
+    pub fn stream_alias_provider(
+        &self,
+        alias: &str,
+        provider: &str,
+        mut request: ProviderRequest,
+    ) -> Result<BoxEventStream, RouterError> {
+        if let Some(thinking) = self.alias_thinking.get(alias) {
+            request.thinking = *thinking;
+        }
+        let candidates = self
+            .router
+            .resolve(alias)?
+            .iter()
+            .filter(|candidate| {
+                self.route_candidates
+                    .get(&candidate.provider)
+                    .and_then(|route| route.split_once('/'))
+                    .is_some_and(|(route_provider, _)| route_provider == provider)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Err(RouterError::ProviderNotAvailable {
+                alias: alias.to_owned(),
+                provider: provider.to_owned(),
+            });
+        }
+        self.router.stream_candidates(alias, candidates, request)
+    }
+
+    /// Whether an alias has an exact route through a configured provider.
+    #[must_use]
+    pub fn has_provider_for_alias(&self, alias: &str, provider: &str) -> bool {
+        self.alias_candidates.get(alias).is_some_and(|candidates| {
+            candidates.iter().any(|candidate| {
+                candidate
+                    .split_once('/')
+                    .is_some_and(|(route_provider, _)| route_provider == provider)
+            })
+        })
+    }
 }
 
 /// Alias/model-bound adapter from provider streams to the public web-search
@@ -496,10 +546,10 @@ impl WebSearcher for ProviderNativeWebSearcher {
                     let end = text.floor_char_boundary(remaining.min(text.len()));
                     answer.push_str(&text[..end]);
                 }
-                rw_providers::ProviderEvent::Citation { uri, title, .. } => {
-                    if citations.len() < usize::from(max_results) {
-                        citations.entry(uri).or_insert(title);
-                    }
+                rw_providers::ProviderEvent::Citation { uri, title, .. }
+                    if citations.len() < usize::from(max_results) =>
+                {
+                    citations.entry(uri).or_insert(title);
                 }
                 _ => {}
             }

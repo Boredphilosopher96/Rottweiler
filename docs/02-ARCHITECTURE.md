@@ -123,6 +123,12 @@ enum EngineEvent {
 }
 ```
 
+Model discovery is the narrow display exception to provider-blind execution:
+`ModelDescriptor` may project the ordered names of locally configured providers
+referenced by an alias so the TUI can render `/models` and `/providers`.
+Provider kinds, endpoints, proxy settings, credential references, tokens, and
+route implementation details remain inside `rw-providers`.
+
 Engine events share one delivery channel, but have two explicit scopes.
 `CommandAcknowledged` is a connection-scoped control event with a request id,
 no session sequence, and an optional session id; it provides the immediate

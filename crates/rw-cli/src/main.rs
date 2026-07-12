@@ -2467,6 +2467,7 @@ async fn spawn_detached_server(
                 "socket": paths.socket,
                 "token": token,
                 "session_id": session_id,
+                "started": false,
             })
         );
         return Ok(());
@@ -2517,6 +2518,7 @@ async fn spawn_detached_server(
                     "socket": paths.socket,
                     "token": token,
                     "session_id": session_id,
+                    "started": true,
                 })
             );
             return Ok(());
@@ -2609,10 +2611,29 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         }),
     };
     let tui_executable = locate_tui_executable()?;
-    let mut remote_runtime = TokioRemoteRecoveryRuntime::new(config, local_paths.clone());
-    remote::initialize_remote(&mut remote_runtime)
-        .await
-        .map_err(|error| miette!(error))?;
+    let fork_operation_directory = storage_root.join("control/pending-forks");
+    let (user_home, user_rottweiler) =
+        runtime::extension_user_roots(&storage_root.join("credentials.toml"));
+    // Validate all fallible local-only TUI setup before starting a detached
+    // remote engine, so invalid user configuration cannot create an orphan.
+    let tui_keybindings = tui_config::load_keybindings(None, None, &user_home, &user_rottweiler)
+        .map_err(|error| miette!(error.to_string()))?;
+    let mut remote_runtime = TokioRemoteRecoveryRuntime::new(config.clone(), local_paths.clone());
+    let owned_engine = remote_runtime.ownership();
+    if let Err(error) = remote::initialize_remote(&mut remote_runtime).await {
+        if !cli.detach
+            && let Some(attachment) = error
+                .attachment
+                .as_ref()
+                .filter(|attachment| attachment.started)
+            && let Err(shutdown_error) =
+                shutdown_remote_using_runtime(&mut remote_runtime, &attachment.bootstrap_token)
+                    .await
+        {
+            tracing::warn!(reason = %shutdown_error, "failed to roll back owned remote startup");
+        }
+        return Err(miette!(error.message));
+    }
     let (watchdog_control, watchdog_commands) = tokio::sync::mpsc::channel(2);
     let mut watchdog = tokio::spawn(remote::run_controlled_watchdog(
         remote_runtime,
@@ -2639,27 +2660,28 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         },
         result = &mut watchdog => {
             broker.abort();
-            return match result {
+            match result {
                 Ok(Ok(())) => Err(miette!("remote connection watchdog stopped before broker readiness")),
                 Ok(Err(error)) => Err(miette!(error)),
                 Err(error) => Err(miette!(error.to_string())),
-            };
+            }
         }
     };
     if let Err(error) = broker_readiness {
         broker.abort();
-        let _ = watchdog_control
-            .send(remote::WatchdogCommand::Shutdown)
-            .await;
-        watchdog.abort();
-        let _ = watchdog.await;
+        let remote_shutdown = finish_remote_watchdog(
+            &watchdog_control,
+            &mut watchdog,
+            &config,
+            &local_paths,
+            (!cli.detach).then_some(owned_engine.as_ref()),
+        )
+        .await;
+        if let Err(shutdown_error) = remote_shutdown {
+            tracing::warn!(reason = %shutdown_error, "attached remote cleanup also failed");
+        }
         return Err(error);
     }
-    let fork_operation_directory = storage_root.join("control/pending-forks");
-    let (user_home, user_rottweiler) =
-        runtime::extension_user_roots(&storage_root.join("credentials.toml"));
-    let tui_keybindings = tui_config::load_keybindings(None, None, &user_home, &user_rottweiler)
-        .map_err(|error| miette!(error.to_string()))?;
     let tui = run_remote_tui_process(
         tui_executable,
         &local_paths,
@@ -2681,49 +2703,142 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
             Err(error) => Err(miette!(error.to_string())),
         },
     };
-    let remote_shutdown = if result.is_ok() && !cli.detach {
-        let (acknowledged, paused) = tokio::sync::oneshot::channel();
-        let pause = watchdog_control
-            .send(remote::WatchdogCommand::Pause(acknowledged))
-            .await
-            .map_err(|_| miette!("remote watchdog stopped before attached shutdown"));
-        match pause {
-            Ok(()) => match paused.await {
-                Ok(()) => match read_private_bootstrap_token(&local_paths.token)? {
-                    Some(token) => remote::shutdown_authenticated_host(
-                        &local_paths.socket,
-                        &token,
-                        std::time::Duration::from_secs(5),
-                    )
-                    .await
-                    .map_err(|error| miette!(error)),
-                    None => Err(miette!(
-                        "remote engine token disappeared before attached shutdown"
-                    )),
-                },
-                Err(_) => Err(miette!(
-                    "remote watchdog stopped before acknowledging attached shutdown"
-                )),
-            },
-            Err(error) => Err(error),
+    broker.abort();
+    let remote_shutdown = finish_remote_watchdog(
+        &watchdog_control,
+        &mut watchdog,
+        &config,
+        &local_paths,
+        (!cli.detach).then_some(owned_engine.as_ref()),
+    )
+    .await;
+    match (result, remote_shutdown) {
+        (Err(error), Err(shutdown_error)) => {
+            tracing::warn!(reason = %shutdown_error, "attached remote cleanup also failed");
+            Err(error)
         }
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), shutdown) => shutdown,
+    }
+}
+
+async fn pause_remote_watchdog(
+    watchdog_control: &tokio::sync::mpsc::Sender<remote::WatchdogCommand>,
+) -> Result<()> {
+    let (acknowledged, paused) = tokio::sync::oneshot::channel();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(25),
+        watchdog_control.send(remote::WatchdogCommand::Pause(acknowledged)),
+    )
+    .await
+    .map_err(|_| miette!("remote watchdog pause timed out before attached shutdown"))?
+    .map_err(|_| miette!("remote watchdog stopped before attached shutdown"))?;
+    tokio::time::timeout(std::time::Duration::from_secs(25), paused)
+        .await
+        .map_err(|_| miette!("remote watchdog pause acknowledgement timed out"))?
+        .map_err(|_| miette!("remote watchdog stopped before acknowledging attached shutdown"))?;
+    Ok(())
+}
+
+async fn finish_remote_watchdog(
+    watchdog_control: &tokio::sync::mpsc::Sender<remote::WatchdogCommand>,
+    watchdog: &mut tokio::task::JoinHandle<std::result::Result<(), String>>,
+    config: &remote::RemoteConfig,
+    paths: &server::ServerRuntimePaths,
+    shutdown_if_owned: Option<&AtomicBool>,
+) -> Result<()> {
+    let pause = if shutdown_if_owned.is_some() && !watchdog.is_finished() {
+        pause_remote_watchdog(watchdog_control).await
     } else {
         Ok(())
     };
-    broker.abort();
-    let _ = watchdog_control
-        .send(remote::WatchdogCommand::Shutdown)
-        .await;
+    // Load ownership only after recovery is quiescent. A watchdog pass may
+    // replace a dead user-owned engine with one created by this invocation.
+    let shutdown_owned_engine =
+        shutdown_if_owned.is_some_and(|owned_engine| owned_engine.load(Ordering::Acquire));
+    let direct_shutdown = if shutdown_owned_engine && pause.is_ok() && !watchdog.is_finished() {
+        shutdown_authenticated_remote(paths).await
+    } else if shutdown_owned_engine {
+        Err(miette!(
+            "remote watchdog tunnel is unavailable for attached shutdown"
+        ))
+    } else {
+        Ok(())
+    };
+
     if !watchdog.is_finished() {
-        let _ = watchdog.await;
+        let _ = watchdog_control
+            .send(remote::WatchdogCommand::Shutdown)
+            .await;
+        if tokio::time::timeout(std::time::Duration::from_secs(2), &mut *watchdog)
+            .await
+            .is_err()
+        {
+            watchdog.abort();
+            let _ = watchdog.await;
+        }
     }
-    result.and(remote_shutdown)
+
+    if shutdown_owned_engine && direct_shutdown.is_err() {
+        shutdown_remote_with_fresh_tunnel(config, paths).await
+    } else {
+        direct_shutdown
+    }
+}
+
+async fn shutdown_authenticated_remote(paths: &server::ServerRuntimePaths) -> Result<()> {
+    let token = read_private_bootstrap_token(&paths.token)?
+        .ok_or_else(|| miette!("remote engine token disappeared before attached shutdown"))?;
+    remote::shutdown_authenticated_host(&paths.socket, &token, std::time::Duration::from_secs(5))
+        .await
+        .map_err(|error| miette!(error))
+}
+
+async fn shutdown_remote_using_runtime(
+    runtime: &mut TokioRemoteRecoveryRuntime,
+    bootstrap_token: &str,
+) -> Result<()> {
+    let direct = remote::shutdown_authenticated_host(
+        &runtime.paths.socket,
+        bootstrap_token,
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    if direct.is_err() {
+        remote::RemoteRecoveryRuntime::restart_tunnel(runtime)
+            .await
+            .map_err(|error| miette!(error))?;
+    }
+    let result = if direct.is_ok() {
+        Ok(())
+    } else {
+        remote::shutdown_authenticated_host(
+            &runtime.paths.socket,
+            bootstrap_token,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .map_err(|error| miette!(error))
+    };
+    runtime.stop_tunnel().await;
+    result
+}
+
+async fn shutdown_remote_with_fresh_tunnel(
+    config: &remote::RemoteConfig,
+    paths: &server::ServerRuntimePaths,
+) -> Result<()> {
+    let token = read_private_bootstrap_token(&paths.token)?
+        .ok_or_else(|| miette!("remote engine token disappeared before fallback shutdown"))?;
+    let mut runtime = TokioRemoteRecoveryRuntime::new(config.clone(), paths.clone());
+    shutdown_remote_using_runtime(&mut runtime, &token).await
 }
 
 struct TokioRemoteRecoveryRuntime {
     config: remote::RemoteConfig,
     paths: server::ServerRuntimePaths,
     tunnel: Option<tokio::process::Child>,
+    owned_engine: Arc<AtomicBool>,
 }
 
 impl TokioRemoteRecoveryRuntime {
@@ -2734,7 +2849,12 @@ impl TokioRemoteRecoveryRuntime {
             config,
             paths,
             tunnel: None,
+            owned_engine: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    fn ownership(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.owned_engine)
     }
 
     async fn stop_tunnel(&mut self) {
@@ -2813,7 +2933,7 @@ impl remote::RemoteRecoveryRuntime for TokioRemoteRecoveryRuntime {
         Ok(())
     }
 
-    async fn attach_or_start(&mut self) -> std::result::Result<String, String> {
+    async fn attach_or_start(&mut self) -> std::result::Result<remote::RemoteAttachment, String> {
         use std::process::Stdio;
 
         let start = self
@@ -2844,7 +2964,13 @@ impl remote::RemoteRecoveryRuntime for TokioRemoteRecoveryRuntime {
         {
             return Err("remote engine readiness descriptor failed validation".to_owned());
         }
-        Ok(ready.token)
+        if ready.started {
+            self.owned_engine.store(true, Ordering::Release);
+        }
+        Ok(remote::RemoteAttachment {
+            bootstrap_token: ready.token,
+            started: ready.started,
+        })
     }
 
     async fn install_bootstrap_token(&mut self, token: &str) -> std::result::Result<(), String> {
@@ -2861,6 +2987,8 @@ struct DetachedServerReady {
     version: u16,
     token: String,
     session_id: String,
+    #[serde(default)]
+    started: bool,
 }
 
 fn valid_bootstrap_token(token: &str) -> bool {
@@ -3012,7 +3140,7 @@ async fn run_remote_tui_process(
         let mut child = command.spawn().into_diagnostic()?;
         let status = tokio::select! {
             status = child.wait() => status.into_diagnostic()?,
-            interrupted = tokio::signal::ctrl_c() => {
+            interrupted = wait_for_remote_shutdown_signal() => {
                 interrupted.into_diagnostic()?;
                 let _ = child.kill().await;
                 let _ = child.wait().await;
@@ -3031,6 +3159,23 @@ async fn run_remote_tui_process(
         .await;
     }
     Err(miette!("remote TUI stopped unexpectedly"))
+}
+
+#[cfg(unix)]
+async fn wait_for_remote_shutdown_signal() -> io::Result<()> {
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
+    tokio::select! {
+        _ = interrupt.recv() => Ok(()),
+        _ = terminate.recv() => Ok(()),
+        _ = hangup.recv() => Ok(()),
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_remote_shutdown_signal() -> io::Result<()> {
+    tokio::signal::ctrl_c().await
 }
 
 fn auth_set_key(provider_name: &str) -> Result<()> {
@@ -3147,7 +3292,7 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Cli, Command, RuntimeDirectoryGuard, TrustCommand, UpgradeChannel,
+        Cli, Command, DetachedServerReady, RuntimeDirectoryGuard, TrustCommand, UpgradeChannel,
         create_guarded_server_runtime, resolve_tui_executable, sync_install_paths,
         valid_bootstrap_token, write_github_device_prompt, write_private_file_atomic,
     };
@@ -3162,6 +3307,26 @@ mod tests {
         assert_eq!(rustix_device_id(42_u64), Some(42));
         assert_eq!(rustix_mode_bits(0o755_u16), 0o755);
         assert_eq!(rustix_mode_bits(0o700_u32), 0o700);
+    }
+
+    #[test]
+    fn detached_readiness_ownership_is_explicit_and_old_descriptors_are_conservative()
+    -> Result<(), serde_json::Error> {
+        let started: DetachedServerReady = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "token": "a".repeat(64),
+            "session_id": "session",
+            "started": true,
+        }))?;
+        assert!(started.started);
+
+        let pre_existing: DetachedServerReady = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "token": "b".repeat(64),
+            "session_id": "session",
+        }))?;
+        assert!(!pre_existing.started);
+        Ok(())
     }
 
     #[test]

@@ -677,7 +677,7 @@ pub async fn guarded_http_fetch(
 }
 
 fn validate_fetch_timeout(timeout: Duration) -> Result<(), GuardedHttpFetchError> {
-    if timeout.is_zero() || timeout > Duration::from_secs(120) {
+    if timeout.is_zero() || timeout > Duration::from_mins(2) {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidRequest,
             "guarded HTTP fetch timeout is invalid",
@@ -744,7 +744,7 @@ pub(crate) fn build_client_with_proxy_auth(
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
-        .timeout(Duration::from_secs(300));
+        .timeout(Duration::from_mins(5));
     if proxy.is_none() && proxy_authentication.is_some() {
         return Err(ProviderError::new(
             ProviderErrorKind::InvalidRequest,
@@ -965,7 +965,7 @@ mod tests {
             proxy_authentication: None,
             dns_pin: None,
             max_bytes: 8,
-            timeout: Duration::from_secs(60),
+            timeout: Duration::from_mins(1),
         })
         .await
         .expect("fetch");
@@ -990,7 +990,7 @@ mod tests {
                 "1.1.1.1:443".parse().expect("pin"),
             )),
             max_bytes: 8,
-            timeout: Duration::from_secs(60),
+            timeout: Duration::from_mins(1),
         })
         .await
         .expect_err("proxy plus target pin must fail closed");
@@ -1046,7 +1046,7 @@ mod tests {
             proxy_authentication: Some(authentication),
             dns_pin: None,
             max_bytes: 8,
-            timeout: Duration::from_secs(60),
+            timeout: Duration::from_mins(1),
         })
         .await
         .expect("fetch through proxy");

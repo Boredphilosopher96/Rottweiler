@@ -7678,7 +7678,7 @@ fn compose_runtime_hooks(
                     .with_effect(HookEffect::WorkspaceMutating)
                     .with_applicable_tools(["write", "edit", "multi_edit"])
                     .with_required_capabilities([ToolCapability::Execute])
-                    .with_timeout(std::time::Duration::from_secs(120)),
+                    .with_timeout(std::time::Duration::from_mins(2)),
                 ToolchainHook::compile(config, Arc::clone(&runtime))?,
             )
             .map_err(|error| miette!("toolchain hook could not register: {error}"))?;
@@ -9172,7 +9172,7 @@ impl WebFetcher for PolicyWebFetcher {
                     proxy_authentication: None,
                     dns_pin,
                     max_bytes: request.max_bytes,
-                    timeout: std::time::Duration::from_secs(60),
+                    timeout: std::time::Duration::from_mins(1),
                 }) => {
                     response.map_err(|error| match error {
                         GuardedHttpFetchError::Provider(error) => {

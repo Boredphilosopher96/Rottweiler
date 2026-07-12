@@ -322,7 +322,7 @@ impl AuthProvider for StaticAuth {
 }
 
 /// Default time allowed for a browser to return to the loopback callback.
-pub const DEFAULT_OAUTH_CALLBACK_TIMEOUT: Duration = Duration::from_secs(180);
+pub const DEFAULT_OAUTH_CALLBACK_TIMEOUT: Duration = Duration::from_mins(3);
 const RESERVED_AUTHORIZATION_PARAMETERS: [&str; 7] = [
     "response_type",
     "client_id",

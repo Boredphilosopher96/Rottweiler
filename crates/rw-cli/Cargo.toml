@@ -20,6 +20,7 @@ flate2.workspace = true
 futures-util = "0.3.31"
 getrandom.workspace = true
 globset.workspace = true
+ignore.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true

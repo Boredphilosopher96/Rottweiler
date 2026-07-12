@@ -12,7 +12,6 @@ import {
 import { formatPercent, formatSessionCost } from "../render"
 import type {
   ApprovalDecision,
-  ContextSnapshot,
   PlanArtifact,
   PlanDecision,
   Question,
@@ -46,6 +45,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
   #callbacks: ReviewPanelCallbacks
   #pendingPaths = new Set<string>()
   #shellActive = false
+  #workspaceDiffMode = false
 
   constructor(
     ctx: RenderContext,
@@ -123,14 +123,56 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.add(this.diff)
     this.add(this.files)
     this.add(this.hint)
+    this.resizeForTerminal(ctx.height)
   }
 
-  update(state: RottweilerState): void {
-    const review = state.replay.active ? null : state.review
-    this.#review = review
+  /** Keep the modal and all of its retained children inside the terminal. */
+  resizeForTerminal(terminalHeight: number): void {
+    const panelHeight = Math.max(4, Math.min(17, terminalHeight - 2))
+    this.height = panelHeight
+    const contentRows = Math.max(1, panelHeight - 2)
+    this.summary.height = 1
+    this.summary.visible = true
+    this.hint.height = contentRows >= 2 ? 1 : 0
+    this.hint.visible = contentRows >= 2
+    const remaining = Math.max(0, contentRows - this.summary.height - this.hint.height)
+    const diffRows =
+      remaining <= 1
+        ? remaining
+        : Math.max(1, Math.min(remaining - 1, Math.ceil(remaining * 0.6)))
+    const fileRows = Math.max(0, remaining - diffRows)
+    this.diff.height = diffRows
+    this.diff.visible = diffRows > 0
+    this.files.height = fileRows
+    this.files.visible = fileRows > 0
+  }
+
+  update(state: RottweilerState, open = state.review !== null): void {
     this.#shellActive = state.shell.active
-    if (review === null) {
+    if (!open || state.replay.active) {
+      this.#workspaceDiffMode = false
+      this.#review = null
       this.visible = false
+      return
+    }
+    if (this.#workspaceDiffMode) {
+      // A current-worktree diff is an independent read-only presentation. It
+      // must survive unrelated state projections and must never retain a
+      // session-review decision target behind the visible diff.
+      this.#review = null
+      this.visible = true
+      this.files.blur()
+      return
+    }
+    const review = state.review
+    this.#review = review
+    if (review === null) {
+      this.visible = true
+      this.title = " Diff "
+      this.summary.content = "Loading changed-file diff…"
+      this.diff.diff = ""
+      this.files.options = []
+      this.hint.content = "Esc close"
       return
     }
     const selectedPath = review.files[this.files.getSelectedIndex()]?.path
@@ -158,6 +200,73 @@ export class ReviewPanelRenderable extends BoxRenderable {
     this.visible = true
     this.#showSelected()
     this.files.focus()
+  }
+
+  /** Switch back to the mutable retained session-review presentation. */
+  showSessionReview(): void {
+    this.#workspaceDiffMode = false
+  }
+
+  /** Leave any open presentation before restoring composer focus. */
+  closePresentation(): void {
+    this.#workspaceDiffMode = false
+    this.#review = null
+    this.files.blur()
+    this.visible = false
+  }
+
+  /** Select and reveal an exact retained review path. */
+  selectPath(path: string): boolean {
+    const index = this.#review?.files.findIndex((file) => file.path === path) ?? -1
+    if (index < 0) return false
+    this.files.setSelectedIndex(index)
+    this.#showSelected()
+    if (this.visible) this.files.focus()
+    return true
+  }
+
+  showDiffMessage(path: string, message: string): void {
+    this.visible = true
+    this.title = ` Diff · ${path} `
+    this.summary.content = message
+    this.diff.diff = ""
+    this.files.options = []
+    this.hint.content = "Esc close"
+  }
+
+  showWorkspaceDiff(
+    path: string,
+    unifiedDiff: string,
+    binary: boolean,
+    truncated: boolean,
+  ): void {
+    this.#workspaceDiffMode = true
+    this.#review = null
+    this.files.blur()
+    this.visible = true
+    this.title = ` Diff · ${path} `
+    this.summary.content = [
+      binary ? "Binary file" : "Current worktree diff",
+      truncated ? "truncated" : "",
+    ].filter(Boolean).join(" · ")
+    this.diff.diff = unifiedDiff
+    this.files.options = []
+    this.hint.content = "Esc close"
+  }
+
+  showWorkspaceDiffMessage(path: string, message: string): void {
+    this.#workspaceDiffMode = true
+    this.#review = null
+    this.files.blur()
+    this.showDiffMessage(path, message)
+  }
+
+  focusPresentation(): void {
+    if (this.#workspaceDiffMode) {
+      this.files.blur()
+    } else {
+      this.files.focus()
+    }
   }
 
   setDecisionPending(path: string, pending: boolean): void {
@@ -429,15 +538,18 @@ function bashApproval(tool: ToolProjection): { readonly command: string; readonl
 }
 
 export interface ContextPanelCallbacks {
-  readonly onPin: (itemId: string) => void
-  readonly onEvict: (itemId: string) => void
+  readonly onOpenDiff?: (path: string) => void
 }
 
+const MAX_SIDEBAR_CHANGED_FILES = 128
+
 export class ContextPanelRenderable extends BoxRenderable {
-  readonly meter: TextRenderable
-  readonly items: SelectRenderable
-  #snapshot: ContextSnapshot | null = null
+  readonly todoTitle: TextRenderable
+  readonly todos: SelectRenderable
+  readonly changedTitle: TextRenderable
+  readonly changedFiles: SelectRenderable
   #callbacks: ContextPanelCallbacks
+  #changedPaths: readonly string[] = []
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, callbacks: ContextPanelCallbacks) {
     super(ctx, {
@@ -451,17 +563,39 @@ export class ContextPanelRenderable extends BoxRenderable {
       borderColor: theme.border,
       backgroundColor: theme.panel,
       padding: 1,
-      title: " Context ",
+      gap: 1,
+      title: " Session ",
       titleColor: theme.info,
     })
     this.#callbacks = callbacks
-    this.meter = new TextRenderable(ctx, {
-      content: "Waiting for context snapshot",
-      fg: theme.muted,
-      height: 3,
-      wrapMode: "word",
+    this.todoTitle = new TextRenderable(ctx, {
+      content: "Todos",
+      fg: theme.info,
+      height: 1,
+      flexShrink: 0,
     })
-    this.items = new SelectRenderable(ctx, {
+    this.todos = new SelectRenderable(ctx, {
+      id: "session-todos",
+      width: "100%",
+      height: "45%",
+      options: [],
+      backgroundColor: theme.panel,
+      textColor: theme.foreground,
+      selectedBackgroundColor: theme.selection,
+      selectedTextColor: theme.accentStrong,
+      descriptionColor: theme.muted,
+      showScrollIndicator: true,
+      showSelectionIndicator: false,
+      showDescription: false,
+    })
+    this.changedTitle = new TextRenderable(ctx, {
+      content: "Changed files",
+      fg: theme.info,
+      height: 1,
+      flexShrink: 0,
+    })
+    this.changedFiles = new SelectRenderable(ctx, {
+      id: "session-changed-files",
       width: "100%",
       flexGrow: 1,
       options: [],
@@ -471,37 +605,78 @@ export class ContextPanelRenderable extends BoxRenderable {
       selectedTextColor: theme.accentStrong,
       descriptionColor: theme.muted,
       showScrollIndicator: true,
+      showDescription: false,
+      showSelectionIndicator: false,
     })
-    this.items.onKeyDown = (key) => {
-      const item = this.#snapshot?.items[this.items.getSelectedIndex()]
-      if (item === undefined) {
-        return
-      }
-      if (key.name === "p") {
-        key.preventDefault()
-        this.#callbacks.onPin(item.item_id)
-      } else if (key.name === "e" || key.name === "delete") {
-        key.preventDefault()
-        this.#callbacks.onEvict(item.item_id)
-      }
+    this.changedFiles.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) => {
+      this.#activateChangedFile(index)
+    })
+    this.changedFiles.onMouseUp = (event) => {
+      if (event.button !== 0) return
+      const row = Math.floor(event.y - this.changedFiles.y)
+      if (row < 0 || row >= this.changedFiles.height) return
+      // OpenTUI does not expose row hit-testing for SelectRenderable. Its runtime
+      // scroll offset is the only source of truth for mapping a visible mouse row.
+      const scrollOffset = (this.changedFiles as unknown as { scrollOffset: number }).scrollOffset
+      const index = scrollOffset + row
+      this.changedFiles.setSelectedIndex(index)
+      this.#activateChangedFile(index)
+      event.preventDefault()
+      event.stopPropagation()
     }
-    this.add(this.meter)
-    this.add(this.items)
+    this.add(this.todoTitle)
+    this.add(this.todos)
+    this.add(this.changedTitle)
+    this.add(this.changedFiles)
   }
 
   update(state: RottweilerState): void {
-    this.#snapshot = state.context
-    if (state.context === null) {
-      this.meter.content = "Waiting for context snapshot"
-      this.items.options = []
-      return
-    }
-    this.meter.content = `${formatPercent(state.context.used_tokens, state.context.usable_tokens)} context · ${state.context.cache_breakpoints.length} cache breaks\nP pin · E evict`
-    this.items.options = state.context.items.map((item) => ({
-      name: `${item.state.pinned ? "◆" : item.state.evicted ? "×" : "·"} ${item.label}`,
-      description: `${item.kind} · ${item.estimated_tokens} tok`,
-      value: item.item_id,
-    }))
+    this.todos.options =
+      state.todos.length === 0
+        ? [{ name: "No todos", description: "", value: "" }]
+        : state.todos.map((todo) => ({
+            name: `${todoGlyph(todo.status)} ${todo.content}`,
+            description: todo.id,
+            value: todo.id,
+          }))
+
+    const reviewPaths = state.review?.files.map((file) => file.path) ?? []
+    const statusPaths = state.workspaceStatus?.changedPaths
+    const changed = statusPaths === undefined ? null : new Set(statusPaths)
+    const candidates =
+      statusPaths === undefined
+        ? reviewPaths
+        : [...reviewPaths.filter((path) => changed?.has(path) === true), ...statusPaths]
+    const seen = new Set<string>()
+    this.#changedPaths = candidates
+      .filter((path) => {
+        if (path.length === 0 || seen.has(path)) return false
+        seen.add(path)
+        return true
+      })
+      .slice(0, MAX_SIDEBAR_CHANGED_FILES)
+    this.changedFiles.options =
+      this.#changedPaths.length === 0
+        ? [{ name: "No changed files", description: "", value: "" }]
+        : this.#changedPaths.map((path) => ({ name: path, description: "", value: path }))
+  }
+
+  #activateChangedFile(index: number): void {
+    const path = this.#changedPaths[index]
+    if (path !== undefined) this.#callbacks.onOpenDiff?.(path)
+  }
+}
+
+function todoGlyph(status: RottweilerState["todos"][number]["status"]): string {
+  switch (status) {
+    case "pending":
+      return "○"
+    case "in_progress":
+      return "◉"
+    case "completed":
+      return "✓"
+    case "blocked":
+      return "!"
   }
 }
 
@@ -552,7 +727,7 @@ export class StatusLineRenderable extends TextRenderable {
           ]),
       ...(state.replay.active ? ["◉ replay"] : []),
       ...(state.replay.active ? [] : [`◉ ${state.mode ?? "execute"}`]),
-      `model ${state.model ?? "fast"}`,
+      `model ${state.provider === null ? (state.model ?? "fast") : `${state.provider}/${state.model ?? "fast"}`}`,
       context,
       formatSessionCost(state.cost),
       cache,

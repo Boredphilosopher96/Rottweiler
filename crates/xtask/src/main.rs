@@ -20,7 +20,8 @@ use rw_types::{
     StoredAttachment, SubagentId, SubagentIsolation, SubagentResult, SubagentStatus, ToolCallId,
     ToolCapability, ToolOutput, ToolOutputPart, ToolOutputStream, TouchedFile, TouchedFileStatus,
     Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
+    WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use semver::Version;
@@ -1712,6 +1713,7 @@ fn generate_typescript() -> String {
     declaration!(WorkspaceFileMatch);
     declaration!(WorkspaceFilePreview);
     declaration!(WorkspaceStatus);
+    declaration!(WorkspaceDiff);
     declaration!(WorkspaceRootDescriptor);
     declaration!(UnifiedDiff);
     declaration!(ApprovalBinding);
@@ -1994,6 +1996,7 @@ fn contract_fixture() -> ContractFixture {
                 meta: command_meta.clone(),
                 session_id: SessionId("session-fixture".to_owned()),
                 model: ModelAlias("fast".to_owned()),
+                provider: None,
             },
             ClientCommand::Compact {
                 meta: command_meta.clone(),
@@ -2240,6 +2243,7 @@ fn contract_fixture() -> ContractFixture {
             EngineEvent::ModelChanged {
                 meta: event_meta(19),
                 model: ModelAlias("fast".to_owned()),
+                provider: None,
             },
             EngineEvent::ContextItemPinned {
                 meta: event_meta(20),

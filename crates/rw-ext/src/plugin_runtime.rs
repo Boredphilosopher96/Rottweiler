@@ -642,8 +642,7 @@ impl Drop for JsonRpcProviderEventStream {
         let removed = self
             .provider_streams
             .lock()
-            .map(|mut streams| streams.remove(&id).is_some())
-            .unwrap_or(false);
+            .is_ok_and(|mut streams| streams.remove(&id).is_some());
         if !removed {
             return;
         }

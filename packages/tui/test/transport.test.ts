@@ -5,6 +5,7 @@ import { createInitialState, engineEvent, reduceRottweilerState } from "../src/s
 import {
   EngineHttpSseClient,
   EngineTransportError,
+  normalizeWireEngineEvent,
   type BackoffScheduler,
 } from "../src/transport"
 import {
@@ -53,6 +54,33 @@ describe("authenticated UDS engine transport", () => {
   afterEach(async () => {
     await engine?.stop()
     engine = undefined
+  })
+
+  test("normalizes provider metadata omitted by older model-list events", () => {
+    const event = normalizeWireEngineEvent({
+      type: "models_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client-old",
+        request_id: "request-old",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      models: [
+        {
+          alias: "fast",
+          capabilities: {
+            tool_calling: true,
+            vision: false,
+            thinking: false,
+            cache_behavior: "none",
+          },
+        },
+      ],
+    })
+    expect(event).toMatchObject({
+      type: "models_listed",
+      models: [{ alias: "fast", providers: [] }],
+    })
   })
 
   test("mints a client credential and never permits command client-id spoofing", async () => {

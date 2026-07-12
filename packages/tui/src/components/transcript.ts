@@ -321,7 +321,7 @@ export class TranscriptRenderable extends BoxRenderable {
       id: "transcript",
       width: "100%",
       flexGrow: 1,
-      minHeight: 5,
+      minHeight: 1,
       backgroundColor: theme.background,
     })
     this.#theme = theme

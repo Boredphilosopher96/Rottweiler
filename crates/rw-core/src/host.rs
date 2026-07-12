@@ -11,8 +11,8 @@ use async_trait::async_trait;
 use rw_types::{
     ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta,
     CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, ModelAlias, ModelDescriptor,
-    RequestId, SequenceId, SessionDescriptor, SessionId, ShellId, TurnId, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceStatus,
+    RequestId, SequenceId, SessionDescriptor, SessionId, ShellId, TurnId, WorkspaceDiff,
+    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
 };
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast, mpsc, watch};
@@ -290,6 +290,12 @@ pub trait HostQueryService: Send + Sync + 'static {
         &self,
         session: &SessionDescriptor,
     ) -> Result<WorkspaceStatus, HostError>;
+    async fn workspace_diff(
+        &self,
+        session: &SessionDescriptor,
+        path: &str,
+        max_bytes: u32,
+    ) -> Result<WorkspaceDiff, HostError>;
 }
 
 /// A host operation could not be completed safely.
@@ -1056,6 +1062,27 @@ impl EngineHost {
                     }],
                 ))
             }
+            ClientCommand::GetWorkspaceDiff {
+                meta,
+                session_id,
+                path,
+                max_bytes,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let diff = self
+                    .queries
+                    .workspace_diff(&session.descriptor(), &path, max_bytes)
+                    .await?;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::WorkspaceDiffReady {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        diff,
+                    }],
+                ))
+            }
             ClientCommand::ShutdownHost { meta } => {
                 let opening_waiters = {
                     let mut registry = self.registry.lock().await;
@@ -1595,7 +1622,8 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::ReviewFile { session_id, .. }
         | ClientCommand::SearchWorkspaceFiles { session_id, .. }
         | ClientCommand::PreviewWorkspaceFile { session_id, .. }
-        | ClientCommand::GetWorkspaceStatus { session_id, .. } => Some(session_id.clone()),
+        | ClientCommand::GetWorkspaceStatus { session_id, .. }
+        | ClientCommand::GetWorkspaceDiff { session_id, .. } => Some(session_id.clone()),
         ClientCommand::CreateSession { .. }
         | ClientCommand::ListSessions { .. }
         | ClientCommand::SearchSessions { .. }
@@ -1853,6 +1881,7 @@ mod tests {
         async fn model_descriptors(&self) -> Result<Vec<ModelDescriptor>, HostError> {
             Ok(vec![ModelDescriptor {
                 alias: ModelAlias("fast".to_owned()),
+                providers: vec!["offline".to_owned()],
                 capabilities: ModelCapabilities {
                     tool_calling: true,
                     vision: false,
@@ -1897,6 +1926,20 @@ mod tests {
                 branch: None,
                 changed_paths: Vec::new(),
                 truncated: false,
+            })
+        }
+
+        async fn workspace_diff(
+            &self,
+            _session: &SessionDescriptor,
+            path: &str,
+            _max_bytes: u32,
+        ) -> Result<WorkspaceDiff, HostError> {
+            Ok(WorkspaceDiff {
+                path: path.to_owned(),
+                unified_diff: String::new(),
+                truncated: false,
+                binary: false,
             })
         }
     }
@@ -2450,6 +2493,7 @@ mod tests {
                         meta: meta("spoofed", "switch-model"),
                         session_id,
                         model: ModelAlias("big".to_owned()),
+                        provider: None,
                     },
                 )
                 .await

@@ -24,8 +24,8 @@ pub use protocol::{
     RewindTarget, SequenceId, SessionDescriptor, SessionId, SessionMode, SessionReview,
     SessionReviewFile, ShellId, StoredAttachment, SubagentId, SubagentIsolation, SubagentResult,
     SubagentStatus, ToolCapability, ToolOutputStream, TouchedFile, TouchedFileStatus,
-    TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage, WorkspaceDiff,
+    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 
 /// Version of the protocol emitted by these types.

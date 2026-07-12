@@ -57,6 +57,9 @@ pub enum RouterError {
     /// Candidate refers to an unregistered provider.
     #[error("model candidate references unregistered provider '{0}'")]
     ProviderNotRegistered(String),
+    /// Explicit provider route is not present in the selected alias.
+    #[error("model alias '{alias}' has no route through provider '{provider}'")]
+    ProviderNotAvailable { alias: String, provider: String },
 }
 
 /// Provider-blind alias router with ordered failover chains.
@@ -244,6 +247,26 @@ impl ProviderRouter {
         request: ProviderRequest,
     ) -> Result<BoxEventStream, RouterError> {
         let candidates = self.resolve(alias)?.to_vec();
+        self.stream_candidates(alias, candidates, request)
+    }
+
+    /// Streams through an already validated subset of one alias's routes.
+    /// This is used for an explicit provider selection, where cross-provider
+    /// fallback would violate the user's route choice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied route subset is empty.
+    #[allow(clippy::too_many_lines)]
+    pub fn stream_candidates(
+        &self,
+        alias: &str,
+        candidates: Vec<ModelCandidate>,
+        request: ProviderRequest,
+    ) -> Result<BoxEventStream, RouterError> {
+        if candidates.is_empty() {
+            return Err(RouterError::AliasNotConfigured(alias.to_owned()));
+        }
         let providers = self.providers.clone();
         let retry = self.retry.clone();
         let delay = Arc::clone(&self.delay);

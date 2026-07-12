@@ -2675,6 +2675,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "ignore",
  "miette",
  "nix 0.28.0",
  "portable-pty",

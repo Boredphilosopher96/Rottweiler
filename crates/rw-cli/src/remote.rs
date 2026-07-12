@@ -133,9 +133,10 @@ impl RemoteConfig {
         Ok(())
     }
 
-    /// Starts or attaches the remote engine. Detach is unconditional, so a
-    /// local UI exit never terminates the remote engine. An omitted permission
-    /// mode lets the remote host load its own user policy.
+    /// Starts or attaches the remote engine as a detached remote process. The
+    /// local lifecycle supervisor later shuts down only an engine it created;
+    /// explicit detach and pre-existing engines remain remote-owned. An omitted
+    /// permission mode lets the remote host load its own user policy.
     pub fn engine_start_command(&self) -> Result<SshCommand, RemoteError> {
         self.validate()?;
         let mut remote_argv = vec![
@@ -264,6 +265,47 @@ pub enum RecoveryOutcome {
     EngineAndTunnelRecovered,
 }
 
+/// Token and lifecycle ownership returned by one idempotent remote attach.
+/// `started` is true only when this invocation created the engine; attaching
+/// to an already-live, user-owned detached engine must never claim ownership.
+#[derive(Clone, Eq, PartialEq)]
+pub struct RemoteAttachment {
+    pub bootstrap_token: String,
+    pub started: bool,
+}
+
+impl std::fmt::Debug for RemoteAttachment {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RemoteAttachment")
+            .field("bootstrap_token", &"[REDACTED]")
+            .field("started", &self.started)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteInitialization {
+    pub outcome: RecoveryOutcome,
+    pub attachment: RemoteAttachment,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RemoteInitializationError {
+    pub message: String,
+    /// Present once attach-or-start returned a validated descriptor. Keeping
+    /// the token out of the message lets the caller transactionally unwind.
+    pub attachment: Option<RemoteAttachment>,
+}
+
+impl std::fmt::Display for RemoteInitializationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RemoteInitializationError {}
+
 /// Testable process/transport seam for remote recovery. Implementations must
 /// make `attach_or_start` idempotent: a live engine is attached to and its
 /// existing token returned; only a dead engine may be replaced.
@@ -272,7 +314,7 @@ pub trait RemoteRecoveryRuntime: Send {
     async fn authenticated_health(&mut self) -> Result<bool, String>;
     async fn tunnel_alive(&mut self) -> Result<bool, String>;
     async fn restart_tunnel(&mut self) -> Result<(), String>;
-    async fn attach_or_start(&mut self) -> Result<String, String>;
+    async fn attach_or_start(&mut self) -> Result<RemoteAttachment, String>;
     async fn install_bootstrap_token(&mut self, token: &str) -> Result<(), String>;
 }
 
@@ -281,14 +323,33 @@ pub trait RemoteRecoveryRuntime: Send {
 /// the local token is installed atomically by the runtime implementation.
 pub async fn initialize_remote<R: RemoteRecoveryRuntime>(
     runtime: &mut R,
-) -> Result<RecoveryOutcome, String> {
-    let token = runtime.attach_or_start().await?;
-    runtime.install_bootstrap_token(&token).await?;
-    runtime.restart_tunnel().await?;
-    if runtime.authenticated_health().await? {
-        Ok(RecoveryOutcome::EngineAndTunnelRecovered)
+) -> Result<RemoteInitialization, RemoteInitializationError> {
+    let attachment =
+        runtime
+            .attach_or_start()
+            .await
+            .map_err(|message| RemoteInitializationError {
+                message,
+                attachment: None,
+            })?;
+    let after_attach = |message| RemoteInitializationError {
+        message,
+        attachment: Some(attachment.clone()),
+    };
+    runtime
+        .install_bootstrap_token(&attachment.bootstrap_token)
+        .await
+        .map_err(after_attach)?;
+    runtime.restart_tunnel().await.map_err(after_attach)?;
+    if runtime.authenticated_health().await.map_err(after_attach)? {
+        Ok(RemoteInitialization {
+            outcome: RecoveryOutcome::EngineAndTunnelRecovered,
+            attachment,
+        })
     } else {
-        Err("forwarded remote engine failed authenticated health after startup".to_owned())
+        Err(after_attach(
+            "forwarded remote engine failed authenticated health after startup".to_owned(),
+        ))
     }
 }
 
@@ -312,8 +373,10 @@ pub async fn recover_remote<R: RemoteRecoveryRuntime>(
         }
     }
 
-    let token = runtime.attach_or_start().await?;
-    runtime.install_bootstrap_token(&token).await?;
+    let attachment = runtime.attach_or_start().await?;
+    runtime
+        .install_bootstrap_token(&attachment.bootstrap_token)
+        .await?;
     if runtime.authenticated_health().await? {
         return Ok(RecoveryOutcome::EngineAttachedOrStarted);
     }
@@ -727,7 +790,9 @@ mod tests {
     struct MockRecoveryState {
         health: VecDeque<Result<bool, String>>,
         tunnel_alive: VecDeque<Result<bool, String>>,
-        attach_tokens: VecDeque<Result<String, String>>,
+        attachments: VecDeque<Result<RemoteAttachment, String>>,
+        tunnel_restarts: VecDeque<Result<(), String>>,
+        token_installs: VecDeque<Result<(), String>>,
         calls: Vec<&'static str>,
         installed: Vec<String>,
     }
@@ -770,15 +835,16 @@ mod tests {
         }
 
         async fn restart_tunnel(&mut self) -> Result<(), String> {
-            self.0.lock().await.calls.push("restart_tunnel");
-            Ok(())
+            let mut state = self.0.lock().await;
+            state.calls.push("restart_tunnel");
+            state.tunnel_restarts.pop_front().unwrap_or(Ok(()))
         }
 
-        async fn attach_or_start(&mut self) -> Result<String, String> {
+        async fn attach_or_start(&mut self) -> Result<RemoteAttachment, String> {
             let mut state = self.0.lock().await;
             state.calls.push("attach_or_start");
             state
-                .attach_tokens
+                .attachments
                 .pop_front()
                 .unwrap_or_else(|| Err("missing mock attach result".to_owned()))
         }
@@ -787,7 +853,7 @@ mod tests {
             let mut state = self.0.lock().await;
             state.calls.push("install_token");
             state.installed.push(token.to_owned());
-            Ok(())
+            state.token_installs.pop_front().unwrap_or(Ok(()))
         }
     }
 
@@ -815,7 +881,10 @@ mod tests {
         let mut runtime = MockRecovery::new(MockRecoveryState {
             health: VecDeque::from([Ok(false), Ok(true)]),
             tunnel_alive: VecDeque::from([Ok(true)]),
-            attach_tokens: VecDeque::from([Ok("b".repeat(64))]),
+            attachments: VecDeque::from([Ok(RemoteAttachment {
+                bootstrap_token: "b".repeat(64),
+                started: false,
+            })]),
             ..MockRecoveryState::default()
         });
 
@@ -841,7 +910,10 @@ mod tests {
         let mut runtime = MockRecovery::new(MockRecoveryState {
             health: VecDeque::from([Ok(false), Ok(false), Ok(true)]),
             tunnel_alive: VecDeque::from([Ok(true)]),
-            attach_tokens: VecDeque::from([Ok("c".repeat(64))]),
+            attachments: VecDeque::from([Ok(RemoteAttachment {
+                bootstrap_token: "c".repeat(64),
+                started: false,
+            })]),
             ..MockRecoveryState::default()
         });
 
@@ -867,13 +939,22 @@ mod tests {
     async fn initialization_installs_token_before_exposing_forwarded_socket() {
         let mut runtime = MockRecovery::new(MockRecoveryState {
             health: VecDeque::from([Ok(true)]),
-            attach_tokens: VecDeque::from([Ok("d".repeat(64))]),
+            attachments: VecDeque::from([Ok(RemoteAttachment {
+                bootstrap_token: "d".repeat(64),
+                started: true,
+            })]),
             ..MockRecoveryState::default()
         });
 
         assert_eq!(
             initialize_remote(&mut runtime).await.expect("initialized"),
-            RecoveryOutcome::EngineAndTunnelRecovered
+            RemoteInitialization {
+                outcome: RecoveryOutcome::EngineAndTunnelRecovered,
+                attachment: RemoteAttachment {
+                    bootstrap_token: "d".repeat(64),
+                    started: true,
+                },
+            }
         );
         assert_eq!(
             runtime.calls().await,
@@ -884,6 +965,77 @@ mod tests {
                 "health"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn initialization_errors_retain_owned_attachment_for_transactional_cleanup() {
+        for (token_installs, tunnel_restarts, health, expected) in [
+            (
+                VecDeque::from([Err("token install failed".to_owned())]),
+                VecDeque::new(),
+                VecDeque::new(),
+                "token install failed",
+            ),
+            (
+                VecDeque::new(),
+                VecDeque::from([Err("tunnel failed".to_owned())]),
+                VecDeque::new(),
+                "tunnel failed",
+            ),
+            (
+                VecDeque::new(),
+                VecDeque::new(),
+                VecDeque::from([Ok(false)]),
+                "failed authenticated health",
+            ),
+            (
+                VecDeque::new(),
+                VecDeque::new(),
+                VecDeque::from([Err("health transport failed".to_owned())]),
+                "health transport failed",
+            ),
+        ] {
+            let attachment = RemoteAttachment {
+                bootstrap_token: "e".repeat(64),
+                started: true,
+            };
+            let mut runtime = MockRecovery::new(MockRecoveryState {
+                attachments: VecDeque::from([Ok(attachment.clone())]),
+                token_installs,
+                tunnel_restarts,
+                health,
+                ..MockRecoveryState::default()
+            });
+            let error = initialize_remote(&mut runtime)
+                .await
+                .expect_err("initialization failpoint");
+            assert!(error.message.contains(expected));
+            assert_eq!(error.attachment, Some(attachment));
+        }
+    }
+
+    #[tokio::test]
+    async fn initialization_attach_failure_does_not_claim_remote_ownership() {
+        let mut runtime = MockRecovery::new(MockRecoveryState {
+            attachments: VecDeque::from([Err("ssh failed".to_owned())]),
+            ..MockRecoveryState::default()
+        });
+        let error = initialize_remote(&mut runtime)
+            .await
+            .expect_err("attach failure");
+        assert_eq!(error.attachment, None);
+        assert_eq!(error.message, "ssh failed");
+    }
+
+    #[test]
+    fn remote_attachment_debug_never_exposes_bootstrap_token() {
+        let attachment = RemoteAttachment {
+            bootstrap_token: "secret-canary".to_owned(),
+            started: true,
+        };
+        let rendered = format!("{attachment:?}");
+        assert!(!rendered.contains("secret-canary"));
+        assert!(rendered.contains("REDACTED"));
     }
 
     #[tokio::test]
