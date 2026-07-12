@@ -206,3 +206,17 @@ per supported platform, selected automatically, is the honest one-app model.
 **Revisit when.** Cargo gains a secure standard for installing private runtime
 assets, or OpenTUI gains a stable Rust/C ABI that removes the helper process and
 native-library payload without weakening ADR-001's renderer requirement.
+
+---
+
+## ADR-019: Live catalogs are authoritative; sanitized provider state may cross the UI boundary
+
+**Status:** accepted 2026-07-12; narrows and supersedes ADR-008 only for model availability and explicit user selection. Role aliases remain the default internal routing abstraction.
+
+**Decision.** Provider-authenticated live discovery is the authority for which concrete models are currently selectable. The refreshable `models.toml` table enriches discovered ids with capabilities and pricing but never invents availability. A short-lived provider-neutral cache may expose bounded concrete ids/display names, capabilities, alias membership, current selection, and a sanitized provider inventory containing only display name, auth interaction kind, boolean authenticated/reachable state, model count, and category-only status. This information contains no credentials or connection configuration. Explicit selection may bind a session to a validated concrete `provider/model`; that binding is durable and must be revalidated/reconstructed on live resume while deterministic replay remains socket-free.
+
+The TUI may initiate provider-neutral OAuth or device-flow interactions through engine commands, but pending login objects, endpoints, client identity, credential references/values, account ids, token responses, and provider wire errors stay behind the Rust provider/core boundary. API-key entry requires a secret-input protocol and is not represented as an ordinary setting value.
+
+**Rationale.** Alias-derived menus cannot show newly released subscription models, configured providers with no current alias, authentication state, or a truthful concrete selection. Keeping only sanitized operational state in the protocol preserves provider-blind execution while making the default UI usable. Live discovery also avoids treating a periodically refreshed pricing dataset as an availability registry.
+
+**Revisit if:** a provider cannot return a bounded catalog, the protocol cannot prevent endpoint/error leakage, or a future signed offline catalog can prove availability with equivalent freshness and account entitlement semantics.

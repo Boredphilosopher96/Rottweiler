@@ -123,11 +123,16 @@ enum EngineEvent {
 }
 ```
 
-Model discovery is the narrow display exception to provider-blind execution:
-`ModelDescriptor` may project the ordered names of locally configured providers
-referenced by an alias so the TUI can render `/models` and `/providers`.
-Provider kinds, endpoints, proxy settings, credential references, tokens, and
-route implementation details remain inside `rw-providers`.
+Live model/provider discovery is the narrow display exception to provider-blind
+execution (ADR-019). The engine may project bounded concrete model ids and
+display names, capabilities, alias membership, availability/current selection,
+and provider rows containing only a display name, sanitized auth interaction
+kind, boolean auth/reachability state, and model count. This lets `/models`,
+`/providers`, and quick-connect flows work without teaching the TUI provider
+wire formats. Provider configuration, endpoints, proxy settings, credential
+references or values, account identifiers, raw transport errors, and route
+implementation details remain inside `rw-providers`. Status strings crossing
+the protocol are category-only and size-bounded.
 
 Engine events share one delivery channel, but have two explicit scopes.
 `CommandAcknowledged` is a connection-scoped control event with a request id,
