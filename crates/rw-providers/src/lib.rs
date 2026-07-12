@@ -49,10 +49,11 @@ pub use models_dev::{
 pub use openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode};
 pub use openai_subscription::{
     OPENAI_SUBSCRIPTION_AUTHORIZATION_ENDPOINT, OPENAI_SUBSCRIPTION_CLIENT_ID,
-    OPENAI_SUBSCRIPTION_REDIRECT_URI, OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT,
-    OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT, OpenAiSubscriptionAuth, OpenAiSubscriptionAuthConfig,
-    OpenAiSubscriptionTokenSink, extract_openai_subscription_account_id,
-    openai_subscription_oauth_flow, openai_subscription_oauth_flow_with_endpoints,
+    OPENAI_SUBSCRIPTION_MODELS_ENDPOINT, OPENAI_SUBSCRIPTION_REDIRECT_URI,
+    OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT,
+    OpenAiSubscriptionAuth, OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink,
+    extract_openai_subscription_account_id, openai_subscription_oauth_flow,
+    openai_subscription_oauth_flow_with_endpoints,
 };
 pub use pricing::{CostBreakdown, ModelPricing, PricingTable};
 pub use proxy::{ProxyEnvironment, ProxyResolution, ProxySettings, ProxySource};
@@ -62,11 +63,11 @@ pub use retry::{
 };
 pub use router::{ModelCandidate, ProviderRouter, RouterError};
 pub use types::{
-    BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,
-    NATIVE_WEB_SEARCH_TOOL_NAME, NativeWebSearchCapability, NativeWebSearchRequest, NetworkPolicy,
-    Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata,
-    ProviderRequest, ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition, UsageAccounting,
-    WireFrameSink, WireMode,
+    BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, DiscoveredModel,
+    DiscoveredProviderCatalog, FinishReason, NATIVE_WEB_SEARCH_TOOL_NAME,
+    NativeWebSearchCapability, NativeWebSearchRequest, NetworkPolicy, Provider, ProviderError,
+    ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest, ThinkingLevel,
+    TokenUsage, ToolChoice, ToolDefinition, UsageAccounting, WireFrameSink, WireMode,
 };
 
 /// Identifies this workspace component in diagnostics.

@@ -132,6 +132,10 @@ async fn network_denied_prevents_both_live_adapters_from_opening_a_socket() {
 
     let _process_guard = deny_outbound_network_for_process();
     for provider in [&anthropic as &dyn Provider, &openai as &dyn Provider] {
+        let Err(error) = provider.discover_models().await else {
+            panic!("network-denied model discovery must reject before transport");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::NetworkDisabled);
         let Err(error) = provider.stream(request()).await else {
             panic!("network-denied adapter must reject before transport");
         };

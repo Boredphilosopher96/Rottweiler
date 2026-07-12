@@ -9,14 +9,17 @@ use url::Url;
 
 use crate::types::RawSseFrame;
 use crate::{
-    AuthProvider, BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason,
-    NetworkPolicy, Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest,
-    ProxyAuthentication, ThinkingLevel, TokenUsage, ToolChoice, WireFrameSink, WireMode,
+    AuthProvider, BoxEventStream, CacheBreakpointSupport, Capabilities, DiscoveredModel,
+    DiscoveredProviderCatalog, FinishReason, NetworkPolicy, Provider, ProviderError,
+    ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyAuthentication, ThinkingLevel,
+    TokenUsage, ToolChoice, WireFrameSink, WireMode,
     http::{build_client_with_proxy_auth, require_network, response_error, transport_error},
     sse::{SseDecoder, SseEvent},
 };
 
 const MAX_TOOL_ARGUMENT_BYTES: usize = 1_048_576;
+const MAX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MODEL_CATALOG_PAGES: usize = 32;
 
 /// How a configured Anthropic endpoint represents the thinking dial.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -141,6 +144,179 @@ impl AnthropicProvider {
         };
         Ok(Box::pin(stream))
     }
+
+    async fn discover_models_impl(&self) -> Result<DiscoveredProviderCatalog, ProviderError> {
+        require_network(self.config.network_policy)?;
+        let material = self.config.auth.material().await?;
+        let mut headers = HeaderMap::new();
+        material.apply_anthropic(&mut headers)?;
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        let endpoint = anthropic_models_endpoint(&self.config.endpoint)?;
+        let mut after_id: Option<String> = None;
+        let mut total_bytes = 0_usize;
+        let mut models = BTreeMap::new();
+        for _ in 0..MAX_MODEL_CATALOG_PAGES {
+            let mut page_endpoint = endpoint.clone();
+            {
+                let mut query = page_endpoint.query_pairs_mut();
+                query.append_pair("limit", "100");
+                if let Some(cursor) = &after_id {
+                    query.append_pair("after_id", cursor);
+                }
+            }
+            let response = self
+                .client
+                .get(page_endpoint)
+                .headers(headers.clone())
+                .send()
+                .await
+                .map_err(transport_error)?;
+            if let Some(error) = response_error(&response) {
+                return Err(error);
+            }
+            let remaining = MAX_MODEL_CATALOG_BYTES.saturating_sub(total_bytes);
+            let bytes = bounded_anthropic_catalog_bytes(response, remaining).await?;
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            let page = parse_anthropic_models_page(&bytes)?;
+            models.extend(
+                page.models
+                    .into_iter()
+                    .map(|model| (model.id.clone(), model)),
+            );
+            if !page.has_more {
+                return Ok(DiscoveredProviderCatalog {
+                    provider: self.config.name.clone(),
+                    models: models.into_values().collect(),
+                });
+            }
+            let next = page
+                .last_id
+                .and_then(|cursor| nonempty(&cursor).map(str::to_owned));
+            if next.is_none() || next == after_id {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Protocol,
+                    "Anthropic model discovery returned a non-advancing pagination cursor",
+                ));
+            }
+            after_id = next;
+        }
+        Err(ProviderError::new(
+            ProviderErrorKind::Protocol,
+            "Anthropic model discovery exceeded the page limit",
+        ))
+    }
+}
+
+struct AnthropicModelsPage {
+    models: Vec<DiscoveredModel>,
+    has_more: bool,
+    last_id: Option<String>,
+}
+
+fn anthropic_models_endpoint(endpoint: &Url) -> Result<Url, ProviderError> {
+    let base = endpoint
+        .path()
+        .strip_suffix("/messages")
+        .unwrap_or_else(|| endpoint.path().trim_end_matches('/'));
+    let mut discovered = endpoint.clone();
+    discovered.set_path(&format!("{base}/models"));
+    discovered.set_query(None);
+    discovered.set_fragment(None);
+    if discovered.cannot_be_a_base() {
+        return Err(ProviderError::new(
+            ProviderErrorKind::Protocol,
+            "could not construct Anthropic model catalog endpoint",
+        ));
+    }
+    Ok(discovered)
+}
+
+async fn bounded_anthropic_catalog_bytes(
+    response: reqwest::Response,
+    remaining: usize,
+) -> Result<Vec<u8>, ProviderError> {
+    if remaining == 0
+        || response
+            .content_length()
+            .is_some_and(|length| length > remaining as u64)
+    {
+        return Err(anthropic_catalog_too_large());
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(transport_error)?;
+        if bytes.len().saturating_add(chunk.len()) > remaining {
+            return Err(anthropic_catalog_too_large());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+fn anthropic_catalog_too_large() -> ProviderError {
+    ProviderError::new(
+        ProviderErrorKind::Protocol,
+        "Anthropic model discovery response exceeded the size limit",
+    )
+}
+
+fn parse_anthropic_models_page(bytes: &[u8]) -> Result<AnthropicModelsPage, ProviderError> {
+    let envelope: Value = serde_json::from_slice(bytes).map_err(|_| {
+        ProviderError::new(
+            ProviderErrorKind::Protocol,
+            "Anthropic model discovery returned invalid JSON",
+        )
+    })?;
+    let data = envelope
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "Anthropic model discovery returned an invalid envelope",
+            )
+        })?;
+    let models = data
+        .iter()
+        .filter(|model| {
+            model
+                .get("type")
+                .and_then(Value::as_str)
+                .is_none_or(|kind| kind == "model")
+        })
+        .filter_map(|model| {
+            let id = model.get("id").and_then(Value::as_str).and_then(nonempty)?;
+            Some(DiscoveredModel {
+                id: id.to_owned(),
+                display_name: model
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .and_then(nonempty)
+                    .map(str::to_owned),
+                description: None,
+                capabilities: None,
+                pricing: None,
+            })
+        })
+        .collect();
+    Ok(AnthropicModelsPage {
+        models,
+        has_more: envelope
+            .get("has_more")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        last_id: envelope
+            .get("last_id")
+            .and_then(Value::as_str)
+            .and_then(nonempty)
+            .map(str::to_owned),
+    })
+}
+
+fn nonempty(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
 }
 
 #[async_trait]
@@ -159,6 +335,10 @@ impl Provider for AnthropicProvider {
             max_output_tokens: self.config.max_output_tokens,
             wire_mode: WireMode::AnthropicMessages,
         }
+    }
+
+    async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
+        self.discover_models_impl().await.map(Some)
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {

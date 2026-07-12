@@ -527,6 +527,12 @@ impl Provider for Recorder {
         self.inner.cached_model_metadata()
     }
 
+    async fn discover_models(
+        &self,
+    ) -> Result<Option<crate::DiscoveredProviderCatalog>, ProviderError> {
+        self.inner.discover_models().await
+    }
+
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         // Reserving bounded writer capacity happens before assigning an
         // occurrence or contacting the provider. Backpressure therefore

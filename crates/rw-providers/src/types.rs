@@ -312,6 +312,30 @@ pub struct ProviderModelMetadata {
     pub accounting: UsageAccounting,
 }
 
+/// One model returned by an authenticated provider's live catalog.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveredModel {
+    /// Provider-local model identifier accepted by inference requests.
+    pub id: String,
+    /// Human-readable provider-supplied name when available.
+    pub display_name: Option<String>,
+    /// Provider-supplied description when available.
+    pub description: Option<String>,
+    /// Authoritative live capabilities when the catalog exposes them.
+    pub capabilities: Option<Capabilities>,
+    /// Authoritative live pricing when the catalog exposes it.
+    pub pricing: Option<ModelPricing>,
+}
+
+/// Bounded snapshot of models currently available from one authenticated provider.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveredProviderCatalog {
+    /// Stable, sanitized logical provider key.
+    pub provider: String,
+    /// Picker-visible models in deterministic provider-local id order.
+    pub models: Vec<DiscoveredModel>,
+}
+
 /// Provider HTTP dialect. Kept inside the provider boundary and recorded so
 /// raw replay frames are routed through the same parser as live traffic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -552,6 +576,16 @@ pub trait Provider: Send + Sync {
     /// Providers with lazy catalogs expose `None` until discovery succeeds.
     fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
         None
+    }
+
+    /// Queries the authenticated provider for its currently selectable models.
+    /// Static and replay-only providers use the default `None` result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized authentication, network, or catalog protocol error.
+    async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
+        Ok(None)
     }
 
     /// Starts a normalized streaming response.

@@ -27,6 +27,9 @@ pub const OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT: &str = "https://auth.openai.com/oa
 /// Raw Responses endpoint backed by a `ChatGPT` Codex subscription.
 pub const OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT: &str =
     "https://chatgpt.com/backend-api/codex/responses";
+/// Authenticated model catalog backed by a `ChatGPT` Codex subscription.
+pub const OPENAI_SUBSCRIPTION_MODELS_ENDPOINT: &str =
+    "https://chatgpt.com/backend-api/codex/models";
 /// Exact callback required by the public native-client registration.
 pub const OPENAI_SUBSCRIPTION_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 

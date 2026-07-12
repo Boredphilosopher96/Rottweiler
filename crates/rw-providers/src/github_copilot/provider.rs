@@ -14,10 +14,10 @@ use super::{
 use crate::types::RawSseFrame;
 use crate::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, BoxEventStream,
-    CacheBreakpointSupport, Capabilities, NetworkPolicy, OpenAiCompatibleConfig,
-    OpenAiCompatibleProvider, OpenAiWireMode, Provider, ProviderError, ProviderErrorKind,
-    ProviderEvent, ProviderModelMetadata, ProviderRequest, ProxyAuthentication, Secret, StaticAuth,
-    UsageAccounting, WireFrameSink, WireMode,
+    CacheBreakpointSupport, Capabilities, DiscoveredModel, DiscoveredProviderCatalog,
+    NetworkPolicy, OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode, Provider,
+    ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest,
+    ProxyAuthentication, Secret, StaticAuth, UsageAccounting, WireFrameSink, WireMode,
     http::{build_client_with_proxy_auth, require_network, response_error, transport_error},
 };
 
@@ -332,6 +332,24 @@ impl Provider for GitHubCopilotProvider {
                 micros_usd_per_credit: 10_000,
             },
         })
+    }
+
+    async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
+        let catalog = self.config.runtime.catalog().await?;
+        let mut models = Vec::new();
+        for (_, model) in catalog.iter().filter(|(_, model)| model.picker_enabled) {
+            models.push(DiscoveredModel {
+                id: model.id.clone(),
+                display_name: Some(model.name.clone()),
+                description: None,
+                capabilities: Some(discovered_capabilities(model)),
+                pricing: model.model_pricing()?,
+            });
+        }
+        Ok(Some(DiscoveredProviderCatalog {
+            provider: self.config.name.clone(),
+            models,
+        }))
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
@@ -882,6 +900,7 @@ mod tests {
                 .map(|pricing| pricing.input_per_million_micros_usd),
             Some(2_500_000)
         );
+        assert_discovered_catalog(&provider).await;
         let requests = server
             .await
             .unwrap_or_else(|error| panic!("server task must finish: {error}"));
@@ -893,6 +912,24 @@ mod tests {
             assert!(request.contains("x-github-api-version: 2026-06-01"));
             assert!(!request.contains("PRIVATE-COPILOT-TOKEN\r\nPRIVATE"));
         }
+    }
+
+    async fn assert_discovered_catalog(provider: &GitHubCopilotProvider) {
+        let discovered = provider
+            .discover_models()
+            .await
+            .unwrap_or_else(|error| panic!("catalog projection must work: {error}"))
+            .unwrap_or_else(|| panic!("Copilot must expose model discovery"));
+        assert_eq!(discovered.provider, "github-copilot");
+        assert_eq!(discovered.models.len(), 1);
+        assert_eq!(discovered.models[0].id, "gpt-fixture");
+        assert_eq!(
+            discovered.models[0]
+                .capabilities
+                .as_ref()
+                .and_then(|capabilities| capabilities.max_context_tokens),
+            Some(100_000)
+        );
     }
 
     fn catalog_fixture() -> String {
