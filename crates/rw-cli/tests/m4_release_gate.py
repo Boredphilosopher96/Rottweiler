@@ -857,12 +857,14 @@ def supervisor_reattach_gate(
     # This is an isolated, generated CI workspace. Opt into the product's
     # explicit non-persisting CI trust escape hatch so the fixture exercises
     # supervision instead of blocking at the interactive folder-trust prompt.
+    runtime_root = home / "run"
     process = spawn_pty(
         rw,
-        isolated_env(home, tui),
+        isolated_env(home),
         workspace,
         ["--dangerously-trust"],
     )
+    closed_normally = False
     try:
         read_until(process, FIRST_PAINT_MARKER, timeout=8)
         first_tui = wait_for_tui_child(process.pid, tui)
@@ -882,8 +884,43 @@ def supervisor_reattach_gate(
             "M4 supervisor reattach: actual compiled TUI was SIGKILLed and the replacement "
             "re-rendered the complete durable prompt/response transcript"
         )
+        owned_children = descendant_pids(process.pid)
+        os.write(process.fd, b"\x03")
+        deadline = time.monotonic() + 8
+        wait_status: int | None = None
+        while time.monotonic() < deadline:
+            found, status = os.waitpid(process.pid, os.WNOHANG)
+            if found == process.pid:
+                wait_status = status
+                break
+            time.sleep(0.01)
+        if wait_status is None:
+            raise RuntimeError("normal TUI Ctrl-C did not stop the installed-bundle supervisor")
+        exit_code = os.waitstatus_to_exitcode(wait_status)
+        if exit_code != 0:
+            raise RuntimeError(
+                f"normal TUI Ctrl-C exited the installed-bundle supervisor with {exit_code}"
+            )
+        cleanup_deadline = time.monotonic() + 5
+        while time.monotonic() < cleanup_deadline:
+            live_children = [pid for pid in owned_children if process_exists(pid)]
+            runtime_leaves = list(runtime_root.glob("engine-*"))
+            if not live_children and not runtime_leaves:
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError(
+                "installed-bundle close leaked supervised children or owned runtime leaves: "
+                f"children={live_children!r} runtime={runtime_leaves!r}"
+            )
+        closed_normally = True
+        print(
+            "M4 installed-bundle lifecycle: colocated rw/TUI/native resolved without an "
+            "override; normal Ctrl-C reaped supervisor children and private runtime leaves"
+        )
     finally:
-        terminate_process_tree(process.pid)
+        if not closed_normally:
+            terminate_process_tree(process.pid)
         with contextlib.suppress(OSError):
             os.close(process.fd)
 
@@ -1095,6 +1132,7 @@ def ssh_loopback_gate(
             session_id,
         ],
     )
+    remote_closed_normally = False
     try:
         remote_ready = read_until(remote, DRIVER_READY_MARKER, timeout=20)
         if FIRST_PAINT_MARKER not in remote_ready:
@@ -1112,11 +1150,33 @@ def ssh_loopback_gate(
             "M4 SSH loopback: production rw --remote path rendered the byte-identical "
             "canonical durable user/assistant transcript through StreamLocal forwarding"
         )
+        descriptor, remote_engine_pid = wait_for_detached_remote(session_id)
+        os.write(remote.fd, b"\x03")
+        exit_code = os.waitstatus_to_exitcode(wait_pid(remote.pid, 8))
+        if exit_code != 0:
+            raise RuntimeError(f"attached remote close exited with {exit_code}")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if not process_exists(remote_engine_pid) and not descriptor.parent.exists():
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError(
+                "normal remote close leaked its engine or runtime directory: "
+                f"pid={remote_engine_pid} runtime={descriptor.parent}"
+            )
+        remote_closed_normally = True
+        print(
+            "M4 SSH lifecycle: normal attached Ctrl-C stopped the local TUI, tunnel, "
+            "remote engine, and owned remote runtime directory"
+        )
     finally:
-        terminate_process_tree(remote.pid)
+        if not remote_closed_normally:
+            terminate_process_tree(remote.pid)
         with contextlib.suppress(OSError):
             os.close(remote.fd)
-        cleanup_detached_remote(session_id)
+        if not remote_closed_normally:
+            cleanup_detached_remote(session_id)
 
 
 def require_visible_markers(captured: bytes) -> None:
@@ -1182,29 +1242,43 @@ def wait_for_canonical_durable_transcript(
     raise RuntimeError(f"durable transcript did not settle: {last_error}")
 
 
-def cleanup_detached_remote(session_id: str) -> None:
+def wait_for_detached_remote(
+    session_id: str, timeout: float = 5.0
+) -> tuple[pathlib.Path, int]:
     root = pathlib.Path(f"/tmp/rottweiler-{os.geteuid()}")
-    for descriptor in root.glob("engine-*/runtime.json"):
-        try:
-            value = json.loads(descriptor.read_text(encoding="utf-8"))
-            if value.get("session_id") != session_id:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for descriptor in root.glob("engine-*/runtime.json"):
+            try:
+                value = json.loads(descriptor.read_text(encoding="utf-8"))
+                if value.get("session_id") != session_id:
+                    continue
+                pid = int(value["pid"])
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
                 continue
-            pid = int(value["pid"])
-        except (OSError, ValueError, KeyError, json.JSONDecodeError):
-            continue
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGTERM)
-        directory = descriptor.parent
-        deadline = time.monotonic() + 2
-        while process_exists(pid) and time.monotonic() < deadline:
-            time.sleep(0.01)
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-        for path in [directory / "engine.sock", directory / "auth.token", descriptor]:
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-        with contextlib.suppress(OSError):
-            directory.rmdir()
+            return descriptor, pid
+        time.sleep(0.01)
+    raise RuntimeError(f"detached remote runtime did not appear for {session_id}")
+
+
+def cleanup_detached_remote(session_id: str) -> None:
+    try:
+        descriptor, pid = wait_for_detached_remote(session_id, timeout=0.1)
+    except RuntimeError:
+        return
+    directory = descriptor.parent
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + 2
+    while process_exists(pid) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGKILL)
+    for path in [directory / "engine.sock", directory / "auth.token", descriptor]:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+    with contextlib.suppress(OSError):
+        directory.rmdir()
 
 
 def parse_args() -> argparse.Namespace:

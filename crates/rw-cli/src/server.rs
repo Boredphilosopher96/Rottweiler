@@ -5,7 +5,10 @@ use std::{
     fs::{self, OpenOptions},
     io::Write as _,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -13,7 +16,7 @@ use http_body_util::{BodyExt as _, Full, Limited, StreamBody, combinators::Unsyn
 use hyper::{
     Method, Request, Response, StatusCode,
     body::{Bytes, Frame, Incoming},
-    header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, HeaderValue},
+    header::{ACCEPT, AUTHORIZATION, CACHE_CONTROL, CONNECTION, CONTENT_TYPE, HeaderValue},
     server::conn::http1,
     service::service_fn,
 };
@@ -24,7 +27,10 @@ use rw_core::{
     SequenceId, SessionId, ShellId,
 };
 use serde::{Deserialize, Serialize};
-use tokio::{net::UnixListener, sync::mpsc};
+use tokio::{
+    net::UnixListener,
+    sync::{Notify, mpsc},
+};
 
 const COMMAND_BODY_LIMIT: usize = 2 * 1024 * 1024;
 const HOST_EVENT_FORWARD_CAPACITY: usize = 256;
@@ -491,6 +497,7 @@ pub struct ServerState {
     engine: Arc<dyn ServerEngine>,
     bootstrap: SecretToken,
     clients: Arc<ClientRegistry>,
+    shutdown_notifier: Arc<Notify>,
 }
 
 impl fmt::Debug for ServerState {
@@ -509,6 +516,7 @@ impl ServerState {
             engine,
             bootstrap: runtime.bootstrap().clone(),
             clients: Arc::new(ClientRegistry::new()),
+            shutdown_notifier: Arc::new(Notify::new()),
         }
     }
 }
@@ -523,6 +531,7 @@ pub async fn serve(
     let listener = UnixListener::from_std(listener).into_diagnostic()?;
     loop {
         tokio::select! {
+            () = state.shutdown_notifier.notified() => return Ok(()),
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
                     return Ok(());
@@ -532,8 +541,15 @@ pub async fn serve(
                 let (stream, _) = accepted.into_diagnostic()?;
                 let connection_state = state.clone();
                 tokio::spawn(async move {
+                    let shutdown_state = connection_state.clone();
+                    let connection_shutdown = Arc::new(AtomicBool::new(false));
+                    let request_shutdown = Arc::clone(&connection_shutdown);
                     let service = service_fn(move |request| {
-                        handle_request(request, connection_state.clone())
+                        handle_request(
+                            request,
+                            connection_state.clone(),
+                            Arc::clone(&request_shutdown),
+                        )
                     });
                     if let Err(error) = http1::Builder::new()
                         .keep_alive(true)
@@ -541,6 +557,9 @@ pub async fn serve(
                         .await
                     {
                         tracing::debug!(reason = %error, "engine client connection closed");
+                    }
+                    if connection_shutdown.load(Ordering::Acquire) {
+                        shutdown_state.shutdown_notifier.notify_one();
                     }
                 });
             }
@@ -552,6 +571,7 @@ pub async fn serve(
 async fn handle_request(
     request: Request<Incoming>,
     state: ServerState,
+    connection_shutdown: Arc<AtomicBool>,
 ) -> std::result::Result<Response<HttpBody>, Infallible> {
     let response = match (request.method(), request.uri().path()) {
         (&Method::POST, "/v1/connect") => {
@@ -610,19 +630,31 @@ async fn handle_request(
                     match serde_json::from_slice::<ClientCommand>(&collected.to_bytes()) {
                         Ok(mut command) => {
                             command.meta_mut().client_id = client.client_id.clone();
+                            let shutdown_requested =
+                                matches!(&command, ClientCommand::ShutdownHost { .. });
                             let outcome = if client.capability == ClientCapability::ShellBroker {
                                 dispatch_shell_broker(&*state.engine, command).await
                             } else {
                                 state.engine.dispatch(client.client_id, command).await
                             };
                             match outcome {
-                                Ok(outcome) => match serde_json::to_vec(&outcome) {
-                                    Ok(bytes) => json_response(StatusCode::ACCEPTED, bytes),
-                                    Err(_) => error_response(
-                                        StatusCode::INTERNAL_SERVER_ERROR,
-                                        "command outcome could not serialize",
-                                    ),
-                                },
+                                Ok(outcome) => {
+                                    let accepted = outcome == CommandOutcome::Accepted;
+                                    let mut response = match serde_json::to_vec(&outcome) {
+                                        Ok(bytes) => json_response(StatusCode::ACCEPTED, bytes),
+                                        Err(_) => error_response(
+                                            StatusCode::INTERNAL_SERVER_ERROR,
+                                            "command outcome could not serialize",
+                                        ),
+                                    };
+                                    if shutdown_requested && accepted {
+                                        connection_shutdown.store(true, Ordering::Release);
+                                        response
+                                            .headers_mut()
+                                            .insert(CONNECTION, HeaderValue::from_static("close"));
+                                    }
+                                    response
+                                }
                                 Err(error) => error_response(StatusCode::BAD_GATEWAY, &error),
                             }
                         }
@@ -856,7 +888,10 @@ mod tests {
             self.received
                 .lock()
                 .expect("received commands")
-                .push((bound_client, command));
+                .push((bound_client, command.clone()));
+            if matches!(command, ClientCommand::ShutdownHost { .. }) {
+                return Ok(CommandOutcome::Accepted);
+            }
             Ok(CommandOutcome::Rejected {
                 error: EngineError {
                     category: EngineErrorCategory::Protocol,
@@ -1208,6 +1243,39 @@ mod tests {
 
         shutdown.send(true).expect("stop server");
         server.await.expect("server join").expect("server result");
+    }
+
+    #[tokio::test]
+    async fn accepted_shutdown_host_stops_the_transport_listener() {
+        let root = tempdir().expect("runtime root");
+        let (runtime, listener) = ServerRuntime::create(root.path()).expect("runtime");
+        let engine = Arc::new(StubEngine::default());
+        let state = ServerState::new(engine.clone(), &runtime);
+        let (_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve(listener, state, shutdown_rx));
+        let bootstrap = fs::read_to_string(&runtime.paths.token).expect("bootstrap token");
+
+        crate::remote::shutdown_authenticated_host(
+            &runtime.paths.socket,
+            bootstrap.trim(),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .expect("attached remote shutdown");
+        tokio::time::timeout(std::time::Duration::from_secs(1), server)
+            .await
+            .expect("server must stop after accepted host shutdown")
+            .expect("server task")
+            .expect("server result");
+        assert!(matches!(
+            engine
+                .received
+                .lock()
+                .expect("received commands")
+                .last()
+                .map(|(_, command)| command),
+            Some(ClientCommand::ShutdownHost { .. })
+        ));
     }
 
     #[tokio::test]

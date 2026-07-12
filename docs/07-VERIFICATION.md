@@ -286,6 +286,22 @@ timestamps, and gzip headers under `SOURCE_DATE_EPOCH`. Its checkout-independent
 fixture must produce byte-identical archives before a release artifact can be
 signed or attested.
 
+The distribution renderer accepts single-link regular release archives only,
+requires both the macOS and Linux publication families, and deterministically
+emits a Homebrew formula plus bootstrap from their exact bytes. Tests reverse
+the input order and require byte-identical output; assert immutable tag URLs,
+lengths, SHA-256 values, private `libexec` helpers, the sole public `rw`
+wrapper, HTTPS-only redirects, supported-host selection, and rejection of bad
+names, duplicates, links, unsupported/missing platforms, length changes, and
+digest changes. The pre-release `--HEAD` formula builds both locked Rust and Bun
+components and has the same private-helper/public-wrapper layout. Stable release
+CI syntax-checks both generated files, attests and publishes them with the
+archives, and verifies the Homebrew tap's resulting `main` commit. Release and
+soak acceptance must invoke only the installed public `rw` with no TUI path
+override, then assert the complete supervisor process tree exits on default
+close. Homebrew tests also require `rw upgrade` to direct users to
+`brew upgrade rottweiler` rather than mutating the Cellar.
+
 ## 7. Definition of Done (any task, any milestone)
 
 1. Code + tests land together; new behavior has a replay fixture or property test.

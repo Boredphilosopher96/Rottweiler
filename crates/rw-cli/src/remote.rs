@@ -7,15 +7,21 @@ use std::{
 };
 
 use async_trait::async_trait;
-use http_body_util::{BodyExt as _, Empty};
+use http_body_util::{BodyExt as _, Full, Limited};
 use hyper::{
     Method, Request, StatusCode,
-    body::Bytes,
+    body::{Bytes, Incoming},
     client::conn::http1 as client_http1,
-    header::{AUTHORIZATION, HOST, HeaderValue},
+    header::{AUTHORIZATION, CONNECTION, CONTENT_TYPE, HOST, HeaderValue},
 };
 use hyper_util::rt::TokioIo;
+use rw_core::{ClientCommand, CommandMeta, CommandOutcome, PROTOCOL_VERSION, RequestId};
 use tokio::net::UnixStream;
+
+use crate::server::ClientCredentials;
+
+const CLIENT_HEADER: &str = "x-rottweiler-client";
+const CONTROL_BODY_LIMIT: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemotePermissionMode {
@@ -376,6 +382,57 @@ pub async fn run_watchdog<R: RemoteRecoveryRuntime>(
     }
 }
 
+/// Production watchdog control. Pausing is acknowledged only after any
+/// in-flight recovery pass has completed, so the caller can use the still-live
+/// tunnel for one final authenticated shutdown without racing a restart.
+pub enum WatchdogCommand {
+    Pause(tokio::sync::oneshot::Sender<()>),
+    Shutdown,
+}
+
+pub async fn run_controlled_watchdog<R: RemoteRecoveryRuntime>(
+    mut runtime: R,
+    mut control: tokio::sync::mpsc::Receiver<WatchdogCommand>,
+    policy: WatchdogPolicy,
+) -> Result<(), String> {
+    if policy.maximum_consecutive_failures == 0 {
+        return Err("remote watchdog recovery budget must be positive".to_owned());
+    }
+    let mut failures = 0_u32;
+    loop {
+        tokio::select! {
+            biased;
+            command = control.recv() => match command {
+                Some(WatchdogCommand::Pause(acknowledged)) => {
+                    let _ = acknowledged.send(());
+                    loop {
+                        match control.recv().await {
+                            Some(WatchdogCommand::Shutdown) | None => return Ok(()),
+                            Some(WatchdogCommand::Pause(acknowledged)) => {
+                                let _ = acknowledged.send(());
+                            }
+                        }
+                    }
+                }
+                Some(WatchdogCommand::Shutdown) | None => return Ok(()),
+            },
+            () = tokio::time::sleep(policy.interval) => {
+                match recover_remote(&mut runtime).await {
+                    Ok(_) => failures = 0,
+                    Err(error) => {
+                        failures = failures.saturating_add(1);
+                        if failures >= policy.maximum_consecutive_failures {
+                            return Err(format!(
+                                "remote watchdog recovery budget exhausted after {failures} failures: {error}"
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Sends the same bootstrap-authenticated health request used by production
 /// clients over the forwarded Unix socket. A non-200 response is a valid
 /// negative probe; connection and protocol failures are returned to the
@@ -402,7 +459,7 @@ pub async fn probe_authenticated_health(
             .uri("/v1/health")
             .header(HOST, "localhost")
             .header(AUTHORIZATION, authorization)
-            .body(Empty::<Bytes>::new())
+            .body(Full::new(Bytes::new()))
             .map_err(|_| "could not build authenticated remote health request".to_owned())?;
         let response = sender
             .send_request(request)
@@ -415,6 +472,102 @@ pub async fn probe_authenticated_health(
     tokio::time::timeout(timeout, operation)
         .await
         .map_err(|_| "forwarded authenticated health request timed out".to_owned())?
+}
+
+/// Authenticates through the forwarded socket and asks the remote host to
+/// terminate. This is used only for the default attached lifecycle; explicit
+/// `--detach` deliberately skips it.
+pub async fn shutdown_authenticated_host(
+    socket: &Path,
+    bootstrap_token: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    if bootstrap_token.len() != 64 || !bootstrap_token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("remote shutdown bootstrap token is invalid".to_owned());
+    }
+    tokio::time::timeout(
+        timeout,
+        shutdown_authenticated_host_inner(socket, bootstrap_token),
+    )
+    .await
+    .map_err(|_| "remote host shutdown timed out".to_owned())?
+}
+
+async fn shutdown_authenticated_host_inner(
+    socket: &Path,
+    bootstrap_token: &str,
+) -> Result<(), String> {
+    let connect = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/connect")
+        .header(HOST, "localhost")
+        .header(AUTHORIZATION, format!("Bearer {bootstrap_token}"))
+        .body(Full::new(Bytes::new()))
+        .map_err(|_| "could not build remote shutdown handshake".to_owned())?;
+    let connected = unix_request(socket, connect).await?;
+    if connected.status() != StatusCode::CREATED {
+        return Err("remote engine rejected shutdown authentication".to_owned());
+    }
+    let credentials: ClientCredentials = collect_control_json(connected.into_body()).await?;
+    let command = ClientCommand::ShutdownHost {
+        meta: CommandMeta {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: credentials.client_id.clone(),
+            request_id: RequestId("remote-supervisor-shutdown".to_owned()),
+        },
+    };
+    let body = serde_json::to_vec(&command)
+        .map_err(|_| "could not serialize remote shutdown command".to_owned())?;
+    let shutdown = Request::builder()
+        .method(Method::POST)
+        .uri("/v1/command")
+        .header(HOST, "localhost")
+        .header(AUTHORIZATION, format!("Bearer {}", credentials.token))
+        .header(CLIENT_HEADER, &credentials.client_id.0)
+        .header(CONNECTION, "close")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Full::new(Bytes::from(body)))
+        .map_err(|_| "could not build remote shutdown command".to_owned())?;
+    let response = unix_request(socket, shutdown).await?;
+    if response.status() != StatusCode::ACCEPTED {
+        return Err("remote engine rejected host shutdown".to_owned());
+    }
+    match collect_control_json::<CommandOutcome>(response.into_body()).await? {
+        CommandOutcome::Accepted => Ok(()),
+        CommandOutcome::Rejected { error } => Err(format!(
+            "remote engine rejected host shutdown: {}",
+            error.code
+        )),
+    }
+}
+
+async fn unix_request(
+    socket: &Path,
+    request: Request<Full<Bytes>>,
+) -> Result<hyper::Response<Incoming>, String> {
+    let stream = UnixStream::connect(socket)
+        .await
+        .map_err(|error| format!("forwarded socket connection failed: {error}"))?;
+    let (mut sender, connection) = client_http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|error| format!("forwarded HTTP handshake failed: {error}"))?;
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    sender
+        .send_request(request)
+        .await
+        .map_err(|error| format!("forwarded HTTP request failed: {error}"))
+}
+
+async fn collect_control_json<T: serde::de::DeserializeOwned>(body: Incoming) -> Result<T, String> {
+    let bytes = Limited::new(body, CONTROL_BODY_LIMIT)
+        .collect()
+        .await
+        .map_err(|_| "remote control response exceeded its limit".to_owned())?
+        .to_bytes();
+    serde_json::from_slice(&bytes).map_err(|_| "remote control response was invalid".to_owned())
 }
 
 #[cfg(test)]
@@ -752,6 +905,33 @@ mod tests {
         .expect_err("watchdog budget");
         assert!(error.contains("recovery budget exhausted after 2 failures"));
         assert_eq!(runtime.calls().await, ["health", "health"]);
+    }
+
+    #[tokio::test]
+    async fn controlled_watchdog_acknowledges_a_quiescent_pause_before_shutdown() {
+        let runtime = MockRecovery::new(MockRecoveryState::default());
+        let (control, commands) = tokio::sync::mpsc::channel(2);
+        let watchdog = tokio::spawn(run_controlled_watchdog(
+            runtime.clone(),
+            commands,
+            WatchdogPolicy {
+                interval: Duration::from_millis(50),
+                maximum_consecutive_failures: 2,
+            },
+        ));
+        let (acknowledged, paused) = tokio::sync::oneshot::channel();
+        control
+            .send(WatchdogCommand::Pause(acknowledged))
+            .await
+            .expect("pause command");
+        paused.await.expect("pause acknowledgement");
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        assert!(runtime.calls().await.is_empty());
+        control
+            .send(WatchdogCommand::Shutdown)
+            .await
+            .expect("shutdown command");
+        watchdog.await.expect("watchdog join").expect("watchdog");
     }
 
     #[tokio::test]

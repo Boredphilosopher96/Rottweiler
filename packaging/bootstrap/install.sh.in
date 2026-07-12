@@ -1,0 +1,66 @@
+#!/bin/sh
+set -eu
+
+# Generated from immutable release artifacts. Do not replace these pins with
+# `latest` URLs: the small bootstrap may move, but every payload it accepts is
+# bound to one version, byte length, and SHA-256 digest.
+version='@VERSION@'
+
+fail() {
+  printf 'rottweiler bootstrap: %s\n' "$*" >&2
+  exit 1
+}
+
+case "$(uname -s)-$(uname -m)" in
+@PLATFORM_CASES@
+  *) fail "unsupported platform: $(uname -s)-$(uname -m)" ;;
+esac
+
+umask 077
+work=$(mktemp -d "${TMPDIR:-/tmp}/rottweiler-install.XXXXXX") ||
+  fail 'could not create a private temporary directory'
+archive="$work/release.tar.gz"
+cleanup() {
+  rm -rf "$work"
+}
+trap cleanup EXIT HUP INT TERM
+
+command -v curl >/dev/null 2>&1 || fail 'curl is required'
+curl \
+  --fail \
+  --location \
+  --silent \
+  --show-error \
+  --proto '=https' \
+  --proto-redir '=https' \
+  --tlsv1.2 \
+  --max-redirs 5 \
+  --retry 3 \
+  --connect-timeout 10 \
+  --max-time 600 \
+  --max-filesize "$archive_length" \
+  --output "$archive" \
+  "$archive_url"
+
+observed_length=$(wc -c <"$archive" | tr -d '[:space:]')
+[ "$observed_length" = "$archive_length" ] ||
+  fail "release length mismatch (expected $archive_length, got $observed_length)"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  observed_sha256=$(sha256sum "$archive" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  observed_sha256=$(shasum -a 256 "$archive" | awk '{print $1}')
+else
+  fail 'sha256sum or shasum is required'
+fi
+[ "$observed_sha256" = "$archive_sha256" ] || fail 'release SHA-256 mismatch'
+
+mkdir "$work/extracted"
+tar -xzf "$archive" -C "$work/extracted"
+installer="$work/extracted/$release_root/install.sh"
+[ -f "$installer" ] && [ ! -L "$installer" ] && [ -x "$installer" ] ||
+  fail 'verified release does not contain its regular executable installer'
+
+"$installer" "$@"
+cleanup
+trap - EXIT HUP INT TERM

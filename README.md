@@ -49,6 +49,50 @@ provider replay, secure tool execution, and public extension protocols.
 | `protocol` | Versioned cross-language schemas and generated bindings |
 | `evals` / `benchmarks` | Capability and performance gates |
 
+## Install and run
+
+Rottweiler is one application. The Rust engine, compiled OpenTUI client, and
+native renderer are installed together; `rw` is the only public command and it
+starts, supervises, and closes the complete local process tree.
+
+Until the first signed stable release clears every protected release gate, the
+Homebrew tap builds that same complete bundle from the current source:
+
+```sh
+brew install --HEAD Boredphilosopher96/tap/rottweiler
+rw
+```
+
+After the first signed stable release, the primary binary installation is:
+
+```sh
+brew install Boredphilosopher96/tap/rottweiler
+rw
+```
+
+Homebrew installations update with `brew upgrade rottweiler`. Also beginning
+with the first signed stable release, the secondary installer downloads and
+verifies the same immutable platform archive before running its bundled
+installer (the URL intentionally does not exist before that release):
+
+```sh
+curl --fail --location --silent --show-error \
+  --proto '=https' --proto-redir '=https' --tlsv1.2 \
+  https://github.com/Boredphilosopher96/Rottweiler/releases/latest/download/rottweiler-install.sh \
+  | sh
+```
+
+Signed binary releases currently support Apple Silicon macOS
+(`darwin-arm64`) and x86-64 Linux/WSL (`linux-x86_64`). Intel macOS, Arm Linux,
+and native Windows fail closed until their complete bundles join the signed
+release matrix.
+
+`cargo install rw-cli` is intentionally not an installation method: Cargo can
+install the Rust executable but cannot install its private compiled OpenTUI
+executable and native renderer as one managed application. Use Homebrew or the
+verified bootstrap above. Neither installation requires Rust, Bun, Node, or
+separate server/UI commands.
+
 ## Build and run from source
 
 Requirements are Rust 1.94.1 and Bun 1.3.14. On macOS or Linux:

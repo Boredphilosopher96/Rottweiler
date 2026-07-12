@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     ffi::OsString,
     io,
-    os::unix::process::CommandExt as _,
+    os::unix::process::{CommandExt as _, ExitStatusExt as _},
     path::{Path, PathBuf},
     process::{ExitStatus, Stdio},
     sync::{Arc, Mutex},
@@ -480,7 +480,7 @@ impl<B: ProcessBackend> Supervisor<B> {
                             source,
                         })?;
                         tui.take();
-                        if status.success() {
+                        if tui_exit_is_user_close(status) {
                             if self.config.detach
                                 && let Some(mut detached_engine) = engine.take()
                             {
@@ -565,6 +565,12 @@ impl<B: ProcessBackend> Supervisor<B> {
                 source,
             })
     }
+}
+
+fn tui_exit_is_user_close(status: ExitStatus) -> bool {
+    status.success()
+        || status.code() == Some(130)
+        || status.signal() == Some(rustix::process::Signal::INT.as_raw())
 }
 
 #[derive(Clone, Copy)]
@@ -1127,6 +1133,14 @@ mod tests {
         let (result, specs, events) = run_scenario_with_config(scenario, fixture_config()).await;
         result.expect("supervisor run");
         (specs, events)
+    }
+
+    #[test]
+    fn ctrl_c_exit_status_is_an_intentional_tui_close() {
+        assert!(tui_exit_is_user_close(ExitStatus::from_raw(0)));
+        assert!(tui_exit_is_user_close(ExitStatus::from_raw(130 << 8)));
+        assert!(tui_exit_is_user_close(ExitStatus::from_raw(2)));
+        assert!(!tui_exit_is_user_close(ExitStatus::from_raw(1 << 8)));
     }
 
     #[tokio::test]

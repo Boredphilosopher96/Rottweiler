@@ -18,6 +18,17 @@ SPEC.loader.exec_module(SOAK)
 
 
 class SoakHarnessTests(unittest.TestCase):
+    def test_release_workflow_uses_only_public_rw_and_sibling_discovery(self) -> None:
+        release = (MODULE_PATH.parents[1] / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        soak = release.split("  release-soak:", 1)[1].split(
+            "  wsl2-acceptance:", 1
+        )[0]
+        self.assertIn('--rw "$ROTTWEILER_SOAK_RW"', soak)
+        self.assertNotIn("ROTTWEILER_SOAK_TUI", soak)
+        self.assertNotIn("--tui", soak)
+
     def test_workload_streams_and_schedules_tool_and_compaction_paths(self) -> None:
         steps, scripts = SOAK.build_workload(10, compact_every=4, tool_every=3)
 

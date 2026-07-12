@@ -65,6 +65,15 @@ Dependency rule: arrows point downward only. No Rust crate depends on anything i
 
 `rw` (Rust) is the single entry point. In TUI mode it: binds the engine server to a unix socket (localhost TCP on Windows) with a per-engine auth token, spawns the bundled TUI executable with the socket address + token, and supervises it. Engine and TUI fail independently: TUI crash → `rw` restarts it and reattaches to the live session; engine crash → TUI shows a reconnect state, sessions recover from the event log. Print/serve/SDK paths never touch Bun — headless usage is pure Rust.
 
+The process boundary is not a product boundary. Every supported release is one
+platform application bundle containing `rw`, `rottweiler-tui`, and exactly one
+native OpenTUI library. Homebrew installs all three together under private
+`libexec` and exposes only an `rw` wrapper; the standalone bootstrap downloads
+the identical signed archive and its installer exposes only `rw`. Consequently
+ordinary install, launch, and close are each one user action even though crash
+isolation remains process-based. Source builds may expose component paths to
+contributors, but are not an end-user distribution contract.
+
 The signed updater follows the same boundary: `rw-core` owns exact-byte threshold verification, root rotation, rollback/freeze policy, and the opaque proxy-aware HTTP client; `rw-providers` remains the only production HTTP implementation; `rw-cli` owns the official versioned install layout, bounded archive extraction, fsync/journal recovery, and atomic generation selection. Runtime/project config cannot replace the compile-time trust root or metadata origin.
 
 **Remote mode** (ADR-015): `rw --remote <host>` SSHes to the host, starts/attaches an engine there, forwards its socket locally, and runs the local TUI against it — same code path as local, which is the point. Two hard rules this imposes everywhere: no protocol message may assume a shared filesystem with the client (file previews/diffs travel in-band), and reconnect/resync is a tested first-class flow, not an error path.

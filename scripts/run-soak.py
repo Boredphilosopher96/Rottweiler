@@ -315,7 +315,7 @@ def write_replay_script(
 
 def run_soak(
     rw: Path,
-    tui: Path,
+    tui: Path | None,
     duration: float,
     sample_seconds: float,
     rss_limit: int,
@@ -325,6 +325,10 @@ def run_soak(
     restart_after_turns: int = 3,
     script_delay_ms: int = 10,
 ) -> dict[str, object]:
+    tui_executable = validate_executable(
+        tui if tui is not None else rw.with_name("rottweiler-tui"),
+        "TUI",
+    )
     if duration <= 0 or sample_seconds <= 0 or turn_seconds <= 0:
         raise ValueError("duration and sample intervals must be positive")
     if compact_every <= 0 or tool_every <= 0 or restart_after_turns <= 0:
@@ -365,10 +369,11 @@ def run_soak(
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "ROTTWEILER_CREDENTIAL_BACKEND": "file",
             "ROTTWEILER_HOME": str(state),
-            "ROTTWEILER_TUI_BIN": str(tui),
             "ROTTWEILER_DRIVER_READY_MARKER": "SOAK_DRIVER_READY",
             "TERM": "xterm-256color",
         }
+        if tui is not None:
+            environment["ROTTWEILER_TUI_BIN"] = str(tui_executable)
         process = subprocess.Popen(
             [
                 str(rw),
@@ -476,7 +481,7 @@ def run_soak(
                 ):
                     rows = process_table()
                     engine_pid = find_descendant(rows, process.pid, rw, " serve ")
-                    tui_pid = find_descendant(rows, process.pid, tui)
+                    tui_pid = find_descendant(rows, process.pid, tui_executable)
                     if engine_pid is not None and tui_pid is not None:
                         os.kill(tui_pid, signal.SIGKILL)
                         restart_old_tui = tui_pid
@@ -486,7 +491,7 @@ def run_soak(
                 if restart_old_tui is not None:
                     rows = process_table()
                     current_engine = find_descendant(rows, process.pid, rw, " serve ")
-                    current_tui = find_descendant(rows, process.pid, tui)
+                    current_tui = find_descendant(rows, process.pid, tui_executable)
                     if (
                         current_engine == restart_engine
                         and current_tui is not None
@@ -576,7 +581,11 @@ def run_soak(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rw", required=True, type=Path)
-    parser.add_argument("--tui", required=True, type=Path)
+    parser.add_argument(
+        "--tui",
+        type=Path,
+        help="development-only TUI override; release bundles discover the private sibling",
+    )
     parser.add_argument("--duration-seconds", type=float, default=DEFAULT_SECONDS)
     parser.add_argument("--sample-seconds", type=float, default=5.0)
     parser.add_argument("--rss-limit-mib", type=int, default=DEFAULT_RSS_LIMIT_MIB)
@@ -589,7 +598,7 @@ def main() -> None:
     args = parser.parse_args()
     result = run_soak(
         validate_executable(args.rw, "rw"),
-        validate_executable(args.tui, "TUI"),
+        validate_executable(args.tui, "TUI") if args.tui is not None else None,
         args.duration_seconds,
         args.sample_seconds,
         args.rss_limit_mib * 1024 * 1024,

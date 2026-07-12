@@ -88,6 +88,20 @@ Sandbox implementation (`rw-sandbox`):
 
   Artifacts bind HTTPS URL-without-userinfo/query, channel, semantic version, platform, compressed length, and SHA-256. Bytes are verified before the tar/gzip parser runs. Extraction accepts exactly `install.sh`, `bin/rw`, `bin/rottweiler-tui`, and one platform native OpenTUI library beneath one signed root directory; traversal, duplicates, links, devices, unexpected entries, bombs, and changing lengths are rejected in same-filesystem staging. Activation is an atomic `current` symlink switch with a private pending-state journal and retained previous generation. `--allow-downgrade` weakens only the signed product-version comparison. Global/config/environment proxy precedence is explicit, redirects are disabled, DNS is pinned for direct public destinations, and time/body/address limits are bounded; errors/logs never include proxy secrets or signed URLs. Unknown/direct-copy/package-managed layouts and WSL DrvFS are not modified.
 
+  Distribution metadata is derived only from those exact completed archives.
+  The Homebrew formula binds each supported platform to its immutable tag URL
+  and SHA-256, installs the engine/TUI/native renderer together under private
+  `libexec`, and exposes only a package-manager-marked `rw` wrapper. Stable tap
+  publication requires a dedicated repository-scoped token and occurs only
+  after the protected tag release is published; a missing token, tap, platform
+  archive, or push verification fails the workflow. The secondary bootstrap is
+  itself a release asset and pins URL, byte length, and SHA-256 for every host
+  it accepts. Its curl permits HTTPS for both the initial request and every
+  redirect, uses bounded retries/timeouts, verifies length before digest, and
+  invokes only the verified archive's regular executable installer. Unsupported
+  platforms fail before download. Package-managed installs cannot be rewritten
+  by `rw upgrade` and direct users to their package manager instead.
+
   Stable and beta documents share one repository metadata version but carry independent target versions and artifacts. The first publication is version 1; every later publication requires threshold-valid prior documents for both channels at the same version and advances exactly from `N` to `N+1`. Release signing takes one explicit fixed Unix time and rejects an active root or either new channel document expiring at or before it; authenticated prior channel documents remain usable as historical transition evidence after their expiry. An unchanged channel is carried into that new metadata epoch only from its corresponding prior envelope and only when it matches the spec's exact target version/URL; unsigned carry-forward data, cross-channel reuse, split prior epochs, skipped epochs, target downgrade, mix-and-match artifacts, and unused inputs fail before output.
 - **Updates switch complete generations**: the release installer creates immutable
   `versions/<version>` directories and atomically advances one `current`

@@ -22,9 +22,17 @@ async function main(): Promise<void> {
   // apparent splash wait on the native backend it is meant to cover.
   const { loadOpenTui } = await import("./opentui")
   const openTui = await loadOpenTui()
+  let runtimeForShutdown: { stop(): Promise<void> } | null = null
   const renderer = await openTui.createCliRenderer({
     exitOnCtrlC: true,
     targetFps: 60,
+    onDestroy: () => {
+      // Closing the renderer must release the SSE/runtime handles so a normal
+      // Ctrl+C can let the process end naturally. Never force exit 0 here:
+      // OpenTUI also destroys after terminal/native setup failures, whose
+      // original non-zero status must remain visible to the supervisor.
+      void runtimeForShutdown?.stop()
+    },
   })
 
   let resolveFirstFrame: (() => void) | undefined
@@ -123,6 +131,7 @@ async function main(): Promise<void> {
       return
     }
     if (bootstrap.runtime !== null) {
+      runtimeForShutdown = bootstrap.runtime
       bootstrap.runtime.bind(app)
       await bootstrap.runtime.start().catch(() => {
         // The runtime has already projected the actionable transport failure.

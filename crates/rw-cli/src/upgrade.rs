@@ -408,6 +408,15 @@ impl InstallLayout {
 }
 
 fn unsupported_layout() -> miette::Report {
+    unsupported_layout_for(std::env::var_os("ROTTWEILER_PACKAGE_MANAGER").as_deref())
+}
+
+fn unsupported_layout_for(package_manager: Option<&std::ffi::OsStr>) -> miette::Report {
+    if package_manager == Some(std::ffi::OsStr::new("homebrew")) {
+        return miette!(
+            "this Rottweiler installation is managed by Homebrew; run `brew upgrade rottweiler` (self-update never modifies package-managed files)"
+        );
+    }
     miette!(
         "self-update requires the official versioned installation layout; reinstall with the signed release install.sh (package-managed and direct-copy binaries are not modified)"
     )
@@ -1389,6 +1398,17 @@ mod tests {
         let direct = root.path().join("rw");
         fs::write(&direct, b"binary").expect("fixture");
         assert!(InstallLayout::from_executable(&direct).is_err());
+    }
+
+    #[test]
+    fn unsupported_homebrew_layout_preserves_refusal_with_package_guidance() {
+        let homebrew = unsupported_layout_for(Some(std::ffi::OsStr::new("homebrew"))).to_string();
+        assert!(homebrew.contains("brew upgrade rottweiler"));
+        assert!(homebrew.contains("never modifies package-managed files"));
+
+        let unknown = unsupported_layout_for(Some(std::ffi::OsStr::new("other"))).to_string();
+        assert!(unknown.contains("official versioned installation layout"));
+        assert!(!unknown.contains("brew upgrade"));
     }
 
     #[test]

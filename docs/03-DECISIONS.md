@@ -179,3 +179,30 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 **Constraints.** ChatGPT tokens may reach only the fixed ChatGPT Codex backend; Copilot tokens may reach only the exact GitHub auth and Copilot API origins. Redirects are disabled. Project config cannot override those origins or client identities. Subscription usage is never mislabeled as ordinary API-key cost. Any unsupported IR field fails before network or has an explicit, tested compatibility mapping. Upstream OpenCode behavior is evidence for compatibility, not authority to impersonate its client identity.
 
 **Revisit when.** OpenAI or GitHub publishes a stable first-party raw provider API/SDK that preserves Rottweiler's headless provider boundary, or a compatibility canary fails; migrate deliberately and retain fixture compatibility where possible.
+
+---
+
+## ADR-018: Distribution is one application bundle with one public command
+
+**Decision.** Preserve ADR-001's separate supervised Rust-engine and OpenTUI
+processes, but ship them only as one complete platform bundle. `rw` is the sole
+public entrypoint. Homebrew is the primary distribution: private engine, TUI,
+and native renderer files live together under the formula's `libexec`, while a
+single package-manager-aware `rw` wrapper is linked into `PATH`. A generated
+HTTPS-only bootstrap is the secondary path and may install only an immutable
+tag archive whose exact URL, byte length, and SHA-256 were derived from that
+release. Homebrew updates use `brew upgrade`; the signed in-app updater remains
+for the official versioned installer and refuses package-managed layouts.
+
+**Rationale.** The process split provides crash isolation, headless reuse, and
+future clients; it does not justify making users install, launch, or close two
+programs. Homebrew can keep runtime helpers private while selecting the correct
+native archive in one command. A source `cargo install` cannot deploy the
+Bun-compiled executable and native renderer as a managed sibling tree, so
+calling it a full installation would produce a broken interactive app. One
+byte-identical executable also cannot span macOS and Linux; one complete bundle
+per supported platform, selected automatically, is the honest one-app model.
+
+**Revisit when.** Cargo gains a secure standard for installing private runtime
+assets, or OpenTUI gains a stable Rust/C ABI that removes the helper process and
+native-library payload without weakening ADR-001's renderer requirement.

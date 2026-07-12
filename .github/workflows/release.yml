@@ -365,11 +365,9 @@ jobs:
           "$release/install.sh" --prefix "$root/installed"
           printf 'ROTTWEILER_SOAK_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
           printf 'ROTTWEILER_SOAK_RW=%s\n' "$root/installed/current/bin/rw" >> "$GITHUB_ENV"
-          printf 'ROTTWEILER_SOAK_TUI=%s\n' "$root/installed/current/bin/rottweiler-tui" >> "$GITHUB_ENV"
       - run: >-
           python3 scripts/run-soak.py
           --rw "$ROTTWEILER_SOAK_RW"
-          --tui "$ROTTWEILER_SOAK_TUI"
           --duration-seconds 28800
           --output soak-result.json
       - run: >-
@@ -607,12 +605,27 @@ jobs:
             --output dist/signed
           rm -rf "$private"
           trap - EXIT
+      - name: Render pinned one-app installers from exact release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/distribution
+          python3 scripts/render-distribution.py \
+            --version "${GITHUB_REF_NAME#v}" \
+            --repository Boredphilosopher96/Rottweiler \
+            --archive "darwin-arm64=dist/unsigned/rottweiler-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz" \
+            --archive "linux-x86_64=dist/unsigned/rottweiler-${GITHUB_REF_NAME#v}-linux-x86_64.tar.gz" \
+            --formula dist/distribution/rottweiler.rb \
+            --bootstrap dist/distribution/rottweiler-install.sh
+          ruby -c dist/distribution/rottweiler.rb
+          sh -n dist/distribution/rottweiler-install.sh
       - name: Attest signed release set
         uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
         with:
           subject-path: |
             dist/unsigned/*.tar.gz
             dist/signed/*
+            dist/distribution/*
       - name: Retain signed update repository for deployment
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -620,6 +633,7 @@ jobs:
           path: |
             dist/unsigned/*.tar.gz
             dist/signed/*
+            dist/distribution/*
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
@@ -627,13 +641,60 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
           options=(--verify-tag --generate-notes)
           case "$GITHUB_REF_NAME" in
             *-*) options+=(--prerelease) ;;
+            *) test -n "$HOMEBREW_TAP_TOKEN" ;;
           esac
-          gh release create "$GITHUB_REF_NAME" \
-            "${options[@]}" \
-            dist/unsigned/*.tar.gz \
-            dist/signed/*
+          publication=$(mktemp -d "$RUNNER_TEMP/rottweiler-publication.XXXXXX")
+          trap 'rm -rf "$publication"' EXIT
+          find dist/unsigned dist/signed dist/distribution -maxdepth 1 -type f \
+            -exec basename {} \; | LC_ALL=C sort > "$publication/expected"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' \
+              | LC_ALL=C sort > "$publication/observed"
+            cmp "$publication/expected" "$publication/observed"
+            gh release download "$GITHUB_REF_NAME" --dir "$publication/downloaded"
+            while IFS= read -r name; do
+              local_path=$(find dist/unsigned dist/signed dist/distribution \
+                -maxdepth 1 -type f -name "$name" -print)
+              test -n "$local_path"
+              test "$(printf '%s\n' "$local_path" | wc -l | tr -d ' ')" -eq 1
+              cmp "$local_path" "$publication/downloaded/$name"
+            done < "$publication/expected"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "${options[@]}" \
+              dist/unsigned/*.tar.gz \
+              dist/signed/* \
+              dist/distribution/*
+          fi
+          rm -rf "$publication"
+          trap - EXIT
+      - name: Publish stable formula to the Homebrew tap
+        if: ${{ !contains(github.ref_name, '-') }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          tap="$RUNNER_TEMP/homebrew-tap"
+          rm -rf "$tap"
+          gh auth setup-git
+          git clone --depth 1 https://github.com/Boredphilosopher96/homebrew-tap.git "$tap"
+          test -d "$tap/Formula"
+          install -m 644 dist/distribution/rottweiler.rb "$tap/Formula/rottweiler.rb"
+          git -C "$tap" add Formula/rottweiler.rb
+          git -C "$tap" config user.name github-actions[bot]
+          git -C "$tap" config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          if ! git -C "$tap" diff --cached --quiet; then
+            git -C "$tap" commit -m "rottweiler ${GITHUB_REF_NAME#v}"
+            git -C "$tap" push origin HEAD:main
+          fi
+          expected=$(git -C "$tap" rev-parse HEAD)
+          observed=$(git -C "$tap" ls-remote --exit-code origin refs/heads/main | awk '{print $1}')
+          test "$observed" = "$expected"

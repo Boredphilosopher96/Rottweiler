@@ -1050,6 +1050,7 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
         return Err(miette!("session {session_id:?} does not exist"));
     }
     let paths = allocate_runtime_paths(&storage_root.join("run"))?;
+    let mut runtime_directory = RuntimeDirectoryGuard::capture(&paths.directory)?;
     let supervisor = supervisor::Supervisor::new(
         supervisor::SupervisorConfig {
             rw_executable: std::env::current_exe().into_diagnostic()?,
@@ -1075,10 +1076,14 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
         supervisor::ResumeHandoff::default(),
     )
     .map_err(|error| miette!(error.to_string()))?;
-    supervisor
+    let result = supervisor
         .run()
         .await
-        .map_err(|error| miette!(error.to_string()))
+        .map_err(|error| miette!(error.to_string()));
+    if cli.detach && result.is_ok() {
+        runtime_directory.preserve();
+    }
+    result
 }
 
 #[derive(Clone, Default)]
@@ -1255,7 +1260,7 @@ async fn run_history_replay_with_tui(
     let through_sequence = events.last().map(|envelope| envelope.sequence);
     let events = historical_replay_items(storage_root, session, events)?;
     let paths = allocate_runtime_paths(&storage_root.join("run"))?;
-    let runtime_directory = paths.directory.clone();
+    let _runtime_directory = RuntimeDirectoryGuard::capture(&paths.directory)?;
     let (runtime, listener) = server::ServerRuntime::create_for_session(paths, Some(session))?;
     let state = server::ServerState::new(
         Arc::new(HistoricalReplayEngine {
@@ -1284,7 +1289,6 @@ async fn run_history_replay_with_tui(
     let _ = shutdown.send(true);
     server_task.await.into_diagnostic()??;
     drop(runtime);
-    let _ = fs::remove_dir_all(runtime_directory);
     let status = status.into_diagnostic()?;
     if !status.success() {
         return Err(miette!("historical replay TUI exited with status {status}"));
@@ -1878,6 +1882,8 @@ async fn run_serve(
         .await;
     }
 
+    let _runtime_directory = RuntimeDirectoryGuard::capture(&paths.directory)?;
+
     let (runtime, listener) = server::ServerRuntime::create_for_session(paths, Some(&session_id))?;
     let deferred = DeferredHostedEngine::default();
     let state = server::ServerState::new(Arc::new(deferred.clone()), &runtime);
@@ -2184,6 +2190,119 @@ fn ensure_configuration_root(root: &Path) -> Result<()> {
     Ok(())
 }
 
+struct RuntimeDirectoryGuard {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+    owner: u32,
+    armed: bool,
+}
+
+impl RuntimeDirectoryGuard {
+    fn capture(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let metadata = fs::symlink_metadata(path).into_diagnostic()?;
+        let owner = rustix::process::geteuid().as_raw();
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != owner
+            || metadata.permissions().mode() & 0o777 != 0o700
+        {
+            return Err(miette!(
+                "runtime directory is not one owner-private directory"
+            ));
+        }
+        Ok(Self {
+            path: path.to_owned(),
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            owner,
+            armed: true,
+        })
+    }
+
+    fn preserve(&mut self) {
+        self.armed = false;
+    }
+
+    fn validate_identity(&self) -> io::Result<()> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let metadata = fs::symlink_metadata(&self.path)?;
+        if metadata.file_type().is_symlink()
+            || !metadata.is_dir()
+            || metadata.uid() != self.owner
+            || metadata.permissions().mode() & 0o777 != 0o700
+            || metadata.dev() != self.device
+            || metadata.ino() != self.inode
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "runtime directory identity changed before cleanup",
+            ));
+        }
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> io::Result<()> {
+        use std::os::unix::fs::FileTypeExt as _;
+
+        if !self.armed {
+            return Ok(());
+        }
+        if matches!(
+            fs::symlink_metadata(&self.path),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        ) {
+            // A supervised serve child may have already removed the exact
+            // shared runtime leaf during its own orderly shutdown.
+            self.armed = false;
+            return Ok(());
+        }
+        self.validate_identity()?;
+        let entries = fs::read_dir(&self.path)?.collect::<io::Result<Vec<_>>>()?;
+        for entry in entries {
+            let name = entry.file_name();
+            let metadata = fs::symlink_metadata(entry.path())?;
+            let expected_type = if name == "engine.sock" {
+                metadata.file_type().is_socket()
+            } else if matches!(
+                name.to_str(),
+                Some("auth.token" | "runtime.json" | "last-seen")
+            ) {
+                metadata.is_file() && !metadata.file_type().is_symlink()
+            } else {
+                false
+            };
+            if !expected_type {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "runtime directory contains an unexpected artifact",
+                ));
+            }
+            self.validate_identity()?;
+            fs::remove_file(entry.path())?;
+        }
+        self.validate_identity()?;
+        fs::remove_dir(&self.path)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for RuntimeDirectoryGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            tracing::warn!(
+                path = %self.path.display(),
+                reason = %error,
+                "left runtime directory in place because safe cleanup could not be proven"
+            );
+        }
+    }
+}
+
 fn allocate_runtime_paths(root: &Path) -> Result<server::ServerRuntimePaths> {
     fs::create_dir_all(root).into_diagnostic()?;
     #[cfg(unix)]
@@ -2252,24 +2371,51 @@ fn resolve_server_paths(
 }
 
 fn locate_tui_executable() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("ROTTWEILER_TUI_BIN").map(PathBuf::from) {
+    let current = std::env::current_exe().into_diagnostic()?;
+    let development =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/tui/dist/rottweiler-tui");
+    resolve_tui_executable(
+        &current,
+        std::env::var_os("ROTTWEILER_TUI_BIN").map(PathBuf::from),
+        &development,
+    )
+}
+
+fn resolve_tui_executable(
+    current_executable: &Path,
+    override_path: Option<PathBuf>,
+    development_path: &Path,
+) -> Result<PathBuf> {
+    if let Some(path) = override_path {
         return require_executable(path);
     }
-    let current = std::env::current_exe().into_diagnostic()?;
-    if let Some(sibling) = current.parent().map(|parent| parent.join("rottweiler-tui"))
+    // Package managers expose a public launcher through a symlink or exec
+    // wrapper while keeping the complete runtime in a private directory.
+    // Resolve the executable that is actually running before looking for its
+    // TUI sibling; never derive a helper path from an untrusted PATH entry.
+    let installed = fs::canonicalize(current_executable).into_diagnostic()?;
+    if let Some(sibling) = installed
+        .parent()
+        .map(|parent| parent.join("rottweiler-tui"))
         && sibling.is_file()
     {
         return require_executable(sibling);
     }
-    let development =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/tui/dist/rottweiler-tui");
-    require_executable(development)
+    require_executable(development_path.to_owned())
 }
 
 fn require_executable(path: PathBuf) -> Result<PathBuf> {
-    if !path.is_file() {
+    let metadata = fs::symlink_metadata(&path).into_diagnostic()?;
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = true;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || !executable {
         return Err(miette!(
-            "compiled OpenTUI executable was not found at {}; run `bun run build` in packages/tui or set ROTTWEILER_TUI_BIN",
+            "compiled OpenTUI executable is not a regular executable at {}; run `bun run build` in packages/tui or set ROTTWEILER_TUI_BIN",
             path.display()
         ));
     }
@@ -2421,6 +2567,7 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         .map_or_else(runtime::new_session_id, Ok)?;
     let storage_root = configuration_root()?;
     let local_paths = allocate_runtime_paths(&storage_root.join("run"))?;
+    let _runtime_directory = RuntimeDirectoryGuard::capture(&local_paths.directory)?;
     let uid = rustix::process::geteuid().as_raw();
     let session_key = blake3::hash(session_id.as_bytes()).to_hex();
     let remote_socket = PathBuf::from(format!(
@@ -2451,10 +2598,10 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
     remote::initialize_remote(&mut remote_runtime)
         .await
         .map_err(|error| miette!(error))?;
-    let (watchdog_shutdown, watchdog_shutdown_rx) = tokio::sync::watch::channel(false);
-    let mut watchdog = tokio::spawn(remote::run_watchdog(
+    let (watchdog_control, watchdog_commands) = tokio::sync::mpsc::channel(2);
+    let mut watchdog = tokio::spawn(remote::run_controlled_watchdog(
         remote_runtime,
-        watchdog_shutdown_rx,
+        watchdog_commands,
         remote::WatchdogPolicy::default(),
     ));
     let (broker_ready, broker_ready_rx) = tokio::sync::oneshot::channel();
@@ -2486,7 +2633,9 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
     };
     if let Err(error) = broker_readiness {
         broker.abort();
-        let _ = watchdog_shutdown.send(true);
+        let _ = watchdog_control
+            .send(remote::WatchdogCommand::Shutdown)
+            .await;
         watchdog.abort();
         let _ = watchdog.await;
         return Err(error);
@@ -2502,7 +2651,6 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
         &fork_operation_directory,
         &session_id,
         tui_keybindings.as_deref(),
-        cli.detach,
     );
     tokio::pin!(tui);
     let result = tokio::select! {
@@ -2518,13 +2666,43 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
             Err(error) => Err(miette!(error.to_string())),
         },
     };
+    let remote_shutdown = if result.is_ok() && !cli.detach {
+        let (acknowledged, paused) = tokio::sync::oneshot::channel();
+        let pause = watchdog_control
+            .send(remote::WatchdogCommand::Pause(acknowledged))
+            .await
+            .map_err(|_| miette!("remote watchdog stopped before attached shutdown"));
+        match pause {
+            Ok(()) => match paused.await {
+                Ok(()) => match read_private_bootstrap_token(&local_paths.token)? {
+                    Some(token) => remote::shutdown_authenticated_host(
+                        &local_paths.socket,
+                        &token,
+                        std::time::Duration::from_secs(5),
+                    )
+                    .await
+                    .map_err(|error| miette!(error)),
+                    None => Err(miette!(
+                        "remote engine token disappeared before attached shutdown"
+                    )),
+                },
+                Err(_) => Err(miette!(
+                    "remote watchdog stopped before acknowledging attached shutdown"
+                )),
+            },
+            Err(error) => Err(error),
+        }
+    } else {
+        Ok(())
+    };
     broker.abort();
-    let _ = watchdog_shutdown.send(true);
+    let _ = watchdog_control
+        .send(remote::WatchdogCommand::Shutdown)
+        .await;
     if !watchdog.is_finished() {
-        watchdog.abort();
         let _ = watchdog.await;
     }
-    result
+    result.and(remote_shutdown)
 }
 
 struct TokioRemoteRecoveryRuntime {
@@ -2793,7 +2971,6 @@ async fn run_remote_tui_process(
     fork_operation_directory: &Path,
     session_id: &str,
     keybindings: Option<&str>,
-    _detach: bool,
 ) -> Result<()> {
     use std::process::Stdio;
 
@@ -2812,11 +2989,21 @@ async fn run_remote_tui_process(
             )
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
         if let Some(keybindings) = keybindings {
             command.env("ROTTWEILER_TUI_KEYBINDINGS", keybindings);
         }
-        let status = command.status().await.into_diagnostic()?;
+        let mut child = command.spawn().into_diagnostic()?;
+        let status = tokio::select! {
+            status = child.wait() => status.into_diagnostic()?,
+            interrupted = tokio::signal::ctrl_c() => {
+                interrupted.into_diagnostic()?;
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Ok(());
+            }
+        };
         if status.success() {
             return Ok(());
         }
@@ -2945,8 +3132,9 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Cli, Command, TrustCommand, UpgradeChannel, sync_install_paths, valid_bootstrap_token,
-        write_github_device_prompt, write_private_file_atomic,
+        Cli, Command, RuntimeDirectoryGuard, TrustCommand, UpgradeChannel, resolve_tui_executable,
+        sync_install_paths, valid_bootstrap_token, write_github_device_prompt,
+        write_private_file_atomic,
     };
     #[cfg(unix)]
     use super::{rustix_device_id, rustix_mode_bits};
@@ -3059,6 +3247,120 @@ mod tests {
         std::os::unix::fs::symlink(&file, &link)
             .unwrap_or_else(|error| panic!("link fixture should be created: {error}"));
         assert!(sync_install_paths(&[link]).is_err());
+    }
+
+    #[test]
+    fn tui_resolution_follows_public_launcher_to_private_runtime_sibling() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary directory must exist: {error}"));
+        let private = root.path().join("Cellar/rottweiler/1.2.3/libexec");
+        let public = root.path().join("bin");
+        std::fs::create_dir_all(&private)
+            .unwrap_or_else(|error| panic!("private runtime must exist: {error}"));
+        std::fs::create_dir_all(&public)
+            .unwrap_or_else(|error| panic!("public bin must exist: {error}"));
+        let rw = private.join("rw");
+        let tui = private.join("rottweiler-tui");
+        for executable in [&rw, &tui] {
+            std::fs::write(executable, b"fixture")
+                .unwrap_or_else(|error| panic!("executable fixture must exist: {error}"));
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755))
+                .unwrap_or_else(|error| panic!("fixture must be executable: {error}"));
+        }
+        let launcher = public.join("rw");
+        symlink(&rw, &launcher)
+            .unwrap_or_else(|error| panic!("public launcher symlink must exist: {error}"));
+
+        assert_eq!(
+            resolve_tui_executable(&launcher, None, &root.path().join("missing"))
+                .unwrap_or_else(|error| panic!("TUI sibling must resolve: {error}")),
+            std::fs::canonicalize(&tui)
+                .unwrap_or_else(|error| panic!("TUI sibling must canonicalize: {error}"))
+        );
+
+        let override_path = root.path().join("test-tui");
+        std::fs::write(&override_path, b"override")
+            .unwrap_or_else(|error| panic!("override fixture must exist: {error}"));
+        std::fs::set_permissions(&override_path, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("override must be executable: {error}"));
+        assert_eq!(
+            resolve_tui_executable(&launcher, Some(override_path.clone()), &tui)
+                .unwrap_or_else(|error| panic!("explicit override must win: {error}")),
+            override_path
+        );
+    }
+
+    #[test]
+    fn owned_runtime_cleanup_removes_only_known_private_artifacts() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary directory must exist: {error}"));
+        let runtime = root.path().join("engine-fixture");
+        std::fs::create_dir(&runtime)
+            .unwrap_or_else(|error| panic!("runtime directory must exist: {error}"));
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("runtime directory must be private: {error}"));
+        for name in ["auth.token", "runtime.json", "last-seen"] {
+            std::fs::write(runtime.join(name), b"fixture")
+                .unwrap_or_else(|error| panic!("runtime artifact must exist: {error}"));
+        }
+        let listener = std::os::unix::net::UnixListener::bind(runtime.join("engine.sock"))
+            .unwrap_or_else(|error| panic!("runtime socket must bind: {error}"));
+        let mut guard = RuntimeDirectoryGuard::capture(&runtime)
+            .unwrap_or_else(|error| panic!("runtime guard must capture: {error}"));
+        drop(listener);
+        guard
+            .cleanup()
+            .unwrap_or_else(|error| panic!("known runtime artifacts must clean: {error}"));
+        assert!(!runtime.exists());
+    }
+
+    #[test]
+    fn owned_runtime_cleanup_refuses_unexpected_or_replaced_directory() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("temporary directory must exist: {error}"));
+        let runtime = root.path().join("engine-fixture");
+        std::fs::create_dir(&runtime)
+            .unwrap_or_else(|error| panic!("runtime directory must exist: {error}"));
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("runtime directory must be private: {error}"));
+        std::fs::write(runtime.join("unexpected"), b"keep")
+            .unwrap_or_else(|error| panic!("unexpected fixture must exist: {error}"));
+        let mut unexpected = RuntimeDirectoryGuard::capture(&runtime)
+            .unwrap_or_else(|error| panic!("runtime guard must capture: {error}"));
+        assert!(unexpected.cleanup().is_err());
+        unexpected.preserve();
+        assert!(runtime.join("unexpected").is_file());
+
+        let replacement = root.path().join("engine-replacement");
+        std::fs::create_dir(&replacement)
+            .unwrap_or_else(|error| panic!("replacement directory must exist: {error}"));
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o700))
+            .unwrap_or_else(|error| panic!("replacement directory must be private: {error}"));
+        let mut replaced = RuntimeDirectoryGuard::capture(&replacement)
+            .unwrap_or_else(|error| panic!("replacement guard must capture: {error}"));
+        let moved = root.path().join("moved-original");
+        std::fs::rename(&replacement, &moved)
+            .unwrap_or_else(|error| panic!("runtime directory must move: {error}"));
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&outside)
+            .unwrap_or_else(|error| panic!("outside directory must exist: {error}"));
+        std::fs::write(outside.join("keep"), b"unchanged")
+            .unwrap_or_else(|error| panic!("outside fixture must exist: {error}"));
+        symlink(&outside, &replacement)
+            .unwrap_or_else(|error| panic!("replacement symlink must exist: {error}"));
+        assert!(replaced.cleanup().is_err());
+        replaced.preserve();
+        assert_eq!(
+            std::fs::read(outside.join("keep"))
+                .unwrap_or_else(|error| panic!("outside fixture must remain: {error}")),
+            b"unchanged"
+        );
     }
 
     #[test]

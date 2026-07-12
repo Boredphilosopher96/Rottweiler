@@ -1,0 +1,30 @@
+# typed: strict
+# frozen_string_literal: true
+
+# The complete Rottweiler engine and OpenTUI application bundle.
+class Rottweiler < Formula
+  desc "Provider-blind coding-agent harness with an OpenTUI frontend"
+  homepage "https://github.com/@REPOSITORY@"
+  version "@VERSION@"
+  license "Apache-2.0"
+@PLATFORM_BLOCKS@
+  # OpenTUI's private renderer is loaded by absolute sibling path. Preserve its
+  # compact @rpath Mach-O ID instead of making Homebrew expand it in-place.
+  preserve_rpath
+
+  def install
+    # The engine, compiled OpenTUI client, and its native renderer are one
+    # application bundle. Only the supervising `rw` entrypoint is public.
+    libexec.install Dir["bin/*"]
+    (bin/"rw").write_env_script libexec/"rw", ROTTWEILER_PACKAGE_MANAGER: "homebrew"
+  end
+
+  test do
+    assert_equal "rw #{version}\n", shell_output("#{bin}/rw --version")
+    assert_predicate libexec/"rottweiler-tui", :executable?
+    native = OS.mac? ? "libopentui.dylib" : "libopentui.so"
+    assert_predicate libexec/native, :file?
+    refute_path_exists bin/"rottweiler-tui"
+    assert_match "brew upgrade rottweiler", shell_output("#{bin}/rw upgrade 2>&1", 1)
+  end
+end

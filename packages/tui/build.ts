@@ -1,7 +1,7 @@
 import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { dirname, isAbsolute, join } from "node:path"
 
 import type { BunPlugin } from "bun"
 
@@ -68,7 +68,11 @@ const selectedNativeLibrary =
 const selectedNativePath = join(selectedNativeDirectory, selectedNativeLibrary)
 function stripLinuxArtifact(path: string, label: string): void {
   if (process.platform !== "linux") return
-  const stripped = spawnSync("/usr/bin/strip", ["--strip-unneeded", path], {
+  const stripExecutable = process.env.ROTTWEILER_STRIP_BIN ?? "/usr/bin/strip"
+  if (!isAbsolute(stripExecutable)) {
+    throw new Error("ROTTWEILER_STRIP_BIN must be an absolute path")
+  }
+  const stripped = spawnSync(stripExecutable, ["--strip-unneeded", path], {
     encoding: "utf8",
   })
   if (stripped.error !== undefined) {
