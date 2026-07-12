@@ -84,8 +84,37 @@ export interface TerminalHandoverAdapter {
   resume(): void
 }
 
-type PickerKind = "commands" | "files" | "modes" | "models" | "providers" | "sessions"
+type PickerKind = "palette" | "commands" | "files" | "modes" | "models" | "providers" | "sessions"
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
+
+type CommandChoice = RottweilerState["commands"][number]
+
+const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
+  { name: "help", description: "List available commands", usage: "/help" },
+  { name: "status", description: "Show actor running and queue state", usage: "/status" },
+  { name: "mode", description: "Show or switch the interaction mode", usage: "/mode [discuss|plan|execute]" },
+  { name: "models", description: "Switch the active model", usage: "/models" },
+  { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
+  { name: "permissions", description: "Show or edit session permission rules", usage: "/permissions [list|approvals|add|remove|clear-session|revoke-session|revoke-project]" },
+  { name: "plan", description: "Show the pending or approved plan", usage: "/plan" },
+  { name: "rewind", description: "Restore a completed turn checkpoint", usage: "/rewind <turn>" },
+  { name: "fork", description: "Fork this session at a completed turn", usage: "/fork [turn]" },
+  { name: "review", description: "Review the cumulative session diff", usage: "/review" },
+  { name: "interrupt", description: "Interrupt the active turn", usage: "/interrupt" },
+  { name: "context", description: "Inspect, pin, or evict context items", usage: "/context [pin|evict <item-id>]" },
+  { name: "cost", description: "Show usage, cost, and budget accounting", usage: "/cost" },
+  { name: "compact", description: "Compact conversation context", usage: "/compact [instructions]" },
+  { name: "trust", description: "Inspect or change folder trust", usage: "/trust [status|grant|revoke]" },
+  { name: "add-dir", description: "Append a live workspace root", usage: "/add-dir <path>" },
+]
+
+interface PaletteAction {
+  readonly id: string
+  readonly title: string
+  readonly description: string
+  readonly category: string
+  readonly run: () => void
+}
 
 export class RottweilerApp extends BoxRenderable {
   readonly transcript: TranscriptRenderable
@@ -113,6 +142,8 @@ export class RottweilerApp extends BoxRenderable {
   #latestWorkspaceDiffRequest: string | null = null
   #pendingWorkspaceDiffPath: string | null = null
   #latestReviewRequest: string | null = null
+  #latestCommandsRequest: string | null = null
+  #latestModelsRequest: string | null = null
   #commandsRequested = false
   #modelsRequested = false
   #pickerAnchored = false
@@ -376,6 +407,24 @@ export class RottweilerApp extends BoxRenderable {
         path !== this.#pendingFilePreview.path
       ) return
     }
+    if (
+      event.type === "command_descriptors_listed" &&
+      this.#latestCommandsRequest !== null &&
+      commandRequestId !== this.#latestCommandsRequest
+    ) return
+    if (
+      event.type === "models_listed" &&
+      this.#latestModelsRequest !== null &&
+      commandRequestId !== this.#latestModelsRequest
+    ) return
+    if (event.type === "command_descriptors_listed") {
+      this.#commandsRequested = false
+      this.#latestCommandsRequest = null
+    }
+    if (event.type === "models_listed") {
+      this.#modelsRequested = false
+      this.#latestModelsRequest = null
+    }
     const previous = this.#state
     const next = reduceRottweilerState(previous, engineEvent(event))
     this.setState(next)
@@ -439,6 +488,9 @@ export class RottweilerApp extends BoxRenderable {
         next.workspaceDiff.truncated,
       )
     }
+    if (event.type === "command_finished" && event.name === "add-dir" && !next.replay.active) {
+      this.#requestCommands()
+    }
     if (
       event.type === "tool_call_finished" ||
       event.type === "conversation_rewound" ||
@@ -485,10 +537,9 @@ export class RottweilerApp extends BoxRenderable {
     this.#pickerAnchored = false
     this.#pickerQuery = ""
     this.#positionPicker(false)
-    this.#pickerKind = "commands"
-    if (this.#state.commands.length === 0 && !this.#commandsRequested) {
-      this.#commandsRequested = true
-      this.#command({ type: "list_commands" })
+    this.#pickerKind = "palette"
+    if (!this.#commandsRequested) {
+      this.#requestCommands()
     }
     this.#refreshPicker()
   }
@@ -510,9 +561,8 @@ export class RottweilerApp extends BoxRenderable {
     this.#modelProviderFilter = provider
     this.#positionPicker(false)
     this.#pickerKind = "models"
-    if (this.#state.models.length === 0 && !this.#modelsRequested) {
-      this.#modelsRequested = true
-      this.#command({ type: "list_models" })
+    if (!this.#modelsRequested) {
+      this.#requestModels()
     }
     this.#refreshPicker()
   }
@@ -523,9 +573,8 @@ export class RottweilerApp extends BoxRenderable {
     this.#modelProviderFilter = null
     this.#positionPicker(false)
     this.#pickerKind = "providers"
-    if (this.#state.models.length === 0 && !this.#modelsRequested) {
-      this.#modelsRequested = true
-      this.#command({ type: "list_models" })
+    if (!this.#modelsRequested) {
+      this.#requestModels()
     }
     this.#refreshPicker()
   }
@@ -836,10 +885,23 @@ export class RottweilerApp extends BoxRenderable {
 
   #refreshPicker(): void {
     switch (this.#pickerKind) {
+      case "palette":
+        this.#openPicker(
+          "Command palette",
+          this.#paletteActions().map((action) => ({
+            id: action.id,
+            label: action.title,
+            description: `${action.category} · ${action.description}`,
+            searchText: `${action.category} ${action.title} ${action.description}`,
+            value: action,
+          })),
+          (item) => (item.value as PaletteAction).run(),
+        )
+        break
       case "commands":
         this.#openPicker(
-          "Commands",
-          this.#commandChoices().map((command) => ({
+          this.#state.commandsTruncated ? "Commands · results truncated" : "Commands",
+          this.#slashCommandChoices().map((command) => ({
             id: command.name,
             label: `/${command.name}`,
             description: command.description,
@@ -920,10 +982,7 @@ export class RottweilerApp extends BoxRenderable {
             this.#modelProviderFilter === null ||
             model.providers.includes(this.#modelProviderFilter),
         )
-        this.#openPicker(
-          this.#modelProviderFilter === null
-            ? "Models"
-            : `Models · ${this.#modelProviderFilter}`,
+        const modelItems: PickerItem<RottweilerState["models"][number] | null>[] =
           models.map((model) => ({
             id: model.alias,
             label: model.alias,
@@ -936,9 +995,30 @@ export class RottweilerApp extends BoxRenderable {
               .filter(Boolean)
               .join(" · "),
             value: model,
-          })),
+          }))
+        if (modelItems.length === 0) {
+          modelItems.push({
+            id: "models.empty",
+            label: "No configured model routes",
+            description: "Configure a provider and model alias, then restart Rottweiler",
+            value: null,
+          })
+        }
+        this.#openPicker(
+          this.#modelProviderFilter === null
+            ? "Models"
+            : `Models · ${this.#modelProviderFilter}`,
+          modelItems,
           (item) => {
-            const model = item.value as RottweilerState["models"][number]
+            const model = item.value as RottweilerState["models"][number] | null
+            if (model === null) {
+              this.#projectClientError(
+                "models_unavailable",
+                "no configured model routes are available; configure a provider and model alias",
+              )
+              this.closePicker()
+              return
+            }
             this.#command({
               type: "switch_model",
               model: model.alias,
@@ -955,15 +1035,36 @@ export class RottweilerApp extends BoxRenderable {
             providers.set(provider, (providers.get(provider) ?? 0) + 1)
           }
         }
-        this.#openPicker(
-          "Providers",
-          [...providers].sort(([left], [right]) => left.localeCompare(right)).map(([provider, count]) => ({
+        const providerItems: PickerItem<string | null>[] = [...providers]
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([provider, count]) => ({
             id: provider,
             label: provider,
             description: `${count} model route${count === 1 ? "" : "s"}`,
             value: provider,
-          })),
-          (item) => this.openModelPicker(item.value),
+          }))
+        if (providerItems.length === 0) {
+          providerItems.push({
+            id: "providers.empty",
+            label: "No configured provider routes",
+            description: "Authenticate and configure a provider, then restart Rottweiler",
+            value: null,
+          })
+        }
+        this.#openPicker(
+          "Providers",
+          providerItems,
+          (item) => {
+            if (item.value === null) {
+              this.#projectClientError(
+                "providers_unavailable",
+                "no configured provider routes are available; authenticate and configure a provider",
+              )
+              this.closePicker()
+              return
+            }
+            this.openModelPicker(item.value)
+          },
         )
         break
       }
@@ -1054,20 +1155,114 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
-  #commandChoices(): readonly RottweilerState["commands"][number][] {
-    const choices = [...this.#state.commands]
-    const names = new Set(choices.map((command) => command.name))
-    for (const command of [
-      { name: "models", description: "Switch the active model", usage: "/models" },
-      {
-        name: "providers",
-        description: "Choose a configured provider and model",
-        usage: "/providers",
-      },
-    ]) {
-      if (!names.has(command.name)) choices.push(command)
+  #paletteActions(): readonly PaletteAction[] {
+    const open = (action: () => void) => () => {
+      this.closePicker()
+      action()
     }
-    return choices
+    const submit = (content: string) => () => {
+      this.closePicker()
+      if (
+        this.#state.connection.phase === "connected" ||
+        this.#state.connection.phase === "replaying"
+      ) {
+        void this.#sendMessage(content, [])
+      } else {
+        this.composer.value = content
+        this.composer.focus()
+      }
+    }
+    const prefill = (content: string) => () => {
+      this.closePicker()
+      this.composer.value = `${content} `
+      this.composer.focus()
+    }
+    const actions: PaletteAction[] = [
+      { id: "session.list", title: "Switch session", category: "Session", description: "Resume another durable session", run: open(() => this.openSessionPicker()) },
+      { id: "model.list", title: "Switch model", category: "Agent", description: "Choose the active model alias", run: open(() => this.openModelPicker()) },
+      { id: "provider.list", title: "Provider and model routes", category: "Agent", description: "Choose a configured provider route", run: open(() => this.openProviderPicker()) },
+      { id: "mode.list", title: "Switch mode", category: "Agent", description: "Choose discuss, plan, or execute", run: open(() => this.openModePicker()) },
+      { id: "review.open", title: "Review changes", category: "Session", description: "Open the cumulative session diff", run: open(() => this.openReview()) },
+      { id: "permissions.manage", title: "Permission settings", category: "Settings", description: "Inspect approvals and session rules", run: prefill("/permissions") },
+      { id: "permissions.list", title: "List permission rules", category: "Settings", description: "Show effective session permission rules", run: submit("/permissions list") },
+      { id: "permissions.approvals", title: "List remembered approvals", category: "Settings", description: "Show remembered approval bindings", run: submit("/permissions approvals") },
+      { id: "permissions.add", title: "Add permission rule", category: "Settings", description: "Add a session-scoped rule", run: prefill("/permissions add") },
+      { id: "permissions.remove", title: "Remove permission rule", category: "Settings", description: "Remove a session-scoped rule", run: prefill("/permissions remove") },
+      { id: "permissions.clear", title: "Clear session permissions", category: "Settings", description: "Clear this session's remembered rules", run: prefill("/permissions clear-session") },
+      { id: "trust.manage", title: "Folder trust settings", category: "Settings", description: "Inspect, grant, or revoke workspace trust", run: prefill("/trust") },
+      { id: "trust.status", title: "Show folder trust", category: "Settings", description: "Inspect the current workspace trust state", run: submit("/trust status") },
+      { id: "trust.grant", title: "Trust this folder", category: "Settings", description: "Grant executable project configuration trust", run: prefill("/trust grant") },
+      { id: "trust.revoke", title: "Revoke folder trust", category: "Settings", description: "Disable executable project configuration", run: prefill("/trust revoke") },
+      { id: "context.manage", title: "Context manager", category: "Session", description: "Inspect, pin, or evict context", run: prefill("/context") },
+      { id: "workspace.add", title: "Add workspace directory", category: "Workspace", description: "Append another live workspace root", run: prefill("/add-dir") },
+      { id: "plan.show", title: "Show plan", category: "Session", description: "Display the pending or approved plan", run: submit("/plan") },
+      { id: "cost.show", title: "Show usage and cost", category: "Session", description: "Display tokens, cost, and budget", run: submit("/cost") },
+      { id: "compact.run", title: "Compact context", category: "Session", description: "Compact with optional instructions", run: prefill("/compact") },
+      { id: "rewind.run", title: "Rewind to turn", category: "Session", description: "Restore a completed turn checkpoint", run: prefill("/rewind") },
+      { id: "fork.run", title: "Fork session", category: "Session", description: "Fork at the latest completed turn", run: open(() => void this.#requestFork(null)) },
+      { id: "interrupt.run", title: "Interrupt turn", category: "Session", description: "Stop the active turn", run: submit("/interrupt") },
+      { id: "status.show", title: "Show agent status", category: "Agent", description: "Display running and queue state", run: submit("/status") },
+      { id: "help.show", title: "Show command help", category: "System", description: "List every available slash command", run: submit("/help") },
+    ]
+    const mcpIndex = actions.findIndex((action) => action.id === "permissions.manage")
+    if (this.#state.commands.some((command) => command.name === "mcp")) {
+      actions.splice(
+        mcpIndex,
+        0,
+        { id: "mcp.manage", title: "MCP connections", category: "Settings", description: "Inspect, enable, disable, or approve MCP servers", run: prefill("/mcp") },
+        { id: "mcp.status", title: "Show MCP status", category: "Settings", description: "List every MCP connection and its state", run: submit("/mcp status") },
+        { id: "mcp.enable", title: "Enable MCP server", category: "Settings", description: "Enable a configured MCP connection", run: prefill("/mcp enable") },
+        { id: "mcp.disable", title: "Disable MCP server", category: "Settings", description: "Disable a configured MCP connection", run: prefill("/mcp disable") },
+        { id: "mcp.approve", title: "Approve MCP server", category: "Settings", description: "Approve a displayed MCP fingerprint", run: prefill("/mcp approve") },
+      )
+    } else {
+      actions.splice(mcpIndex, 0, {
+        id: "mcp.configure",
+        title: "Configure MCP connections",
+        category: "Settings",
+        description: "Add an MCP server configuration and restart Rottweiler",
+        run: () => {
+          this.closePicker()
+          this.#projectClientError(
+            "mcp_unconfigured",
+            "no MCP servers are configured; add an MCP server configuration and restart Rottweiler",
+          )
+        },
+      })
+    }
+    if (this.#state.commandsTruncated) {
+      actions.push({
+        id: "commands.truncated",
+        title: "Command results truncated",
+        category: "System",
+        description: "The live extension catalog exceeded the safe display limit",
+        run: () => {
+          this.closePicker()
+          this.#projectClientError(
+            "command_catalog_truncated",
+            "the live command catalog exceeded the safe display limit; narrow the configured extension set",
+          )
+        },
+      })
+    }
+    const localNames = new Set(LOCAL_SLASH_COMMANDS.map((command) => command.name))
+    for (const command of this.#state.commands) {
+      if (localNames.has(command.name)) continue
+      actions.push({
+        id: `slash.${command.name}`,
+        title: `Run /${command.name}`,
+        category: "Commands",
+        description: command.description,
+        run: prefill(`/${command.name}`),
+      })
+    }
+    return actions
+  }
+
+  #slashCommandChoices(): readonly CommandChoice[] {
+    const choices = new Map(LOCAL_SLASH_COMMANDS.map((command) => [command.name, command]))
+    for (const command of this.#state.commands) choices.set(command.name, command)
+    return [...choices.values()]
   }
 
   #updateComposerAutocomplete(value: string): void {
@@ -1078,8 +1273,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#positionPicker(true)
       this.#pickerKind = "commands"
       if (this.#state.commands.length === 0 && !this.#commandsRequested) {
-        this.#commandsRequested = true
-        this.#command({ type: "list_commands" })
+        this.#requestCommands()
       }
       this.#refreshPicker()
       return
@@ -1105,6 +1299,16 @@ export class RottweilerApp extends BoxRenderable {
       this.picker.left = "15%"
       this.picker.width = "70%"
     }
+  }
+
+  #requestCommands(): void {
+    this.#commandsRequested = true
+    this.#latestCommandsRequest = this.#command({ type: "list_commands" })
+  }
+
+  #requestModels(): void {
+    this.#modelsRequested = true
+    this.#latestModelsRequest = this.#command({ type: "list_models" })
   }
 
   #openChangedFileDiff(path: string): void {
@@ -1366,10 +1570,12 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingModelSwitchRequests.add(meta.request_id)
     }
     switch (command.type) {
-      case "list_commands":
       case "list_models":
       case "list_sessions":
         this.#emit({ type: command.type, meta })
+        break
+      case "list_commands":
+        this.#emit({ type: command.type, meta, session_id: this.#sessionId })
         break
       case "search_sessions":
         this.#emit({ ...command, meta })

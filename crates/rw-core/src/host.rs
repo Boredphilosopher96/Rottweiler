@@ -20,6 +20,8 @@ use tokio::sync::{Notify, broadcast, mpsc, watch};
 use crate::{AgentLoopError, EventClock, SessionHandle, SystemEventClock};
 
 const HOST_EVENT_CAPACITY: usize = 256;
+const MAX_WIRE_COMMANDS: usize = 512;
+const MAX_WIRE_COMMAND_CATALOG_BYTES: usize = 48 * 1024;
 
 /// Transport-authenticated client identity. The host overwrites every
 /// untrusted wire `CommandMeta.client_id` with this value before authorization.
@@ -990,14 +992,21 @@ impl EngineHost {
                     }],
                 ))
             }
-            ClientCommand::ListCommands { meta } => Ok((
-                CommandOutcome::Accepted,
-                None,
-                vec![EngineEvent::CommandDescriptorsListed {
-                    meta: ack_meta(&meta, &*self.clock),
-                    commands: self.queries.command_descriptors().await?,
-                }],
-            )),
+            ClientCommand::ListCommands { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let descriptors = session.handle().command_descriptors();
+                let (commands, truncated) = wire_command_catalog(descriptors.iter().cloned());
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::CommandDescriptorsListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        commands,
+                        truncated,
+                    }],
+                ))
+            }
             ClientCommand::ListModels { meta } => Ok((
                 CommandOutcome::Accepted,
                 None,
@@ -1623,14 +1632,55 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::SearchWorkspaceFiles { session_id, .. }
         | ClientCommand::PreviewWorkspaceFile { session_id, .. }
         | ClientCommand::GetWorkspaceStatus { session_id, .. }
-        | ClientCommand::GetWorkspaceDiff { session_id, .. } => Some(session_id.clone()),
+        | ClientCommand::GetWorkspaceDiff { session_id, .. }
+        | ClientCommand::ListCommands { session_id, .. } => Some(session_id.clone()),
         ClientCommand::CreateSession { .. }
         | ClientCommand::ListSessions { .. }
         | ClientCommand::SearchSessions { .. }
-        | ClientCommand::ListCommands { .. }
         | ClientCommand::ListModels { .. }
         | ClientCommand::ShutdownHost { .. } => None,
     }
+}
+
+fn wire_command_catalog(
+    descriptors: impl IntoIterator<Item = rw_ext::CommandDescriptor>,
+) -> (Vec<CommandDescriptor>, bool) {
+    let mut commands = Vec::new();
+    let mut truncated = false;
+    // JSON arrays need two brackets plus one comma between adjacent entries.
+    // Serialize each candidate once so catalog projection remains linear and
+    // stop examining input after the wire count bound has been proven exceeded.
+    let mut serialized_bytes = 2_usize;
+    for (index, descriptor) in descriptors.into_iter().enumerate() {
+        if index >= MAX_WIRE_COMMANDS {
+            truncated = true;
+            break;
+        }
+        let command = CommandDescriptor {
+            name: descriptor.name().to_owned(),
+            description: descriptor.description().to_owned(),
+            usage: descriptor.argument_hint().unwrap_or_default().to_owned(),
+        };
+        let Ok(encoded) = serde_json::to_vec(&command) else {
+            truncated = true;
+            break;
+        };
+        let separator = usize::from(!commands.is_empty());
+        let Some(next_size) = serialized_bytes
+            .checked_add(separator)
+            .and_then(|size| size.checked_add(encoded.len()))
+        else {
+            truncated = true;
+            break;
+        };
+        if next_size > MAX_WIRE_COMMAND_CATALOG_BYTES {
+            truncated = true;
+            break;
+        }
+        serialized_bytes = next_size;
+        commands.push(command);
+    }
+    (commands, truncated)
 }
 
 #[cfg(test)]
@@ -1642,6 +1692,10 @@ mod tests {
     };
 
     use futures_util::stream;
+    use rw_ext::{
+        CommandDescriptor as ExtensionCommandDescriptor, CommandExecutionError, CommandHandler,
+        CommandInvocation,
+    };
     use rw_types::{
         AttachmentData, CommandMeta, ModelCacheBehavior, ModelCapabilities, PROTOCOL_VERSION,
     };
@@ -1651,13 +1705,30 @@ mod tests {
     use crate::{
         ModelDriver, NoopFolderTrustController, NoopMutationCheckpointCoordinator,
         NoopSecretRedactor, NoopSessionEventSink, PermissionGate, SessionActor, SessionActorConfig,
-        SessionEventSink, SessionRecoveredState, builtin_command_registry, builtin_hook_dispatcher,
+        SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,
+        SessionRecoveredState, builtin_command_registry, builtin_hook_dispatcher,
         runtime_support::{
             BoxEventStream, PermissionDecision, ProviderRequest, ThinkingLevel, ToolRegistry,
         },
     };
 
     struct IdleModel;
+
+    struct MarkerCommand;
+
+    #[async_trait]
+    impl CommandHandler<SessionCommandContext, SessionCommandOutput> for MarkerCommand {
+        async fn execute(
+            &self,
+            _context: &mut SessionCommandContext,
+            _invocation: CommandInvocation,
+        ) -> Result<SessionCommandOutput, CommandExecutionError> {
+            Ok(SessionCommandOutput {
+                message: "marker".to_owned(),
+                action: SessionCommandAction::None,
+            })
+        }
+    }
 
     impl ModelDriver for IdleModel {
         fn stream(
@@ -1724,6 +1795,16 @@ mod tests {
         fn session(&self, session_id: &SessionId) -> HostedSession {
             let workspace = self.root.path().join(&session_id.0);
             std::fs::create_dir_all(&workspace).expect("session workspace");
+            let mut commands = builtin_command_registry().expect("commands");
+            commands
+                .register(
+                    ExtensionCommandDescriptor::new(
+                        format!("only.{}", session_id.0),
+                        "session-specific command",
+                    ),
+                    MarkerCommand,
+                )
+                .expect("session marker command");
             let handle = SessionActor::spawn(SessionActorConfig {
                 session_id: session_id.clone(),
                 workspace_root: workspace,
@@ -1735,7 +1816,7 @@ mod tests {
                 tools: Arc::new(ToolRegistry::new()),
                 permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
                 hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
-                commands: Arc::new(builtin_command_registry().expect("commands")),
+                commands: Arc::new(commands),
                 event_sink: self
                     .event_sink
                     .clone()
@@ -2321,6 +2402,107 @@ mod tests {
             conflict,
             CommandOutcome::Rejected { error } if error.code == "request_id_conflict"
         ));
+    }
+
+    #[tokio::test]
+    async fn list_commands_routes_to_the_explicit_sessions_assembled_registry() {
+        let (host, _factory) = host(3);
+        let bound = BoundClient {
+            client_id: ClientId("palette-driver".to_owned()),
+        };
+        for name in ["palette-first", "palette-second"] {
+            assert_eq!(
+                host.dispatch(
+                    bound.clone(),
+                    ClientCommand::ResumeSession {
+                        meta: meta("spoofed", &format!("resume-{name}")),
+                        session_id: SessionId(name.to_owned()),
+                        last_seen_sequence: None,
+                        role: ClientRole::Driver,
+                    },
+                )
+                .await,
+                CommandOutcome::Accepted
+            );
+        }
+        let mut events = host
+            .subscribe(bound.clone(), None, None)
+            .await
+            .expect("command catalog events");
+        for name in ["palette-first", "palette-second"] {
+            assert_eq!(
+                host.dispatch(
+                    bound.clone(),
+                    ClientCommand::ListCommands {
+                        meta: meta("spoofed", &format!("list-{name}")),
+                        session_id: SessionId(name.to_owned()),
+                    },
+                )
+                .await,
+                CommandOutcome::Accepted
+            );
+            let (session_id, commands, truncated) =
+                tokio::time::timeout(Duration::from_secs(1), async {
+                    loop {
+                        if let EngineEvent::CommandDescriptorsListed {
+                            session_id,
+                            commands,
+                            truncated,
+                            ..
+                        } = events
+                            .recv()
+                            .await
+                            .expect("command catalog event")
+                            .expect("command catalog result")
+                        {
+                            if session_id.0 == name {
+                                break (session_id, commands, truncated);
+                            }
+                        }
+                    }
+                })
+                .await
+                .expect("command catalog deadline");
+            assert_eq!(session_id, SessionId(name.to_owned()));
+            assert!(!truncated);
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| command.name == format!("only.{name}"))
+            );
+            let other = if name == "palette-first" {
+                "palette-second"
+            } else {
+                "palette-first"
+            };
+            assert!(
+                commands
+                    .iter()
+                    .all(|command| command.name != format!("only.{other}"))
+            );
+            assert!(commands.iter().any(|command| command.name == "permissions"));
+            assert!(commands.iter().any(|command| command.name == "add-dir"));
+        }
+    }
+
+    #[test]
+    fn wire_command_catalog_is_bounded_below_the_sse_line_limit() {
+        let descriptors = (0..600).map(|index| {
+            ExtensionCommandDescriptor::new(
+                format!("catalog-{index}"),
+                format!("{}-{index}", "description".repeat(80)),
+            )
+            .with_argument_hint("<value>".repeat(20))
+        });
+        let (commands, truncated) = wire_command_catalog(descriptors);
+        assert!(truncated);
+        assert!(commands.len() <= MAX_WIRE_COMMANDS);
+        assert!(
+            serde_json::to_vec(&commands)
+                .expect("bounded command catalog JSON")
+                .len()
+                <= MAX_WIRE_COMMAND_CATALOG_BYTES
+        );
     }
 
     #[tokio::test]

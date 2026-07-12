@@ -279,11 +279,17 @@
         "meta": {
           "$ref": "#/$defs/CommandAckMeta"
         },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "commands": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/CommandDescriptor"
           }
+        },
+        "truncated": {
+          "type": "boolean"
         },
         "type": {
           "type": "string",
@@ -293,7 +299,9 @@
       "required": [
         "type",
         "meta",
-        "commands"
+        "session_id",
+        "commands",
+        "truncated"
       ]
     },
     {

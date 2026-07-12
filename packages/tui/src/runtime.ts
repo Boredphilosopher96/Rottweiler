@@ -468,7 +468,8 @@ export class TuiEngineRuntime {
 
   async #prepareSession(sessionId: string, signal: AbortSignal): Promise<void> {
     let delay = SESSION_PREPARE_INITIAL_DELAY_MS
-    for (let attempt = 0; attempt < SESSION_PREPARE_ATTEMPTS; attempt += 1) {
+    let attempt = 0
+    while (!signal.aborted) {
       const resume = await this.#client.postCommand(
         {
           type: "resume_session",
@@ -503,14 +504,12 @@ export class TuiEngineRuntime {
         throw new EngineRuntimeError(`engine rejected session resume: ${resume.error.message}`)
       }
 
-      if (attempt + 1 === SESSION_PREPARE_ATTEMPTS) {
-        break
-      }
-      this.#onConnection({ phase: "reconnecting", attempt: attempt + 1 })
+      attempt = Math.min(attempt + 1, Number.MAX_SAFE_INTEGER)
+      this.#onConnection({ phase: "reconnecting", attempt })
       await this.#sleep(delay, signal)
       delay = Math.min(delay * 2, SESSION_PREPARE_MAXIMUM_DELAY_MS)
     }
-    throw new EngineRuntimeError("engine session preparation did not finish before retry budget")
+    throw signal.reason ?? new DOMException("session preparation aborted", "AbortError")
   }
 
   async #requestInitialProjections(sessionId: string, signal: AbortSignal): Promise<void> {
@@ -519,7 +518,7 @@ export class TuiEngineRuntime {
       { type: "get_cost", meta: this.#meta(), session_id: sessionId },
       { type: "get_workspace_status", meta: this.#meta(), session_id: sessionId },
       { type: "list_models", meta: this.#meta() },
-      { type: "list_commands", meta: this.#meta() },
+      { type: "list_commands", meta: this.#meta(), session_id: sessionId },
     ]
     for (const command of commands) {
       if (signal.aborted || sessionId !== this.#sessionId) {
@@ -643,12 +642,7 @@ async function loadEngineRuntimeConfigWithHandoffRetry(
 function isTransientSessionPreparationRejection(outcome: CommandOutcome): boolean {
   return (
     outcome.type === "rejected" &&
-    [
-      "session_not_loaded",
-      "host_persistence_failure",
-      "session_persistence_failure",
-      "host_shutting_down",
-    ].includes(outcome.error.code)
+    outcome.error.code === "session_not_loaded"
   )
 }
 

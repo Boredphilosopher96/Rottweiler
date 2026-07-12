@@ -321,6 +321,7 @@ export interface RottweilerState {
   readonly review: SessionReviewProjection | null
   readonly lastFork: SessionForkProjection | null
   readonly commands: readonly CommandChoice[]
+  readonly commandsTruncated: boolean
   readonly models: readonly ModelChoice[]
   readonly workspaceFiles: readonly WorkspaceFileChoice[]
   readonly workspacePreview: WorkspacePreviewProjection | null
@@ -380,6 +381,7 @@ export function createInitialState(): RottweilerState {
     review: null,
     lastFork: null,
     commands: [],
+    commandsTruncated: false,
     models: [],
     workspaceFiles: [],
     workspacePreview: null,

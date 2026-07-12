@@ -663,6 +663,77 @@ describe("OpenTUI engine runtime", () => {
     expect(client.subscription?.attach.role).toBe("driver")
   })
 
+  test("fails permanent session persistence preparation instead of retrying forever", async () => {
+    const client = new ScriptedClient([
+      {
+        type: "rejected",
+        error: {
+          category: "internal",
+          code: "host_persistence_failure",
+          message: "session metadata is corrupt",
+          retryable: false,
+        },
+      },
+    ])
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "session-corrupt",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+      },
+      client,
+      new MemoryFiles(),
+    )
+    const app = new TestApp()
+    runtime.bind(app)
+
+    await expect(runtime.start()).rejects.toThrow("session metadata is corrupt")
+    expect(client.commands).toHaveLength(1)
+    expect(app.state.connection.phase).toBe("disconnected")
+  })
+
+  test("keeps genuinely opening sessions retryable until runtime shutdown", async () => {
+    const commands: ClientCommand[] = []
+    const client: RuntimeEngineClient = {
+      async postCommand(command) {
+        commands.push(command)
+        return {
+          type: "rejected",
+          error: {
+            category: "protocol",
+            code: "session_not_loaded",
+            message: "session is still opening",
+            retryable: true,
+          },
+        }
+      },
+      async subscribe() {
+        throw new Error("subscription must not start before preparation")
+      },
+    }
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "session-opening",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+      },
+      client,
+      new MemoryFiles(),
+    )
+    runtime.bind(new TestApp())
+    const starting = runtime.start()
+    await waitFor(() => commands.length >= 2)
+    await runtime.stop()
+    await starting
+    expect(commands.every((command) => command.type === "resume_session")).toBeTrue()
+  })
+
   test("holds a first-paint submit until driver takeover is complete", async () => {
     const client = new BlockingPreparationClient()
     const runtime = new TuiEngineRuntime(
@@ -788,6 +859,32 @@ describe("OpenTUI engine runtime", () => {
       event: { type: "thinking_delta", text: "stale" },
     })
     expect(app.state.subagentOrder).toEqual([])
+    await client.subscriptions[1]?.onEvent({
+      type: "command_descriptors_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "ui",
+        request_id: "stale-command-catalog",
+        emitted_at: "2026-07-10T00:00:00Z",
+      },
+      session_id: "session-old",
+      commands: [{ name: "stale", description: "wrong session", usage: "" }],
+      truncated: false,
+    })
+    expect(app.state.commands).toEqual([])
+    await client.subscriptions[1]?.onEvent({
+      type: "command_descriptors_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "ui",
+        request_id: "current-command-catalog",
+        emitted_at: "2026-07-10T00:00:00Z",
+      },
+      session_id: "session-new",
+      commands: [{ name: "current", description: "right session", usage: "" }],
+      truncated: false,
+    })
+    expect(app.state.commands.map((command) => command.name)).toEqual(["current"])
     await client.subscriptions[1]?.onEvent({
       type: "subagent_spawned",
       meta: {

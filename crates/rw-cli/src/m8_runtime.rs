@@ -559,8 +559,13 @@ impl PluginSessionRuntime {
             ));
         }
         for declaration in &manifest.capabilities.commands {
+            let descriptor = plugin_command_descriptor(
+                &declaration.name,
+                &declaration.description,
+                declaration.argument_hint.as_deref(),
+            );
             self.commands.push((
-                CommandDescriptor::new(&declaration.name, &declaration.description),
+                descriptor,
                 Arc::new(PluginSessionCommand {
                     inner: RpcCommandAdapter::new(
                         &declaration.name,
@@ -633,6 +638,18 @@ impl PluginSessionRuntime {
                 tracing::warn!(%error, "plugin shutdown failed");
             }
         }
+    }
+}
+
+fn plugin_command_descriptor(
+    name: &str,
+    description: &str,
+    argument_hint: Option<&str>,
+) -> CommandDescriptor {
+    let descriptor = CommandDescriptor::new(name, description);
+    match argument_hint {
+        Some(hint) => descriptor.with_argument_hint(hint),
+        None => descriptor,
     }
 }
 
@@ -1427,6 +1444,17 @@ mod tests {
         ) -> std::result::Result<Arc<dyn McpClient>, McpError> {
             Err(McpError::Policy("offline fixture".to_owned()))
         }
+    }
+
+    #[test]
+    fn plugin_command_descriptor_preserves_the_manifest_argument_hint() {
+        let descriptor = plugin_command_descriptor(
+            "fixture.review",
+            "Review a fixture",
+            Some("<path> [instructions]"),
+        );
+        assert_eq!(descriptor.name(), "fixture.review");
+        assert_eq!(descriptor.argument_hint(), Some("<path> [instructions]"));
     }
 
     #[tokio::test]

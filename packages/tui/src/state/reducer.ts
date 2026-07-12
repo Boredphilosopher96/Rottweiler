@@ -326,6 +326,7 @@ function applyKnownEvent(
           description: command.description,
           usage: command.usage,
         })),
+        commandsTruncated: event.truncated,
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
       }
     case "models_listed":

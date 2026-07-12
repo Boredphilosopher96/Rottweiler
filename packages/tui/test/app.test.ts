@@ -331,9 +331,10 @@ describe("Rottweiler OpenTUI shell", () => {
     await setup.mockInput.typeText("/")
     expect(app.picker.visible).toBeTrue()
     expect(app.picker.select.getSelectedIndex()).toBe(0)
+    const optionCount = app.picker.select.options.length
 
     setup.mockInput.pressKey("p", { ctrl: true })
-    expect(app.picker.select.getSelectedIndex()).toBe(commands.length + 1)
+    expect(app.picker.select.getSelectedIndex()).toBe(optionCount - 1)
     setup.mockInput.pressKey("n", { ctrl: true })
     expect(app.picker.select.getSelectedIndex()).toBe(0)
     setup.mockInput.pressKey("\x1b[6~")
@@ -341,17 +342,171 @@ describe("Rottweiler OpenTUI shell", () => {
     setup.mockInput.pressKey("\x1b[5~")
     expect(app.picker.select.getSelectedIndex()).toBe(0)
     setup.mockInput.pressKey("END")
-    expect(app.picker.select.getSelectedIndex()).toBe(commands.length + 1)
+    expect(app.picker.select.getSelectedIndex()).toBe(optionCount - 1)
     setup.mockInput.pressKey("HOME")
     expect(app.picker.select.getSelectedIndex()).toBe(0)
     setup.mockInput.pressArrow("up")
-    expect(app.picker.select.getSelectedIndex()).toBe(commands.length + 1)
+    expect(app.picker.select.getSelectedIndex()).toBe(optionCount - 1)
     setup.mockInput.pressArrow("down")
     expect(app.picker.select.getSelectedIndex()).toBe(0)
 
     setup.mockInput.pressEnter()
     expect(app.picker.visible).toBeFalse()
-    expect(app.composer.value).toBe("/command-0 ")
+    expect(app.composer.value).toBe("/help ")
+  })
+
+  test("keeps slash defaults and the full action palette useful before engine projections", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+
+    await setup.mockInput.typeText("/")
+    const slash = app.picker.select.options.map((option) => option.value)
+    expect(slash).toContain("help")
+    expect(slash).toContain("providers")
+    expect(slash).toContain("permissions")
+    expect(slash.length).toBeGreaterThan(10)
+
+    app.closePicker()
+    app.openCommandPicker()
+    const palette = app.picker.select.options.map((option) => option.value)
+    expect(palette).toContain("session.list")
+    expect(palette).toContain("provider.list")
+    expect(palette).toContain("mcp.configure")
+    expect(palette).not.toContain("mcp.status")
+    expect(palette).toContain("permissions.manage")
+    expect(palette.length).toBeGreaterThan(10)
+
+    const statusIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "status.show",
+    )
+    app.picker.select.setSelectedIndex(statusIndex)
+    app.picker.select.selectCurrent()
+    expect(app.composer.value).toBe("/status")
+  })
+
+  test("searches settings actions and never one-clicks destructive choices", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+        commands: [{ name: "mcp", description: "Manage MCP servers", usage: "[status]" }],
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openCommandPicker()
+    await setup.mockInput.typeText("mcp")
+    expect(app.picker.select.options.map((option) => option.value)).toContain("mcp.status")
+
+    app.picker.input.value = "trust this folder"
+    const trustIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "trust.grant",
+    )
+    expect(trustIndex).toBeGreaterThanOrEqual(0)
+    app.picker.select.setSelectedIndex(trustIndex)
+    app.picker.select.selectCurrent()
+    expect(app.composer.value).toBe("/trust grant ")
+    expect(emitted).toHaveLength(1)
+    expect(emitted[0]?.type).toBe("list_commands")
+  })
+
+  test("refreshes live catalogs when pickers reopen and workspace roots change", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+        commands: [{ name: "first", description: "First", usage: "" }],
+        models: [{ alias: "fast", providers: ["openai"], vision: false, thinking: false, toolCalling: true }],
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openCommandPicker()
+    const firstCatalogRequest = emitted.find((command) => command.type === "list_commands")
+    expect(firstCatalogRequest?.type).toBe("list_commands")
+    app.handleEvent({
+      type: "command_descriptors_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: firstCatalogRequest!.meta.request_id, emitted_at: "2026-01-01T00:00:00Z" },
+      session_id: "session-local",
+      commands: [{ name: "second", description: "Second", usage: "" }],
+      truncated: false,
+    })
+    app.closePicker()
+    app.openCommandPicker()
+    expect(emitted.filter((command) => command.type === "list_commands")).toHaveLength(2)
+
+    app.handleEvent({
+      type: "command_finished",
+      meta: { protocol_version: PROTOCOL_VERSION, session_id: "session-local", sequence_id: "1", emitted_at: "2026-01-01T00:00:01Z" },
+      name: "add-dir",
+      message: "added workspace root @root/1",
+      unrestorable_paths: [],
+    })
+    expect(emitted.filter((command) => command.type === "list_commands")).toHaveLength(3)
+
+    app.openModelPicker()
+    const firstModelsRequest = emitted.find((command) => command.type === "list_models")
+    expect(firstModelsRequest?.type).toBe("list_models")
+    app.handleEvent({
+      type: "models_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: firstModelsRequest!.meta.request_id, emitted_at: "2026-01-01T00:00:02Z" },
+      models: [],
+    })
+    app.closePicker()
+    app.openModelPicker()
+    expect(emitted.filter((command) => command.type === "list_models")).toHaveLength(2)
+  })
+
+  test("shows command catalog truncation in both command surfaces", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        commands: [{ name: "fixture", description: "Fixture", usage: "" }],
+        commandsTruncated: true,
+      },
+    })
+    renderer.root.add(app)
+    await setup.mockInput.typeText("/")
+    expect(app.picker.title).toContain("results truncated")
+    app.closePicker()
+    app.openCommandPicker()
+    expect(app.picker.select.options.map((option) => option.value)).toContain("commands.truncated")
+  })
+
+  test("explains empty provider and model configuration instead of opening blank pickers", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+
+    app.openProviderPicker()
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "providers.empty",
+    ])
+    app.picker.select.selectCurrent()
+    expect(app.state.errors.at(-1)?.code).toBe("providers_unavailable")
+
+    app.openModelPicker()
+    expect(app.picker.select.options.map((option) => option.value)).toEqual(["models.empty"])
+    app.picker.select.selectCurrent()
+    expect(app.state.errors.at(-1)?.code).toBe("models_unavailable")
   })
 
   test("clears a partial anchored trigger before opening a local slash action", async () => {
@@ -397,8 +552,8 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.getSelectedIndex()).toBe(0)
     expect(offset()).toBe(1)
     await setup.mockMouse.click(app.picker.select.x + 2, app.picker.select.y)
-    expect(app.picker.visible).toBeFalse()
-    expect(app.composer.value).toBe("/command-1 ")
+    expect(app.picker.visible).toBeTrue()
+    expect(app.picker.title).toContain("Models")
   })
 
   test("centers Ctrl-P keyboard selection instead of following viewport edges", async () => {
@@ -691,7 +846,11 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     renderer.root.add(app)
     app.openCommandPicker()
-    app.picker.select.setSelectedIndex(15)
+    const commandIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "slash.command-15",
+    )
+    expect(commandIndex).toBeGreaterThanOrEqual(0)
+    app.picker.select.setSelectedIndex(commandIndex)
     await setup.renderOnce()
 
     app.handleEvent({
@@ -701,9 +860,9 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     await setup.renderOnce()
 
-    expect(app.picker.select.getSelectedOption()?.value).toBe("command-15")
-    expect(app.picker.select.getSelectedIndex()).toBe(15)
-    expect(setup.captureCharFrame()).toContain("/command-15")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("slash.command-15")
+    expect(app.picker.select.getSelectedIndex()).toBe(commandIndex)
+    expect(setup.captureCharFrame()).toContain("Run /command-15")
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     expect(app.picker.visible).toBeFalse()

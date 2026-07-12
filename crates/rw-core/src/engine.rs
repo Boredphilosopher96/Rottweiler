@@ -4,7 +4,7 @@ use std::{
     panic::AssertUnwindSafe,
     path::{Component, Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -3730,6 +3730,9 @@ impl SessionActor {
         let (command_tx, command_rx) = mpsc::channel(64);
         let (event_tx, _) = broadcast::channel(config.event_capacity);
         let active_turn = Arc::new(AtomicU64::new(0));
+        let command_descriptors = Arc::new(RwLock::new(Arc::from(
+            config.commands.descriptors().cloned().collect::<Vec<_>>(),
+        )));
         let handle = SessionHandle {
             commands: command_tx,
             events: event_tx.clone(),
@@ -3739,6 +3742,7 @@ impl SessionActor {
             local_request_sequence: Arc::new(AtomicU64::new(0)),
             local_attached: Arc::new(AtomicBool::new(false)),
             local_last_seen: config.recovered.last_sequence,
+            command_descriptors: Arc::clone(&command_descriptors),
         };
         tokio::spawn(run_actor(
             config,
@@ -3746,6 +3750,7 @@ impl SessionActor {
             command_rx,
             event_tx,
             active_turn,
+            Arc::clone(&command_descriptors),
         ));
         Ok(handle)
     }
@@ -3886,6 +3891,7 @@ pub struct SessionHandle {
     local_request_sequence: Arc<AtomicU64>,
     local_attached: Arc<AtomicBool>,
     local_last_seen: Option<SequenceId>,
+    command_descriptors: Arc<RwLock<Arc<[CommandDescriptor]>>>,
 }
 
 /// Opaque, plugin-scoped machine capability for one session actor.
@@ -4046,6 +4052,17 @@ impl SessionHandle {
     /// Returns a persistence error when the durable sink cannot read its tail.
     pub async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
         self.event_sink.last_sequence().await
+    }
+
+    /// Returns the exact slash-command catalog assembled for this live
+    /// session, including project commands, skills, MCP prompts, and plugins.
+    ///
+    #[must_use]
+    pub fn command_descriptors(&self) -> Arc<[CommandDescriptor]> {
+        self.command_descriptors
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn local_meta(&self) -> CommandMeta {
@@ -4748,6 +4765,7 @@ async fn run_actor(
     mut commands: mpsc::Receiver<ActorCommand>,
     events: broadcast::Sender<RoutedEvent>,
     active_turn: Arc<AtomicU64>,
+    command_descriptors: Arc<RwLock<Arc<[CommandDescriptor]>>>,
 ) {
     let mut state = ActorState::recover(
         config.session_id.clone(),
@@ -4851,6 +4869,7 @@ async fn run_actor(
                     &turn_signals,
                     &events,
                     &active_turn,
+                    &command_descriptors,
                 ).await;
             }
             signal = signals.recv() => {
@@ -4917,7 +4936,6 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         ClientCommand::CreateSession { .. }
         | ClientCommand::ListSessions { .. }
         | ClientCommand::SearchSessions { .. }
-        | ClientCommand::ListCommands { .. }
         | ClientCommand::ListModels { .. }
         | ClientCommand::ShutdownHost { .. } => None,
         ClientCommand::ResumeSession { session_id, .. }
@@ -4945,7 +4963,8 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::SearchWorkspaceFiles { session_id, .. }
         | ClientCommand::PreviewWorkspaceFile { session_id, .. }
         | ClientCommand::GetWorkspaceStatus { session_id, .. }
-        | ClientCommand::GetWorkspaceDiff { session_id, .. } => Some(session_id),
+        | ClientCommand::GetWorkspaceDiff { session_id, .. }
+        | ClientCommand::ListCommands { session_id, .. } => Some(session_id),
     }
 }
 
@@ -6046,6 +6065,7 @@ async fn handle_actor_command(
     turn_signals: &mpsc::UnboundedSender<TurnSignal>,
     events: &broadcast::Sender<RoutedEvent>,
     active_turn: &Arc<AtomicU64>,
+    command_descriptors: &Arc<RwLock<Arc<[CommandDescriptor]>>>,
 ) {
     match command {
         ActorCommand::Protocol {
@@ -6973,6 +6993,7 @@ async fn handle_actor_command(
                         turn_signals,
                         events,
                         active_turn,
+                        command_descriptors,
                     ))
                     .await;
                     match internal_receive.await {
@@ -7684,7 +7705,18 @@ async fn handle_actor_command(
                                 config
                                     .workspace_roots
                                     .finalize_generation(generation.generation);
-                                *config = Arc::new(config.with_workspace_generation(&generation));
+                                let next_config =
+                                    Arc::new(config.with_workspace_generation(&generation));
+                                *command_descriptors
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(
+                                    next_config
+                                        .commands
+                                        .descriptors()
+                                        .cloned()
+                                        .collect::<Vec<_>>(),
+                                );
+                                *config = next_config;
                                 *tool_context = replacement_context;
                                 output.message = format!(
                                     "added workspace root @root/{}",
@@ -13882,13 +13914,23 @@ mod tests {
             effective_from_turn: u64,
             _permissions: Arc<PermissionGate>,
         ) -> Result<WorkspaceRuntimeGeneration, AgentLoopError> {
+            let mut commands = builtin_command_registry().expect("generation commands");
+            commands
+                .register(
+                    CommandDescriptor::new(
+                        "generation-marker",
+                        "command discovered from the new workspace generation",
+                    ),
+                    EchoCommand,
+                )
+                .expect("generation marker command");
             Ok(WorkspaceRuntimeGeneration {
                 generation: current_generation + 1,
                 effective_from_turn,
                 roots: self.roots.clone(),
                 tools: Arc::clone(&self.tools),
                 hooks: Arc::new(builtin_hook_dispatcher().expect("generation hooks")),
-                commands: Arc::new(builtin_command_registry().expect("generation commands")),
+                commands: Arc::new(commands),
                 permissions: Arc::clone(&self.permissions),
                 checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
                 folder_trust: Arc::new(NoopFolderTrustController),
@@ -14583,6 +14625,53 @@ mod tests {
         assert_eq!(unchanged.workspace_roots.len(), 1);
         assert_eq!(failing_controller.committed.load(Ordering::SeqCst), 0);
         assert_eq!(failing_controller.aborted.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn add_dir_commit_refreshes_the_nonblocking_command_catalog() {
+        let root = TempDir::new().expect("tempdir");
+        let primary = std::fs::canonicalize(root.path()).expect("canonical primary");
+        let added_dir = TempDir::new().expect("added tempdir");
+        let added = std::fs::canonicalize(added_dir.path()).expect("canonical added");
+        let tools = Arc::new(ToolRegistry::new());
+        let permissions = Arc::new(PermissionGate::new(PermissionDecision::Allow));
+        let controller = Arc::new(FixedWorkspaceRootController {
+            roots: vec![primary.clone(), added.clone()],
+            tools: Arc::clone(&tools),
+            permissions: Arc::clone(&permissions),
+            committed: AtomicU64::new(0),
+            aborted: AtomicU64::new(0),
+            fail_commit: false,
+        });
+        let mut actor_config = config(
+            &primary,
+            Arc::new(ScriptedModel::default()),
+            tools,
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.permissions = permissions;
+        actor_config.workspace_roots = controller.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        assert!(
+            handle
+                .command_descriptors()
+                .iter()
+                .all(|descriptor| descriptor.name() != "generation-marker")
+        );
+
+        handle
+            .send_message(format!("/add-dir {}", added.display()))
+            .await
+            .expect("add workspace root");
+
+        assert_eq!(controller.committed.load(Ordering::SeqCst), 1);
+        assert!(
+            handle
+                .command_descriptors()
+                .iter()
+                .any(|descriptor| descriptor.name() == "generation-marker")
+        );
     }
 
     #[tokio::test]

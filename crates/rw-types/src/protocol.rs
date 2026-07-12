@@ -752,6 +752,7 @@ pub enum ClientCommand {
     },
     ListCommands {
         meta: CommandMeta,
+        session_id: SessionId,
     },
     ListModels {
         meta: CommandMeta,
@@ -1184,7 +1185,9 @@ pub enum EngineEvent {
     },
     CommandDescriptorsListed {
         meta: CommandAckMeta,
+        session_id: SessionId,
         commands: Vec<CommandDescriptor>,
+        truncated: bool,
     },
     ModelsListed {
         meta: CommandAckMeta,

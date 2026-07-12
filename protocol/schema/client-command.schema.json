@@ -693,6 +693,9 @@
         "meta": {
           "$ref": "#/$defs/CommandMeta"
         },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "type": {
           "type": "string",
           "const": "list_commands"
@@ -700,7 +703,8 @@
       },
       "required": [
         "type",
-        "meta"
+        "meta",
+        "session_id"
       ]
     },
     {

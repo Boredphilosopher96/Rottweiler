@@ -60,6 +60,22 @@ function childResult(
 }
 
 describe("pure TUI state reducer", () => {
+  test("retains command catalog truncation so the UI cannot imply completeness", () => {
+    const state = reduce(createInitialState(), {
+      type: "command_descriptors_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client",
+        request_id: "commands",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session",
+      commands: [{ name: "fixture", description: "Fixture", usage: "" }],
+      truncated: true,
+    })
+    expect(state.commandsTruncated).toBeTrue()
+  })
+
   test("defaults missing providers from older model-list events", () => {
     const state = reduce(createInitialState(), {
       type: "models_listed",
