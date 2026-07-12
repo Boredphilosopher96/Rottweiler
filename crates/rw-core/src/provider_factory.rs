@@ -924,9 +924,18 @@ where
                     .as_ref()
                     .map_or_else(Vec::new, |value| value.reasoning_efforts.clone())
             };
+            let capability_pricing = if kind == AdapterKind::GitHubCopilot {
+                find_pricing(&self.pricing, provider_name, model, Some("github-copilot")).1
+            } else {
+                pricing.clone()
+            };
             let capabilities = match kind {
-                AdapterKind::OpenAiSubscription => subscription_model_capabilities(),
-                AdapterKind::GitHubCopilot => github_copilot_capabilities(),
+                AdapterKind::OpenAiSubscription => {
+                    subscription_model_capabilities(capability_pricing.as_ref())
+                }
+                AdapterKind::GitHubCopilot => {
+                    github_copilot_capabilities(capability_pricing.as_ref())
+                }
                 _ => model_capabilities(kind, pricing.as_ref()),
             };
             let accounting = match kind {
@@ -1891,28 +1900,33 @@ fn subscription_model_allowed(model: &str) -> bool {
     )
 }
 
-fn subscription_model_capabilities() -> Capabilities {
+fn subscription_model_capabilities(pricing: Option<&ModelPricing>) -> Capabilities {
     Capabilities {
+        // The subscription transport is intentionally isolated from ordinary
+        // OpenAI model discovery. A refreshable catalog may enrich a known id,
+        // but never makes that id selectable or proves subscription access.
+        // Tool compatibility is a property of the isolated subscription
+        // transport, not something models.dev pricing metadata may revoke.
         tool_calling: true,
         vision: false,
         thinking: true,
         cache_breakpoints: CacheBreakpointSupport::Automatic,
-        max_context_tokens: None,
-        max_output_tokens: None,
+        max_context_tokens: pricing.and_then(|value| value.max_context_tokens),
+        max_output_tokens: pricing.and_then(|value| value.max_output_tokens),
         wire_mode: WireMode::OpenAiResponses,
     }
 }
 
-fn github_copilot_capabilities() -> Capabilities {
+fn github_copilot_capabilities(pricing: Option<&ModelPricing>) -> Capabilities {
     Capabilities {
         // Copilot is a coding-agent route, so tools must reach lazy discovery;
         // the discovered model record remains the authoritative fail-closed gate.
         tool_calling: true,
         vision: false,
-        thinking: false,
+        thinking: pricing.is_some_and(|value| !value.reasoning_efforts.is_empty()),
         cache_breakpoints: CacheBreakpointSupport::None,
-        max_context_tokens: None,
-        max_output_tokens: None,
+        max_context_tokens: pricing.and_then(|value| value.max_context_tokens),
+        max_output_tokens: pricing.and_then(|value| value.max_output_tokens),
         wire_mode: WireMode::GitHubCopilot,
     }
 }
@@ -2213,6 +2227,53 @@ mod native_search_tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+
+    fn capability_pricing() -> ModelPricing {
+        ModelPricing {
+            display_name: "Fixture".to_owned(),
+            max_context_tokens: Some(400_000),
+            max_output_tokens: Some(128_000),
+            supports_tools: true,
+            supports_thinking: true,
+            reasoning_efforts: vec![ThinkingLevel::Low, ThinkingLevel::High],
+            input_per_million_micros_usd: 1,
+            output_per_million_micros_usd: 1,
+            cache_read_per_million_micros_usd: None,
+            cache_write_per_million_micros_usd: None,
+            reasoning_per_million_micros_usd: None,
+        }
+    }
+
+    #[test]
+    fn subscription_and_copilot_pre_discovery_caps_use_catalog_enrichment() {
+        let pricing = capability_pricing();
+        let subscription = subscription_model_capabilities(Some(&pricing));
+        assert_eq!(subscription.max_context_tokens, Some(400_000));
+        assert_eq!(subscription.max_output_tokens, Some(128_000));
+        assert!(subscription.tool_calling);
+        assert!(subscription.thinking);
+
+        let copilot = github_copilot_capabilities(Some(&pricing));
+        assert_eq!(copilot.max_context_tokens, Some(400_000));
+        assert_eq!(copilot.max_output_tokens, Some(128_000));
+        assert!(copilot.tool_calling);
+        assert!(copilot.thinking);
+    }
+
+    #[test]
+    fn unknown_subscription_caps_remain_explicitly_unbounded() {
+        let capabilities = subscription_model_capabilities(None);
+        assert_eq!(capabilities.max_context_tokens, None);
+        assert_eq!(capabilities.max_output_tokens, None);
+        assert!(capabilities.tool_calling);
+    }
+
+    #[test]
+    fn subscription_tools_do_not_depend_on_pricing_metadata() {
+        let mut pricing = capability_pricing();
+        pricing.supports_tools = false;
+        assert!(subscription_model_capabilities(Some(&pricing)).tool_calling);
+    }
 
     struct Candidate {
         name: &'static str,

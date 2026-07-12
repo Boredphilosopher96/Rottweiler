@@ -477,6 +477,13 @@ pub struct ContextSnapshot {
     #[schemars(with = "String")]
     #[ts(type = "string")]
     pub reserved_tokens: u64,
+    /// False when zero capacity means unknown rather than exhausted.
+    #[serde(default)]
+    pub context_window_known: bool,
+    /// Provider-neutral explanation for an unknown context window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context_window_reason: Option<String>,
     pub cache_breakpoints: Vec<CacheBreakpoint>,
     pub items: Vec<ContextItemSnapshot>,
 }
@@ -1382,6 +1389,12 @@ pub enum EngineEvent {
         #[schemars(with = "String")]
         #[ts(type = "string")]
         reserved_tokens: u64,
+        /// False when zero capacity means unknown rather than exhausted.
+        #[serde(default)]
+        context_window_known: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        context_window_reason: Option<String>,
         stable_prefix_hash: String,
         cache_hit_basis_points: u16,
         #[serde(default, with = "decimal_u64")]

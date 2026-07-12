@@ -91,6 +91,7 @@ pub struct PermissionGenerationUpdate {
 
 #[derive(Default)]
 struct PermissionMemory {
+    workspace_roots: Vec<PathBuf>,
     workspace_namespace: Vec<String>,
     generation: u64,
     session_allows: BTreeSet<RememberedApproval>,
@@ -207,9 +208,11 @@ impl PermissionGate {
     /// Binds remembered approvals to the complete ordered root identity.
     #[must_use]
     pub fn with_workspace_roots(self, roots: impl IntoIterator<Item = impl AsRef<Path>>) -> Self {
+        let roots = canonical_workspace_roots(roots);
         {
             let mut memory = lock_write(&self.memory);
-            memory.workspace_namespace = workspace_namespace(roots);
+            memory.workspace_namespace = workspace_namespace(&roots);
+            memory.workspace_roots = roots;
             memory.generation = 1;
         }
         self
@@ -227,7 +230,8 @@ impl PermissionGate {
         &self,
         roots: impl IntoIterator<Item = impl AsRef<Path>>,
     ) -> Result<PermissionGenerationUpdate, std::io::Error> {
-        let namespace = workspace_namespace(roots);
+        let roots = canonical_workspace_roots(roots);
+        let namespace = workspace_namespace(&roots);
         let mut memory = lock_write(&self.memory);
         if memory.workspace_namespace == namespace {
             return Ok(PermissionGenerationUpdate {
@@ -247,6 +251,7 @@ impl PermissionGate {
             invalidated_project_approvals,
         };
         memory.workspace_namespace = namespace;
+        memory.workspace_roots = roots;
         memory.generation = update.generation;
         memory.session_allows.clear();
         Ok(update)
@@ -267,12 +272,14 @@ impl PermissionGate {
         &self,
         roots: impl IntoIterator<Item = impl AsRef<Path>>,
     ) -> Result<Self, std::io::Error> {
+        let roots = canonical_workspace_roots(roots);
         let generation = lock_read(&self.memory).generation.saturating_add(1);
         Ok(Self {
             policy: self.policy.clone(),
             restrictive_rules: self.restrictive_rules.clone(),
             memory: RwLock::new(PermissionMemory {
-                workspace_namespace: workspace_namespace(roots),
+                workspace_namespace: workspace_namespace(&roots),
+                workspace_roots: roots,
                 generation,
                 session_allows: BTreeSet::new(),
             }),
@@ -305,6 +312,7 @@ impl PermissionGate {
             policy: self.policy.clone(),
             restrictive_rules: Some(restrictive_rules),
             memory: RwLock::new(PermissionMemory {
+                workspace_roots: memory.workspace_roots.clone(),
                 workspace_namespace: memory.workspace_namespace.clone(),
                 generation: memory.generation,
                 session_allows: memory.session_allows.clone(),
@@ -601,6 +609,9 @@ impl PermissionGate {
                         HeadlessPermissionMode::Yolo => PermissionDecision::Allow,
                     };
                 }
+                if *mode == HeadlessPermissionMode::AutoSafe {
+                    return self.auto_safe_decision(request, rules, safe_listed);
+                }
                 if rules.is_empty() {
                     match mode {
                         HeadlessPermissionMode::Strict if safe_listed => PermissionDecision::Allow,
@@ -634,6 +645,33 @@ impl PermissionGate {
                 .is_some_and(|command| {
                     self.command_safety.classify(command) == CommandSafety::SafeListed
                 })
+    }
+
+    fn auto_safe_decision(
+        &self,
+        request: &PermissionRequest,
+        rules: Vec<PermissionRule>,
+        safe_listed: bool,
+    ) -> PermissionDecision {
+        let configured = rule_decision(
+            &PermissionConfig {
+                default: PermissionDecision::Ask,
+                rules,
+            },
+            request,
+        );
+        if configured == PermissionDecision::Deny {
+            return PermissionDecision::Deny;
+        }
+        let memory = lock_read(&self.memory);
+        if safe_listed
+            || is_read_only(request)
+            || is_auto_safe_workspace_write(request, &memory.workspace_roots)
+        {
+            PermissionDecision::Allow
+        } else {
+            PermissionDecision::Deny
+        }
     }
 }
 
@@ -758,6 +796,79 @@ fn workspace_namespace(roots: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec
     }
     namespace.update(&count.to_le_bytes());
     vec![namespace.finalize().to_hex().to_string()]
+}
+
+fn canonical_workspace_roots(roots: impl IntoIterator<Item = impl AsRef<Path>>) -> Vec<PathBuf> {
+    roots
+        .into_iter()
+        .map(|root| fs::canonicalize(root.as_ref()).unwrap_or_else(|_| root.as_ref().to_path_buf()))
+        .collect()
+}
+
+fn is_auto_safe_workspace_write(request: &PermissionRequest, roots: &[PathBuf]) -> bool {
+    if !matches!(request.tool_name.as_str(), "write" | "edit" | "multi_edit")
+        || roots.is_empty()
+        || !request
+            .capabilities
+            .contains(&ToolCapability::WriteFilesystem)
+        || request.capabilities.iter().any(|capability| {
+            matches!(
+                capability,
+                ToolCapability::Execute | ToolCapability::Network
+            )
+        })
+    {
+        return false;
+    }
+    let Some(path) = request.arguments.get("path").and_then(Value::as_str) else {
+        return false;
+    };
+    resolve_workspace_write_path(roots, path).is_some()
+}
+
+fn resolve_workspace_write_path(roots: &[PathBuf], supplied: &str) -> Option<PathBuf> {
+    let supplied = Path::new(supplied);
+    let candidate = if supplied.is_absolute() {
+        supplied.to_path_buf()
+    } else {
+        let mut components = supplied.components();
+        if components.next().is_some_and(
+            |component| matches!(component, std::path::Component::Normal(name) if name == "@root"),
+        ) {
+            let std::path::Component::Normal(index) = components.next()? else {
+                return None;
+            };
+            let index = index.to_str()?.parse::<usize>().ok()?;
+            roots.get(index)?.join(components.collect::<PathBuf>())
+        } else {
+            roots.first()?.join(supplied)
+        }
+    };
+    let canonical = canonicalize_with_missing_tail(&candidate)?;
+    roots
+        .iter()
+        .any(|root| canonical.starts_with(root))
+        .then_some(canonical)
+}
+
+fn canonicalize_with_missing_tail(path: &Path) -> Option<PathBuf> {
+    let mut ancestor = path;
+    let mut tail = Vec::new();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(mut canonical) => {
+                for component in tail.iter().rev() {
+                    canonical.push(component);
+                }
+                return Some(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tail.push(ancestor.file_name()?.to_owned());
+                ancestor = ancestor.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 fn canonical_key_arguments(request: &PermissionRequest) -> String {
@@ -2629,6 +2740,115 @@ mod tests {
             PermissionOutcome::Allowed
         );
         assert_eq!(mode_deny.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn auto_safe_allows_only_reversible_workspace_file_tools() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let primary = fixture.path().join("primary");
+        let added = fixture.path().join("added");
+        let outside = fixture.path().join("outside");
+        for root in [&primary, &added, &outside] {
+            fs::create_dir(root).expect("workspace fixture");
+        }
+        let gate = PermissionGate::for_headless_mode(HeadlessPermissionMode::AutoSafe)
+            .with_workspace_roots([&primary, &added]);
+        let approver = CountingDeny(AtomicUsize::new(0));
+        let write = |path: &str| PermissionRequest {
+            id: "auto-safe-write".to_owned(),
+            tool_name: "write".to_owned(),
+            arguments: json!({"path": path, "content": "fixture"}),
+            capabilities: vec![
+                ToolCapability::ReadFilesystem,
+                ToolCapability::WriteFilesystem,
+            ],
+            approval_diff: None,
+        };
+
+        assert_eq!(
+            gate.authorize(write("new.txt"), &approver).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            gate.authorize(write("@root/1/new.txt"), &approver).await,
+            PermissionOutcome::Allowed
+        );
+        let multi_edit = |path: &str| PermissionRequest {
+            id: "auto-safe-multi-edit".to_owned(),
+            tool_name: "multi_edit".to_owned(),
+            arguments: json!({
+                "path": path,
+                "edits": [{"old": "before", "new": "after"}],
+            }),
+            capabilities: vec![
+                ToolCapability::ReadFilesystem,
+                ToolCapability::WriteFilesystem,
+            ],
+            approval_diff: None,
+        };
+        assert_eq!(
+            gate.authorize(multi_edit("@root/1/existing.txt"), &approver)
+                .await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            gate.authorize(
+                multi_edit(outside.join("existing.txt").to_str().expect("UTF-8")),
+                &approver,
+            )
+            .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            gate.authorize(
+                write(outside.join("escaped.txt").to_str().expect("UTF-8")),
+                &approver
+            )
+            .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            gate.authorize(write("../outside/escaped.txt"), &approver)
+                .await,
+            PermissionOutcome::Denied
+        );
+
+        let mut network_write = write("network.txt");
+        network_write.capabilities.push(ToolCapability::Network);
+        assert_eq!(
+            gate.authorize(network_write, &approver).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(approver.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auto_safe_does_not_follow_workspace_symlinks_for_write_approval() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let workspace = fixture.path().join("workspace");
+        let outside = fixture.path().join("outside");
+        fs::create_dir(&workspace).expect("workspace");
+        fs::create_dir(&outside).expect("outside");
+        std::os::unix::fs::symlink(&outside, workspace.join("escape")).expect("symlink");
+        let gate = PermissionGate::for_headless_mode(HeadlessPermissionMode::AutoSafe)
+            .with_workspace_roots([&workspace]);
+        let request = PermissionRequest {
+            id: "symlink-write".to_owned(),
+            tool_name: "edit".to_owned(),
+            arguments: json!({"path": "escape/file.txt", "old": "a", "new": "b"}),
+            capabilities: vec![
+                ToolCapability::ReadFilesystem,
+                ToolCapability::WriteFilesystem,
+            ],
+            approval_diff: None,
+        };
+        let approver = CountingDeny(AtomicUsize::new(0));
+        assert_eq!(
+            gate.authorize(request, &approver).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(approver.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

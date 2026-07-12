@@ -25,7 +25,7 @@ use std::{
 use async_trait::async_trait;
 #[cfg(unix)]
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use rw_core::runtime_support::PricingTable;
+use rw_core::runtime_support::{PricingTable, default_models_path};
 use rw_core::{
     AttachmentData, CommandDescriptor, CompletedForkOperation, Config, CreateSessionRequest,
     EngineEvent, ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError,
@@ -1616,7 +1616,10 @@ impl HostQueryService for CliSessionFactory {
     }
 
     async fn model_descriptors(&self) -> Result<Vec<ModelDescriptor>, HostError> {
-        let pricing = PricingTable::bundled().ok();
+        let pricing = match default_models_path() {
+            Ok(path) if path.is_file() => PricingTable::load(&path).await.ok(),
+            Ok(_) | Err(_) => PricingTable::bundled().ok(),
+        };
         let mut descriptors = BTreeMap::new();
         for (alias, candidates) in &self.options.config.models.aliases {
             let capabilities =

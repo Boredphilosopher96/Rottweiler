@@ -108,6 +108,14 @@ pub(crate) fn search_sessions(
         .map_err(|error| miette!("session search failed: {error}"))
 }
 
+pub(crate) fn list_sessions(storage_root: &Path, limit: usize) -> Result<Vec<SessionSummary>> {
+    if !(1..=1_000).contains(&limit) {
+        return Err(miette!("session list limit must be between 1 and 1000"));
+    }
+    SessionIndex::list_read_only(storage_root, limit)
+        .map_err(|error| miette!("session listing failed: {error}"))
+}
+
 fn markdown_export(session: &str, events: &[Value]) -> Result<Vec<u8>> {
     let mut output =
         format!("# Rottweiler transcript: {}\n\n", escape_markdown(session)).into_bytes();
@@ -598,6 +606,7 @@ fn redact_export_value(value: Value, redactor: &FixtureRedactor) -> Value {
                         "api_key",
                         "authorization",
                         "credential",
+                        "signature",
                     ]
                     .iter()
                     .any(|marker| lowered.contains(marker));
@@ -662,6 +671,9 @@ fn next_absolute_path_start(value: &str, cursor: usize) -> Option<usize> {
                 return None;
             }
             let tail = &value[index..];
+            if character == '/' && is_known_slash_command(tail) {
+                return None;
+            }
             let file_uri = tail.starts_with("file:///") || tail.starts_with("file://localhost/");
             let html_closing_tag = character == '/'
                 && value[..index].ends_with('<')
@@ -687,6 +699,49 @@ fn next_absolute_path_start(value: &str, cursor: usize) -> Option<usize> {
                 && tail.as_bytes().get(2).is_some_and(|next| *next != b'\\');
             (file_uri || unix || windows_drive || windows_unc).then_some(index)
         })
+}
+
+fn is_known_slash_command(value: &str) -> bool {
+    let token = value
+        .strip_prefix('/')
+        .and_then(|value| {
+            let end = value
+                .find(|character: char| {
+                    character.is_whitespace()
+                        || matches!(character, '"' | '\'' | '<' | '>' | ')' | ']' | '}' | ',')
+                })
+                .unwrap_or(value.len());
+            value.get(..end)
+        })
+        .unwrap_or_default();
+    matches!(
+        token,
+        "help"
+            | "status"
+            | "mode"
+            | "permissions"
+            | "plan"
+            | "rewind"
+            | "fork"
+            | "review"
+            | "interrupt"
+            | "context"
+            | "cost"
+            | "compact"
+            | "trust"
+            | "add-dir"
+            | "init"
+            | "deep-init"
+            | "memory"
+            | "models"
+            | "providers"
+            | "mcp"
+            | "mcp.prompt"
+            | "project"
+            | "workspace"
+            | "session"
+            | "plugin"
+    )
 }
 
 fn path_has_left_boundary(value: &str, index: usize) -> bool {
@@ -781,6 +836,9 @@ fn looks_like_secret(value: &str) -> bool {
     {
         return true;
     }
+    if looks_like_utc_timestamp(trimmed) {
+        return false;
+    }
     if !(24..=4_096).contains(&trimmed.len())
         || trimmed.bytes().any(|byte| byte.is_ascii_whitespace())
     {
@@ -798,6 +856,23 @@ fn looks_like_secret(value: &str) -> bool {
         return false;
     }
     shannon_entropy(trimmed.as_bytes()) >= 3.5
+}
+
+fn looks_like_utc_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (20..=35).contains(&bytes.len())
+        && bytes.get(4) == Some(&b'-')
+        && bytes.get(7) == Some(&b'-')
+        && bytes.get(10) == Some(&b'T')
+        && bytes.get(13) == Some(&b':')
+        && bytes.get(16) == Some(&b':')
+        && bytes.last() == Some(&b'Z')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16)
+                || *byte == b'.'
+                || byte.is_ascii_digit()
+                || (index + 1 == bytes.len() && *byte == b'Z')
+        })
 }
 
 fn shannon_entropy(bytes: &[u8]) -> f64 {
@@ -838,6 +913,7 @@ mod tests {
 
     use super::*;
     use rw_core::{EventMeta, PROTOCOL_VERSION, SequenceId, SessionId};
+    use rw_store::session::{SessionProjection, SessionSummary};
 
     fn fixture() -> Vec<EventEnvelope<EngineEvent>> {
         vec![EventEnvelope {
@@ -891,6 +967,36 @@ mod tests {
     }
 
     #[test]
+    fn read_only_session_listing_is_newest_first_and_bounded() {
+        let storage = tempfile::tempdir().expect("storage");
+        let index = SessionIndex::open(storage.path()).expect("index");
+        for (id, updated) in [("older", 1), ("newer-b", 2), ("newer-a", 2)] {
+            index
+                .upsert(&SessionProjection {
+                    summary: SessionSummary {
+                        id: id.to_owned(),
+                        title: id.to_owned(),
+                        updated_unix_ms: updated,
+                        cost_micros: 0,
+                    },
+                    transcript: String::new(),
+                    projected_through: None,
+                })
+                .expect("projection");
+        }
+        let listed = list_sessions(storage.path(), 2).expect("read-only list");
+        assert_eq!(
+            listed
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer-a", "newer-b"]
+        );
+        assert!(list_sessions(storage.path(), 0).is_err());
+        assert!(list_sessions(storage.path(), 1_001).is_err());
+    }
+
+    #[test]
     fn replay_rejects_event_identity_outside_its_durable_envelope() {
         let storage = tempfile::tempdir().expect("storage");
         let mut log = SessionEventLog::open(storage.path(), "history").expect("event log");
@@ -935,6 +1041,31 @@ mod tests {
         assert!(redacted.contains("https://example.invalid/public/path"));
         assert!(redacted.contains("relative=src/main.rs"));
         assert_eq!(redacted.matches("[REDACTED_PATH]").count(), 3);
+    }
+
+    #[test]
+    fn export_redaction_preserves_timestamps_and_slash_command_help() {
+        let input = "at 2026-07-12T14:23:45.123Z use /add-dir <path> then /models";
+        let redacted = redact_export_string(input, &FixtureRedactor::default());
+        assert_eq!(redacted, input);
+        assert_eq!(
+            redact_export_string("read /Users/alice/private", &FixtureRedactor::default()),
+            "read [REDACTED_PATH]"
+        );
+    }
+
+    #[test]
+    fn export_json_redacts_opaque_reasoning_signatures_by_field_name() {
+        let redacted = redact_export_value(
+            serde_json::json!({
+                "type": "thinking_delta",
+                "text": "summary",
+                "signature": "provider-opaque-ciphertext",
+            }),
+            &FixtureRedactor::default(),
+        );
+        assert_eq!(redacted["text"], "summary");
+        assert_eq!(redacted["signature"], "[REDACTED]");
     }
 
     #[test]

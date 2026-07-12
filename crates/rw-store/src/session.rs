@@ -1549,6 +1549,48 @@ impl SessionIndex {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Lists newest sessions from a private read-only snapshot of an existing
+    /// index. The live database and WAL are never modified by this query.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the result limit is too large, the index path is
+    /// unsafe or changes during the read, or the snapshot cannot be queried.
+    pub fn list_read_only(
+        root: &Path,
+        limit: usize,
+    ) -> Result<Vec<SessionSummary>, SessionStoreError> {
+        if limit > 1_001 {
+            return Err(SessionStoreError::SearchLimitTooLarge);
+        }
+        let limit = i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?;
+        let path = root.join("index.sqlite");
+        let before = validate_read_only_index(&path)?;
+        let canonical_root = fs::canonicalize(root)?;
+        let canonical_path = fs::canonicalize(&path)?;
+        if canonical_path.parent() != Some(canonical_root.as_path()) {
+            return Err(SessionStoreError::UnsafeSessionIndex);
+        }
+        let snapshot = read_only_index_snapshot(&canonical_root, &before)?;
+        let snapshot_path = fs::canonicalize(snapshot.path().join("index.sqlite"))?;
+        let connection = Connection::open_with_flags(
+            snapshot_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        let after = validate_read_only_index(&path)?;
+        if !same_file_identity(&before, &after) {
+            return Err(SessionStoreError::UnsafeSessionIndex);
+        }
+        let mut statement = connection.prepare(
+            "SELECT id,title,updated_unix_ms,cost_micros FROM sessions \
+             ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
+        )?;
+        let rows = statement.query_map([limit], summary_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Returns one projection by id.
     ///
     /// # Errors

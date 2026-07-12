@@ -568,6 +568,8 @@ enum PendingEvent {
         used_tokens: u64,
         usable_tokens: u64,
         reserved_tokens: u64,
+        context_window_known: bool,
+        context_window_reason: Option<String>,
         stable_prefix_hash: String,
         cache_hit_basis_points: u16,
         estimated_input_tokens: u64,
@@ -990,6 +992,8 @@ impl PendingEvent {
                 used_tokens,
                 usable_tokens,
                 reserved_tokens,
+                context_window_known,
+                context_window_reason,
                 stable_prefix_hash,
                 cache_hit_basis_points,
                 estimated_input_tokens,
@@ -1001,6 +1005,8 @@ impl PendingEvent {
                 used_tokens,
                 usable_tokens,
                 reserved_tokens,
+                context_window_known,
+                context_window_reason,
                 stable_prefix_hash,
                 cache_hit_basis_points,
                 estimated_input_tokens,
@@ -1620,6 +1626,8 @@ fn recovered_pending_event(
             used_tokens,
             usable_tokens,
             reserved_tokens,
+            context_window_known,
+            context_window_reason,
             stable_prefix_hash,
             cache_hit_basis_points,
             estimated_input_tokens,
@@ -1631,6 +1639,8 @@ fn recovered_pending_event(
             used_tokens: *used_tokens,
             usable_tokens: *usable_tokens,
             reserved_tokens: *reserved_tokens,
+            context_window_known: *context_window_known,
+            context_window_reason: context_window_reason.clone(),
             stable_prefix_hash: stable_prefix_hash.clone(),
             cache_hit_basis_points: *cache_hit_basis_points,
             estimated_input_tokens: *estimated_input_tokens,
@@ -9405,6 +9415,7 @@ fn context_snapshot(
     compaction: &CompactionConfig,
     turn_id: Option<TurnId>,
 ) -> ContextSnapshot {
+    let context_window_known = metadata.max_context_tokens.is_some_and(|window| window > 0);
     let (usable_tokens, reserved_tokens) = metadata.max_context_tokens.map_or((0, 0), |window| {
         let policy = OverflowPolicy {
             context_window_tokens: window,
@@ -9474,7 +9485,9 @@ fn context_snapshot(
         machine_local_path: None,
         estimated_tokens: LocalTokenEstimator::tools(std::slice::from_ref(tool)),
         state: ContextItemState {
-            pinned: true,
+            // Tool schemas are part of the provider request shape, but they
+            // are not user pins and the context UI must not claim otherwise.
+            pinned: false,
             evicted: false,
             summarized: false,
             pruned: false,
@@ -9528,6 +9541,9 @@ fn context_snapshot(
         used_tokens: assembled.token_totals.total,
         usable_tokens,
         reserved_tokens,
+        context_window_known,
+        context_window_reason: (!context_window_known)
+            .then(|| "provider did not report a context window".to_owned()),
         cache_breakpoints: assembled
             .cache_breakpoints
             .iter()
@@ -11660,6 +11676,8 @@ async fn run_turn(
             snapshot.used_tokens,
             snapshot.usable_tokens,
             snapshot.reserved_tokens,
+            snapshot.context_window_known,
+            snapshot.context_window_reason.clone(),
             snapshot.stable_prefix_hash.clone(),
         );
         send_event(
@@ -11669,6 +11687,8 @@ async fn run_turn(
                 used_tokens: snapshot.used_tokens,
                 usable_tokens: snapshot.usable_tokens,
                 reserved_tokens: snapshot.reserved_tokens,
+                context_window_known: snapshot.context_window_known,
+                context_window_reason: snapshot.context_window_reason,
                 stable_prefix_hash: snapshot.stable_prefix_hash,
                 cache_hit_basis_points: 0,
                 estimated_input_tokens: input_estimate.local_tokens,
@@ -11943,7 +11963,9 @@ async fn run_turn(
                 used_tokens: context_metrics.0,
                 usable_tokens: context_metrics.1,
                 reserved_tokens: context_metrics.2,
-                stable_prefix_hash: context_metrics.3.clone(),
+                context_window_known: context_metrics.3,
+                context_window_reason: context_metrics.4.clone(),
+                stable_prefix_hash: context_metrics.5.clone(),
                 cache_hit_basis_points,
                 estimated_input_tokens: input_estimate.local_tokens,
                 provider_input_tokens,
@@ -19634,6 +19656,11 @@ mod tests {
         let handle = SessionActor::spawn(actor_config).expect("actor");
         let snapshot = handle.context_snapshot().await.expect("context snapshot");
         assert_eq!(snapshot.items.len(), 1);
+        assert!(!snapshot.context_window_known);
+        assert_eq!(
+            snapshot.context_window_reason.as_deref(),
+            Some("provider did not report a context window")
+        );
         let item_id = snapshot.items[0].item_id.clone();
         handle.pin_context(item_id.clone()).await.expect("pin");
         let pinned = handle.context_snapshot().await.expect("pinned snapshot");
@@ -19703,9 +19730,14 @@ mod tests {
             .iter()
             .find(|item| item.kind == ContextItemKind::System)
             .expect("system inventory item");
-        assert!(snapshot.items.iter().any(|item| {
-            item.item_id.0 == "tool:inspect" && item.kind == ContextItemKind::ToolDefinitions
-        }));
+        let tool_schema = snapshot
+            .items
+            .iter()
+            .find(|item| {
+                item.item_id.0 == "tool:inspect" && item.kind == ContextItemKind::ToolDefinitions
+            })
+            .expect("tool schema inventory item");
+        assert!(!tool_schema.state.pinned);
         let tool_results = snapshot
             .items
             .iter()

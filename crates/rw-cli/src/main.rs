@@ -354,6 +354,16 @@ impl From<HistoryExportFormat> for history::TranscriptFormat {
 
 #[derive(Debug, Subcommand)]
 enum SessionsCommand {
+    /// List sessions from newest to oldest.
+    List {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Alias for `list`, optimized for quickly finding a resume target.
+    Recent {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     Search {
         #[arg(value_name = "QUERY")]
         query: String,
@@ -692,6 +702,12 @@ async fn main() -> Result<()> {
             command: SessionsCommand::Search { query, limit },
         }) => {
             let sessions = history::search_sessions(&configuration_root_path()?, &query, limit)?;
+            render_session_search(&sessions, cli.output_format)?;
+        }
+        Some(Command::Sessions {
+            command: SessionsCommand::List { limit } | SessionsCommand::Recent { limit },
+        }) => {
+            let sessions = history::list_sessions(&configuration_root_path()?, limit)?;
             render_session_search(&sessions, cli.output_format)?;
         }
         Some(Command::Stats {

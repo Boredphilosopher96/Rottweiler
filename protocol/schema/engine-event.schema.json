@@ -1090,6 +1090,17 @@
         "reserved_tokens": {
           "type": "string"
         },
+        "context_window_known": {
+          "description": "False when zero capacity means unknown rather than exhausted.",
+          "type": "boolean",
+          "default": false
+        },
+        "context_window_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "stable_prefix_hash": {
           "type": "string"
         },
@@ -1812,6 +1823,18 @@
         },
         "reserved_tokens": {
           "type": "string"
+        },
+        "context_window_known": {
+          "description": "False when zero capacity means unknown rather than exhausted.",
+          "type": "boolean",
+          "default": false
+        },
+        "context_window_reason": {
+          "description": "Provider-neutral explanation for an unknown context window.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "cache_breakpoints": {
           "type": "array",

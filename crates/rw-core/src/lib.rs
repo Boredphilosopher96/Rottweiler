@@ -160,8 +160,8 @@ pub mod runtime_support {
         ProviderErrorKind, ProviderEvent, ProviderReachabilityRequest, ProviderRequest,
         ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource, Recorder,
         ReplayProvider, Secret as ProviderSecret, ThinkingLevel, ToolChoice, ToolDefinition,
-        WireMode, deny_outbound_network_for_process, guarded_http_fetch, guarded_http_request,
-        provider_reachability_probe,
+        WireMode, default_models_path, deny_outbound_network_for_process, guarded_http_fetch,
+        guarded_http_request, provider_reachability_probe,
     };
     pub use rw_tools::{
         ApplyWorktreeDiffTool, AskUserInput, AskUserTool, BackgroundKillTool, BackgroundOutputTool,
