@@ -58,7 +58,7 @@ jobs:
       - run: crates/rw-cli/tests/m8_release_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
-      - run: bun test test/perf/performance.test.ts
+      - run: bun run test:perf
         working-directory: packages/tui
         env:
           ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/perf-results/tui.json

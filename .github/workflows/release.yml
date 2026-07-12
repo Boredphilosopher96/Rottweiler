@@ -85,7 +85,7 @@ jobs:
           ROTTWEILER_PERF_OUTPUT=perf-results/headless.json crates/rw-cli/tests/perf_gate.sh
           ROTTWEILER_PERF_OUTPUT=perf-results/m4.json crates/rw-cli/tests/m4_release_gate.sh
           ROTTWEILER_PERF_OUTPUT=perf-results/m8.json crates/rw-cli/tests/m8_release_gate.sh
-      - run: bun test test/perf/performance.test.ts
+      - run: bun run test:perf
         working-directory: packages/tui
         env:
           ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/perf-results/tui.json
@@ -172,7 +172,7 @@ jobs:
         run: |
           for package in packages/plugin-sdk packages/tui; do
             bun install --cwd "$package" --frozen-lockfile
-            bun test --cwd "$package"
+            bun run --cwd "$package" test
             bun run --cwd "$package" typecheck
             bun run --cwd "$package" build
           done

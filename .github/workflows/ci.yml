@@ -82,7 +82,7 @@ jobs:
           bun run --cwd "$root/plugin" build
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
-      - run: bun test
+      - run: bun run test
         working-directory: packages/tui
       - run: bun run typecheck
         working-directory: packages/tui
@@ -129,7 +129,7 @@ jobs:
       - run: crates/rw-cli/tests/m8_release_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
-      - run: bun test test/perf/performance.test.ts
+      - run: bun run test:perf
         working-directory: packages/tui
         env:
           ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/perf-results/tui.json

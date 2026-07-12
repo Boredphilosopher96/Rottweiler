@@ -7,7 +7,7 @@ must not be handwritten in this package.
 ```sh
 bun install
 bun run dev
-bun test
+bun run test
 bun run typecheck
 ```
 

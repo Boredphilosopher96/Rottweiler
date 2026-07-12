@@ -112,7 +112,7 @@ cargo deny check
 cargo audit
 
 bun install --cwd packages/tui --frozen-lockfile
-bun test --cwd packages/tui
+bun run --cwd packages/tui test
 bun run --cwd packages/tui typecheck
 bun run --cwd packages/tui build
 ```
