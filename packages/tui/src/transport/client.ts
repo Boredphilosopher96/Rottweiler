@@ -7,7 +7,7 @@ import {
   type BackoffPolicy,
   type BackoffScheduler,
 } from "./backoff"
-import { parseSseStream, type SseParserOptions } from "./sse"
+import { parseSseStream, SseLimitError, type SseParserOptions } from "./sse"
 import {
   durableSequenceId,
   isRecord,
@@ -178,6 +178,9 @@ export class EngineHttpSseClient {
       })
 
       let receivedEvent = false
+      const eventStreamController = new AbortController()
+      const abortEventStream = () => eventStreamController.abort(options.signal.reason)
+      options.signal.addEventListener("abort", abortEventStream, { once: true })
       try {
         const attach: AttachSessionCommand = {
           ...options.attach,
@@ -204,7 +207,7 @@ export class EngineHttpSseClient {
             headers: this.#clientHeaders(await this.#ensureClientAuth(options.signal), {
               Accept: "text/event-stream",
             }),
-            signal: options.signal,
+            signal: eventStreamController.signal,
           },
         )
         if (!response.ok) {
@@ -222,7 +225,11 @@ export class EngineHttpSseClient {
         }
         options.onConnection?.({ phase: "connected", attempt })
 
-        for await (const frame of parseSseStream(response.body, this.#sse, options.signal)) {
+        for await (const frame of parseSseStream(
+          response.body,
+          this.#sse,
+          eventStreamController.signal,
+        )) {
           const value = normalizeWireEngineEvent(parseEventJson(frame.data))
           if (value === null) {
             throw new EngineTransportError("engine event stream emitted an invalid event")
@@ -244,6 +251,16 @@ export class EngineHttpSseClient {
           attempt,
           error: transportErrorMessage(error),
         })
+        // A bounded parser rejection is deterministic for the same replay
+        // cursor. Retrying would request the identical poison event forever.
+        if (error instanceof SseLimitError) {
+          throw error
+        }
+      } finally {
+        options.signal.removeEventListener("abort", abortEventStream)
+        if (!eventStreamController.signal.aborted) {
+          eventStreamController.abort(new Error("engine event stream attempt ended"))
+        }
       }
 
       if (options.signal.aborted) {

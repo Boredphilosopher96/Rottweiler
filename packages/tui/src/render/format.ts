@@ -77,7 +77,9 @@ export function turnMarkdown(turn: Turn): string {
         chunks.push(block.text)
         break
       case "thinking":
-        chunks.push(`> Thinking\n> ${block.content.replaceAll("\n", "\n> ")}`)
+        if (block.content.trim() !== "") {
+          chunks.push(`> Thinking\n> ${block.content.replaceAll("\n", "\n> ")}`)
+        }
         break
       case "citation":
         chunks.push(`[${block.title ?? block.uri}](${block.uri})`)

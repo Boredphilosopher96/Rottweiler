@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { SseLimitError, SseParser, backoffDelay } from "../src/transport"
+import { SseLimitError, SseParser, backoffDelay, parseSseStream } from "../src/transport"
 
 const encoder = new TextEncoder()
 
@@ -26,6 +26,43 @@ describe("bounded SSE parser", () => {
     ])
   })
 
+  test("accepts a bounded event larger than the old 64 KiB line limit", () => {
+    const parser = new SseParser()
+    const payload = JSON.stringify({
+      type: "conversation_turn_committed",
+      turn: {
+        role: "assistant",
+        blocks: [{ type: "text", text: "x".repeat(96 * 1024) }],
+      },
+    })
+    const messages = parser.push(encoder.encode(`data: ${payload}\n\n`))
+
+    expect(messages).toHaveLength(1)
+    expect(messages[0]?.data).toBe(payload)
+  })
+
+  test("accepts the base64 wire size of a legal 5 MiB image", () => {
+    const parser = new SseParser()
+    const base64Bytes = Math.ceil((5 * 1024 * 1024) / 3) * 4
+    const payload = JSON.stringify({
+      type: "conversation_turn_committed",
+      turn: {
+        role: "user",
+        blocks: [
+          {
+            type: "image",
+            media_type: "image/png",
+            data: "x".repeat(base64Bytes),
+          },
+        ],
+      },
+    })
+
+    const messages = parser.push(encoder.encode(`data: ${payload}\n\n`))
+    expect(messages).toHaveLength(1)
+    expect(messages[0]?.data.length).toBe(payload.length)
+  })
+
   test("flushes a final complete field and rejects unbounded input", () => {
     const parser = new SseParser({ maxLineBytes: 16, maxDataBytes: 8 })
     expect(parser.push(encoder.encode("data: ok\n"))).toEqual([])
@@ -37,6 +74,23 @@ describe("bounded SSE parser", () => {
     expect(() =>
       new SseParser({ maxDataBytes: 3 }).push(encoder.encode("data: four\n\n")),
     ).toThrow(SseLimitError)
+  })
+
+  test("releases the reader lock even when underlying cancellation rejects", async () => {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("data: first\n\n"))
+      },
+      cancel() {
+        return Promise.reject(new Error("fixture cancellation failed"))
+      },
+    })
+    const messages = parseSseStream(stream)
+    expect((await messages.next()).value).toEqual({ data: "first" })
+    await expect(messages.return(undefined)).rejects.toThrow("fixture cancellation failed")
+
+    const replacement = stream.getReader()
+    replacement.releaseLock()
   })
 })
 

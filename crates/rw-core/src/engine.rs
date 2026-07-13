@@ -2207,10 +2207,7 @@ pub fn project_session_events(
                 content,
                 signature,
             } if active_turn == Some(*turn) => {
-                partial_assistant_blocks.push(Block::Thinking {
-                    content: content.clone(),
-                    signature: signature.clone(),
-                });
+                append_thinking(&mut partial_assistant_blocks, content, signature.clone());
             }
             PendingEvent::CitationDelta { turn, uri, title } if active_turn == Some(*turn) => {
                 partial_assistant_blocks.push(Block::Citation {
@@ -10291,9 +10288,11 @@ fn send_event(signals: &mpsc::UnboundedSender<TurnSignal>, kind: PendingEvent) {
 
 fn flush_pending_text_delta(
     pending: &mut Option<String>,
+    deadline: &mut Option<tokio::time::Instant>,
     signals: &mpsc::UnboundedSender<TurnSignal>,
     turn: u64,
 ) {
+    *deadline = None;
     if let Some(text) = pending.take() {
         send_event(signals, PendingEvent::TextDelta { turn, text });
     }
@@ -10333,6 +10332,32 @@ fn append_text(blocks: &mut Vec<Block>, delta: &str) {
             text: delta.to_owned(),
         });
     }
+}
+
+fn append_thinking(blocks: &mut Vec<Block>, delta: &str, signature: Option<String>) {
+    if delta.is_empty() && signature.is_none() {
+        return;
+    }
+    if let Some(Block::Thinking {
+        content,
+        signature: current,
+    }) = blocks.last_mut()
+        && match (&signature, &*current) {
+            (None | Some(_), None) => true,
+            (Some(next), Some(existing)) => next == existing,
+            (None, Some(_)) => false,
+        }
+    {
+        content.push_str(delta);
+        if signature.is_some() {
+            *current = signature;
+        }
+        return;
+    }
+    blocks.push(Block::Thinking {
+        content: delta.to_owned(),
+        signature,
+    });
 }
 
 fn tool_definition(descriptor: ToolDescriptor) -> ToolDefinition {
@@ -12892,26 +12917,31 @@ async fn run_turn(
         let mut stream_failed = false;
         let mut provider_overflow_recovered = false;
         let mut pending_text_delta = None;
+        let mut pending_text_delta_deadline = None;
         loop {
-            let next = if pending_text_delta.is_some() {
+            let next = if let Some(deadline) = pending_text_delta_deadline {
                 tokio::select! {
+                    biased;
                     () = cancellation.cancelled() => {
-                        flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
+                        flush_pending_text_delta(
+                            &mut pending_text_delta,
+                            &mut pending_text_delta_deadline,
+                            &signals,
+                            turn,
+                        );
                         status = AgentTurnStatus::Interrupted;
                         break;
                     }
-                    event = tokio::time::timeout(TEXT_DELTA_COALESCE_WINDOW, stream.next()) => {
-                        if let Ok(event) = event {
-                            event
-                        } else {
-                            flush_pending_text_delta(
-                                &mut pending_text_delta,
-                                &signals,
-                                turn,
-                            );
-                            continue;
-                        }
+                    () = tokio::time::sleep_until(deadline) => {
+                        flush_pending_text_delta(
+                            &mut pending_text_delta,
+                            &mut pending_text_delta_deadline,
+                            &signals,
+                            turn,
+                        );
+                        continue;
                     }
+                    event = stream.next() => event,
                 }
             } else {
                 tokio::select! {
@@ -12923,13 +12953,23 @@ async fn run_turn(
                 }
             };
             let Some(event) = next else {
-                flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
+                flush_pending_text_delta(
+                    &mut pending_text_delta,
+                    &mut pending_text_delta_deadline,
+                    &signals,
+                    turn,
+                );
                 break;
             };
             let event = match event {
                 Ok(event) => event,
                 Err(error) => {
-                    flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
+                    flush_pending_text_delta(
+                        &mut pending_text_delta,
+                        &mut pending_text_delta_deadline,
+                        &signals,
+                        turn,
+                    );
                     if error.kind == rw_providers::ProviderErrorKind::ContextOverflow
                         && assistant.blocks.is_empty()
                         && calls.is_empty()
@@ -12994,31 +13034,39 @@ async fn run_turn(
                 &event,
                 ProviderEvent::TextDelta { .. } | ProviderEvent::Finished { .. }
             ) {
-                flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
+                flush_pending_text_delta(
+                    &mut pending_text_delta,
+                    &mut pending_text_delta_deadline,
+                    &signals,
+                    turn,
+                );
             }
             match event {
                 ProviderEvent::RouteSelected { route } => selected_route = Some(route),
                 ProviderEvent::MessageStart { model } => assistant.meta.model = Some(model),
                 ProviderEvent::TextDelta { text } => {
                     let text = config.secret_redactor.redact(&text);
-                    flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
                     append_text(&mut assistant.blocks, &text);
-                    pending_text_delta = Some(text);
+                    pending_text_delta
+                        .get_or_insert_with(String::new)
+                        .push_str(&text);
+                    pending_text_delta_deadline.get_or_insert_with(|| {
+                        tokio::time::Instant::now() + TEXT_DELTA_COALESCE_WINDOW
+                    });
                 }
                 ProviderEvent::ThinkingDelta { content, signature } => {
                     let content = config.secret_redactor.redact(&content);
-                    assistant.blocks.push(Block::Thinking {
-                        content: content.clone(),
-                        signature: signature.clone(),
-                    });
-                    send_event(
-                        &signals,
-                        PendingEvent::ThinkingDelta {
-                            turn,
-                            content,
-                            signature,
-                        },
-                    );
+                    append_thinking(&mut assistant.blocks, &content, signature.clone());
+                    if !content.is_empty() || signature.is_some() {
+                        send_event(
+                            &signals,
+                            PendingEvent::ThinkingDelta {
+                                turn,
+                                content,
+                                signature,
+                            },
+                        );
+                    }
                 }
                 ProviderEvent::ToolCallStart { id, name } => {
                     if calls.iter().any(|call| call.id == id) {
@@ -13084,7 +13132,12 @@ async fn run_turn(
                 ProviderEvent::Usage { usage: latest } => iteration_usage.update(latest),
                 ProviderEvent::Finished { reason } => {
                     if reason == FinishReason::ToolCalls || !calls.is_empty() {
-                        flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
+                        flush_pending_text_delta(
+                            &mut pending_text_delta,
+                            &mut pending_text_delta_deadline,
+                            &signals,
+                            turn,
+                        );
                     }
                     finish_reason = Some(reason);
                     break;
@@ -13198,7 +13251,12 @@ async fn run_turn(
             Ok(false) => {}
         }
         if budget_stop {
-            flush_pending_text_delta(&mut pending_text_delta, &signals, turn);
+            flush_pending_text_delta(
+                &mut pending_text_delta,
+                &mut pending_text_delta_deadline,
+                &signals,
+                turn,
+            );
         }
         if provider_overflow_recovered {
             continue 'iterations;
@@ -13421,6 +13479,84 @@ mod tests {
     use super::*;
 
     type ProviderScript = Vec<Result<ProviderEvent, ProviderError>>;
+
+    #[test]
+    fn adjacent_reasoning_deltas_coalesce_and_keep_the_final_signature() {
+        let mut blocks = Vec::new();
+        append_thinking(&mut blocks, "checking ", None);
+        append_thinking(&mut blocks, "the workspace", None);
+        append_thinking(&mut blocks, "", Some("opaque-final".to_owned()));
+
+        assert_eq!(
+            blocks,
+            vec![Block::Thinking {
+                content: "checking the workspace".to_owned(),
+                signature: Some("opaque-final".to_owned()),
+            }]
+        );
+
+        append_thinking(&mut blocks, "next item", None);
+        assert_eq!(blocks.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn final_reasoning_signature_is_durable_and_recovers_with_partial_content() {
+        let root = TempDir::new().expect("tempdir");
+        let sink = Arc::new(RecordingSink::default());
+        let script = vec![
+            Ok(ProviderEvent::MessageStart {
+                model: "fixture-model".to_owned(),
+            }),
+            Ok(ProviderEvent::ThinkingDelta {
+                content: "checking the workspace".to_owned(),
+                signature: None,
+            }),
+            Ok(ProviderEvent::ThinkingDelta {
+                content: String::new(),
+                signature: Some("opaque-final".to_owned()),
+            }),
+            Ok(ProviderEvent::Finished {
+                reason: FinishReason::Stop,
+            }),
+        ];
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(ScriptedModel::new([script])),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.recovered.title = Some("reasoning fixture".to_owned());
+        actor_config.event_sink = sink.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+
+        handle.send_message("run").await.expect("message");
+        collect_turn(&mut events).await;
+
+        let persisted = sink.events.lock().expect("event sink").clone();
+        let signature_index = persisted
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.kind,
+                    PendingEvent::ThinkingDelta { content, signature: Some(signature), .. }
+                        if content.is_empty() && signature == "opaque-final"
+                )
+            })
+            .expect("final reasoning signature must be journaled");
+        let prefix = persisted[..=signature_index]
+            .iter()
+            .map(|event| event.wire.clone())
+            .collect::<Vec<_>>();
+        let recovered = project_session_events(&prefix).expect("project signed partial turn");
+        assert!(matches!(
+            recovered.conversation.last(),
+            Some(Turn { role: Role::Assistant, blocks, .. })
+                if matches!(blocks.as_slice(), [Block::Thinking { content, signature: Some(signature) }]
+                    if content == "checking the workspace" && signature == "opaque-final")
+        ));
+    }
 
     #[tokio::test]
     async fn built_in_command_copy_is_human_readable_and_contains_no_wire_json() {
@@ -13964,6 +14100,44 @@ mod tests {
                         reason: FinishReason::Stop,
                     })
                 })),
+            ))
+        }
+    }
+
+    struct ContinuousDeltaModel {
+        count: usize,
+        delay: Duration,
+    }
+
+    impl ModelDriver for ContinuousDeltaModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            let count = self.count;
+            let delay = self.delay;
+            let deltas = stream::unfold(0_usize, move |index| async move {
+                if index > count {
+                    return None;
+                }
+                tokio::time::sleep(delay).await;
+                let event = if index == count {
+                    ProviderEvent::Finished {
+                        reason: FinishReason::Stop,
+                    }
+                } else {
+                    ProviderEvent::TextDelta {
+                        text: "x".to_owned(),
+                    }
+                };
+                Some((Ok(event), index.saturating_add(1)))
+            });
+            Ok(Box::pin(
+                stream::iter([Ok(ProviderEvent::MessageStart {
+                    model: "fixture-model".to_owned(),
+                })])
+                .chain(deltas),
             ))
         }
     }
@@ -16993,7 +17167,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn multiple_immediate_deltas_keep_order_and_only_defer_the_trailing_delta() {
+    async fn multiple_immediate_deltas_coalesce_without_losing_order() {
         let root = TempDir::new().expect("tempdir");
         let sink = Arc::new(RecordingSink::default());
         let script = vec![
@@ -17031,10 +17205,15 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(deltas, ["first", "second"]);
+        assert_eq!(deltas, ["firstsecond"]);
         assert_eq!(
-            sink.batch_sizes.lock().expect("batch sizes").as_slice(),
-            &[1, 3, 1, 1, 1, 3]
+            sink.events
+                .lock()
+                .expect("event sink")
+                .iter()
+                .filter(|event| matches!(event.kind, PendingEvent::TextDelta { .. }))
+                .count(),
+            1
         );
     }
 
@@ -17066,6 +17245,48 @@ mod tests {
             delta.kind,
             PendingEvent::TextDelta { turn: 1, ref text }
                 if text == "visible promptly"
+        ));
+        let finished = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::TurnFinished { .. })
+        })
+        .await;
+        assert!(matches!(
+            finished.kind,
+            PendingEvent::TurnFinished {
+                status: AgentTurnStatus::Completed,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn continuous_deltas_flush_on_the_anchored_coalescing_deadline() {
+        let root = TempDir::new().expect("tempdir");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            Arc::new(ContinuousDeltaModel {
+                count: 50,
+                delay: Duration::from_micros(100),
+            }),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+
+        handle.send_message("run").await.expect("message");
+        let delta = timeout(
+            Duration::from_millis(30),
+            next_matching(&mut events, |kind| {
+                matches!(kind, PendingEvent::TextDelta { .. })
+            }),
+        )
+        .await
+        .expect("continuous provider output must be visible before stream completion");
+        assert!(matches!(
+            delta.kind,
+            PendingEvent::TextDelta { turn: 1, ref text } if !text.is_empty()
         ));
         let finished = next_matching(&mut events, |kind| {
             matches!(kind, PendingEvent::TurnFinished { .. })

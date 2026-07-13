@@ -10,8 +10,13 @@ export interface SseParserOptions {
   readonly maxDataBytes?: number
 }
 
-const DEFAULT_MAX_LINE_BYTES = 64 * 1024
-const DEFAULT_MAX_DATA_BYTES = 4 * 1024 * 1024
+// A legal user turn can contain a 5 MiB decoded image, whose base64 wire form
+// is nearly 7 MiB. The per-message attachment total is 10 MiB, so retain a
+// bounded envelope with enough room for base64 expansion and JSON framing.
+const DEFAULT_MAX_DATA_BYTES = 16 * 1024 * 1024
+// The engine serializes each protocol event as one `data:` line. Keep the line
+// bound aligned with the event-data bound plus the SSE field prefix.
+const DEFAULT_MAX_LINE_BYTES = DEFAULT_MAX_DATA_BYTES + 16
 
 /** A bounded, incremental parser for the event-stream wire format. */
 export class SseParser {
@@ -141,6 +146,7 @@ export async function* parseSseStream(
   const parser = new SseParser(options)
   const reader = stream.getReader()
   let cancellation: Promise<void> | null = null
+  let completed = false
   const cancelReader = (reason: unknown): Promise<void> => {
     cancellation ??= reader.cancel(reason)
     return cancellation
@@ -159,6 +165,7 @@ export async function* parseSseStream(
     while (true) {
       const { done, value } = await reader.read()
       if (done) {
+        completed = true
         break
       }
       for (const message of parser.push(value)) {
@@ -170,10 +177,17 @@ export async function* parseSseStream(
     }
   } finally {
     signal?.removeEventListener("abort", onAbort)
-    if (cancellation !== null) {
-      await cancellation
+    try {
+      if (!completed) {
+        await cancelReader(new Error("SSE consumer stopped before stream completion"))
+      } else if (cancellation !== null) {
+        await cancellation
+      }
+    } finally {
+      // A rejecting underlying cancel must not strand the reader lock (or the
+      // fetch body and its Unix socket) after an early consumer exit.
+      reader.releaseLock()
     }
-    reader.releaseLock()
   }
 }
 

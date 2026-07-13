@@ -43,20 +43,17 @@ export class ToolBlockRenderable extends BoxRenderable {
     super(ctx, {
       id: `tool-${tool.toolCallId}`,
       width: "100%",
-      minHeight: 2,
+      minHeight: 1,
       flexDirection: "column",
-      border: true,
-      borderStyle: "single",
-      borderColor: theme.border,
-      focusedBorderColor: theme.focus,
-      backgroundColor: theme.panelRaised,
+      border: false,
+      backgroundColor: theme.background,
       focusable: true,
-      paddingX: 1,
-      marginTop: 1,
+      paddingX: 0,
+      marginTop: 0,
     })
     this.#theme = theme
     this.#tool = tool
-    this.#collapsed = expanded === undefined ? tool.status === "finished" : !expanded
+    this.#collapsed = expanded === undefined ? tool.status !== "awaiting_approval" : !expanded
     this.#onExpansionChange = onExpansionChange
     this.header = new TextRenderable(ctx, { content: "", fg: theme.foreground, height: 1 })
     this.body = new TextRenderable(ctx, {
@@ -81,12 +78,12 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#tool = tool
     const glyph = tool.status === "awaiting_approval" ? "?" : tool.status === "running" ? "◌" : tool.isError === true ? "✕" : "✓"
     const approval = tool.status === "awaiting_approval" ? " · approval needed" : ""
-    const args = formatToolArguments(tool.args, 96)
+    const args = compactToolArguments(tool)
     const result =
       tool.status === "finished" && this.#collapsed
-        ? singleLine(toolOutputText(tool.output), 72)
+        ? compactToolResult(tool)
         : ""
-    this.header.content = `${this.#collapsed ? "▸" : "▾"} ${glyph} ${tool.name}${args === "" ? "" : ` · ${args}`}${approval}${result === "" ? "" : ` · ${result}`}`
+    this.header.content = `${this.#collapsed ? "›" : "⌄"} ${glyph} ${tool.name}${args === "" ? "" : ` ${args}`}${approval}${result === "" ? "" : `  ${result}`}`
     this.header.fg =
       tool.status === "awaiting_approval"
         ? this.#theme.warning
@@ -98,20 +95,20 @@ export class ToolBlockRenderable extends BoxRenderable {
     if (this.#collapsed) {
       this.body.content = ""
       this.body.height = 0
-      this.height = 2
+      this.height = 1
       return
     }
     this.body.content = toolBodyContent(tool)
     const bodyRows = Math.min(8, Math.max(1, this.body.plainText.split("\n").length))
     this.body.height = bodyRows
-    this.height = bodyRows + 3
+    this.height = bodyRows + 1
   }
 
   toggle(): void {
     this.#collapsed = !this.#collapsed
-    this.#onExpansionChange?.(!this.#collapsed)
     this.body.visible = !this.#collapsed
     this.update(this.#tool)
+    this.#onExpansionChange?.(!this.#collapsed)
   }
 }
 
@@ -131,9 +128,51 @@ function toolBodyContent(tool: ToolProjection): string {
     .join("\n")
 }
 
-function toolBlockRows(tool: ToolProjection): number {
-  if (tool.status === "finished") return 2
-  return Math.min(8, Math.max(1, toolBodyContent(tool).split("\n").length)) + 3
+function toolBlockExpanded(
+  tool: ToolProjection,
+  expansion?: ReadonlyMap<string, boolean>,
+): boolean {
+  return expansion?.get(tool.toolCallId) ?? tool.status === "awaiting_approval"
+}
+
+function toolBlockRows(
+  tool: ToolProjection,
+  expansion?: ReadonlyMap<string, boolean>,
+): number {
+  if (!toolBlockExpanded(tool, expansion)) return 1
+  return Math.min(8, Math.max(1, toolBodyContent(tool).split("\n").length)) + 1
+}
+
+function compactToolArguments(tool: ToolProjection): string {
+  if (!isRecord(tool.args)) return formatToolArguments(tool.args, 64)
+  const path = typeof tool.args.path === "string" ? tool.args.path : ""
+  switch (tool.name) {
+    case "ls":
+      return path === "" ? "." : path
+    case "glob": {
+      const pattern = typeof tool.args.pattern === "string" ? tool.args.pattern : ""
+      return `${pattern}${path === "" || path === "." ? "" : ` in ${path}`}`
+    }
+    case "read":
+      return path
+    case "bash":
+    case "shell":
+      return typeof tool.args.command === "string" ? singleLine(tool.args.command, 64) : ""
+    default:
+      return formatToolArguments(tool.args, 64)
+  }
+}
+
+function compactToolResult(tool: ToolProjection): string {
+  const result = toolOutputText(tool.output).trim()
+  if (result === "") return tool.isError === true ? "Failed" : "Done"
+  const lines = result.split("\n").filter(Boolean)
+  if (lines.length > 1) return `${lines.length} lines · ${singleLine(lines[0] ?? "", 36)}`
+  return singleLine(result, 40)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 export class SubagentPanelRenderable extends BoxRenderable {
@@ -269,40 +308,44 @@ class TurnCardRenderable extends BoxRenderable {
     subagents: readonly SubagentProjection[],
     subagentTotal: number,
     toolExpansion: Map<string, boolean>,
+    onToolExpansionChange: (toolCallId: string, expanded: boolean) => void,
     treeSitterClient?: TreeSitterClient,
   ) {
+    const markdown = turnMarkdown(entry.turn)
+    const toolOnly = entry.turn.role === "tool" && markdown === ""
     const role = entry.presentation === "command_result"
       ? "Command result"
       : entry.turn.role === "assistant"
         ? "Rottweiler"
         : entry.turn.role === "user"
           ? "You"
-          : "Notice"
+          : "Tools"
     super(ctx, {
       id: `turn-${entryKey(entry)}`,
       width: "100%",
       height:
-        estimateEntryHeight(entry, width) + 1 +
-        tools.reduce((rows, tool) => rows + (tool.status === "finished" ? 2 : 4), 0) +
+        (toolOnly ? 0 : estimateEntryHeight(entry, width) + 1) +
+        tools.reduce((rows, tool) => rows + toolBlockRows(tool, toolExpansion), 0) +
         (subagents.length === 0 ? 0 : subagents.length + 3),
       flexDirection: "column",
       flexShrink: 0,
       border: false,
       backgroundColor: entry.turn.role === "user" ? theme.panelRaised : theme.background,
       paddingX: 1,
-      paddingY: 1,
+      paddingY: toolOnly ? 0 : 1,
     })
     this.header = new TextRenderable(ctx, {
       content: entry.presentation === "command_result"
         ? `${role} · ${entry.title ?? "completed"}`
         : `${role} · ${cost}`,
       fg: entry.turn.role === "assistant" ? theme.accentStrong : theme.info,
-      height: 1,
+      height: toolOnly ? 0 : 1,
       flexShrink: 0,
+      visible: !toolOnly,
     })
     this.markdown = new MarkdownRenderable(ctx, {
       id: `markdown-${entryKey(entry)}`,
-      content: turnMarkdown(entry.turn),
+      content: markdown,
       syntaxStyle,
       ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
       fg: theme.foreground,
@@ -311,18 +354,21 @@ class TurnCardRenderable extends BoxRenderable {
       streaming: false,
       width: "100%",
       flexGrow: 1,
+      visible: !toolOnly,
       internalBlockMode: "top-level",
       tableOptions: { style: "columns", widthMode: "full", wrapMode: "word" },
     })
-    this.add(this.header)
-    this.add(this.markdown)
+    if (!toolOnly) {
+      this.add(this.header)
+      this.add(this.markdown)
+    }
     for (const tool of tools) {
       this.add(new ToolBlockRenderable(
         ctx,
         theme,
         tool,
         toolExpansion.get(tool.toolCallId),
-        (expanded) => toolExpansion.set(tool.toolCallId, expanded),
+        (expanded) => onToolExpansionChange(tool.toolCallId, expanded),
       ))
     }
     if (subagents.length > 0) {
@@ -350,6 +396,8 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #syntaxStyle: SyntaxStyle
   readonly #treeSitterClient: TreeSitterClient | undefined
   readonly #toolExpansion = new Map<string, boolean>()
+  #toolExpansionRevision = 0
+  #virtualizedToolExpansionRevision = -1
   #state: RottweilerState | null = null
   #transcript: readonly TranscriptEntry[] | null = null
   #tools: RottweilerState["tools"] | null = null
@@ -495,13 +543,14 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#virtualizedTranscript !== state.transcript ||
       this.#virtualizedTools !== state.tools ||
       this.#virtualizedSubagents !== state.subagents ||
+      this.#virtualizedToolExpansionRevision !== this.#toolExpansionRevision ||
       this.#virtualizedWidth !== width
     ) {
       const toolRowsByTurn = new Map<string, number>()
       for (const tool of Object.values(state.tools)) {
         toolRowsByTurn.set(
           tool.turnId,
-          (toolRowsByTurn.get(tool.turnId) ?? 0) + (tool.status === "finished" ? 2 : 4),
+          (toolRowsByTurn.get(tool.turnId) ?? 0) + toolBlockRows(tool, this.#toolExpansion),
         )
       }
       const subagentRowsByTurn = new Map<string, number>()
@@ -532,6 +581,7 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#virtualizedTranscript = state.transcript
       this.#virtualizedTools = state.tools
       this.#virtualizedSubagents = state.subagents
+      this.#virtualizedToolExpansionRevision = this.#toolExpansionRevision
       this.#virtualizedWidth = width
     }
     const window = this.#virtualizer.window(this.scroller.scrollTop, height)
@@ -577,6 +627,7 @@ export class TranscriptRenderable extends BoxRenderable {
         visibleSubagents,
         turnSubagents.length,
         this.#toolExpansion,
+        (toolCallId, expanded) => this.#rememberToolExpansion(toolCallId, expanded),
         this.#treeSitterClient,
       )
       this.scroller.insertBefore(card, this.#bottomSpacer)
@@ -613,15 +664,17 @@ export class TranscriptRenderable extends BoxRenderable {
     const tools = tail.toolCallIds
       .map((toolCallId) => state.tools[toolCallId])
       .filter((tool): tool is ToolProjection => tool !== undefined)
-    const emptyActivity = tools.some((tool) => tool.status === "awaiting_approval")
-      ? "_Waiting for tool approval…_"
+    const activity = tools.some((tool) => tool.status === "awaiting_approval")
+      ? "Waiting for approval"
       : tools.some((tool) => tool.status === "running")
-        ? "_Running tools…_"
-        : "_Working…_"
-    this.streamingMarkdown.visible = true
-    this.streamingMarkdown.content = tail.text.length === 0 ? emptyActivity : tail.text
+        ? "Running tools"
+        : tail.thinking.length > 0
+          ? "Thinking"
+          : "Streaming"
+    this.streamingMarkdown.visible = tail.text.length > 0
+    this.streamingMarkdown.content = tail.text
     this.streamingMarkdown.streaming = tail.finished === null
-    this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? "streaming" : formatCost(tail.finished.cost, tail.finished.usage)}`
+    this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? activity : formatCost(tail.finished.cost, tail.finished.usage)}`
     const thinkingRows = tail.thinking.length === 0 ? 0 : Math.min(4, tail.thinking.split("\n").length)
     this.#tailThinking.visible = tail.thinking.length > 0
     this.#tailThinking.content = tail.thinking.length > 0 ? `Thinking · ${tail.thinking}` : ""
@@ -632,9 +685,12 @@ export class TranscriptRenderable extends BoxRenderable {
       .join("  ")
     this.#tailCitations.height = tail.citations.length > 0 ? 1 : 0
     this.#replaceTailTools(tools)
-    const textRows = Math.max(1, tail.text.split("\n").length)
+    const textRows = tail.text.length === 0 ? 0 : tail.text.split("\n").length
     this.streamingMarkdown.height = Math.min(20, textRows)
-    const toolRows = tools.reduce((rows, tool) => rows + toolBlockRows(tool), 0)
+    const toolRows = tools.reduce(
+      (rows, tool) => rows + toolBlockRows(tool, this.#toolExpansion),
+      0,
+    )
     this.#tailTools.height = toolRows
     this.streamingCard.height = Math.min(
       32,
@@ -658,9 +714,19 @@ export class TranscriptRenderable extends BoxRenderable {
         this.#theme,
         tool,
         this.#toolExpansion.get(tool.toolCallId),
-        (expanded) => this.#toolExpansion.set(tool.toolCallId, expanded),
+        (expanded) => this.#rememberToolExpansion(tool.toolCallId, expanded),
       ))
     }
+  }
+
+  #rememberToolExpansion(toolCallId: string, expanded: boolean): void {
+    if (this.#toolExpansion.get(toolCallId) === expanded) return
+    this.#toolExpansion.set(toolCallId, expanded)
+    this.#toolExpansionRevision += 1
+    const state = this.#state
+    if (state === null) return
+    this.#updateTail(state)
+    this.#reconcile(true)
   }
 }
 

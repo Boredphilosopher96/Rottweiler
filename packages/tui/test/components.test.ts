@@ -86,6 +86,17 @@ describe("M4 retained components", () => {
     expect(cards[0]?.header.plainText.match(/canary output/g)?.length).toBe(1)
     cards[0]?.toggle()
     expect(cards[0]?.body.visible).toBeTrue()
+    await setup.renderOnce()
+    cards = app.transcript.streamingCard
+      .getChildren()
+      .flatMap((child) => child.getChildren())
+      .filter((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    const tailTools = app.transcript.streamingCard
+      .getChildren()
+      .find((child) => child.id === "streaming-tools")
+    expect(cards).toHaveLength(1)
+    expect(tailTools?.height).toBe(cards[0]?.height)
+    expect(app.transcript.streamingCard.height).toBeGreaterThan(cards[0]?.height ?? 0)
 
     app.handleEvent({
       type: "conversation_turn_committed",
@@ -103,11 +114,21 @@ describe("M4 retained components", () => {
       },
     })
     await setup.renderOnce()
+    expect(app.transcript.streamingCard.visible).toBeFalse()
+    expect(
+      app.transcript.streamingCard
+        .getChildren()
+        .flatMap((child) => child.getChildren())
+        .filter((child) => child instanceof ToolBlockRenderable),
+    ).toHaveLength(0)
     cards = [...app.transcript.mountedCards.values()]
       .flatMap((card) => card.getChildren())
       .filter((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
     expect(cards).toHaveLength(1)
     expect(cards[0]?.body.visible).toBeTrue()
+    const toolOnlyCard = [...app.transcript.mountedCards.values()][0]
+    expect(Number.isFinite(toolOnlyCard?.height)).toBeTrue()
+    expect(toolOnlyCard?.height).toBe(cards[0]?.height)
     const visibleToolText = `${cards[0]?.header.plainText ?? ""}\n${cards[0]?.body.plainText ?? ""}`
     expect(visibleToolText.match(/canary output/g)?.length).toBe(1)
   })
@@ -218,7 +239,7 @@ describe("M4 retained components", () => {
     expect(setup.captureCharFrame()).toContain("Thinking · checking the workspace")
     expect(setup.captureCharFrame()).toContain("glob")
     expect(setup.captureCharFrame()).toContain("**/*.rs")
-    expect(setup.captureCharFrame()).toContain("Running…")
+    expect(setup.captureCharFrame()).not.toContain("Working…")
 
     app.setState({
       ...initial,

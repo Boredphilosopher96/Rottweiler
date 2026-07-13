@@ -1067,11 +1067,17 @@ impl OpenAiState {
             "response.reasoning_summary_text.delta" => {
                 let index = value["output_index"].as_u64().unwrap_or_default();
                 let content = value["delta"].as_str().unwrap_or_default().to_owned();
-                let signature = self.reasoning.get_mut(&index).and_then(|state| {
+                if let Some(state) = self.reasoning.get_mut(&index) {
                     state.streamed_summary.push_str(&content);
-                    encode_responses_reasoning_signature(&state.signature)
-                });
-                Ok(vec![ProviderEvent::ThinkingDelta { content, signature }])
+                }
+                if content.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![ProviderEvent::ThinkingDelta {
+                        content,
+                        signature: None,
+                    }])
+                }
             }
             "response.output_item.added" if value["item"]["type"] == "reasoning" => {
                 let index = value["output_index"].as_u64().unwrap_or_default();
@@ -1087,7 +1093,6 @@ impl OpenAiState {
                         .as_str()
                         .map(str::to_owned),
                 };
-                let opaque = encode_responses_reasoning_signature(&signature);
                 self.reasoning.insert(
                     index,
                     OpenAiReasoningState {
@@ -1095,10 +1100,7 @@ impl OpenAiState {
                         streamed_summary: String::new(),
                     },
                 );
-                Ok(vec![ProviderEvent::ThinkingDelta {
-                    content: String::new(),
-                    signature: opaque,
-                }])
+                Ok(Vec::new())
             }
             "response.output_item.done" if value["item"]["type"] == "reasoning" => {
                 let index = value["output_index"].as_u64().unwrap_or_default();
@@ -1570,6 +1572,44 @@ mod tests {
         assert!(matches!(
             events.last(),
             Some(ProviderEvent::Finished { .. })
+        ));
+    }
+
+    #[test]
+    fn responses_suppresses_empty_reasoning_transport_noise() {
+        let mut state = OpenAiState::new(OpenAiWireMode::Responses);
+        for (kind, value) in [
+            (
+                "response.output_item.added",
+                json!({"output_index":0,"item":{"type":"reasoning","id":"rs_fixture"}}),
+            ),
+            (
+                "response.reasoning_summary_text.delta",
+                json!({"output_index":0,"delta":""}),
+            ),
+        ] {
+            assert!(
+                state
+                    .handle(&SseEvent {
+                        event: Some(kind.to_owned()),
+                        data: value.to_string(),
+                    })
+                    .unwrap_or_else(|error| panic!("response event must parse: {error}"))
+                    .is_empty()
+            );
+        }
+        let done = state
+            .handle(&SseEvent {
+                event: Some("response.output_item.done".to_owned()),
+                data: json!({"output_index":0,"item":{"type":"reasoning","id":"rs_fixture","encrypted_content":"opaque"}}).to_string(),
+            })
+            .unwrap_or_else(|error| panic!("reasoning completion must parse: {error}"));
+        assert!(matches!(
+            done.as_slice(),
+            [ProviderEvent::ThinkingDelta {
+                content,
+                signature: Some(_),
+            }] if content.is_empty()
         ));
     }
 

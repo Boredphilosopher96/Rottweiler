@@ -87,6 +87,7 @@ export function entryKey(entry: TranscriptEntry): string {
 export function estimateEntryHeight(entry: TranscriptEntry, width: number): number {
   const contentWidth = Math.max(8, width - 4)
   const markdown = turnMarkdown(entry.turn)
+  if (entry.turn.role === "tool" && markdown === "") return 0
   const lines = markdown.split("\n")
   const contentRows = lines.reduce(
     (rows, line) => rows + Math.max(1, Math.ceil(Math.max(1, line.length) / contentWidth)),

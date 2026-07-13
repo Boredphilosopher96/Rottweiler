@@ -102,6 +102,12 @@ describe("bounded retained rendering", () => {
     expect(markdown).not.toContain("call-internal")
     expect(markdown).not.toContain("{")
 
+    expect(turnMarkdown({
+      role: "assistant",
+      blocks: [{ type: "thinking", content: "", signature: "opaque-provider-state" }],
+      meta: { synthetic: false, summary: false },
+    })).toBe("")
+
     const structuredOnly = toolOutputText({
       type: "structured",
       value: {
@@ -145,5 +151,28 @@ describe("bounded retained rendering", () => {
     expect(virtualizer.window(0, 1).totalHeight).toBe(
       virtualizer.heightAt(0) + virtualizer.heightAt(1),
     )
+  })
+
+  test("uses only retained tool rows for a tool-only transcript entry", () => {
+    const virtualizer = new TranscriptVirtualizer(0)
+    const entries = [{
+      sequenceId: "1",
+      agentTurn: "1",
+      turn: {
+        role: "tool" as const,
+        blocks: [{
+          type: "tool_result" as const,
+          id: "read-1",
+          output: { type: "text" as const, text: "README" },
+          is_error: false,
+        }],
+        meta: { synthetic: false, summary: false },
+      },
+    }]
+
+    virtualizer.update(entries, 80, () => 6)
+
+    expect(virtualizer.heightAt(0)).toBe(6)
+    expect(virtualizer.window(0, 1).totalHeight).toBe(6)
   })
 })

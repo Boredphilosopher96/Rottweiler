@@ -234,6 +234,21 @@ function replayFixtureState(): RottweilerState {
       meta: eventMeta("7"),
       agent_turn: "2",
       turn: {
+        role: "tool",
+        blocks: [{
+          type: "tool_result",
+          id: "historical-read",
+          output: { type: "text", text: "Historical PROJECT.md contents" },
+          is_error: false,
+        }],
+        meta: { synthetic: false, summary: false },
+      },
+    },
+    {
+      type: "conversation_turn_committed",
+      meta: eventMeta("8"),
+      agent_turn: "2",
+      turn: {
         role: "assistant",
         blocks: [
           {
@@ -246,7 +261,7 @@ function replayFixtureState(): RottweilerState {
     },
     {
       type: "turn_finished",
-      meta: eventMeta("8"),
+      meta: eventMeta("9"),
       turn_id: "2",
       status: "completed",
       usage,
@@ -448,7 +463,7 @@ function scenarios(): ScreenScenario[] {
             emitted_at: "2026-01-01T00:00:00Z",
           },
           session_id: "session-golden-replay",
-          through_sequence: "8",
+          through_sequence: "9",
         })
       },
     },

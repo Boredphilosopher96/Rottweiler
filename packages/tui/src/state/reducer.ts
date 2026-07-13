@@ -575,7 +575,8 @@ function applyKnownEvent(
         },
       ]
       const clearsTail =
-        event.turn.role === "assistant" && state.streamingTail?.turnId === event.agent_turn
+        (event.turn.role === "assistant" || event.turn.role === "tool") &&
+        state.streamingTail?.turnId === event.agent_turn
       const resolvedRoute =
         event.turn.role === "assistant" ? providerQualifiedRoute(event.turn.meta.model) : null
       return {

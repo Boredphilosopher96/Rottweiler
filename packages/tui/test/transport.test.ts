@@ -5,6 +5,8 @@ import { createInitialState, engineEvent, reduceRottweilerState } from "../src/s
 import {
   EngineHttpSseClient,
   EngineTransportError,
+  SseLimitError,
+  durableSequenceId,
   normalizeWireEngineEvent,
   type BackoffScheduler,
 } from "../src/transport"
@@ -252,6 +254,97 @@ describe("authenticated UDS engine transport", () => {
       "?session_id=session-transport&last_seen_sequence=1",
     ])
     expect(delays).toEqual([1])
+  })
+
+  test("advances past a committed event larger than 64 KiB without reconnecting", async () => {
+    const large = {
+      type: "conversation_turn_committed",
+      meta: durableMeta("1"),
+      agent_turn: "1",
+      turn: {
+        role: "assistant",
+        blocks: [{ type: "text", text: "x".repeat(96 * 1024) }],
+        meta: { synthetic: false, summary: false },
+      },
+    } satisfies EngineEvent
+    const finished = {
+      type: "turn_finished",
+      meta: durableMeta("2"),
+      turn_id: "1",
+      status: "completed",
+      usage: {
+        input_tokens: "1",
+        output_tokens: "1",
+        cache_read_tokens: "0",
+        cache_write_tokens: "0",
+        reasoning_tokens: "0",
+      },
+      cost: { kind: "unavailable", reason: "fixture" },
+    } satisfies EngineEvent
+    engine = new AuthenticatedMockEngine([
+      {
+        chunks: [...splitBytes(encodeSseJson(large), [17, 4_096]), encodeSseJson(finished)],
+        holdOpen: true,
+      },
+    ])
+    await engine.start()
+    const client = new EngineHttpSseClient({
+      socketPath: engine.socketPath,
+      bootstrapToken: engine.bootstrapToken,
+    })
+    const controller = new AbortController()
+    const seen: string[] = []
+    let reconnects = 0
+
+    await client.subscribe({
+      attach,
+      signal: controller.signal,
+      onReconnect: () => {
+        reconnects += 1
+      },
+      onEvent(event) {
+        const sequence = durableSequenceId(event)
+        if (sequence === null) return
+        seen.push(sequence)
+        if (sequence === "2") controller.abort()
+      },
+    })
+
+    expect(seen).toEqual(["1", "2"])
+    expect(reconnects).toBe(0)
+  })
+
+  test("does not reconnect forever on a deterministic parser limit rejection", async () => {
+    const event = {
+      type: "mode_changed",
+      meta: durableMeta("1"),
+      mode: "plan",
+    } satisfies EngineEvent
+    engine = new AuthenticatedMockEngine([{ chunks: [encodeSseJson(event)], holdOpen: true }])
+    await engine.start()
+    const client = new EngineHttpSseClient({
+      socketPath: engine.socketPath,
+      bootstrapToken: engine.bootstrapToken,
+      sse: { maxLineBytes: 32, maxDataBytes: 32 },
+    })
+    const controller = new AbortController()
+    let reconnects = 0
+
+    await expect(
+      client.subscribe({
+        attach,
+        signal: controller.signal,
+        onReconnect() {
+          reconnects += 1
+        },
+        onEvent() {},
+      }),
+    ).rejects.toBeInstanceOf(SseLimitError)
+
+    expect(reconnects).toBe(0)
+    expect(engine.requests.filter((request) => request.path === "/v1/events")).toHaveLength(1)
+    await waitFor(() => engine?.cancelledStreams === 1)
+    expect(engine.cancelledStreams).toBe(1)
   })
 
   test("encodes the session and replay cursor in the SSE request", async () => {
