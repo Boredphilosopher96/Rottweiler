@@ -1241,12 +1241,16 @@ fn discover_local_workspace(launch_directory: &Path) -> PathBuf {
 
 #[derive(Clone, Default)]
 struct DeferredHostedEngine {
-    inner: Arc<RwLock<Option<server::HostedEngine>>>,
+    inner: Arc<RwLock<Option<Arc<dyn server::ServerEngine>>>>,
     ready: Arc<AtomicBool>,
 }
 
 impl DeferredHostedEngine {
     fn install(&self, engine: server::HostedEngine) {
+        self.install_engine(Arc::new(engine));
+    }
+
+    fn install_engine(&self, engine: Arc<dyn server::ServerEngine>) {
         *self
             .inner
             .write()
@@ -1254,7 +1258,7 @@ impl DeferredHostedEngine {
         self.ready.store(true, Ordering::Release);
     }
 
-    fn loaded(&self) -> std::result::Result<server::HostedEngine, String> {
+    fn loaded(&self) -> std::result::Result<Arc<dyn server::ServerEngine>, String> {
         self.inner
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1389,6 +1393,25 @@ impl server::ServerEngine for HistoricalReplayEngine {
         _shell_id: rw_core::ShellId,
         _status: i32,
         _captured_output: Option<String>,
+    ) -> std::result::Result<(), String> {
+        Err("historical replay is read-only".to_owned())
+    }
+
+    async fn submit_provider_api_key(
+        &self,
+        _bound_client: ClientId,
+        _session_id: SessionId,
+        _provider: String,
+        _api_key: ProviderApiKey,
+    ) -> std::result::Result<rw_core::ProviderApiKeySubmission, String> {
+        Err("historical replay is read-only".to_owned())
+    }
+
+    async fn activate_provider(
+        &self,
+        _bound_client: ClientId,
+        _session_id: SessionId,
+        _provider: String,
     ) -> std::result::Result<(), String> {
         Err("historical replay is read-only".to_owned())
     }
@@ -1994,6 +2017,29 @@ impl server::ServerEngine for DeferredHostedEngine {
     ) -> std::result::Result<(), String> {
         self.loaded()?
             .complete_shell(session_id, shell_id, status, captured_output)
+            .await
+    }
+
+    async fn submit_provider_api_key(
+        &self,
+        bound_client: ClientId,
+        session_id: SessionId,
+        provider: String,
+        api_key: ProviderApiKey,
+    ) -> std::result::Result<rw_core::ProviderApiKeySubmission, String> {
+        self.loaded()?
+            .submit_provider_api_key(bound_client, session_id, provider, api_key)
+            .await
+    }
+
+    async fn activate_provider(
+        &self,
+        bound_client: ClientId,
+        session_id: SessionId,
+        provider: String,
+    ) -> std::result::Result<(), String> {
+        self.loaded()?
+            .activate_provider(bound_client, session_id, provider)
             .await
     }
 }
@@ -3465,16 +3511,152 @@ fn sync_install_paths(paths: &[PathBuf]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use async_trait::async_trait;
     use clap::Parser as _;
 
     use super::{
-        Cli, Command, DetachedServerReady, RuntimeDirectoryGuard, TrustCommand, UpgradeChannel,
-        append_execution_lease_restart_flag, create_guarded_server_runtime,
-        discover_local_workspace, resolve_tui_executable, sync_install_paths,
-        valid_bootstrap_token, write_github_device_prompt, write_private_file_atomic,
+        Cli, Command, DeferredHostedEngine, DetachedServerReady, RuntimeDirectoryGuard,
+        TrustCommand, UpgradeChannel, append_execution_lease_restart_flag,
+        create_guarded_server_runtime, discover_local_workspace, resolve_tui_executable,
+        sync_install_paths, valid_bootstrap_token, write_github_device_prompt,
+        write_private_file_atomic,
     };
     #[cfg(unix)]
     use super::{rustix_device_id, rustix_mode_bits};
+
+    #[derive(Default)]
+    struct ProviderMutationProbe {
+        activations: std::sync::Mutex<Vec<(rw_core::ClientId, rw_core::SessionId, String)>>,
+        api_keys: std::sync::Mutex<Vec<(rw_core::ClientId, rw_core::SessionId, String, String)>>,
+    }
+
+    #[async_trait]
+    impl crate::server::ServerEngine for ProviderMutationProbe {
+        async fn dispatch(
+            &self,
+            _bound_client: rw_core::ClientId,
+            _command: rw_core::ClientCommand,
+        ) -> std::result::Result<rw_core::CommandOutcome, String> {
+            Ok(rw_core::CommandOutcome::Accepted)
+        }
+
+        async fn subscribe(
+            &self,
+            _bound_client: rw_core::ClientId,
+            _session_id: Option<rw_core::SessionId>,
+            _last_seen: Option<rw_core::SequenceId>,
+        ) -> std::result::Result<
+            tokio::sync::mpsc::Receiver<std::result::Result<rw_core::EngineEvent, String>>,
+            String,
+        > {
+            let (_send, receive) = tokio::sync::mpsc::channel(1);
+            Ok(receive)
+        }
+
+        async fn complete_shell(
+            &self,
+            _session_id: rw_core::SessionId,
+            _shell_id: rw_core::ShellId,
+            _status: i32,
+            _captured_output: Option<String>,
+        ) -> std::result::Result<(), String> {
+            Ok(())
+        }
+
+        async fn submit_provider_api_key(
+            &self,
+            bound_client: rw_core::ClientId,
+            session_id: rw_core::SessionId,
+            provider: String,
+            api_key: rw_core::ProviderApiKey,
+        ) -> std::result::Result<rw_core::ProviderApiKeySubmission, String> {
+            self.api_keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((
+                    bound_client,
+                    session_id,
+                    provider,
+                    api_key.expose_secret().to_owned(),
+                ));
+            Ok(rw_core::ProviderApiKeySubmission {
+                stored: true,
+                activated: true,
+                warnings: Vec::new(),
+            })
+        }
+
+        async fn activate_provider(
+            &self,
+            bound_client: rw_core::ClientId,
+            session_id: rw_core::SessionId,
+            provider: String,
+        ) -> std::result::Result<(), String> {
+            self.activations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((bound_client, session_id, provider));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_engine_forwards_provider_mutations_after_readiness() {
+        use crate::server::ServerEngine as _;
+
+        let deferred = DeferredHostedEngine::default();
+        let client = rw_core::ClientId("provider-forwarding-client".to_owned());
+        let session = rw_core::SessionId("provider-forwarding-session".to_owned());
+        let before_install = match deferred
+            .activate_provider(client.clone(), session.clone(), "github_copilot".to_owned())
+            .await
+        {
+            Ok(()) => panic!("provider activation must fail before the engine is installed"),
+            Err(error) => error,
+        };
+        assert!(before_install.contains("still starting"));
+        let probe = std::sync::Arc::new(ProviderMutationProbe::default());
+        deferred.install_engine(probe.clone());
+        deferred
+            .activate_provider(client.clone(), session.clone(), "github_copilot".to_owned())
+            .await
+            .unwrap_or_else(|error| {
+                panic!("provider activation must reach the loaded engine: {error}")
+            });
+        let submission = deferred
+            .submit_provider_api_key(
+                client.clone(),
+                session.clone(),
+                "openai".to_owned(),
+                rw_core::ProviderApiKey::from_terminal_input("test-only-key".to_owned())
+                    .unwrap_or_else(|error| panic!("test key must validate: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!("API-key submission must reach the loaded engine: {error}")
+            });
+        assert!(submission.stored);
+        assert!(submission.activated);
+        assert_eq!(
+            *probe
+                .activations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [(client.clone(), session.clone(), "github_copilot".to_owned())]
+        );
+        assert_eq!(
+            *probe
+                .api_keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            [(
+                client,
+                session,
+                "openai".to_owned(),
+                "test-only-key".to_owned()
+            )]
+        );
+    }
 
     #[test]
     fn detached_recovery_threads_the_execution_lease_wait_flag_to_the_real_child() {

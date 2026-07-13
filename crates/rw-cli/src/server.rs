@@ -423,18 +423,14 @@ pub trait ServerEngine: Send + Sync + 'static {
         _session_id: SessionId,
         _provider: String,
         _api_key: ProviderApiKey,
-    ) -> std::result::Result<ProviderApiKeySubmission, String> {
-        Err("provider credential submission is unavailable".to_owned())
-    }
+    ) -> std::result::Result<ProviderApiKeySubmission, String>;
 
     async fn activate_provider(
         &self,
         _bound_client: ClientId,
         _session_id: SessionId,
         _provider: String,
-    ) -> std::result::Result<(), String> {
-        Err("provider activation is unavailable".to_owned())
-    }
+    ) -> std::result::Result<(), String>;
 }
 
 /// Production adapter from the core multi-session host to the transport trait.
@@ -1246,6 +1242,15 @@ mod tests {
                 activated: true,
                 warnings: vec!["fixture keychain warning".to_owned()],
             })
+        }
+
+        async fn activate_provider(
+            &self,
+            _bound_client: ClientId,
+            _session_id: SessionId,
+            _provider: String,
+        ) -> std::result::Result<(), String> {
+            Ok(())
         }
     }
 

@@ -741,6 +741,25 @@ mod tests {
                 "matching completion was already durable".to_owned()
             })
         }
+
+        async fn submit_provider_api_key(
+            &self,
+            _bound_client: ClientId,
+            _session_id: SessionId,
+            _provider: String,
+            _api_key: rw_core::ProviderApiKey,
+        ) -> Result<rw_core::ProviderApiKeySubmission, String> {
+            Err("shell broker cannot store provider credentials".to_owned())
+        }
+
+        async fn activate_provider(
+            &self,
+            _bound_client: ClientId,
+            _session_id: SessionId,
+            _provider: String,
+        ) -> Result<(), String> {
+            Err("shell broker cannot activate providers".to_owned())
+        }
     }
 
     #[test]
