@@ -328,8 +328,7 @@ async fn load_pricing() -> PricingTable {
             .await
             .unwrap_or_else(|error| panic!("refreshed user model catalog must load: {error}"))
     } else {
-        PricingTable::bundled()
-            .unwrap_or_else(|error| panic!("bundled model catalog must load: {error}"))
+        PricingTable::default()
     }
 }
 

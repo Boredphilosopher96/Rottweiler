@@ -1894,7 +1894,7 @@ fn subscription_kind_has_independent_capabilities_and_no_dollar_pricing() {
 }
 
 #[test]
-fn subscription_kind_rejects_auth_endpoint_and_model_conflicts() {
+fn subscription_kind_rejects_auth_endpoint_conflicts_without_static_model_allowlist() {
     let build = |config: &rw_types::config::Config| {
         ProviderFactory::with_backends(
             manager(TestEnvironment::default(), subscription_keychain()),
@@ -1920,8 +1920,8 @@ fn subscription_kind_rejects_auth_endpoint_and_model_conflicts() {
         .unwrap_or_else(|| panic!("fixture provider must exist"))
         .base_url = Some("https://example.com/v1/responses".to_owned());
     assert!(build(&endpoint).is_err());
-    assert!(build(&subscription_config("gpt-5.5-pro")).is_err());
-    assert!(build(&subscription_config("gpt-5.6-luna")).is_err());
+    assert!(build(&subscription_config("catalog-discovery")).is_ok());
+    assert!(build(&subscription_config("future-live-model")).is_ok());
 }
 
 #[test]

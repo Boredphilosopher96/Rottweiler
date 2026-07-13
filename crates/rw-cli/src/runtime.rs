@@ -116,10 +116,9 @@ pub(crate) async fn load_effective_pricing_table() -> Result<PricingTable> {
     if path.is_file() {
         PricingTable::load(&path)
             .await
-            .map_err(|error| miette!("refreshed model catalog is invalid: {error}"))
+            .map_err(|error| miette!("cached model metadata is invalid: {error}"))
     } else {
-        PricingTable::bundled()
-            .map_err(|error| miette!("bundled model catalog is invalid: {error}"))
+        Ok(PricingTable::default())
     }
 }
 
@@ -5902,7 +5901,7 @@ fn prepare_provider_activation_config(
         AgentLoopError::InvalidConfiguration(format!("provider {provider:?} is not configured"))
     })?;
     if config.models.aliases.is_empty() {
-        let model = provider_activation_candidate(provider);
+        let model = provider_activation_candidate();
         let default = config.models.default.clone();
         config
             .models
@@ -5923,22 +5922,14 @@ fn prepare_isolated_provider_activation_config(
     "__provider_connection".clone_into(&mut config.models.default);
     config.models.aliases = BTreeMap::from([(
         config.models.default.clone(),
-        vec![format!(
-            "{provider}/{}",
-            provider_activation_candidate(provider)
-        )],
+        vec![format!("{provider}/{}", provider_activation_candidate())],
     )]);
     config.models.thinking.clear();
     Ok(config)
 }
 
-fn provider_activation_candidate(provider: &str) -> &'static str {
-    match provider {
-        "openai_codex" => "gpt-5.4-mini",
-        "github_copilot" | "openai" => "gpt-4.1",
-        "anthropic" => "claude-haiku-4-5",
-        _ => "catalog-discovery",
-    }
+fn provider_activation_candidate() -> &'static str {
+    "catalog-discovery"
 }
 
 #[derive(Clone)]
@@ -11113,7 +11104,10 @@ mod tests {
                 ));
             }
             assert_eq!(config.models.default, "fast");
-            assert_eq!(config.models.aliases["fast"], vec!["openai/gpt-4.1"]);
+            assert_eq!(
+                config.models.aliases["fast"],
+                vec!["openai/catalog-discovery"]
+            );
             Ok(ActivatedHostedProvider {
                 replacement_model: Arc::new(QuickConnectedModel),
                 pre_commit: None,
@@ -11322,7 +11316,7 @@ mod tests {
             recovery.models.aliases,
             BTreeMap::from([(
                 "__provider_connection".to_owned(),
-                vec!["github_copilot/gpt-4.1".to_owned()]
+                vec!["github_copilot/catalog-discovery".to_owned()]
             )])
         );
         assert_eq!(recovery.models.default, "__provider_connection");

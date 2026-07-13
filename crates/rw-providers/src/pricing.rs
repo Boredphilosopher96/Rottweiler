@@ -78,16 +78,7 @@ pub struct PricingTable {
 }
 
 impl PricingTable {
-    /// Returns the small bundled bootstrap snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the committed snapshot is invalid.
-    pub fn bundled() -> Result<Self, ProviderError> {
-        Self::from_toml(include_str!("../models.toml"))
-    }
-
-    /// Parses downloaded or bundled TOML pricing data.
+    /// Parses downloaded or cached TOML pricing data.
     ///
     /// # Errors
     ///
@@ -351,15 +342,9 @@ reasoning_per_million_micros_usd = 0
     }
 
     #[test]
-    fn bundled_table_has_source_metadata_and_unknown_is_none() {
-        let table = PricingTable::bundled()
-            .unwrap_or_else(|error| panic!("bundled pricing must parse: {error}"));
-        assert_eq!(table.source_url, "https://models.dev/api.json");
-        assert!(!table.models.is_empty());
-        let bootstrap = &table.models["openai/gpt-5-mini"];
-        assert_eq!(bootstrap.cache_read_per_million_micros_usd, Some(25_000));
-        assert_eq!(bootstrap.cache_write_per_million_micros_usd, Some(0));
-        assert_eq!(bootstrap.reasoning_per_million_micros_usd, None);
+    fn empty_cache_has_no_model_data() {
+        let table = PricingTable::default();
+        assert!(table.models.is_empty());
         let unknown = table
             .cost("missing/model", TokenUsage::default())
             .unwrap_or_else(|error| panic!("unknown lookup cannot overflow: {error}"));

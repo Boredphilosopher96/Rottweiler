@@ -286,15 +286,13 @@ impl CliSessionFactory {
         let pricing_path = options.storage_root.join("models.toml");
         let pricing = if pricing_path.is_file() {
             let contents = fs::read_to_string(&pricing_path).map_err(|_| {
-                HostError::Persistence("refreshed model catalog could not be read".to_owned())
+                HostError::Persistence("cached model metadata could not be read".to_owned())
             })?;
             PricingTable::from_toml(&contents).map_err(|_| {
-                HostError::Persistence("refreshed model catalog is invalid".to_owned())
+                HostError::Persistence("cached model metadata is invalid".to_owned())
             })?
         } else {
-            PricingTable::bundled().map_err(|_| {
-                HostError::Persistence("bundled model catalog is invalid".to_owned())
-            })?
+            PricingTable::default()
         };
         let source = Arc::new(ProviderModelCatalogSource::system(
             options.credentials_path.clone(),

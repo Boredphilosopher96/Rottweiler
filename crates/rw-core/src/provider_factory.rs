@@ -1639,12 +1639,6 @@ where
                     kind.catalog_namespace(),
                 )
             };
-            if kind == AdapterKind::OpenAiSubscription && !subscription_model_allowed(model) {
-                warnings.extend([format!(
-                    "model candidate {candidate:?} is outside the conservative ChatGPT subscription allowlist"
-                )]);
-                continue;
-            }
             let supported_thinking = if kind == AdapterKind::OpenAiSubscription {
                 vec![
                     ThinkingLevel::Off,
@@ -3232,13 +3226,6 @@ const fn provider_discovery_status(error: &ProviderError) -> &'static str {
     }
 }
 
-fn subscription_model_allowed(model: &str) -> bool {
-    matches!(
-        model,
-        "gpt-5.5" | "gpt-5.3-codex-spark" | "gpt-5.4" | "gpt-5.4-mini"
-    )
-}
-
 fn subscription_model_capabilities(pricing: Option<&ModelPricing>) -> Capabilities {
     Capabilities {
         // The subscription transport is intentionally isolated from ordinary
@@ -3733,7 +3720,7 @@ mod native_search_tests {
             .models
             .aliases
             .insert("fast".to_owned(), vec!["work/live-model".to_owned()]);
-        let mut pricing = PricingTable::bundled().expect("pricing");
+        let mut pricing = PricingTable::default();
         pricing
             .models
             .insert("openai/live-model".to_owned(), capability_pricing());
@@ -3799,7 +3786,7 @@ mod native_search_tests {
             .insert("fast".to_owned(), vec!["broken/model".to_owned()]);
         let catalog = project_model_catalog(
             &config,
-            &PricingTable::bundled().expect("pricing"),
+            &PricingTable::default(),
             vec![(
                 "broken".to_owned(),
                 "broken/model".to_owned(),
@@ -3840,7 +3827,7 @@ mod native_search_tests {
         )]);
         let catalog = project_model_catalog(
             &config,
-            &PricingTable::bundled().expect("pricing"),
+            &PricingTable::default(),
             vec![(
                 "openai_codex".to_owned(),
                 "openai_codex/gpt-5.4-mini".to_owned(),
@@ -3882,7 +3869,7 @@ mod native_search_tests {
             manager,
             ProxyEnvironment::default(),
             NetworkPolicy::Allow,
-            PricingTable::bundled().expect("pricing"),
+            PricingTable::default(),
         )
         .with_model_discovery_timeout(std::time::Duration::from_millis(5));
 
@@ -3912,7 +3899,7 @@ mod native_search_tests {
             manager,
             ProxyEnvironment::default(),
             NetworkPolicy::Allow,
-            PricingTable::bundled().expect("pricing"),
+            PricingTable::default(),
         );
 
         factory
@@ -3937,7 +3924,7 @@ mod native_search_tests {
             manager,
             ProxyEnvironment::default(),
             NetworkPolicy::Allow,
-            PricingTable::bundled().expect("pricing"),
+            PricingTable::default(),
         );
         let mut config = Config::default();
         config.providers.insert(
@@ -3997,7 +3984,7 @@ mod native_search_tests {
             .collect();
         let catalog = project_model_catalog(
             &config,
-            &PricingTable::bundled().expect("pricing"),
+            &PricingTable::default(),
             vec![(
                 "work".to_owned(),
                 "work/catalog-discovery".to_owned(),
