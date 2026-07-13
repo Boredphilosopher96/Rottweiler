@@ -1,3 +1,3 @@
 export * from "./format"
 export * from "./mermaid"
-export * from "./virtualizer"
+export * from "./scroll"

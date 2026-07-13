@@ -9,14 +9,11 @@ import {
 } from "@opentui/core"
 
 import {
-  estimateEntryHeight,
-  entryKey,
-  entryLayoutKey,
   formatCost,
   formatToolArguments,
+  getScrollAcceleration,
   terminalMarkdown,
   toolOutputText,
-  TranscriptVirtualizer,
   turnMarkdown,
   turnReasoningMarkdown,
 } from "../render"
@@ -31,11 +28,14 @@ import type { RottweilerTheme } from "../theme"
 export interface TranscriptRenderableOptions {
   readonly syntaxStyle: SyntaxStyle
   readonly treeSitterClient?: TreeSitterClient
-  readonly overscan?: number
   readonly onInteraction?: () => void
 }
 
 const MAX_VISIBLE_SUBAGENTS = 8
+
+function entryKey(entry: TranscriptEntry): string {
+  return `${entry.sequenceId}:${entry.agentTurn}:${entry.turn.role}`
+}
 
 export class ReasoningBlockRenderable extends BoxRenderable {
   readonly header: TextRenderable
@@ -63,7 +63,6 @@ export class ReasoningBlockRenderable extends BoxRenderable {
   ) {
     super(ctx, {
       width: "100%",
-      height: 0,
       flexDirection: "column",
       flexShrink: 0,
       backgroundColor: theme.background,
@@ -106,16 +105,6 @@ export class ReasoningBlockRenderable extends BoxRenderable {
     return this.#expanded
   }
 
-  measuredHeight(): number | null {
-    if (this.#content === "") return 0
-    if (!this.#expanded) return 1
-    const bodyRows = markdownIntrinsicRows(this.body)
-    if (bodyRows === null) return null
-    this.body.height = bodyRows
-    this.height = bodyRows + 1
-    return this.height
-  }
-
   update(content: string, streaming = this.#streaming, width = this.#width): void {
     this.#content = presentableReasoning(content)
     this.#streaming = streaming
@@ -143,8 +132,6 @@ export class ReasoningBlockRenderable extends BoxRenderable {
     if (this.#content === "") {
       this.header.content = ""
       this.body.visible = false
-      this.body.height = 0
-      this.height = 0
       return
     }
     const state = this.#streaming ? "Thinking" : "Thought"
@@ -152,9 +139,6 @@ export class ReasoningBlockRenderable extends BoxRenderable {
     this.header.content = `${indicator} ${state}: ${reasoningTitle(this.#content)}`
     this.body.visible = this.#expanded
     this.body.content = this.#expanded ? this.#content : ""
-    const bodyRows = this.#expanded ? reasoningBodyRows(this.#content, this.#width) : 0
-    this.body.height = bodyRows
-    this.height = bodyRows + 1
   }
 }
 
@@ -174,39 +158,12 @@ function reasoningTitle(content: string): string {
   return singleLine(first, 72)
 }
 
-function reasoningBodyRows(content: string, width: number): number {
-  const contentWidth = Math.max(12, width - 6)
-  return content.split("\n").reduce(
-    (rows, line) => rows + Math.max(1, Math.ceil(Math.max(1, line.length) / contentWidth)),
-    0,
-  )
-}
-
 function colorWithOpacity(color: string, opacity: number): string {
   const match = /^#([0-9A-Fa-f]{6})([0-9A-Fa-f]{2})?$/.exec(color)
   if (match === null) return color
   const sourceAlpha = match[2] === undefined ? 255 : Number.parseInt(match[2], 16)
   const alpha = Math.round(sourceAlpha * Math.max(0, Math.min(1, opacity)))
   return `#${match[1]}${alpha.toString(16).padStart(2, "0")}`
-}
-
-function markdownIntrinsicRows(markdown: MarkdownRenderable): number | null {
-  const children = markdown.getChildren()
-  if (children.length === 0) return null
-  let rows = 0
-  for (const child of children) {
-    // Markdown blocks (especially fenced code) are created asynchronously.
-    // A zero/unresolved first-pass box is not a real measurement and feeding
-    // it back into Yoga can collapse the card before Tree-sitter settles.
-    if (
-      !Number.isFinite(child.width) || child.width <= 0 ||
-      !Number.isFinite(child.height) || child.height <= 0
-    ) return null
-    const marginTop = typeof child.marginTop === "number" ? child.marginTop : 0
-    const marginBottom = typeof child.marginBottom === "number" ? child.marginBottom : 0
-    rows += child.height + marginTop + marginBottom
-  }
-  return rows
 }
 
 export class ToolBlockRenderable extends BoxRenderable {
@@ -319,14 +276,6 @@ function toolBlockExpanded(
   expansion?: ReadonlyMap<string, boolean>,
 ): boolean {
   return expansion?.get(tool.toolCallId) ?? tool.status === "awaiting_approval"
-}
-
-function toolBlockRows(
-  tool: ToolProjection,
-  expansion?: ReadonlyMap<string, boolean>,
-): number {
-  if (!toolBlockExpanded(tool, expansion)) return 1
-  return Math.min(8, Math.max(1, toolBodyContent(tool).split("\n").length)) + 1
 }
 
 function compactToolArguments(tool: ToolProjection): string {
@@ -483,7 +432,6 @@ class TurnCardRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly markdown: MarkdownRenderable
   readonly reasoning: ReasoningBlockRenderable | null
-  #pendingMarkdown: string | null
 
   constructor(
     ctx: RenderContext,
@@ -500,8 +448,6 @@ class TurnCardRenderable extends BoxRenderable {
     onToolExpansionChange: (toolCallId: string, expanded: boolean) => void,
     onReasoningExpansionChange: (expanded: boolean) => void,
     onInteraction: (() => void) | undefined,
-    layoutKey: string,
-    onHeightChange: (layoutKey: string, height: number) => void,
     treeSitterClient?: TreeSitterClient,
   ) {
     const markdown = terminalMarkdown(turnMarkdown(entry.turn), Math.max(20, width - 4))
@@ -517,11 +463,6 @@ class TurnCardRenderable extends BoxRenderable {
     super(ctx, {
       id: `turn-${entryKey(entry)}`,
       width,
-      height:
-        (toolOnly ? 0 : estimateEntryHeight(entry, width) + 1) +
-        (reasoning === "" ? 0 : 1 + (reasoningExpanded ? reasoningBodyRows(reasoning, width) : 0)) +
-        tools.reduce((rows, tool) => rows + toolBlockRows(tool, toolExpansion), 0) +
-        (subagents.length === 0 ? 0 : subagents.length + 3),
       flexDirection: "column",
       flexShrink: 0,
       border: false,
@@ -538,23 +479,16 @@ class TurnCardRenderable extends BoxRenderable {
       flexShrink: 0,
       visible: !toolOnly && markdown !== "",
     })
-    this.#pendingMarkdown = markdown
     this.markdown = new MarkdownRenderable(ctx, {
       id: `markdown-${entryKey(entry)}`,
-      // Populate after the card has completed one finite parent layout. Code
-      // blocks create native buffers immediately when content is assigned.
-      content: "",
+      content: markdown,
       syntaxStyle,
       ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
       fg: theme.markdownText,
       conceal: true,
       concealCode: false,
       streaming: false,
-      // Seed both axes for the first Yoga pass. Markdown builds fenced-code
-      // children asynchronously; percentage/auto geometry can otherwise
-      // briefly reach the native framebuffer as NaN during virtualization.
       width: Math.max(1, width - 2),
-      height: Math.max(1, estimateEntryHeight(entry, width) - 3),
       flexShrink: 0,
       visible: !toolOnly,
       internalBlockMode: "top-level",
@@ -593,39 +527,6 @@ class TurnCardRenderable extends BoxRenderable {
       panel.update(subagents, subagentTotal)
       this.add(panel)
     }
-    this.onLifecyclePass = () => {
-      if (this.#pendingMarkdown !== null) {
-        this.markdown.content = this.#pendingMarkdown
-        this.#pendingMarkdown = null
-        return
-      }
-      let measuredHeight = toolOnly ? 0 : 2
-      for (const child of this.getChildren()) {
-        if (!child.visible) continue
-        const marginTop = typeof child.marginTop === "number" ? child.marginTop : 0
-        const marginBottom = typeof child.marginBottom === "number" ? child.marginBottom : 0
-        const childHeight = child === this.markdown
-          ? markdownIntrinsicRows(this.markdown)
-          : child === this.reasoning
-            ? this.reasoning.measuredHeight()
-            : child.height
-        if (childHeight === null || !Number.isFinite(childHeight) || childHeight < 0) return
-        if (child === this.markdown && this.markdown.height !== childHeight) {
-          this.markdown.height = childHeight
-        }
-        measuredHeight += childHeight + marginTop + marginBottom
-      }
-      if (Number.isFinite(measuredHeight) && measuredHeight > 0) {
-        if (this.height !== measuredHeight) this.height = measuredHeight
-        onHeightChange(layoutKey, measuredHeight)
-      }
-    }
-    ctx.registerLifecyclePass(this)
-    queueMicrotask(() => {
-      if (this.isDestroyed || this.#pendingMarkdown === null || this.parent === null) return
-      this.markdown.content = this.#pendingMarkdown
-      this.#pendingMarkdown = null
-    })
   }
 }
 
@@ -635,43 +536,23 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly streamingMarkdown: MarkdownRenderable
   readonly subagentPanel: SubagentPanelRenderable
   readonly mountedCards = new Map<string, TurnCardRenderable>()
-  readonly #topSpacer: BoxRenderable
-  readonly #bottomSpacer: BoxRenderable
   readonly #tailReasoning: ReasoningBlockRenderable
   readonly #tailHeader: TextRenderable
   readonly #tailCitations: TextRenderable
   readonly #tailTools: BoxRenderable
-  readonly #virtualizer: TranscriptVirtualizer
   readonly #theme: RottweilerTheme
   readonly #syntaxStyle: SyntaxStyle
   readonly #treeSitterClient: TreeSitterClient | undefined
   readonly #onInteraction: (() => void) | undefined
   readonly #toolExpansion = new Map<string, boolean>()
   readonly #reasoningExpansion = new Map<string, boolean>()
-  readonly #measuredHeights = new Map<string, number>()
-  #toolExpansionRevision = 0
-  #reasoningExpansionRevision = 0
-  #projectionRevision = 0
-  #measuredHeightRevision = 0
-  #virtualizedToolExpansionRevision = -1
-  #virtualizedReasoningExpansionRevision = -1
-  #virtualizedMeasuredHeightRevision = -1
+  readonly #cardSignatures = new Map<string, string>()
   #state: RottweilerState | null = null
   #transcript: readonly TranscriptEntry[] | null = null
   #presentableTranscript: readonly TranscriptEntry[] = []
   #tools: RottweilerState["tools"] | null = null
   #turns: RottweilerState["turns"] | null = null
   #subagents: RottweilerState["subagents"] | null = null
-  #virtualizedTranscript: readonly TranscriptEntry[] | null = null
-  #virtualizedTools: RottweilerState["tools"] | null = null
-  #virtualizedSubagents: RottweilerState["subagents"] | null = null
-  #virtualizedWidth = 0
-  #virtualizedEntryKeys: readonly string[] = []
-  #lastWindow = ""
-  #observedScrollTop = 0
-  #scrollReconcileScheduled = false
-  #heightReconcileScheduled = false
-  #nativeScrollWatchPasses = 0
   #tailToolsSignature = ""
   #tailReasoningTurnId: string | null = null
 
@@ -691,7 +572,6 @@ export class TranscriptRenderable extends BoxRenderable {
     this.#syntaxStyle = options.syntaxStyle
     this.#treeSitterClient = options.treeSitterClient
     this.#onInteraction = options.onInteraction
-    this.#virtualizer = new TranscriptVirtualizer(options.overscan)
     this.scroller = new ScrollBoxRenderable(ctx, {
       id: "transcript-scroll",
       width: "100%",
@@ -700,18 +580,12 @@ export class TranscriptRenderable extends BoxRenderable {
       scrollX: false,
       stickyScroll: true,
       stickyStart: "bottom",
+      scrollAcceleration: getScrollAcceleration(),
       viewportCulling: true,
       contentOptions: { flexDirection: "column", width: "100%" },
       verticalScrollbarOptions: { showArrows: false, trackOptions: { backgroundColor: theme.panel } },
     })
-    const reconcileAfterPointerEvent = () => queueMicrotask(() => {
-      this.#reconcileScrollPosition()
-      this.#onInteraction?.()
-    })
-    this.scroller.onMouseScroll = reconcileAfterPointerEvent
-    this.scroller.onMouseUp = reconcileAfterPointerEvent
-    this.#topSpacer = new BoxRenderable(ctx, { width: "100%", height: 0, flexShrink: 0 })
-    this.#bottomSpacer = new BoxRenderable(ctx, { width: "100%", height: 0, flexShrink: 0 })
+    this.scroller.onMouseUp = () => this.#onInteraction?.()
     this.streamingCard = new BoxRenderable(ctx, {
       id: "streaming-tail",
       width: "100%",
@@ -777,23 +651,8 @@ export class TranscriptRenderable extends BoxRenderable {
     this.streamingCard.add(this.#tailCitations)
     this.streamingCard.add(this.subagentPanel)
     this.streamingCard.add(this.#tailTools)
-    this.scroller.add(this.#topSpacer)
-    this.scroller.add(this.#bottomSpacer)
     this.scroller.add(this.streamingCard)
     this.add(this.scroller)
-    this.onLifecyclePass = () => {
-      this.#nativeScrollWatchPasses += 1
-      if (this.scroller.scrollTop !== this.#observedScrollTop && !this.#scrollReconcileScheduled) {
-        this.#scrollReconcileScheduled = true
-        queueMicrotask(() => {
-          this.#scrollReconcileScheduled = false
-          this.#reconcileScrollPosition()
-        })
-      }
-      if (this.#nativeScrollWatchPasses >= 2) {
-        this.ctx.unregisterLifecyclePass(this)
-      }
-    }
   }
 
   get mountedEntryCount(): number {
@@ -801,12 +660,11 @@ export class TranscriptRenderable extends BoxRenderable {
   }
 
   get mountedKeys(): readonly string[] {
-    return [...this.mountedCards.keys()]
+    return this.#presentableTranscript.map(entryKey)
   }
 
   update(state: RottweilerState): void {
     this.#state = state
-    const previousPresentableTranscript = this.#presentableTranscript
     const transcriptChanged = this.#transcript !== state.transcript
     const cardProjectionChanged = this.#tools !== state.tools || this.#subagents !== state.subagents
     const turnProjectionChanged = this.#turns !== state.turns
@@ -817,151 +675,40 @@ export class TranscriptRenderable extends BoxRenderable {
     if (transcriptChanged || cardProjectionChanged) {
       this.#presentableTranscript = presentableTranscript(state)
     }
-    const transcriptReplaced = transcriptChanged && (
-      this.#presentableTranscript.length < previousPresentableTranscript.length ||
-      previousPresentableTranscript.some(
-        (entry, index) => this.#presentableTranscript[index] !== entry,
-      )
-    )
-    if (cardProjectionChanged) {
-      this.#projectionRevision += 1
-      this.#measuredHeights.clear()
-      this.#measuredHeightRevision += 1
-    }
-    this.#nativeScrollWatchPasses = 0
-    this.ctx.registerLifecyclePass(this)
     this.#updateTail(state)
-    this.#reconcile(
-      transcriptReplaced ||
-        turnProjectionChanged ||
-        (state.streamingTail === null && cardProjectionChanged),
-    )
+    if (transcriptChanged || cardProjectionChanged || turnProjectionChanged) {
+      this.#reconcileHistory()
+    }
   }
 
   setScrollOffset(scrollTop: number): void {
-    this.scroller.scrollTop = scrollTop
-    this.#reconcileScrollPosition(true)
+    this.scroller.scrollTo(scrollTop)
   }
 
   scrollBy(direction: 1 | -1, unit: "step" | "viewport"): void {
     this.scroller.scrollBy(direction, unit)
-    this.#reconcileScrollPosition()
   }
 
   scrollTo(position: number): void {
     this.scroller.scrollTo(position)
-    this.#reconcileScrollPosition()
   }
 
   protected override onResize(_width: number, _height: number): void {
-    this.#reconcile(true)
+    this.#reconcileHistory()
   }
 
-  #reconcile(rebuildCards: boolean): void {
+  #reconcileHistory(): void {
     const state = this.#state
     if (state === null) return
     const width = Math.max(20, this.width || this.ctx.width)
-    const height = Math.max(4, this.height || this.ctx.height - 8)
     const transcript = this.#presentableTranscript
-    if (this.#virtualizedWidth !== 0 && this.#virtualizedWidth !== width) {
-      this.#measuredHeights.clear()
-      this.#measuredHeightRevision += 1
-    }
-    const layoutRevision = [
-      this.#projectionRevision,
-      this.#toolExpansionRevision,
-      this.#reasoningExpansionRevision,
-    ].join(":")
-    if (
-      this.#virtualizedTranscript !== state.transcript ||
-      this.#virtualizedTools !== state.tools ||
-      this.#virtualizedSubagents !== state.subagents ||
-      this.#virtualizedToolExpansionRevision !== this.#toolExpansionRevision ||
-      this.#virtualizedReasoningExpansionRevision !== this.#reasoningExpansionRevision ||
-      this.#virtualizedMeasuredHeightRevision !== this.#measuredHeightRevision ||
-      this.#virtualizedWidth !== width
-    ) {
-      const previousTotalHeight = this.#virtualizer.totalHeight
-      const previousScrollTop = this.scroller.scrollTop
-      const previousAnchor = this.#virtualizer.anchor(previousScrollTop)
-      const previousAnchorKey = previousAnchor === null
-        ? null
-        : this.#virtualizedEntryKeys[previousAnchor.index] ?? null
-      const wasAtBottom = previousTotalHeight > 0 &&
-        previousScrollTop >= Math.max(0, previousTotalHeight - height) - 1
-      const toolRowsByTurn = new Map<string, number>()
-      for (const tool of Object.values(state.tools)) {
-        toolRowsByTurn.set(
-          tool.turnId,
-          (toolRowsByTurn.get(tool.turnId) ?? 0) + toolBlockRows(tool, this.#toolExpansion),
-        )
-      }
-      const subagentRowsByTurn = new Map<string, number>()
-      const groupedSubagents = new Map<string, SubagentProjection[]>()
-      for (const subagent of Object.values(state.subagents)) {
-        const group = groupedSubagents.get(subagent.parentTurnId) ?? []
-        group.push(subagent)
-        groupedSubagents.set(subagent.parentTurnId, group)
-      }
-      for (const [turnId, subagents] of groupedSubagents) {
-        const visible = boundedSubagents(subagents)
-        if (visible.length > 0) subagentRowsByTurn.set(turnId, visible.length + 3)
-      }
-      const toolKeys = projectionEntryKeys(transcript, "tool")
-      const subagentKeys = projectionEntryKeys(transcript, "assistant")
-      const extraRows = (entry: TranscriptEntry) =>
-        (toolKeys.has(entryKey(entry)) ? (toolRowsByTurn.get(entry.agentTurn) ?? 0) : 0) +
-        (subagentKeys.has(entryKey(entry)) ? (subagentRowsByTurn.get(entry.agentTurn) ?? 0) : 0) +
-        reasoningRowsForEntry(entry, width, this.#reasoningExpansion)
-      this.#virtualizer.update(
-        transcript,
-        width,
-        extraRows,
-        this.#measuredHeights,
-        layoutRevision,
-      )
-      this.#virtualizedTranscript = state.transcript
-      this.#virtualizedTools = state.tools
-      this.#virtualizedSubagents = state.subagents
-      this.#virtualizedToolExpansionRevision = this.#toolExpansionRevision
-      this.#virtualizedReasoningExpansionRevision = this.#reasoningExpansionRevision
-      this.#virtualizedMeasuredHeightRevision = this.#measuredHeightRevision
-      this.#virtualizedWidth = width
-      this.#virtualizedEntryKeys = transcript.map(entryKey)
-      if (wasAtBottom) {
-        this.scroller.scrollTop = Math.max(0, this.#virtualizer.totalHeight - height)
-      } else if (previousAnchor !== null && previousAnchorKey !== null) {
-        const nextAnchorIndex = this.#virtualizedEntryKeys.indexOf(previousAnchorKey)
-        if (nextAnchorIndex >= 0) {
-          this.scroller.scrollTop =
-            this.#virtualizer.offsetAt(nextAnchorIndex) + previousAnchor.offsetWithin
-        }
-      }
-    }
-    const window = this.#virtualizer.window(this.scroller.scrollTop, height)
-    const windowKey = `${window.start}:${window.end}:${width}`
-    if (!rebuildCards && windowKey === this.#lastWindow) {
-      this.#topSpacer.height = window.topSpacer
-      this.#bottomSpacer.height = window.bottomSpacer
-      this.#observedScrollTop = this.scroller.scrollTop
-      return
-    }
-    this.#lastWindow = windowKey
-    if (rebuildCards) {
-      for (const card of this.mountedCards.values()) {
-        this.scroller.remove(card)
-        card.destroyRecursively()
-      }
-      this.mountedCards.clear()
-    }
-    const desiredKeys = new Set(
-      transcript.slice(window.start, window.end).map(entryKey),
-    )
+    const desiredKeys = new Set(transcript.map(entryKey))
     for (const [key, card] of this.mountedCards) {
       if (desiredKeys.has(key)) continue
       this.scroller.remove(card)
       card.destroyRecursively()
       this.mountedCards.delete(key)
+      this.#cardSignatures.delete(key)
     }
     const toolEntryKeys = projectionEntryKeys(transcript, "tool")
     const subagentEntryKeys = projectionEntryKeys(transcript, "assistant")
@@ -971,16 +718,11 @@ export class TranscriptRenderable extends BoxRenderable {
         lastAssistantEntryByTurn.set(transcriptEntry.agentTurn, entryKey(transcriptEntry))
       }
     }
-    let reference: BoxRenderable = this.#bottomSpacer
-    for (let index = window.end - 1; index >= window.start; index -= 1) {
+    let reference: BoxRenderable = this.streamingCard
+    for (let index = transcript.length - 1; index >= 0; index -= 1) {
       const entry = transcript[index]
       if (entry === undefined) continue
       const key = entryKey(entry)
-      const retained = this.mountedCards.get(key)
-      if (retained !== undefined) {
-        reference = retained
-        continue
-      }
       const tools = toolEntryKeys.has(key)
         ? Object.values(state.tools).filter((tool) => tool.turnId === entry.agentTurn)
         : []
@@ -988,25 +730,37 @@ export class TranscriptRenderable extends BoxRenderable {
         ? subagentsForTurn(state, entry.agentTurn)
         : []
       const visibleSubagents = boundedSubagents(turnSubagents)
-      const extraRows =
-        tools.reduce((rows, tool) => rows + toolBlockRows(tool, this.#toolExpansion), 0) +
-        (visibleSubagents.length === 0 ? 0 : visibleSubagents.length + 3) +
-        reasoningRowsForEntry(entry, width, this.#reasoningExpansion)
-      const layoutKey = entryLayoutKey(entry, width, extraRows, layoutRevision)
+      const detail = entry.turn.role === "assistant" &&
+          lastAssistantEntryByTurn.get(entry.agentTurn) === key &&
+          state.turns[entry.agentTurn]?.cost != null
+        ? turnDetail(state.turns[entry.agentTurn]?.cost, state.turns[entry.agentTurn]?.usage)
+        : null
+      const signature = JSON.stringify([
+        width,
+        entry,
+        detail,
+        tools,
+        visibleSubagents,
+        turnSubagents.length,
+        tools.map((tool) => this.#toolExpansion.get(tool.toolCallId) === true),
+        this.#reasoningExpansion.get(key) === true,
+      ])
+      const retained = this.mountedCards.get(key)
+      if (retained !== undefined && this.#cardSignatures.get(key) === signature) {
+        reference = retained
+        continue
+      }
+      if (retained !== undefined) {
+        this.scroller.remove(retained)
+        retained.destroyRecursively()
+      }
       const card = new TurnCardRenderable(
         this.ctx,
         this.#theme,
         this.#syntaxStyle,
         entry,
         width,
-        entry.turn.role === "assistant" &&
-          lastAssistantEntryByTurn.get(entry.agentTurn) === key &&
-          state.turns[entry.agentTurn]?.cost != null
-          ? turnDetail(
-              state.turns[entry.agentTurn]?.cost,
-              state.turns[entry.agentTurn]?.usage,
-            )
-          : null,
+        detail,
         tools,
         visibleSubagents,
         turnSubagents.length,
@@ -1015,37 +769,13 @@ export class TranscriptRenderable extends BoxRenderable {
         (toolCallId, expanded) => this.#rememberToolExpansion(toolCallId, expanded),
         (expanded) => this.#rememberReasoningExpansion(key, expanded),
         this.#onInteraction,
-        layoutKey,
-        (measuredKey, measuredHeight) =>
-          this.#rememberMeasuredHeight(measuredKey, measuredHeight),
         this.#treeSitterClient,
       )
       this.scroller.insertBefore(card, reference)
       this.mountedCards.set(key, card)
+      this.#cardSignatures.set(key, signature)
       reference = card
     }
-    this.#topSpacer.height = window.topSpacer
-    this.#bottomSpacer.height = window.bottomSpacer
-    this.#observedScrollTop = this.scroller.scrollTop
-  }
-
-  #reconcileScrollPosition(force = false): void {
-    if (!force && this.scroller.scrollTop === this.#observedScrollTop) return
-    this.#reconcile(false)
-  }
-
-  #rememberMeasuredHeight(layoutKey: string, height: number): void {
-    if (!Number.isFinite(height) || height <= 0 || this.#measuredHeights.get(layoutKey) === height) {
-      return
-    }
-    this.#measuredHeights.set(layoutKey, height)
-    this.#measuredHeightRevision += 1
-    if (this.#heightReconcileScheduled) return
-    this.#heightReconcileScheduled = true
-    queueMicrotask(() => {
-      this.#heightReconcileScheduled = false
-      this.#reconcile(false)
-    })
   }
 
   #updateTail(state: RottweilerState): void {
@@ -1113,11 +843,6 @@ export class TranscriptRenderable extends BoxRenderable {
       .join("  ")
     this.#tailCitations.height = tail.citations.length > 0 ? 1 : 0
     this.#replaceTailTools(tools)
-    // Markdown, code blocks, tables, tools, and reasoning own their intrinsic
-    // Yoga height. Estimating rows from the raw source corrupts fenced ASCII
-    // diagrams because the source and rendered block trees have different
-    // geometry while a response is still arriving.
-    this.ctx.registerLifecyclePass(this)
   }
 
   #replaceTailTools(tools: readonly ToolProjection[]): void {
@@ -1151,22 +876,14 @@ export class TranscriptRenderable extends BoxRenderable {
   #rememberToolExpansion(toolCallId: string, expanded: boolean): void {
     if (this.#toolExpansion.get(toolCallId) === expanded) return
     this.#toolExpansion.set(toolCallId, expanded)
-    this.#toolExpansionRevision += 1
-    this.#measuredHeights.clear()
-    this.#measuredHeightRevision += 1
     const state = this.#state
     if (state === null) return
     this.#updateTail(state)
-    this.#reconcile(true)
   }
 
   #rememberReasoningExpansion(key: string, expanded: boolean): void {
     if ((this.#reasoningExpansion.get(key) ?? false) === expanded) return
     this.#reasoningExpansion.set(key, expanded)
-    this.#reasoningExpansionRevision += 1
-    this.#measuredHeights.clear()
-    this.#measuredHeightRevision += 1
-    this.#reconcile(true)
   }
 }
 
@@ -1178,16 +895,6 @@ function turnDetail(
   return cost?.kind === "subscription_quota" && (cost.used === null || cost.used === undefined)
     ? `turn usage · ${detail}`
     : detail
-}
-
-function reasoningRowsForEntry(
-  entry: TranscriptEntry,
-  width: number,
-  expansion: ReadonlyMap<string, boolean>,
-): number {
-  const reasoning = turnReasoningMarkdown(entry.turn)
-  if (reasoning === "") return 0
-  return 1 + (expansion.get(entryKey(entry)) === true ? reasoningBodyRows(reasoning, width) : 0)
 }
 
 function projectionEntryKeys(

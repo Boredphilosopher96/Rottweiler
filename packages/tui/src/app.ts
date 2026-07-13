@@ -441,7 +441,6 @@ export class RottweilerApp extends BoxRenderable {
       ...(this.#treeSitterClient === undefined
         ? {}
         : { treeSitterClient: this.#treeSitterClient }),
-      overscan: 3,
       onInteraction: () => this.#restoreFocusAfterTranscriptInteraction(),
     })
     this.contextPanel = new ContextPanelRenderable(this.ctx, theme, {

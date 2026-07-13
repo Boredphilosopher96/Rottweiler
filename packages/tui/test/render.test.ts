@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { formatCost, formatSessionCost, formatTokenCount, terminalMarkdown, toolOutputText, TranscriptVirtualizer, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { CustomSpeedScroll, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, terminalMarkdown, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 
 describe("bounded retained rendering", () => {
   test("renders completed Mermaid and flowchart fences as terminal diagrams without flashing source", () => {
@@ -77,7 +77,7 @@ describe("bounded retained rendering", () => {
     const started = performance.now()
     const rejected = terminalMarkdown(source, 80)
     expect(performance.now() - started).toBeLessThan(16)
-    expect(rejected).toContain("too large to render safely")
+    expect(rejected).toContain("Diagram preview unavailable")
 
     const wide = terminalMarkdown("```mermaid\nflowchart LR\n A --> B --> C --> D --> E --> F\n```", 40)
     const body = wide.split("\n").slice(1, -1)
@@ -89,11 +89,29 @@ describe("bounded retained rendering", () => {
     }
   })
 
+  test("falls back atomically instead of clipping oversized terminal diagrams", () => {
+    const oversized = terminalMarkdown(
+      "```mermaid\nflowchart LR\n A[This node label is intentionally far wider than the terminal viewport] --> B[Destination]\n```",
+      32,
+    )
+
+    expect(oversized).toContain("◇ Diagram preview unavailable")
+    expect(oversized).not.toContain("Diagram clipped")
+    expect(oversized).not.toMatch(/[┌┐└┘]/)
+    expect(Math.max(...oversized.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(32)
+  })
+
+  test("uses OpenCode-compatible fixed scroll speed when configured", () => {
+    const fixed = getScrollAcceleration({ scroll_speed: 4 })
+    expect(fixed).toBeInstanceOf(CustomSpeedScroll)
+    expect(fixed.tick()).toBe(4)
+  })
+
   test("rejects grouped-node expansion and bounds aggregate diagram work", () => {
     const group = Array.from({ length: 80 }, (_, index) => `N${index}`).join(" & ")
     const grouped = `\`\`\`mermaid\nflowchart LR\n${group} --> ${group}\n\`\`\``
     const groupedStart = performance.now()
-    expect(terminalMarkdown(grouped, 80)).toContain("too large to render safely")
+    expect(terminalMarkdown(grouped, 80)).toContain("Diagram preview unavailable")
     expect(performance.now() - groupedStart).toBeLessThan(16)
 
     const diagram = "```mermaid\nflowchart LR\n A --> B --> C\n```"
@@ -254,56 +272,4 @@ describe("bounded retained rendering", () => {
     expect(structuredOnly).not.toContain("/private/repo")
   })
 
-  test("includes bounded child-panel rows in transcript virtual offsets", () => {
-    const virtualizer = new TranscriptVirtualizer(0)
-    const entries = [
-      {
-        sequenceId: "1",
-        agentTurn: "1",
-        turn: {
-          role: "assistant" as const,
-          blocks: [{ type: "text" as const, text: "first" }],
-          meta: { synthetic: false, summary: false },
-        },
-      },
-      {
-        sequenceId: "2",
-        agentTurn: "2",
-        turn: {
-          role: "assistant" as const,
-          blocks: [{ type: "text" as const, text: "second" }],
-          meta: { synthetic: false, summary: false },
-        },
-      },
-    ]
-    virtualizer.update(entries, 80, (entry) => (entry.agentTurn === "1" ? 11 : 0))
-
-    expect(virtualizer.heightAt(0) - virtualizer.heightAt(1)).toBe(11)
-    expect(virtualizer.window(0, 1).totalHeight).toBe(
-      virtualizer.heightAt(0) + virtualizer.heightAt(1),
-    )
-  })
-
-  test("uses only retained tool rows for a tool-only transcript entry", () => {
-    const virtualizer = new TranscriptVirtualizer(0)
-    const entries = [{
-      sequenceId: "1",
-      agentTurn: "1",
-      turn: {
-        role: "tool" as const,
-        blocks: [{
-          type: "tool_result" as const,
-          id: "read-1",
-          output: { type: "text" as const, text: "README" },
-          is_error: false,
-        }],
-        meta: { synthetic: false, summary: false },
-      },
-    }]
-
-    virtualizer.update(entries, 80, () => 6)
-
-    expect(virtualizer.heightAt(0)).toBe(6)
-    expect(virtualizer.window(0, 1).totalHeight).toBe(6)
-  })
 })

@@ -13,7 +13,7 @@ const MAX_RESPONSE_DIAGRAM_BYTES = 16 * 1024
 const MAX_RESPONSE_DIAGRAM_EDGES = 32
 const MAX_RESPONSE_DIAGRAM_STATEMENTS = 64
 const MAX_RENDERED_BYTES = 32 * 1024
-const MAX_RENDERED_LINES = 80
+const MAX_RENDERED_LINES = 24
 const MAX_CACHE_ENTRIES = 64
 const MAX_CACHE_BYTES = 256 * 1024
 
@@ -96,7 +96,7 @@ export function terminalMarkdown(
     if (closing < 0) {
       const quote = opening.prefix.includes(">") ? opening.prefix : `${opening.prefix}> `
       const message = sourceTooLarge
-        ? `${quote}Diagram is too large to render safely.`
+        ? `${quote}◇ Diagram preview unavailable — definition exceeds the terminal preview limit.`
         : phase === "streaming"
           ? `${quote}◌ Rendering diagram…`
           : `${quote}Diagram is incomplete because its closing fence is missing.`
@@ -122,9 +122,12 @@ export function terminalMarkdown(
       responseDiagramStatements + metrics.statements > MAX_RESPONSE_DIAGRAM_STATEMENTS
     const diagramWidth = Math.max(1, width - prefixWidth)
     const rendered = sourceTooLarge || exceedsDiagramBudget
-      ? "Diagram is too large to render safely."
+      ? diagramFallback(
+        "Diagram preview unavailable — definition exceeds the terminal preview limit.",
+        diagramWidth,
+      )
       : exceedsResponseBudget
-        ? "Additional diagrams were omitted to keep the interface responsive."
+        ? diagramFallback("Additional diagrams were omitted to keep the interface responsive.", diagramWidth)
         : renderDiagram(sourceText, diagramWidth, metrics)
     if (!sourceTooLarge && !exceedsDiagramBudget && !exceedsResponseBudget) {
       renderedDiagrams += 1
@@ -133,9 +136,7 @@ export function terminalMarkdown(
       responseDiagramStatements += metrics.statements
     }
     output.push(`${opening.prefix}\`\`\`text`)
-    output.push(...rendered.split("\n").map((line) =>
-      `${opening.prefix}${clipTerminalLine(line, diagramWidth)}`,
-    ))
+    output.push(...rendered.split("\n").map((line) => `${opening.prefix}${line}`))
     output.push(`${opening.prefix}\`\`\``)
     index = closing
   }
@@ -145,7 +146,10 @@ export function terminalMarkdown(
 
 function renderDiagram(source: string, width: number, metrics: DiagramMetrics): string {
   if (diagramExceedsLimits(metrics)) {
-    return "Diagram is too large to render safely."
+    return diagramFallback(
+      "Diagram preview unavailable — definition exceeds the terminal preview limit.",
+      width,
+    )
   }
 
   const requestedWidth = Math.max(1, Math.floor(width))
@@ -168,7 +172,11 @@ function renderDiagram(source: string, width: number, metrics: DiagramMetrics): 
       boxBorderPadding: layoutWidth < 48 ? 0 : 1,
     }).trimEnd()
     if (rendered.trim().length === 0) rendered = "Diagram has no visible nodes."
-    rendered = constrainRenderedDiagram(rendered, requestedWidth)
+    const fitted = fitRenderedDiagram(rendered, requestedWidth)
+    rendered = fitted ?? diagramFallback(
+      "Diagram preview unavailable — rendered layout does not fit this terminal.",
+      requestedWidth,
+    )
   } catch {
     rendered = "Diagram could not be rendered from this Mermaid definition."
   }
@@ -196,25 +204,17 @@ function diagramExceedsLimits(metrics: DiagramMetrics): boolean {
     metrics.groupSeparators > MAX_DIAGRAM_GROUP_SEPARATORS
 }
 
-function constrainRenderedDiagram(rendered: string, width: number): string {
-  const maxColumns = Math.max(1, width)
+function fitRenderedDiagram(rendered: string, width: number): string | null {
+  const maxColumns = Math.max(1, Math.floor(width))
   const sourceLines = rendered.split("\n")
-  const visibleLines = sourceLines.slice(0, MAX_RENDERED_LINES)
-  let clipped = sourceLines.length > MAX_RENDERED_LINES
-  const constrained = visibleLines.map((line) => {
-    if (Bun.stringWidth(line) <= maxColumns) return line
-    clipped = true
-    return clipTerminalLine(line, maxColumns)
-  })
-  let result = constrained.join("\n")
-  if (new TextEncoder().encode(result).length > MAX_RENDERED_BYTES) {
-    result = new TextDecoder().decode(
-      new TextEncoder().encode(result).slice(0, MAX_RENDERED_BYTES - 64),
-    )
-    clipped = true
-  }
-  if (clipped) result = `${result.trimEnd()}\n${clipTerminalLine("… Diagram clipped", maxColumns)}`
-  return result
+  if (sourceLines.length > MAX_RENDERED_LINES) return null
+  if (sourceLines.some((line) => Bun.stringWidth(line) > maxColumns)) return null
+  if (new TextEncoder().encode(rendered).length > MAX_RENDERED_BYTES) return null
+  return rendered
+}
+
+function diagramFallback(message: string, width: number): string {
+  return `◇ ${clipTerminalLine(message, Math.max(1, Math.floor(width) - 2))}`
 }
 
 function clipTerminalLine(line: string, width: number): string {

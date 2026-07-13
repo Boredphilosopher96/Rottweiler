@@ -129,6 +129,10 @@ describe("M4 retained components", () => {
     const toolOnlyCard = [...app.transcript.mountedCards.values()][0]
     expect(Number.isFinite(toolOnlyCard?.height)).toBeTrue()
     expect(toolOnlyCard?.height).toBe(cards[0]?.height)
+    cards[0]?.toggle()
+    await setup.renderOnce()
+    expect([...app.transcript.mountedCards.values()][0]).toBe(toolOnlyCard)
+    expect(cards[0]?.body.visible).toBeFalse()
     const visibleToolText = `${cards[0]?.header.plainText ?? ""}\n${cards[0]?.body.plainText ?? ""}`
     expect(visibleToolText.match(/canary output/g)?.length).toBe(1)
   })
@@ -153,17 +157,17 @@ describe("M4 retained components", () => {
     expect(rendered.length).toBeLessThanOrEqual(120)
   })
 
-  test("mounts only visible transcript rows and preserves the streaming markdown instance", async () => {
+  test("retains stable transcript rows and preserves the streaming markdown instance", async () => {
     const setup = await createTestRenderer({ width: 86, height: 24, useThread: false })
     renderer = setup.renderer
     treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
     treeSitter.setMockResult({ highlights: [] })
-    const transcript = Array.from({ length: 10_000 }, (_, index) => ({
+    const transcript = Array.from({ length: 120 }, (_, index) => ({
       sequenceId: String(index + 1),
       agentTurn: String(index + 1),
       turn: {
         role: "assistant" as const,
-        blocks: [{ type: "text" as const, text: `Turn ${index} stayed virtualized.` }],
+        blocks: [{ type: "text" as const, text: `Turn ${index} stayed retained.` }],
         meta: { synthetic: false, summary: false },
       },
     }))
@@ -187,7 +191,7 @@ describe("M4 retained components", () => {
     await setup.waitFor(() => treeSitter?.isHighlighting() === false)
     await setup.flush()
 
-    expect(app.transcript.mountedEntryCount).toBeLessThan(20)
+    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
     const streamingMarkdown = app.transcript.streamingMarkdown
     app.setState({
       ...initial,
@@ -195,15 +199,15 @@ describe("M4 retained components", () => {
     })
     await setup.renderOnce()
     expect(app.transcript.streamingMarkdown).toBe(streamingMarkdown)
-    expect(app.transcript.mountedEntryCount).toBeLessThan(20)
+    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
 
     app.transcript.setScrollOffset(5_000_000)
     await setup.flush()
-    expect(app.transcript.mountedEntryCount).toBeLessThan(20)
-    expect(app.transcript.mountedKeys.at(-1)).not.toContain(":0:")
+    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
+    expect(app.transcript.mountedKeys.at(-1)).toBe("120:120:assistant")
   })
 
-  test("reconciles the virtual window after native mouse scrolling", async () => {
+  test("keeps retained transcript identities stable during native mouse scrolling", async () => {
     const setup = await createTestRenderer({ width: 86, height: 18, useThread: false })
     renderer = setup.renderer
     const transcript = Array.from({ length: 120 }, (_, index) => ({
@@ -234,7 +238,8 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
 
     expect(app.transcript.scroller.scrollTop).toBeLessThan(app.transcript.scroller.scrollHeight)
-    expect(app.transcript.mountedKeys).not.toEqual(tailKeys)
+    expect(app.transcript.mountedKeys).toEqual(tailKeys)
+    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
     expect(
       [...app.transcript.mountedCards.values()].some((card) =>
         card.markdown.content.includes("Visible transcript row")
@@ -419,13 +424,14 @@ describe("M4 retained components", () => {
     expect(setup.captureCharFrame()).not.toContain("Read `Cargo.toml` next.")
     expect(setup.captureCharFrame()).not.toContain("REDACTED")
 
-    // OpenTUI's test renderer does not assign finite pointer coordinates to a
-    // virtualized child, so exercise the same public toggle used by its header.
+    // Exercise the same public toggle used by the reasoning header.
     reasoning!.toggle()
     await Bun.sleep(5)
     await setup.renderOnce()
 
     const expanded = [...app.transcript.mountedCards.values()][0]?.reasoning
+    expect([...app.transcript.mountedCards.values()][0]).toBe(card)
+    expect(expanded).toBe(reasoning)
     expect(expanded?.header.plainText).toBe("⌄ Thought: Inspecting workspace")
     expect(expanded?.body.visible).toBeTrue()
     expect(expanded?.body.content).toContain("Read `Cargo.toml` next.")

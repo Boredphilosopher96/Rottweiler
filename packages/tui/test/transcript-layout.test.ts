@@ -10,7 +10,7 @@ import { createRottweilerApp } from "../src/app"
 import { createInitialState } from "../src/state"
 import { nordTheme } from "../src/theme"
 
-describe("render-aware transcript virtualization", () => {
+describe("retained transcript layout", () => {
   let renderer: TestRendererSetup | undefined
   let treeSitter: TreeSitterClient | undefined
   let parserDataPath: string | undefined

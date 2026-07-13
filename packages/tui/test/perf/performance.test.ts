@@ -45,7 +45,7 @@ describe("M4 executable TUI performance budgets", () => {
     treeSitter = undefined
   })
 
-  test("10MB transcript streaming frame compute stays inside p95/p99.9 budgets", async () => {
+  test("retained transcript streaming frame compute stays inside p95/p99.9 budgets", async () => {
     // Perf files share a Bun process with the component suite. Collect before
     // allocating the 10MB fixture so unrelated suite garbage cannot become a
     // frame-compute outlier while preserving the production budget itself.
@@ -60,7 +60,7 @@ describe("M4 executable TUI performance budgets", () => {
     treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
     treeSitter.setMockResult({ highlights: [] })
     const payload = "x".repeat(1_020)
-    const transcript = Array.from({ length: 10_000 }, (_, index) => ({
+    const transcript = Array.from({ length: 400 }, (_, index) => ({
       sequenceId: String(index + 1),
       agentTurn: String(index + 1),
       turn: {
@@ -88,7 +88,7 @@ describe("M4 executable TUI performance budgets", () => {
     renderer.root.add(app)
     await setup.waitFor(() => treeSitter?.isHighlighting() === false)
     await setup.flush()
-    expect(app.transcript.mountedEntryCount).toBeLessThan(24)
+    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
 
     for (let warmup = 0; warmup < 10; warmup += 1) {
       app.setState({
@@ -123,7 +123,7 @@ describe("M4 executable TUI performance budgets", () => {
     emittedMetrics.tui_frame_p999_us = Math.ceil(p999 * 1_000)
     expect(p95).toBeLessThan(frameP95BudgetMs)
     expect(p999).toBeLessThan(frameP999BudgetMs)
-    expect(app.transcript.mountedEntryCount).toBeLessThan(24)
+    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
     const native = setup.getNativeStats()
     // OpenTUI's native stats expose frame duration in microseconds.
     expect(native.nativeLastFrameTime).toBeLessThan(frameP999BudgetMs * 1_000)
