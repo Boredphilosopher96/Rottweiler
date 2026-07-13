@@ -1,11 +1,18 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { CliRenderEvents } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../src/protocol"
 import { PROTOCOL_VERSION } from "../../../protocol/types"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
-import { daylightTheme, kennelTheme, themeCatalog, type RottweilerTheme } from "../src/theme"
+import {
+  daylightTheme,
+  kennelTheme,
+  systemThemeFor,
+  themeCatalog,
+  type RottweilerTheme,
+} from "../src/theme"
 
 const initialEvent = {
   type: "text_delta",
@@ -105,8 +112,13 @@ describe("Rottweiler OpenTUI shell", () => {
     const daylight = app.picker.select.options.findIndex(
       (option) => option.value === "theme:daylight",
     )
+    const pickerBeforePreview = app.picker
     app.picker.select.setSelectedIndex(daylight)
     await setup.renderOnce()
+    expect(app.picker).not.toBe(pickerBeforePreview)
+    expect(pickerBeforePreview.input.isDestroyed).toBeTrue()
+    expect(app.picker.input.isDestroyed).toBeFalse()
+    expect(renderer.currentFocusedRenderable?.id).toBe("picker-query")
     expect(setup.captureCharFrame()).toContain("Themes · arrows preview · Enter confirms")
     expectCoherentTheme(app, daylightTheme)
     expect(app.composer.value).toBe("draft survives retheme")
@@ -115,6 +127,7 @@ describe("Rottweiler OpenTUI shell", () => {
     await Bun.sleep(100)
     await setup.renderOnce()
     expect(app.picker.visible).toBeFalse()
+    expect(renderer.currentFocusedRenderable?.id).toBe("composer-editor")
     expectCoherentTheme(app, kennelTheme)
     expect(app.composer.value).toBe("draft survives retheme")
     expect(commands).toHaveLength(0)
@@ -139,6 +152,26 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.visible).toBeTrue()
     expectCoherentTheme(app, daylightTheme)
     expect(setup.captureCharFrame()).toContain("Modes")
+  })
+
+  test("keeps the active System theme and its picker preview synchronized with terminal mode", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 22, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      theme: systemThemeFor("dark"),
+      systemThemeMode: "dark",
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    expectCoherentTheme(app, systemThemeFor("dark"))
+
+    renderer.emit(CliRenderEvents.THEME_MODE, "light")
+    await setup.renderOnce()
+    expectCoherentTheme(app, systemThemeFor("light"))
+
+    app.openThemePicker()
+    const system = app.picker.select.options.find((option) => option.value === "theme:system")
+    expect(system?.description).toContain(daylightTheme.background)
   })
 
   test("submits with plain Enter while modified Enter and Ctrl+J insert newlines", async () => {
@@ -1292,6 +1325,7 @@ describe("Rottweiler OpenTUI shell", () => {
       key: "project.models.default",
     }))
 
+    expect(app.picker.input.isDestroyed).toBeFalse()
     app.openSettingsPicker()
     const settingOptions = app.picker.select.options.map((option) => option.value)
     expect(settingOptions).toContain("models.thinking.fast:high")
@@ -2193,7 +2227,7 @@ describe("Rottweiler OpenTUI shell", () => {
       correction_millionths: "1000000",
     })
     await setup.renderOnce()
-    expect(app.statusLine.plainText).toContain("ctx 50%")
+    expect(app.statusLine.plainText).toContain("ctx 500/1.0k (50%)")
     expect(app.statusLine.plainText).toContain("git feature/live-status")
 
     app.handleEvent({

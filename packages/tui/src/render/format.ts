@@ -69,6 +69,15 @@ export function formatPercent(numerator: string, denominator: string): string {
   return `${Math.min(999, Math.round((used / total) * 100))}%`
 }
 
+export function formatTokenCount(value: string): string {
+  const tokens = decimal(value)
+  if (!Number.isFinite(tokens)) return "—"
+  if (tokens < 1_000) return tokens.toFixed(0)
+  if (tokens < 10_000) return `${(tokens / 1_000).toFixed(1)}k`
+  if (tokens < 1_000_000) return `${Math.round(tokens / 1_000)}k`
+  return `${(tokens / 1_000_000).toFixed(1)}m`
+}
+
 export function turnMarkdown(turn: Turn): string {
   const chunks: string[] = []
   for (const block of turn.blocks) {
@@ -77,9 +86,7 @@ export function turnMarkdown(turn: Turn): string {
         chunks.push(block.text)
         break
       case "thinking":
-        if (block.content.trim() !== "") {
-          chunks.push(`> Thinking\n> ${block.content.replaceAll("\n", "\n> ")}`)
-        }
+        // Reasoning has a dedicated compact, expandable presentation.
         break
       case "citation":
         chunks.push(`[${block.title ?? block.uri}](${block.uri})`)
@@ -96,6 +103,17 @@ export function turnMarkdown(turn: Turn): string {
     }
   }
   return chunks.join("\n\n")
+}
+
+/** Provider reasoning suitable for user presentation, excluding encrypted placeholders. */
+export function turnReasoningMarkdown(turn: Turn): string {
+  return turn.blocks
+    .filter((block): block is Extract<Turn["blocks"][number], { type: "thinking" }> =>
+      block.type === "thinking",
+    )
+    .map((block) => block.content.replaceAll("[REDACTED]", "").trim())
+    .filter(Boolean)
+    .join("\n\n")
 }
 
 export function toolOutputText(output: ToolOutput | null): string {

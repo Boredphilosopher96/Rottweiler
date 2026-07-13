@@ -347,7 +347,18 @@ impl CliSessionFactory {
                 key: "ui.theme".to_owned(),
                 label: "Theme".to_owned(),
                 value: loaded.config.ui.theme.clone(),
-                choices: vec!["kennel-dark".to_owned(), "daylight".to_owned()],
+                choices: [
+                    "system",
+                    "kennel-dark",
+                    "daylight",
+                    "tokyo-night",
+                    "catppuccin-mocha",
+                    "gruvbox",
+                    "nord",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
                 provenance: provenance("ui.theme"),
                 applies_immediately: false,
             },

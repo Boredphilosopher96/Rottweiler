@@ -1,5 +1,12 @@
 import "rottweiler-opentui-native"
-import { CliRenderEvents, TextRenderable, createCliRenderer } from "@opentui/core"
+import {
+  CliRenderEvents,
+  TextRenderable,
+  addDefaultParsers,
+  createCliRenderer,
+  destroyTreeSitterClient,
+  getTreeSitterClient,
+} from "@opentui/core"
 
 declare global {
   // Set immediately before importing the patched OpenTUI core. This removes
@@ -10,5 +17,12 @@ declare global {
 }
 
 export async function loadOpenTui() {
-  return { CliRenderEvents, TextRenderable, createCliRenderer } as const
+  return {
+    CliRenderEvents,
+    TextRenderable,
+    addDefaultParsers,
+    createCliRenderer,
+    destroyTreeSitterClient,
+    getTreeSitterClient,
+  } as const
 }

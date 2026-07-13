@@ -25,10 +25,17 @@ async function main(): Promise<void> {
   // apparent splash wait on the native backend it is meant to cover.
   const { loadOpenTui } = await import("./opentui")
   const openTui = await loadOpenTui()
+  const treeSitterSmokeReport = process.env.ROTTWEILER_TREE_SITTER_SMOKE_REPORT
+  if (treeSitterSmokeReport !== undefined && treeSitterSmokeReport.length > 0) {
+    const { runCompiledTreeSitterSmoke } = await import("./tree-sitter-smoke")
+    await runCompiledTreeSitterSmoke(treeSitterSmokeReport)
+    return
+  }
   let runtimeForShutdown: {
     shutdownHost(): Promise<boolean>
     stop(): Promise<void>
   } | null = null
+  let treeSitterRuntime: import("./tree-sitter-runtime").MaterializedTreeSitterRuntime | null = null
   let exitRequested = false
   const renderer = await openTui.createCliRenderer({
     exitOnCtrlC: true,
@@ -39,6 +46,11 @@ async function main(): Promise<void> {
       // OpenTUI also destroys after terminal/native setup failures, whose
       // original non-zero status must remain visible to the supervisor.
       void runtimeForShutdown?.stop()
+      void (async () => {
+        await openTui.destroyTreeSitterClient()
+        await treeSitterRuntime?.cleanup()
+        treeSitterRuntime = null
+      })()
     },
   })
 
@@ -93,8 +105,35 @@ async function main(): Promise<void> {
   const configuredSession = process.env.ROTTWEILER_SESSION_ID
   const replaySession = process.env.ROTTWEILER_REPLAY_MODE === "1" ? configuredSession : undefined
   const keybindings = await parseKeybindingsFromEnvironment(process.env.ROTTWEILER_TUI_KEYBINDINGS)
-  const { kennelTheme, themeByName } = await import("./theme")
-  const theme = themeByName(process.env.ROTTWEILER_TUI_THEME ?? "") ?? kennelTheme
+  const { homedir } = await import("node:os")
+  const { join: joinPath } = await import("node:path")
+  const { kennelTheme, loadCustomThemes, systemThemeFor, themeByName } = await import("./theme")
+  await loadCustomThemes(joinPath(homedir(), ".rottweiler", "themes"))
+  const configuredTheme = process.env.ROTTWEILER_TUI_THEME ?? ""
+  const terminalThemeMode = configuredTheme === "system"
+    ? await renderer.waitForThemeMode(1_000)
+    : renderer.themeMode
+  const theme = configuredTheme === "system"
+    ? systemThemeFor(terminalThemeMode)
+    : themeByName(configuredTheme) ?? kennelTheme
+  // OpenTUI workers require real filesystem paths. Bun embeds the selected
+  // parser assets inside the executable; materialize a private, bounded runtime
+  // after first paint and remove it when the renderer shuts down.
+  try {
+    const { embeddedParserConfigurations, materializeTreeSitterRuntime } = await import("./tree-sitter-runtime")
+    treeSitterRuntime = await materializeTreeSitterRuntime()
+    const { assetsPath, workerPath } = treeSitterRuntime
+    process.env.OTUI_TREE_SITTER_WORKER_PATH = workerPath
+    openTui.addDefaultParsers(embeddedParserConfigurations(assetsPath))
+  } catch {
+    // Markdown remains readable if a locked-down host cannot create the
+    // ephemeral parser runtime. Never fail application startup for highlighting.
+  }
+  const treeSitterClient = openTui.getTreeSitterClient()
+  void treeSitterClient.initialize().catch(() => {
+    // Markdown remains readable if a terminal cannot start a worker. OpenTUI
+    // reports the parser failure; the application must stay usable.
+  })
   const terminalHandover = {
     suspend: () => renderer.suspend(),
     resume: () => renderer.resume(),
@@ -108,6 +147,8 @@ async function main(): Promise<void> {
       : { replaySessionId: replaySession }),
     ...(keybindings === undefined ? {} : { keybindings }),
     theme,
+    systemThemeMode: terminalThemeMode,
+    treeSitterClient,
     onCommand: async (command) => {
       const bootstrap = await runtimeBootstrap
       return (await bootstrap.runtime?.sendCommand(command)) ?? null

@@ -8,7 +8,7 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ContextPanelRenderable, ImageAttachmentRenderable, ToolBlockRenderable, fuzzyScore } from "../src/components"
+import { ContextPanelRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, ToolBlockRenderable, fuzzyScore } from "../src/components"
 import {
   PROTOCOL_VERSION,
   type ClientCommand,
@@ -203,6 +203,281 @@ describe("M4 retained components", () => {
     expect(app.transcript.mountedKeys.at(-1)).not.toContain(":0:")
   })
 
+  test("reconciles the virtual window after native mouse scrolling", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 18, useThread: false })
+    renderer = setup.renderer
+    const transcript = Array.from({ length: 120 }, (_, index) => ({
+      sequenceId: String(index + 1),
+      agentTurn: String(index + 1),
+      turn: {
+        role: index % 2 === 0 ? ("user" as const) : ("assistant" as const),
+        blocks: [{ type: "text" as const, text: `Visible transcript row ${index + 1}` }],
+        meta: { synthetic: false, summary: false },
+      },
+    }))
+    const app = createRottweilerApp(renderer, {
+      initialState: { ...createInitialState(), transcript },
+    })
+    renderer.root.add(app)
+    await setup.flush()
+
+    const tailKeys = app.transcript.mountedKeys
+    expect(tailKeys.some((key) => key.startsWith("120:"))).toBeTrue()
+    for (let index = 0; index < 16; index += 1) {
+      await setup.mockMouse.scroll(
+        app.transcript.scroller.x + 2,
+        app.transcript.scroller.y + 2,
+        "up",
+      )
+    }
+    await Bun.sleep(10)
+    await setup.renderOnce()
+
+    expect(app.transcript.scroller.scrollTop).toBeLessThan(app.transcript.scroller.scrollHeight)
+    expect(app.transcript.mountedKeys).not.toEqual(tailKeys)
+    expect(
+      [...app.transcript.mountedCards.values()].some((card) =>
+        card.markdown.content.includes("Visible transcript row")
+      ),
+    ).toBeTrue()
+  })
+
+  test("keeps the composer writable after clicking a retained answer", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 18, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "1",
+          agentTurn: "1",
+          turn: {
+            role: "assistant",
+            blocks: [{ type: "text", text: "Click this retained answer." }],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    const answer = [...app.transcript.mountedCards.values()][0]
+    expect(answer).toBeDefined()
+
+    await setup.mockMouse.click(answer!.markdown.x + 2, answer!.markdown.y)
+    await Bun.sleep(5)
+    await setup.mockMouse.click(app.composer.editor.x + 2, app.composer.editor.y)
+    await setup.mockInput.typeText("composer still works")
+
+    expect(renderer.currentFocusedRenderable?.id).toBe("composer-editor")
+    expect(app.composer.value).toBe("composer still works")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(5)
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "send_message",
+      content: "composer still works",
+    }))
+  })
+
+  test("omits signature-only assistant shells while retaining real questions and answers", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 22, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        transcript: [
+          {
+            sequenceId: "1",
+            agentTurn: "1",
+            turn: {
+              role: "user",
+              blocks: [{ type: "text", text: "Keep this question visible." }],
+              meta: { synthetic: false, summary: false },
+            },
+          },
+          ...["2", "3", "4"].map((sequenceId) => ({
+            sequenceId,
+            agentTurn: "1",
+            turn: {
+              role: "assistant" as const,
+              blocks: [{ type: "thinking" as const, content: "", signature: `opaque-${sequenceId}` }],
+              meta: { synthetic: false, summary: false },
+            },
+          })),
+          {
+            sequenceId: "5",
+            agentTurn: "1",
+            turn: {
+              role: "assistant",
+              blocks: [{ type: "text", text: "Keep this answer visible." }],
+              meta: { synthetic: false, summary: false },
+            },
+          },
+        ],
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.transcript.mountedEntryCount).toBe(2)
+    expect(new Set(app.transcript.mountedKeys)).toEqual(new Set(["1:1:user", "5:1:assistant"]))
+    expect(new Set([...app.transcript.mountedCards.values()].map((card) => card.markdown.content))).toEqual(
+      new Set(["Keep this question visible.", "Keep this answer visible."]),
+    )
+  })
+
+  test("labels per-turn subscription usage so it cannot be mistaken for context occupancy", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 18, useThread: false })
+    renderer = setup.renderer
+    const usage = { ...neverUsage(), input_tokens: "1200", output_tokens: "34" }
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        transcript: [
+          {
+            sequenceId: "1",
+            agentTurn: "1",
+            turn: {
+              role: "user",
+              blocks: [{ type: "text", text: "What is the context?" }],
+              meta: { synthetic: false, summary: false },
+            },
+          },
+          {
+            sequenceId: "2",
+            agentTurn: "1",
+            turn: {
+              role: "assistant",
+              blocks: [{ type: "text", text: "This is the final answer." }],
+              meta: { synthetic: false, summary: false },
+            },
+          },
+        ],
+        turns: {
+          "1": {
+            turnId: "1",
+            status: "completed",
+            usage,
+            cost: { kind: "subscription_quota", used: null, unit: null },
+          },
+        },
+        context: {
+          turn_id: "1",
+          stable_prefix_hash: "hash",
+          used_tokens: "5000",
+          usable_tokens: "100000",
+          reserved_tokens: "0",
+          context_window_known: true,
+          cache_breakpoints: [],
+          items: [],
+        },
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.transcript.mountedCards.get("1:1:user")?.header.plainText).toBe("You")
+    expect(app.transcript.mountedCards.get("2:1:assistant")?.header.plainText)
+      .toContain("turn usage · 1234 tokens")
+    expect(app.statusLine.plainText).toContain("ctx 5.0k/100k (5%)")
+  })
+
+  test("keeps committed reasoning compact and expands its Markdown without stealing composer focus", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 22, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "1",
+          agentTurn: "1",
+          turn: {
+            role: "assistant",
+            blocks: [
+              { type: "thinking", content: "**Inspecting workspace**\n\nRead `Cargo.toml` next.", signature: null },
+              { type: "thinking", content: "[REDACTED]", signature: "opaque" },
+              { type: "text", text: "## Result\n\nReady." },
+            ],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    const card = [...app.transcript.mountedCards.values()][0]
+    const reasoning = card?.reasoning
+    expect(reasoning).toBeInstanceOf(ReasoningBlockRenderable)
+    expect(reasoning?.header.plainText).toBe("› Thought: Inspecting workspace")
+    expect(reasoning?.body.visible).toBeFalse()
+    expect(setup.captureCharFrame()).not.toContain("Read `Cargo.toml` next.")
+    expect(setup.captureCharFrame()).not.toContain("REDACTED")
+
+    // OpenTUI's test renderer does not assign finite pointer coordinates to a
+    // virtualized child, so exercise the same public toggle used by its header.
+    reasoning!.toggle()
+    await Bun.sleep(5)
+    await setup.renderOnce()
+
+    const expanded = [...app.transcript.mountedCards.values()][0]?.reasoning
+    expect(expanded?.header.plainText).toBe("⌄ Thought: Inspecting workspace")
+    expect(expanded?.body.visible).toBeTrue()
+    expect(expanded?.body.content).toContain("Read `Cargo.toml` next.")
+    await setup.mockMouse.click(app.composer.editor.x + 2, app.composer.editor.y)
+    expect(renderer.currentFocusedRenderable?.id).toBe("composer-editor")
+  })
+
+  test("keeps streaming reasoning compact and commits it as a collapsed thought", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 22, useThread: false })
+    renderer = setup.renderer
+    const initial = {
+      ...createInitialState(),
+      streamingTail: {
+        turnId: "1",
+        text: "",
+        thinking: "**Inspecting project**\n\nReading manifests now.",
+        citations: [],
+        toolCallIds: [],
+        finished: null,
+      },
+    } satisfies RottweilerState
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    const live = app.transcript.streamingCard
+      .getChildren()
+      .find((child): child is ReasoningBlockRenderable => child instanceof ReasoningBlockRenderable)
+    expect(live?.header.plainText).toBe("◌ Thinking: Inspecting project")
+    expect(live?.body.visible).toBeFalse()
+    expect(setup.captureCharFrame()).not.toContain("Reading manifests now.")
+
+    app.setState({
+      ...initial,
+      transcript: [{
+        sequenceId: "1",
+        agentTurn: "1",
+        turn: {
+          role: "assistant",
+          blocks: [{ type: "thinking", content: initial.streamingTail.thinking, signature: null }],
+          meta: { synthetic: false, summary: false },
+        },
+      }],
+      streamingTail: null,
+    })
+    await setup.renderOnce()
+
+    const committed = [...app.transcript.mountedCards.values()][0]?.reasoning
+    expect(committed?.header.plainText).toBe("› Thought: Inspecting project")
+    expect(committed?.body.visible).toBeFalse()
+  })
+
   test("shows retained tool activity and output instead of a generic response wait", async () => {
     const setup = await createTestRenderer({ width: 86, height: 24, useThread: false })
     renderer = setup.renderer
@@ -236,7 +511,7 @@ describe("M4 retained components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("Running tools")
-    expect(setup.captureCharFrame()).toContain("Thinking · checking the workspace")
+    expect(setup.captureCharFrame()).toContain("◌ Thinking: checking the workspace")
     expect(setup.captureCharFrame()).toContain("glob")
     expect(setup.captureCharFrame()).toContain("**/*.rs")
     expect(setup.captureCharFrame()).not.toContain("Working…")

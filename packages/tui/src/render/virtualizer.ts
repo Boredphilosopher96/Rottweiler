@@ -27,10 +27,14 @@ export class TranscriptVirtualizer {
     entries: readonly TranscriptEntry[],
     width: number,
     extraRows: (entry: TranscriptEntry) => number = () => 0,
+    measuredRows: ReadonlyMap<string, number> = new Map(),
+    layoutRevision = "0",
   ): void {
     const normalizedWidth = Math.max(8, Math.floor(width))
     const sameWidth = normalizedWidth === this.#width
-    const nextKeys = entries.map((entry) => `${entryKey(entry)}:${extraRows(entry)}`)
+    const nextKeys = entries.map((entry) =>
+      entryLayoutKey(entry, normalizedWidth, extraRows(entry), layoutRevision)
+    )
     let stable = 0
     if (sameWidth) {
       const limit = Math.min(nextKeys.length, this.#keys.length)
@@ -40,8 +44,11 @@ export class TranscriptVirtualizer {
     }
     const heights = sameWidth ? this.#heights.slice(0, stable) : []
     for (let index = heights.length; index < entries.length; index += 1) {
+      const entry = entries[index]!
+      const extra = extraRows(entry)
+      const layoutKey = entryLayoutKey(entry, normalizedWidth, extra, layoutRevision)
       heights.push(
-        estimateEntryHeight(entries[index]!, normalizedWidth) + extraRows(entries[index]!),
+        measuredRows.get(layoutKey) ?? estimateEntryHeight(entry, normalizedWidth) + extra,
       )
     }
     const offsets = new Array<number>(heights.length + 1)
@@ -78,10 +85,35 @@ export class TranscriptVirtualizer {
   heightAt(index: number): number {
     return this.#heights[index] ?? 0
   }
+
+  offsetAt(index: number): number {
+    return this.#offsets[Math.max(0, Math.min(index, this.#heights.length))] ?? 0
+  }
+
+  anchor(scrollTop: number): { readonly index: number; readonly offsetWithin: number } | null {
+    if (this.#heights.length === 0) return null
+    const totalHeight = this.#offsets.at(-1) ?? 0
+    const top = Math.max(0, Math.min(totalHeight, Math.floor(scrollTop)))
+    const index = findContainingOffset(this.#offsets, top)
+    return { index, offsetWithin: Math.max(0, top - this.offsetAt(index)) }
+  }
+
+  get totalHeight(): number {
+    return this.#offsets.at(-1) ?? 0
+  }
 }
 
 export function entryKey(entry: TranscriptEntry): string {
   return `${entry.sequenceId}:${entry.agentTurn}:${entry.turn.role}`
+}
+
+export function entryLayoutKey(
+  entry: TranscriptEntry,
+  width: number,
+  extraRows: number,
+  layoutRevision: string,
+): string {
+  return `${entryKey(entry)}:${Math.max(8, Math.floor(width))}:${extraRows}:${layoutRevision}`
 }
 
 export function estimateEntryHeight(entry: TranscriptEntry, width: number): number {

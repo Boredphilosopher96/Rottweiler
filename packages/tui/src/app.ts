@@ -4,6 +4,7 @@ import {
   SelectRenderableEvents,
   type KeyEvent,
   type RenderContext,
+  type ThemeMode,
   type TreeSitterClient,
 } from "@opentui/core"
 
@@ -61,7 +62,14 @@ import {
   type RottweilerState,
   type ToolProjection,
 } from "./state"
-import { createSyntaxStyle, kennelTheme, themeByName, themeCatalog, type RottweilerTheme } from "./theme"
+import {
+  createSyntaxStyle,
+  kennelTheme,
+  systemThemeFor,
+  themeByName,
+  themeCatalog,
+  type RottweilerTheme,
+} from "./theme"
 import { isRecord, isSessionForkedEvent, type WireEngineEvent } from "./transport"
 
 export interface RottweilerAppOptions {
@@ -83,6 +91,7 @@ export interface RottweilerAppOptions {
   readonly onProviderActivate?: (provider: string) => Promise<void>
   readonly requestId?: () => string
   readonly theme?: RottweilerTheme
+  readonly systemThemeMode?: ThemeMode | null
   readonly treeSitterClient?: TreeSitterClient
   readonly notifications?: NotificationAdapter
   readonly editor?: EditorAdapter
@@ -204,6 +213,7 @@ export class RottweilerApp extends BoxRenderable {
   #rethemeInProgress = false
   #sessionId: string
   #terminalFocused = true
+  #systemThemeMode: ThemeMode | null
   #pickerKind: PickerKind | null = null
   #pendingFilePreview: { readonly path: string; readonly requestId: string } | null = null
   #pendingWorkspaceSearchRequest: string | null = null
@@ -251,6 +261,12 @@ export class RottweilerApp extends BoxRenderable {
   }
   #onTerminalBlur = () => {
     this.#terminalFocused = false
+  }
+  #onTerminalThemeMode = (mode: ThemeMode) => {
+    this.#systemThemeMode = mode
+    if (this.#theme.name !== "system") return
+    const next = systemThemeFor(mode)
+    if (next.background !== this.#theme.background) this.#createThemedSurface(next)
   }
   #onGlobalKey = (key: KeyEvent) => {
     const focusOwner = this.#visibleFocusOwner()
@@ -303,6 +319,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#keybindings = compileKeybindings(options.keybindings)
     this.#inputMode = this.#keybindings.preset === "vim" ? "normal" : "standard"
     this.#theme = theme
+    this.#systemThemeMode = options.systemThemeMode ?? null
     this.#treeSitterClient = options.treeSitterClient
     this.#sessionId = this.#options.sessionId
     const initialState = options.initialState ?? createInitialState()
@@ -321,6 +338,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#createThemedSurface(theme)
     ctx.on(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     ctx.on(CliRenderEvents.BLUR, this.#onTerminalBlur)
+    ctx.on(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
     ctx.keyInput.on("keypress", this.#onGlobalKey)
     this.setState(this.#state)
     if (this.#reviewOpen) {
@@ -369,6 +387,7 @@ export class RottweilerApp extends BoxRenderable {
         ? {}
         : { treeSitterClient: this.#treeSitterClient }),
       overscan: 3,
+      onInteraction: () => this.#restoreFocusAfterTranscriptInteraction(),
     })
     this.contextPanel = new ContextPanelRenderable(this.ctx, theme, {
       onOpenDiff: (path) => this.#openChangedFileDiff(path),
@@ -397,12 +416,17 @@ export class RottweilerApp extends BoxRenderable {
       },
       this.#treeSitterClient,
     )
-    this.picker = new FuzzyPickerRenderable(this.ctx, theme, (query) => {
+    const picker = new FuzzyPickerRenderable(this.ctx, theme, (query) => {
+      if (this.picker !== picker) return
       if (this.#pickerKind === "sessions") this.#scheduleSessionSearch(query)
     })
-    this.picker.select.on(SelectRenderableEvents.SELECTION_CHANGED, () => {
+    this.picker = picker
+    picker.select.on(SelectRenderableEvents.SELECTION_CHANGED, () => {
+      // A preview rebuild destroys the old picker. Ignore any queued selection
+      // notification from that generation instead of reading its dead buffer.
+      if (this.picker !== picker) return
       if ((this.#pickerKind !== "themes" && this.#pickerKind !== "settings") || this.#rethemeInProgress) return
-      const id = this.picker.select.getSelectedOption()?.value
+      const id = picker.select.getSelectedOption()?.value
       if (typeof id !== "string") return
       const name = id.startsWith("theme:")
         ? id.slice("theme:".length)
@@ -1085,6 +1109,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearSessionSearchTimer()
     this.ctx.off(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     this.ctx.off(CliRenderEvents.BLUR, this.#onTerminalBlur)
+    this.ctx.off(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
     this.ctx.keyInput.off("keypress", this.#onGlobalKey)
     this.#syntaxStyle.destroy()
     super.destroy()
@@ -1234,10 +1259,10 @@ export class RottweilerApp extends BoxRenderable {
         this.#scrollTranscript(1, "viewport")
         return true
       case "view_top":
-        this.transcript.scroller.scrollTo(0)
+        this.transcript.scrollTo(0)
         return true
       case "view_bottom":
-        this.transcript.scroller.scrollTo(this.transcript.scroller.scrollHeight)
+        this.transcript.scrollTo(this.transcript.scroller.scrollHeight)
         return true
       default:
         return false
@@ -1304,7 +1329,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #scrollTranscript(direction: 1 | -1, unit: "step" | "viewport"): void {
-    this.transcript.scroller.scrollBy(direction, unit)
+    this.transcript.scrollBy(direction, unit)
   }
 
   #moveToBoundary(end: boolean): void {
@@ -1314,8 +1339,21 @@ export class RottweilerApp extends BoxRenderable {
       if (end) this.composer.editor.gotoBufferEnd()
       else this.composer.editor.gotoBufferHome()
     } else {
-      this.transcript.scroller.scrollTo(end ? this.transcript.scroller.scrollHeight : 0)
+      this.transcript.scrollTo(end ? this.transcript.scroller.scrollHeight : 0)
     }
+  }
+
+  #restoreFocusAfterTranscriptInteraction(): void {
+    if (this.#destroyed || this.#state.replay.active) return
+    if (this.#inputMode === "standard") {
+      this.composer.focus()
+      return
+    }
+    this.#vimFocus = "transcript"
+    this.#vimFocusBeforePicker = "transcript"
+    this.#focusForInputMode()
+    this.statusLine.setKeybindingMode(this.#inputMode, "transcript")
+    this.statusLine.update(this.#state)
   }
 
   #visibleFocusOwner(): VimFocus | "interaction" | "review" {
@@ -1911,7 +1949,8 @@ export class RottweilerApp extends BoxRenderable {
         const items: PickerItem<SettingPickerAction>[] = []
         for (const setting of this.#state.settings) {
           if (setting.key === "ui.theme") {
-            for (const theme of themeCatalog) {
+            for (const catalogTheme of themeCatalog) {
+              const theme = this.#resolvedTheme(catalogTheme)
               items.push({
                 id: `ui.theme:${theme.name}`,
                 label: `Theme → ${theme.name}`,
@@ -1959,12 +1998,15 @@ export class RottweilerApp extends BoxRenderable {
         break
       }
       case "themes": {
-        const items: PickerItem<RottweilerTheme>[] = themeCatalog.map((theme) => ({
-          id: `theme:${theme.name}`,
-          label: `${theme.name === this.#theme.name ? "● " : ""}${theme.name}`,
-          description: `${theme.background} · ${theme.foreground} · ${theme.accent}`,
-          value: theme,
-        }))
+        const items: PickerItem<RottweilerTheme>[] = themeCatalog.map((catalogTheme) => {
+          const theme = this.#resolvedTheme(catalogTheme)
+          return {
+            id: `theme:${theme.name}`,
+            label: `${theme.name === this.#theme.name ? "● " : ""}${theme.name}`,
+            description: `${theme.background} · ${theme.foreground} · ${theme.accent}`,
+            value: theme,
+          }
+        })
         this.#openPicker("Themes · arrows preview · Enter confirms", items, (item) => {
           void this.#confirmTheme(item.value)
         })
@@ -2056,23 +2098,34 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
+  #resolvedTheme(theme: RottweilerTheme): RottweilerTheme {
+    return theme.name === "system" ? systemThemeFor(this.#systemThemeMode) : theme
+  }
+
   #openPicker<T>(
     title: string,
     items: readonly PickerItem<T>[],
     onSelect: (item: PickerItem<T>) => void,
   ): void {
     const select = (item: PickerItem<unknown>) => onSelect(item as PickerItem<T>)
-    if (this.#pickerAnchored) {
-      this.picker.refreshAnchored(
-        title,
-        items as readonly PickerItem<unknown>[],
-        this.#pickerQuery,
-        select,
-      )
-      this.#positionPicker(true)
-      this.composer.focus()
-    } else {
-      this.picker.refresh(title, items as readonly PickerItem<unknown>[], select)
+    const suppressThemePreview = this.#pickerKind === "themes" || this.#pickerKind === "settings"
+    const rethemeWasInProgress = this.#rethemeInProgress
+    if (suppressThemePreview) this.#rethemeInProgress = true
+    try {
+      if (this.#pickerAnchored) {
+        this.picker.refreshAnchored(
+          title,
+          items as readonly PickerItem<unknown>[],
+          this.#pickerQuery,
+          select,
+        )
+        this.#positionPicker(true)
+        this.composer.focus()
+      } else {
+        this.picker.refresh(title, items as readonly PickerItem<unknown>[], select)
+      }
+    } finally {
+      this.#rethemeInProgress = rethemeWasInProgress
     }
     if (
       !this.#pickerAnchored &&

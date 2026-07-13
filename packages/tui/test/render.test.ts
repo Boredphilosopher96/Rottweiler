@@ -1,8 +1,15 @@
 import { describe, expect, test } from "bun:test"
 
-import { formatCost, formatSessionCost, toolOutputText, TranscriptVirtualizer, turnMarkdown } from "../src/render"
+import { formatCost, formatSessionCost, formatTokenCount, toolOutputText, TranscriptVirtualizer, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 
 describe("bounded retained rendering", () => {
+  test("formats compact context counters without confusing them with percentages", () => {
+    expect(formatTokenCount("999")).toBe("999")
+    expect(formatTokenCount("6400")).toBe("6.4k")
+    expect(formatTokenCount("23167")).toBe("23k")
+    expect(formatTokenCount("380000")).toBe("380k")
+  })
+
   test("renders subscription usage and AI credits instead of a dead dollar placeholder", () => {
     const usage = {
       input_tokens: "640",
@@ -106,6 +113,18 @@ describe("bounded retained rendering", () => {
       role: "assistant",
       blocks: [{ type: "thinking", content: "", signature: "opaque-provider-state" }],
       meta: { synthetic: false, summary: false },
+    })).toBe("")
+
+    const reasoningTurn = {
+      role: "assistant",
+      blocks: [{ type: "thinking", content: "**Inspecting**\n\n`Cargo.toml`", signature: null }],
+      meta: { synthetic: false, summary: false },
+    } satisfies import("../src/protocol").Turn
+    expect(turnMarkdown(reasoningTurn)).toBe("")
+    expect(turnReasoningMarkdown(reasoningTurn)).toBe("**Inspecting**\n\n`Cargo.toml`")
+    expect(turnReasoningMarkdown({
+      ...reasoningTurn,
+      blocks: [{ type: "thinking", content: " [REDACTED] \n", signature: null }],
     })).toBe("")
 
     const structuredOnly = toolOutputText({

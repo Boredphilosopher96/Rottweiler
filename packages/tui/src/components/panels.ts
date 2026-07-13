@@ -9,7 +9,7 @@ import {
   type TreeSitterClient,
 } from "@opentui/core"
 
-import { formatPercent, formatSessionCost, formatToolArguments } from "../render"
+import { formatPercent, formatSessionCost, formatTokenCount, formatToolArguments } from "../render"
 import type {
   ApprovalDecision,
   PlanArtifact,
@@ -729,7 +729,7 @@ export class StatusLineRenderable extends TextRenderable {
     const context =
       state.context === null
         ? "ctx —"
-        : `ctx ${formatPercent(state.context.used_tokens, state.context.usable_tokens)}`
+        : `ctx ${formatTokenCount(state.context.used_tokens)}/${formatTokenCount(state.context.usable_tokens)} (${formatPercent(state.context.used_tokens, state.context.usable_tokens)})`
     const cache =
       state.cost === null || !hasRecordedUsage(state.cost.session_usage)
         ? "cache —"

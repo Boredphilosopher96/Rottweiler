@@ -2109,19 +2109,29 @@ fn validate(config: &Config) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn valid_theme_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes[0].is_ascii_lowercase()
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
 fn validate_ui(config: &Config) -> Result<(), ConfigError> {
-    if matches!(config.ui.theme.as_str(), "kennel-dark" | "daylight") {
+    if valid_theme_name(&config.ui.theme) {
         Ok(())
     } else {
         Err(ConfigError::Validation(
-            "ui.theme must be kennel-dark or daylight".to_owned(),
+            "ui.theme must be a safe theme name".to_owned(),
         ))
     }
 }
 
 fn validate_tui_setting(config: &Config, key: &str, value: &str) -> Result<(), ConfigError> {
     let valid = match key {
-        "ui.theme" => matches!(value, "kennel-dark" | "daylight"),
+        "ui.theme" => valid_theme_name(value),
         "compaction.auto" => matches!(value, "true" | "false"),
         "permissions.default" => matches!(value, "ask" | "allow" | "deny"),
         _ if key.starts_with("models.thinking.") => {
