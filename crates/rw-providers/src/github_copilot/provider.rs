@@ -336,8 +336,16 @@ impl Provider for GitHubCopilotProvider {
 
     async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
         let catalog = self.config.runtime.catalog().await?;
+        // `model_picker_enabled` is a presentation hint, not an availability
+        // guarantee. Some authenticated catalogs mark every otherwise usable
+        // model false. Prefer GitHub's picker subset when it exists, but never
+        // turn a successfully validated live catalog into an empty picker.
+        let has_picker_models = catalog.iter().any(|(_, model)| model.picker_enabled);
         let mut models = Vec::new();
-        for (_, model) in catalog.iter().filter(|(_, model)| model.picker_enabled) {
+        for (_, model) in catalog
+            .iter()
+            .filter(|(_, model)| !has_picker_models || model.picker_enabled)
+        {
             models.push(DiscoveredModel {
                 id: model.id.clone(),
                 display_name: Some(model.name.clone()),
@@ -935,7 +943,7 @@ mod tests {
     fn catalog_fixture() -> String {
         json!({
             "data": [{
-                "model_picker_enabled": true,
+                "model_picker_enabled": false,
                 "id": "gpt-fixture",
                 "name": "GPT Fixture",
                 "version": "gpt-fixture-2026-07-10",

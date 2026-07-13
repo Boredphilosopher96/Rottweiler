@@ -1119,7 +1119,7 @@ impl ModelCatalogSource for ProviderRuntime {
         let pending = providers
             .into_iter()
             .map(|(provider_name, provider)| {
-                let candidate = discovery_candidate(&self.config, &provider_name);
+                let candidate = discovery_candidate(&provider_name);
                 async move {
                     let discovery =
                         tokio::time::timeout(discovery_timeout, provider.discover_models())
@@ -1776,7 +1776,7 @@ where
         let mut discovery_providers: BTreeMap<String, Arc<dyn Provider>> = connections
             .iter()
             .filter_map(|(provider_name, connection)| {
-                let candidate = discovery_candidate(config, provider_name);
+                let candidate = discovery_candidate(provider_name);
                 let capabilities = match connection.kind {
                     AdapterKind::OpenAiSubscription => subscription_model_capabilities(None),
                     AdapterKind::GitHubCopilot => github_copilot_capabilities(None),
@@ -1854,7 +1854,7 @@ where
             futures_util::stream::iter(provider_names.into_iter().map(|provider_name| {
                 let discovery_factory = self.clone();
                 async move {
-                    let candidate = discovery_candidate(config, &provider_name);
+                    let candidate = discovery_candidate(&provider_name);
                     let mut isolated = config.clone();
                     isolated.providers.retain(|name, _| name == &provider_name);
                     isolated.models.aliases =
@@ -2437,7 +2437,7 @@ where
                 "provider is not configured",
             ));
         }
-        let candidate = discovery_candidate(&self.config, provider);
+        let candidate = discovery_candidate(provider);
         let mut isolated = self.config.clone();
         isolated.providers.retain(|name, _| name == provider);
         isolated.models.aliases =
@@ -2860,28 +2860,11 @@ fn find_pricing(
     (None, None)
 }
 
-fn discovery_candidate(config: &Config, provider: &str) -> String {
-    if let Some(candidate) = config.models.aliases.values().flatten().find(|candidate| {
-        candidate
-            .split_once('/')
-            .is_some_and(|(name, _)| name == provider)
-    }) {
-        return candidate.clone();
-    }
-    let model = config
-        .providers
-        .get(provider)
-        .and_then(|entry| AdapterKind::parse(provider, &entry.kind).ok())
-        .map_or("catalog-discovery", |kind| match kind {
-            AdapterKind::OpenAiSubscription => "gpt-5.4-mini",
-            AdapterKind::GitHubCopilot => "gpt-4.1",
-            AdapterKind::Anthropic => "claude-haiku-4-5",
-            AdapterKind::OpenAiResponses
-            | AdapterKind::OpenAiChat
-            | AdapterKind::OpenAiCompatibleResponses
-            | AdapterKind::OpenAiCompatibleChat => "catalog-discovery",
-        });
-    format!("{provider}/{model}")
+fn discovery_candidate(provider: &str) -> String {
+    // This is an internal, never-presented binding used only to construct the
+    // provider adapter before it calls the live catalog endpoint. It must not
+    // seed discovery from configured aliases, a bundled list, or a model file.
+    format!("{provider}/catalog-discovery")
 }
 
 #[allow(clippy::too_many_lines)]
