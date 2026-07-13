@@ -217,6 +217,10 @@ async fn chatgpt_discovers_visible_models_from_tolerant_envelope() {
     );
     assert!(requests[0].contains("user-agent: rottweiler/test"));
     assert!(requests[0].contains("chatgpt-account-id: private-account"));
+    assert!(requests[0].contains(&format!(
+        "version: {}",
+        rw_providers::OPENAI_SUBSCRIPTION_MODELS_COMPATIBILITY_VERSION
+    )));
 }
 
 #[tokio::test]

@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures_util::StreamExt;
-use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue};
 use rw_types::{Block, ImageRef, Role, ToolOutput, ToolOutputPart, Turn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -247,6 +247,12 @@ impl OpenAiCompatibleProvider {
         let optional_loopback_catalog = is_loopback(&endpoint) && !subscription;
         let mut headers = HeaderMap::new();
         material.apply_openai(&mut headers)?;
+        if subscription {
+            headers.insert(
+                HeaderName::from_static("version"),
+                HeaderValue::from_static(crate::OPENAI_SUBSCRIPTION_MODELS_COMPATIBILITY_VERSION),
+            );
+        }
         let response = self
             .client
             .get(endpoint)
@@ -305,12 +311,15 @@ fn request_has_image(request: &ProviderRequest) -> bool {
 
 fn discovery_endpoint(endpoint: &Url, subscription: bool) -> Result<Url, ProviderError> {
     if subscription && !is_loopback(endpoint) {
-        return Url::parse(crate::OPENAI_SUBSCRIPTION_MODELS_ENDPOINT).map_err(|_| {
-            ProviderError::new(
-                ProviderErrorKind::Protocol,
-                "built-in ChatGPT model catalog endpoint is invalid",
-            )
-        });
+        let mut discovered =
+            Url::parse(crate::OPENAI_SUBSCRIPTION_MODELS_ENDPOINT).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::Protocol,
+                    "built-in ChatGPT model catalog endpoint is invalid",
+                )
+            })?;
+        append_subscription_catalog_version(&mut discovered);
+        return Ok(discovered);
     }
     let path = endpoint.path();
     let base = path
@@ -327,12 +336,16 @@ fn discovery_endpoint(endpoint: &Url, subscription: bool) -> Result<Url, Provide
     discovered.set_query(None);
     discovered.set_fragment(None);
     if subscription {
-        discovered.query_pairs_mut().append_pair(
-            "client_version",
-            crate::OPENAI_SUBSCRIPTION_MODELS_COMPATIBILITY_VERSION,
-        );
+        append_subscription_catalog_version(&mut discovered);
     }
     Ok(discovered)
+}
+
+fn append_subscription_catalog_version(endpoint: &mut Url) {
+    endpoint.query_pairs_mut().append_pair(
+        "client_version",
+        crate::OPENAI_SUBSCRIPTION_MODELS_COMPATIBILITY_VERSION,
+    );
 }
 
 fn is_loopback(url: &Url) -> bool {
@@ -1434,8 +1447,26 @@ mod tests {
         OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiState, OpenAiWireMode,
         ResponsesReasoningSignature, apply_auth_request_shape, apply_subscription_request_shape,
         build_chat_request, build_responses_request, decode_responses_reasoning_signature,
-        encode_responses_reasoning_signature, openai_stream_error, parse_usage, responses_items,
+        discovery_endpoint, encode_responses_reasoning_signature, openai_stream_error, parse_usage,
+        responses_items,
     };
+
+    #[test]
+    fn production_chatgpt_catalog_keeps_protocol_version_query() {
+        let inference = Url::parse(crate::OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT)
+            .unwrap_or_else(|error| panic!("built-in inference URL must parse: {error}"));
+        let catalog = discovery_endpoint(&inference, true)
+            .unwrap_or_else(|error| panic!("built-in catalog URL must compose: {error}"));
+
+        assert_eq!(
+            catalog.as_str(),
+            format!(
+                "{}?client_version={}",
+                crate::OPENAI_SUBSCRIPTION_MODELS_ENDPOINT,
+                crate::OPENAI_SUBSCRIPTION_MODELS_COMPATIBILITY_VERSION
+            )
+        );
+    }
 
     #[test]
     fn chat_tool_fragments_and_usage_normalize() {
