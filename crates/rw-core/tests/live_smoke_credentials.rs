@@ -533,11 +533,10 @@ async fn chatgpt_subscription_record_and_offline_replay() {
     .await;
 }
 
-/// Direct GitHub Copilot invocation using Rottweiler's own OAuth identity and
-/// logical credential-vault entry:
+/// Direct GitHub Copilot invocation using the pinned compatible OAuth identity
+/// and Rottweiler's logical credential-vault entry:
 ///
 /// ```text
-/// # The release build must contain ROTTWEILER_GITHUB_COPILOT_CLIENT_ID.
 /// # User config must define provider `github-copilot` with kind
 /// # `github_copilot`, and `rw auth login github-copilot` must have completed.
 /// RW_LIVE_SMOKE=accept-paid-requests \

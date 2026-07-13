@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use url::{Host, Url};
@@ -26,13 +26,14 @@ pub const GITHUB_COPILOT_DEVICE_CODE_ENDPOINT: &str = "https://github.com/login/
 /// Public GitHub device-token endpoint used by released clients.
 pub const GITHUB_COPILOT_ACCESS_TOKEN_ENDPOINT: &str =
     "https://github.com/login/oauth/access_token";
-/// Public client id for Rottweiler's GitHub OAuth application.
+/// Public native-client identity used by GitHub Copilot CLI-compatible device
+/// flows, including `OpenCode`'s current implementation.
 ///
-/// OAuth device-flow client ids identify the application and are not secrets.
-/// Keeping the first-party id in the binary makes Copilot subscription login
-/// work in every Cargo and Homebrew build without a release-only environment
-/// variable.
-pub const GITHUB_COPILOT_CLIENT_ID: &str = "Ov23li0EIrAqgRskCzlG";
+/// OAuth device-flow client ids are public application identifiers, not
+/// secrets. The previously pinned generic application completed GitHub device
+/// authorization but failed the live Copilot catalog; this identity matches
+/// the current known-compatible `OpenCode` flow.
+pub const GITHUB_COPILOT_CLIENT_ID: &str = "Ov23li8tweQw6odWQebz";
 
 const DEVICE_SCOPE: &str = "read:user";
 const POLLING_SAFETY_MARGIN: Duration = Duration::from_secs(3);
@@ -110,7 +111,7 @@ pub enum GitHubDevicePoll {
 /// Injectable GitHub device-flow boundary used by deterministic tests.
 #[async_trait]
 pub trait GitHubDeviceFlowTransport: Send + Sync + fmt::Debug {
-    /// Starts a device grant using the supplied Rottweiler-owned client id.
+    /// Starts a device grant using the supplied pinned public client id.
     async fn begin(
         &self,
         client_id: &str,
@@ -451,7 +452,7 @@ impl GitHubDeviceFlowTransport for ReqwestGitHubDeviceFlowTransport {
             .client
             .post(self.device_code_endpoint.clone())
             .headers(github_json_headers(user_agent)?)
-            .form(&DeviceCodeRequest {
+            .json(&DeviceCodeRequest {
                 client_id,
                 scope: DEVICE_SCOPE,
             })
@@ -492,7 +493,7 @@ impl GitHubDeviceFlowTransport for ReqwestGitHubDeviceFlowTransport {
             .client
             .post(self.access_token_endpoint.clone())
             .headers(github_json_headers(user_agent)?)
-            .form(&AccessTokenRequest {
+            .json(&AccessTokenRequest {
                 client_id,
                 device_code: device_code.expose_secret(),
                 grant_type: "urn:ietf:params:oauth:grant-type:device_code",
@@ -543,6 +544,7 @@ fn interpret_access_token_response(
 fn github_json_headers(user_agent: &str) -> Result<HeaderMap, ProviderError> {
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(
         USER_AGENT,
         HeaderValue::from_str(user_agent).map_err(|_| {
@@ -615,7 +617,7 @@ fn validate_authorization(
 fn missing_client_id() -> ProviderError {
     ProviderError::new(
         ProviderErrorKind::Authentication,
-        "this Rottweiler build has no GitHub OAuth client id; configure a Rottweiler-owned public client",
+        "this Rottweiler build has no compatible GitHub Copilot OAuth client id",
     )
 }
 
@@ -662,6 +664,11 @@ mod tests {
         GitHubCopilotDeviceAuthorization, GitHubCopilotDeviceFlow, GitHubDeviceFlowTransport,
         GitHubDevicePoll, interpret_access_token_response,
     };
+
+    #[test]
+    fn production_client_identity_matches_the_reviewed_copilot_compatibility_profile() {
+        assert_eq!(super::GITHUB_COPILOT_CLIENT_ID, "Ov23li8tweQw6odWQebz");
+    }
 
     #[derive(Debug)]
     struct FakeClock(Mutex<Instant>);
@@ -1105,7 +1112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_transport_uses_exact_form_fields_without_client_secret() {
+    async fn production_transport_matches_copilot_json_device_flow_without_client_secret() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .unwrap_or_else(|error| panic!("listener must bind: {error}"));
@@ -1164,14 +1171,15 @@ mod tests {
         assert!(requests.iter().all(|request| {
             request
                 .to_ascii_lowercase()
-                .contains("content-type: application/x-www-form-urlencoded")
+                .contains("content-type: application/json")
         }));
-        assert!(requests[0].ends_with("client_id=rottweiler-test-client&scope=read%3Auser"));
-        assert!(requests[1].contains("client_id=rottweiler-test-client"));
-        assert!(requests[1].contains("device_code=DEVICE-CODE"));
         assert!(
-            requests[1]
-                .contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code")
+            requests[0].ends_with(r#"{"client_id":"rottweiler-test-client","scope":"read:user"}"#)
+        );
+        assert!(requests[1].contains(r#""client_id":"rottweiler-test-client""#));
+        assert!(requests[1].contains(r#""device_code":"DEVICE-CODE""#));
+        assert!(
+            requests[1].contains(r#""grant_type":"urn:ietf:params:oauth:grant-type:device_code""#)
         );
         assert!(
             requests

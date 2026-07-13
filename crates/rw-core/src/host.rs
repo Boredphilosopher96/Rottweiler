@@ -3318,7 +3318,7 @@ fn sanitized_provider_auth_error(error: &HostError) -> String {
         HostError::Persistence(_) => "provider credential storage failed",
         HostError::Protocol(_) => "provider authentication request was invalid",
         HostError::Query(message) if message.contains("no GitHub OAuth client id") => {
-            "GitHub Copilot sign-in is unavailable in this build because it has no Rottweiler OAuth client identity"
+            "GitHub Copilot sign-in is unavailable in this build because it has no compatible OAuth client identity"
         }
         HostError::Query(message) if message.contains("device authorization expired") => {
             "GitHub sign-in expired; start a new sign-in attempt"

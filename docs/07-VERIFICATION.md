@@ -86,11 +86,11 @@ An accept-canary listener additionally proves invalid required/named tool choice
 return before any `/models` socket. Copilot replay under the process-wide network
 deny guard lives in its own integration-test binary, so the global guard cannot
 race or contaminate parallel loopback acceptance tests.
-Developer builds without the compile-time Rottweiler OAuth client hook fail
-login with an actionable configuration error; CI never borrows another tool's
-client identity or token. The ignored release canary in
+Developer builds without the pinned compatible OAuth client identity fail
+login with an actionable configuration error; CI never reads another tool's
+stored token. The ignored release canary in
 `crates/rw-core/tests/live_smoke_credentials.rs` additionally requires that
-Rottweiler-owned client identity, an existing device-flow credential, and an
+pinned client identity, an existing device-flow credential, and an
 explicit `RW_LIVE_GITHUB_COPILOT_MODEL`; ordinary CI only compiles this path.
 
 These deterministic fixtures do **not** substitute for M1's credentialed live

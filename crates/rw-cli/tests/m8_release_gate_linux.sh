@@ -57,8 +57,7 @@ set -- docker run --rm --privileged \
   --env "ROTTWEILER_HOST_UID=$(id -u)" \
   --env "ROTTWEILER_HOST_GID=$(id -g)"
 
-# Forward only variables that are actually set. In particular, compile-time
-# release identity must remain absent rather than becoming an empty value.
+# Forward only variables that are actually set.
 for variable in \
   ROTTWEILER_M8_PERF_SAMPLES \
   ROTTWEILER_M8_FUNCTIONAL_ONLY \
@@ -68,8 +67,7 @@ for variable in \
   ROTTWEILER_UPDATE_ROOT_PUBLIC_KEY_B64 \
   ROTTWEILER_UPDATE_ROOT_KEYS_JSON \
   ROTTWEILER_UPDATE_ROOT_THRESHOLD \
-  ROTTWEILER_UPDATE_ROOT_VERSION \
-  ROTTWEILER_GITHUB_COPILOT_CLIENT_ID
+  ROTTWEILER_UPDATE_ROOT_VERSION
 do
   if printenv "$variable" >/dev/null 2>&1; then
     set -- "$@" --env "$variable"

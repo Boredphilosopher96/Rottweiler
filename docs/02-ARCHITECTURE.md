@@ -319,7 +319,7 @@ a per-request output maximum on this transport; it still reconciles returned tok
 usage, and exposes no API-dollar pricing for subscription models.
 
 The `github_copilot` kind is the other isolated subscription profile. Released
-builds inject a Rottweiler-owned GitHub OAuth App client id at compile time;
+builds pin the audited public Copilot CLI-compatible OAuth device client id at compile time;
 configuration cannot supply a client id, API key, generic OAuth endpoint, or
 Copilot base URL. `rw auth login github-copilot` shows GitHub's verification URI
 and user code, polls the device grant with expiry/backoff and explicit
@@ -327,7 +327,7 @@ cancellation, then stores one Rottweiler-owned logical token entry. It never
 reads `gh`, Copilot CLI, VS Code, or OpenCode credentials. The factory registers
 that token with the shared redactor before any request. The credential records
 the OAuth client id that issued it; production resolution requires the current
-build's Rottweiler-owned client id to exist and match exactly. Loopback fixtures
+build's pinned client id to exist and match exactly. Loopback fixtures
 instead supply an explicit non-production test identity. One async lazy catalog
 runtime is shared by all configured models for the logical provider: the first
 inference fetches `/models`, rejects 401/403, policy-disabled, missing, or
