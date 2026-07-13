@@ -12,9 +12,9 @@ Every feature Rottweiler ships, grouped by area. Features marked **[gap]** were 
 - **Steering & interrupt** **[gap]**: Esc interrupts the current turn cleanly (tool calls cancelled, partial state preserved); messages typed mid-turn are queued and injected at the next turn boundary.
 - **Message editing / rewind** **[gap]**: rewind the conversation to any prior turn; file checkpoints (see §7) restore workspace state alongside.
 - **Bash escape**: `!cmd` runs a shell command with the **real TTY handed over** (TUI suspends raw mode): interactive commands — login flows, REPLs, editors, sudo prompts — just work. The agent is **blocked until the process actually exits**: Ctrl+C/signals go to the child, not the harness, and an interrupted-but-still-running process keeps control; the agent never resumes against a half-finished command. During handover, background-process output is buffered (never written to the surrendered TTY) and MCP servers keep running. Output (redacted) lands in the transcript as user-provided context.
-- **$EDITOR composition** **[gap]**: a keybinding opens `$EDITOR` to compose or edit long prompts; saved buffer becomes the message.
-- **@-file mentions & fuzzy picker** **[gap]**: `@src/main.rs` attaches a file reference; `@` opens a fuzzy finder over the repo.
-- **Multimodal input** **[gap]**: paste/attach images (screenshots of UIs, error dialogs) for vision-capable models.
+- **$EDITOR composition**: a keybinding opens `$EDITOR` to compose or edit long prompts; saved buffer becomes the message.
+- **@-file mentions & fuzzy picker**: `@` opens a gitignore-aware fuzzy finder and attaches a workspace file as structured context. Nested paths and names containing spaces remain exact and removable.
+- **Multimodal input**: paste images with `Ctrl+V` (`Ctrl+I` remains a terminal-safe fallback), paste quoted/escaped/`file://` image paths, or attach workspace images through `@`. Image and long-text attachments are visible and individually removable before submission; rejected sends preserve them.
 
 ## 2. Slash commands & skills
 

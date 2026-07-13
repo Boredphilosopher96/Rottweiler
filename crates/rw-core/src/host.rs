@@ -34,6 +34,8 @@ const MAX_PROVIDER_AUTH_URL_BYTES: usize = 4_096;
 const MAX_PROVIDER_AUTH_CODE_BYTES: usize = 256;
 const MAX_PROVIDER_AUTH_WARNINGS: usize = 16;
 const MAX_PROVIDER_AUTH_WARNING_BYTES: usize = 512;
+const PROVIDER_AUTH_WARNINGS_OMITTED: &str =
+    "provider credential was saved; some credential warnings were omitted";
 const MAX_PROVIDER_AUTH_MESSAGE_BYTES: usize = 1_024;
 
 /// Transport-authenticated client identity. The host overwrites every
@@ -896,19 +898,23 @@ impl EngineHost {
             .await
             .map_err(|_| HostError::Query("provider credential storage failed".to_owned()))??;
             let warnings = bounded_provider_auth_warnings(&warnings)?;
-            let activated = session
+            let connection_ready = session
                 .handle()
                 .activate_provider(&provider, Some(&snapshot.model_alias))
                 .await
                 .is_ok();
             drop(lifecycle_guard);
             drop(provider_mutation_guard);
-            if activated && let Some(catalog) = session.model_catalog() {
-                let _ = catalog.get(true).await;
-            }
+            let catalog_ready = match session.model_catalog() {
+                Some(catalog) => catalog
+                    .get(true)
+                    .await
+                    .is_ok_and(|catalog| provider_catalog_is_ready(&catalog, &provider)),
+                None => false,
+            };
             Ok(ProviderApiKeySubmission {
                 stored: true,
-                activated,
+                activated: connection_ready && catalog_ready,
                 warnings,
             })
         })
@@ -946,8 +952,17 @@ impl EngineHost {
             .map_err(|_| HostError::Query("provider activation failed".to_owned()))?;
         drop(lifecycle_guard);
         drop(provider_mutation_guard);
-        if let Some(catalog) = session.model_catalog() {
-            let _ = catalog.get(true).await;
+        let catalog = session
+            .model_catalog()
+            .ok_or_else(|| HostError::Query("provider model catalog is unavailable".to_owned()))?;
+        let catalog = catalog
+            .get(true)
+            .await
+            .map_err(|_| HostError::Query("provider model catalog refresh failed".to_owned()))?;
+        if !provider_catalog_is_ready(&catalog, provider) {
+            return Err(HostError::Query(
+                "provider is not reachable or returned no models".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -2766,9 +2781,7 @@ impl EngineHost {
                     false,
                     sanitized_provider_auth_error(&error),
                     Vec::new(),
-                    None,
-                )
-                .await;
+                );
                 return;
             }
         };
@@ -2784,9 +2797,7 @@ impl EngineHost {
                     false,
                     sanitized_provider_auth_error(&error),
                     Vec::new(),
-                    None,
-                )
-                .await;
+                );
                 return;
             }
         };
@@ -2803,9 +2814,7 @@ impl EngineHost {
                     false,
                     sanitized_provider_auth_error(&HostError::from(error)),
                     Vec::new(),
-                    None,
-                )
-                .await;
+                );
                 return;
             }
         };
@@ -2830,51 +2839,68 @@ impl EngineHost {
         } else {
             Ok(Vec::new())
         };
-        let (success, message, warnings) = match persisted {
+        let (message, warnings) = match persisted {
             Ok(mut persisted_warnings) => {
                 completion.warnings.append(&mut persisted_warnings);
-                match bounded_provider_auth_warnings(&completion.warnings) {
-                    Ok(warnings) => {
-                        if session
-                            .handle()
-                            .activate_provider(&owner.provider, Some(&snapshot.model_alias))
-                            .await
-                            .is_ok()
-                        {
-                            (true, completion.message, warnings)
-                        } else {
-                            (
-                                false,
-                                "provider credentials were stored, but activation failed; retry activation without re-entering the credential".to_owned(),
-                                warnings,
-                            )
-                        }
-                    }
-                    Err(_) => (
-                        false,
-                        "provider credentials were stored, but activation was skipped because credential warnings exceeded the safety limit; retry activation without re-entering the credential".to_owned(),
-                        Vec::new(),
-                    ),
-                }
+                (
+                    completion.message,
+                    sanitized_persisted_provider_auth_warnings(completion.warnings),
+                )
             }
-            Err(error) => (false, sanitized_provider_auth_error(&error), Vec::new()),
+            Err(error) => {
+                drop(lifecycle_guard);
+                drop(provider_mutation);
+                self.emit_provider_auth_finished(
+                    &owner,
+                    attempt_id,
+                    &meta,
+                    false,
+                    sanitized_provider_auth_error(&error),
+                    Vec::new(),
+                );
+                return;
+            }
         };
+        // Credential persistence is the authentication result. Report it
+        // immediately; activation and catalog discovery are independent
+        // readiness work and must not relabel or delay a successful login.
+        self.emit_provider_auth_finished(&owner, attempt_id, &meta, true, message, warnings);
+        let activated = session
+            .handle()
+            .activate_provider(&owner.provider, Some(&snapshot.model_alias))
+            .await
+            .is_ok();
         drop(lifecycle_guard);
         drop(provider_mutation);
-        self.emit_provider_auth_finished(
-            &owner,
-            attempt_id,
-            &meta,
-            success,
-            message,
-            warnings,
-            success.then_some(snapshot),
-        )
-        .await;
+        let catalog_ready = self
+            .emit_refreshed_provider_catalog(&owner, &meta, snapshot)
+            .await;
+        let (ready, readiness_message) = match (activated, catalog_ready) {
+            (true, Some(true)) => (
+                true,
+                "Provider connected. Choose a model from /models.".to_owned(),
+            ),
+            (false, _) => (
+                false,
+                "Signed in, but the provider connection is not ready. Retry from /providers."
+                    .to_owned(),
+            ),
+            (true, None) => (
+                false,
+                "Signed in, but the model catalog could not be refreshed. Retry from /providers."
+                    .to_owned(),
+            ),
+            (true, Some(false)) => (
+                false,
+                "Signed in, but this provider is not reachable or returned no models. Retry from /providers."
+                    .to_owned(),
+            ),
+        };
+        self.emit_provider_activation_finished(&owner, &meta, ready, readiness_message);
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn emit_provider_auth_finished(
+    fn emit_provider_auth_finished(
         &self,
         owner: &ProviderAuthOwner,
         attempt_id: ProviderAuthAttemptId,
@@ -2882,55 +2908,90 @@ impl EngineHost {
         success: bool,
         message: String,
         warnings: Vec<String>,
-        snapshot: Option<crate::SessionSnapshot>,
     ) {
-        let mut events = vec![EngineEvent::ProviderAuthFinished {
-            meta: ack_meta(meta, &*self.clock),
-            session_id: owner.session_id.clone(),
-            attempt_id,
-            provider: owner.provider.clone(),
-            success,
-            message,
-            warnings,
-        }];
-        if let Some(snapshot) = snapshot {
-            let selected = Some(snapshot.model_alias.as_str());
-            let resolved = snapshot.conversation.iter().rev().find_map(|turn| {
-                turn.meta
-                    .model
-                    .as_deref()
-                    .filter(|model| model.contains('/'))
-            });
-            let mut refreshed_catalog = if let Ok(session) =
-                self.ready_session(&owner.session_id).await
-                && let Some(catalog) = session.model_catalog()
-            {
-                catalog.get(true).await.ok()
-            } else {
-                None
-            };
-            if refreshed_catalog.is_none() {
-                refreshed_catalog = self
-                    .queries
-                    .model_catalog(true, selected, resolved)
-                    .await
-                    .ok();
-            }
-            if let Some(mut catalog) = refreshed_catalog {
-                overlay_model_catalog_current(&mut catalog, selected, resolved);
-                events.push(EngineEvent::ModelsListed {
-                    meta: ack_meta(meta, &*self.clock),
-                    session_id: Some(owner.session_id.clone()),
-                    models: catalog.models,
-                    aliases: catalog.aliases,
-                    providers: catalog.providers,
-                    cached: catalog.cached,
-                    truncated: catalog.truncated,
-                });
-            }
-        }
-        self.emit_many(&owner.client_id, &events);
+        self.emit_many(
+            &owner.client_id,
+            &[EngineEvent::ProviderAuthFinished {
+                meta: ack_meta(meta, &*self.clock),
+                session_id: owner.session_id.clone(),
+                attempt_id,
+                provider: owner.provider.clone(),
+                success,
+                message,
+                warnings,
+            }],
+        );
     }
+
+    fn emit_provider_activation_finished(
+        &self,
+        owner: &ProviderAuthOwner,
+        meta: &CommandMeta,
+        success: bool,
+        message: String,
+    ) {
+        self.emit_many(
+            &owner.client_id,
+            &[EngineEvent::ProviderActivationFinished {
+                meta: ack_meta(meta, &*self.clock),
+                session_id: owner.session_id.clone(),
+                provider: owner.provider.clone(),
+                success,
+                message,
+            }],
+        );
+    }
+
+    async fn emit_refreshed_provider_catalog(
+        &self,
+        owner: &ProviderAuthOwner,
+        meta: &CommandMeta,
+        snapshot: crate::SessionSnapshot,
+    ) -> Option<bool> {
+        let selected = Some(snapshot.model_alias.as_str());
+        let resolved = snapshot.conversation.iter().rev().find_map(|turn| {
+            turn.meta
+                .model
+                .as_deref()
+                .filter(|model| model.contains('/'))
+        });
+        let mut refreshed_catalog = if let Ok(session) = self.ready_session(&owner.session_id).await
+            && let Some(catalog) = session.model_catalog()
+        {
+            catalog.get(true).await.ok()
+        } else {
+            None
+        };
+        if refreshed_catalog.is_none() {
+            refreshed_catalog = self
+                .queries
+                .model_catalog(true, selected, resolved)
+                .await
+                .ok();
+        }
+        let mut catalog = refreshed_catalog?;
+        let provider_ready = provider_catalog_is_ready(&catalog, &owner.provider);
+        overlay_model_catalog_current(&mut catalog, selected, resolved);
+        self.emit_many(
+            &owner.client_id,
+            &[EngineEvent::ModelsListed {
+                meta: ack_meta(meta, &*self.clock),
+                session_id: Some(owner.session_id.clone()),
+                models: catalog.models,
+                aliases: catalog.aliases,
+                providers: catalog.providers,
+                cached: catalog.cached,
+                truncated: catalog.truncated,
+            }],
+        );
+        Some(provider_ready)
+    }
+}
+
+fn provider_catalog_is_ready(catalog: &ModelCatalogSnapshot, provider_name: &str) -> bool {
+    catalog.providers.iter().any(|provider| {
+        provider.name == provider_name && provider.reachable && provider.model_count > 0
+    })
 }
 
 fn ack_meta(meta: &CommandMeta, clock: &dyn EventClock) -> CommandAckMeta {
@@ -3226,6 +3287,13 @@ fn bounded_provider_auth_warnings(warnings: &[String]) -> Result<Vec<String>, Ho
     Ok(warnings.to_vec())
 }
 
+fn sanitized_persisted_provider_auth_warnings(warnings: Vec<String>) -> Vec<String> {
+    if bounded_provider_auth_warnings(&warnings).is_ok() {
+        return warnings;
+    }
+    vec![PROVIDER_AUTH_WARNINGS_OMITTED.to_owned()]
+}
+
 fn validate_provider_auth_completion(
     expected_provider: &str,
     completion: ProviderAuthCompletion,
@@ -3371,6 +3439,8 @@ mod tests {
 
     struct IdleModel;
 
+    struct ActivatableModel;
+
     struct MarkerCommand;
 
     #[async_trait]
@@ -3401,6 +3471,29 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ModelDriver for ActivatableModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            Ok(Box::pin(stream::empty()))
+        }
+
+        fn has_model_alias(&self, alias: &str) -> bool {
+            matches!(alias, "fast" | "big") || alias.contains('/')
+        }
+
+        async fn activate_provider(
+            &self,
+            _provider: &str,
+            _selected_model: Option<&str>,
+        ) -> Result<(), AgentLoopError> {
+            Ok(())
+        }
+    }
+
     struct StubFactory {
         root: TempDir,
         next: AtomicUsize,
@@ -3418,6 +3511,7 @@ mod tests {
         fork_turns: Mutex<Vec<TurnId>>,
         shutdowns: AtomicUsize,
         event_sink: Option<Arc<dyn SessionEventSink>>,
+        model: Arc<dyn ModelDriver>,
     }
 
     impl StubFactory {
@@ -3439,12 +3533,20 @@ mod tests {
                 fork_turns: Mutex::new(Vec::new()),
                 shutdowns: AtomicUsize::new(0),
                 event_sink: None,
+                model: Arc::new(IdleModel),
             }
         }
 
         fn with_event_sink(event_sink: Arc<dyn SessionEventSink>) -> Self {
             Self {
                 event_sink: Some(event_sink),
+                ..Self::new()
+            }
+        }
+
+        fn with_model(model: Arc<dyn ModelDriver>) -> Self {
+            Self {
+                model,
                 ..Self::new()
             }
         }
@@ -3469,7 +3571,7 @@ mod tests {
                 workspace_generation: 0,
                 initial_session_context: Vec::new(),
                 model_alias: "fast".to_owned(),
-                model: Arc::new(IdleModel),
+                model: Arc::clone(&self.model),
                 tools: Arc::new(ToolRegistry::new()),
                 permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
                 hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
@@ -3608,6 +3710,7 @@ mod tests {
     struct StubQueries {
         auth: Option<Arc<AuthFixture>>,
         persisted_models: std::sync::Mutex<Vec<String>>,
+        fail_model_catalog: bool,
     }
 
     struct AuthFixture {
@@ -3693,6 +3796,11 @@ mod tests {
             _selected_model: Option<&str>,
             _resolved_model: Option<&str>,
         ) -> Result<ModelCatalogSnapshot, HostError> {
+            if self.fail_model_catalog {
+                return Err(HostError::Query(
+                    "injected provider catalog refresh failure".to_owned(),
+                ));
+            }
             Ok(ModelCatalogSnapshot {
                 aliases: Vec::new(),
                 models: Vec::new(),
@@ -4882,25 +4990,190 @@ mod tests {
         assert!(submission.stored);
         assert!(oauth_mutation.persisted.load(Ordering::Acquire));
         assert!(api_mutation.persisted.load(Ordering::Acquire));
-        let (success, message) = tokio::time::timeout(Duration::from_secs(1), async {
+        let (success, message, warnings) = tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 if let EngineEvent::ProviderAuthFinished {
-                    success, message, ..
+                    success,
+                    message,
+                    warnings,
+                    ..
                 } = auth_events
                     .recv()
                     .await
                     .expect("auth event")
                     .expect("auth result")
                 {
-                    break (success, message);
+                    break (success, message, warnings);
                 }
             }
         })
         .await
         .expect("auth completion event");
-        assert!(!success);
-        assert!(message.contains("credentials were stored"));
-        assert!(message.contains("retry activation"));
+        assert!(success, "stored credentials complete authentication");
+        assert_eq!(message, "provider authentication completed");
+        assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn provider_catalog_refresh_failure_does_not_delay_or_relabel_login() {
+        let fixture = AuthFixture::pending();
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 1,
+                max_deduplicated_requests: 32,
+            },
+            Arc::new(StubFactory::with_model(Arc::new(ActivatableModel))),
+            Arc::new(StubQueries {
+                auth: Some(Arc::clone(&fixture)),
+                fail_model_catalog: true,
+                ..StubQueries::default()
+            }),
+        )
+        .expect("host");
+        let session_id = SessionId("provider-catalog-warning".to_owned());
+        host.prepare_session(
+            CreateSessionRequest {
+                session_id: session_id.clone(),
+                workspace: "workspace".to_owned(),
+                model: None,
+            },
+            false,
+        )
+        .await
+        .expect("session");
+        let driver = BoundClient {
+            client_id: ClientId("catalog-warning-driver".to_owned()),
+        };
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::TakeDriver {
+                    meta: meta("spoofed", "catalog-warning-take"),
+                    session_id: session_id.clone(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let mut events = host
+            .subscribe(driver.clone(), Some(session_id.clone()), None)
+            .await
+            .expect("events");
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::BeginProviderAuth {
+                    meta: meta("spoofed", "catalog-warning-begin"),
+                    session_id: session_id.clone(),
+                    provider: "github_copilot".to_owned(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let attempt_id = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::ProviderAuthStarted { attempt_id, .. } = events
+                    .recv()
+                    .await
+                    .expect("auth event")
+                    .expect("auth result")
+                {
+                    break attempt_id;
+                }
+            }
+        })
+        .await
+        .expect("auth prompt");
+        assert_eq!(
+            host.dispatch(
+                driver,
+                ClientCommand::CompleteProviderAuth {
+                    meta: meta("spoofed", "catalog-warning-complete"),
+                    session_id,
+                    provider: "github_copilot".to_owned(),
+                    attempt_id,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        fixture.completion.send_replace(true);
+
+        let (success, message, warnings) = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::ProviderAuthFinished {
+                    success,
+                    message,
+                    warnings,
+                    ..
+                } = events
+                    .recv()
+                    .await
+                    .expect("auth event")
+                    .expect("auth result")
+                {
+                    break (success, message, warnings);
+                }
+            }
+        })
+        .await
+        .expect("auth completion event");
+        assert!(success, "catalog refresh does not redefine login success");
+        assert_eq!(message, "provider authentication completed");
+        assert!(warnings.is_empty());
+        let (ready, message) = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::ProviderActivationFinished {
+                    success, message, ..
+                } = events
+                    .recv()
+                    .await
+                    .expect("readiness event")
+                    .expect("readiness result")
+                {
+                    break (success, message);
+                }
+            }
+        })
+        .await
+        .expect("provider readiness event");
+        assert!(!ready);
+        assert!(message.contains("catalog could not be refreshed"));
+    }
+
+    #[test]
+    fn provider_readiness_requires_the_target_catalog_row_to_be_usable() {
+        let descriptor =
+            |name: &str, reachable: bool, model_count: u32| rw_types::ProviderDescriptor {
+                name: name.to_owned(),
+                auth_kind: rw_types::ProviderAuthKind::DeviceFlow,
+                next_action: rw_types::ProviderNextAction::SelectModels,
+                configured: true,
+                authenticated: true,
+                reachable,
+                model_count,
+                status: None,
+            };
+        let catalog = ModelCatalogSnapshot {
+            aliases: Vec::new(),
+            models: Vec::new(),
+            providers: vec![
+                descriptor("openai_codex", true, 3),
+                descriptor("github_copilot", false, 0),
+            ],
+            cached: false,
+            truncated: false,
+        };
+
+        assert!(!provider_catalog_is_ready(&catalog, "github_copilot"));
+        assert!(provider_catalog_is_ready(&catalog, "openai_codex"));
+        let empty_target = ModelCatalogSnapshot {
+            providers: vec![descriptor("github_copilot", true, 0)],
+            ..catalog
+        };
+        assert!(!provider_catalog_is_ready(&empty_target, "github_copilot"));
     }
 
     #[test]

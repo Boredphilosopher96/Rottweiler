@@ -32,7 +32,10 @@ use tokio::{
     sync::{Notify, mpsc},
 };
 
-const COMMAND_BODY_LIMIT: usize = 2 * 1024 * 1024;
+// A legal message may carry two 5 MiB images. Inline base64 expands that to
+// roughly 13.4 MiB before the bounded JSON envelope, so the command transport
+// must be at least as large as the protocol's already-bounded SSE envelope.
+const COMMAND_BODY_LIMIT: usize = 16 * 1024 * 1024;
 const PROVIDER_API_KEY_BODY_LIMIT: usize = 16 * 1024;
 const PROVIDER_API_KEY_LIMIT: usize = 8 * 1024;
 const MAX_PROVIDER_API_KEY_ATTEMPTS: usize = 256;
@@ -1139,10 +1142,11 @@ fn unauthorized() -> Response<HttpBody> {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
     use hyper::{Uri, client::conn::http1 as client_http1};
     use rw_core::{
-        CommandAckMeta, CommandMeta, EngineError, EngineErrorCategory, EventMeta, PROTOCOL_VERSION,
-        RequestId, SessionDescriptor, TurnId,
+        Attachment, AttachmentData, CommandAckMeta, CommandMeta, EngineError, EngineErrorCategory,
+        EventMeta, PROTOCOL_VERSION, RequestId, SessionDescriptor, TurnId,
     };
     use rw_store::session::SessionEventLog;
     use tempfile::tempdir;
@@ -1506,6 +1510,77 @@ mod tests {
             .expect("protocol JSON")
             .contains(canary)
         );
+        shutdown.send(true).expect("shutdown");
+        server.await.expect("server task").expect("server result");
+    }
+
+    #[tokio::test]
+    async fn command_transport_accepts_the_maximum_legal_image_attachment_envelope() {
+        let root = tempdir().expect("runtime root");
+        let (runtime, listener) = ServerRuntime::create(root.path()).expect("runtime");
+        let engine = Arc::new(StubEngine::default());
+        let state = ServerState::new(engine.clone(), &runtime);
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve(listener, state, shutdown_rx));
+        let bootstrap = fs::read_to_string(&runtime.paths.token).expect("bootstrap token");
+        let connected = unix_request(
+            &runtime.paths.socket,
+            request_builder(Method::POST, "/v1/connect")
+                .header(AUTHORIZATION, format!("Bearer {}", bootstrap.trim()))
+                .body(Full::new(Bytes::new()))
+                .expect("connect request"),
+        )
+        .await;
+        let credentials: ClientCredentials = serde_json::from_slice(
+            &connected
+                .into_body()
+                .collect()
+                .await
+                .expect("connect body")
+                .to_bytes(),
+        )
+        .expect("credentials");
+        let image = BASE64_STANDARD.encode(vec![0_u8; 5 * 1024 * 1024]);
+        let command = ClientCommand::SendMessage {
+            meta: CommandMeta {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId("spoofed".to_owned()),
+                request_id: RequestId("maximum-attachments".to_owned()),
+            },
+            session_id: SessionId("session-attachments".to_owned()),
+            content: "inspect both screenshots".to_owned(),
+            attachments: ["first.png", "second.png"]
+                .map(|name| Attachment {
+                    name: name.to_owned(),
+                    source_path: None,
+                    media_type: "image/png".to_owned(),
+                    data: AttachmentData::InlineBase64 {
+                        data: image.clone(),
+                    },
+                })
+                .to_vec(),
+        };
+        let body = serde_json::to_vec(&command).expect("command JSON");
+        assert!(
+            body.len() < COMMAND_BODY_LIMIT,
+            "legal envelope must fit transport"
+        );
+        assert!(
+            body.len() > 2 * 1024 * 1024,
+            "fixture must cover the old failure"
+        );
+        let response = unix_request(
+            &runtime.paths.socket,
+            request_builder(Method::POST, "/v1/command")
+                .header(AUTHORIZATION, format!("Bearer {}", credentials.token))
+                .header(CLIENT_HEADER, &credentials.client_id.0)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Full::new(Bytes::from(body)))
+                .expect("attachment command"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        assert_eq!(engine.dispatches.load(Ordering::Relaxed), 1);
         shutdown.send(true).expect("shutdown");
         server.await.expect("server task").expect("server result");
     }

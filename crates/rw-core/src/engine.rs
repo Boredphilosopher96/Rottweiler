@@ -161,6 +161,9 @@ impl PreparedUserMessage {
         self.content = redactor.redact(&self.content);
         for attachment in &mut self.stored_attachments {
             attachment.name = redactor.redact(&attachment.name);
+            if let Some(source_path) = &mut attachment.source_path {
+                *source_path = redactor.redact(source_path);
+            }
         }
         for block in &mut self.attachment_blocks {
             if let Block::Text { text } = block {
@@ -324,6 +327,14 @@ pub trait ModelDriver: Send + Sync {
             )))
         }
     }
+
+    /// Commits runtime state staged by [`Self::prepare_model`] after the
+    /// corresponding `ModelChanged` event has been persisted successfully.
+    fn commit_prepared_model(&self, _alias: &str) {}
+
+    /// Discards runtime state staged by [`Self::prepare_model`] when command
+    /// validation or durable persistence fails.
+    fn discard_prepared_model(&self, _alias: &str) {}
 
     /// Activates a provider whose credentials became available after this
     /// session runtime was assembled.
@@ -1579,6 +1590,7 @@ fn recovered_pending_event(
         | EngineEvent::ProviderAuthStarted { .. }
         | EngineEvent::ProviderConfigured { .. }
         | EngineEvent::ProviderAuthFinished { .. }
+        | EngineEvent::ProviderActivationFinished { .. }
         | EngineEvent::WorkspaceFilesFound { .. }
         | EngineEvent::WorkspaceFilePreviewReady { .. }
         | EngineEvent::WorkspaceStatusReady { .. }
@@ -5647,6 +5659,13 @@ fn prepare_user_message(
         {
             return Err("attachment names must be safe single path components".to_owned());
         }
+        if let Some(source_path) = attachment.source_path.as_deref()
+            && !is_safe_relative_attachment_path(source_path)
+        {
+            return Err(
+                "attachment source paths must be normalized workspace-relative paths".to_owned(),
+            );
+        }
         if attachment.media_type.trim() != attachment.media_type
             || attachment.media_type.to_ascii_lowercase() != attachment.media_type
         {
@@ -5668,10 +5687,11 @@ fn prepare_user_message(
                     ));
                 }
                 let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
-                let text = format!(
-                    "Attached file {:?} ({media_type}):\n{content}",
-                    attachment.name
-                );
+                let label = attachment
+                    .source_path
+                    .as_deref()
+                    .unwrap_or(&attachment.name);
+                let text = format!("Attached file {label:?} ({media_type}):\n{content}");
                 (content.len(), hash, Block::Text { text })
             }
             (AttachmentData::InlineBase64 { data }, media_type)
@@ -5722,6 +5742,7 @@ fn prepare_user_message(
         }
         stored_attachments.push(StoredAttachment {
             name: attachment.name.clone(),
+            source_path: attachment.source_path.clone(),
             media_type: attachment.media_type.clone(),
             content_hash,
             byte_len: u64::try_from(byte_len).unwrap_or(u64::MAX),
@@ -5736,6 +5757,16 @@ fn prepare_user_message(
         stored_attachments,
         attachment_blocks,
     })
+}
+
+fn is_safe_relative_attachment_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 4_096
+        && !value.chars().any(char::is_control)
+        && !value.contains('\\')
+        && Path::new(value)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn canonical_base64_decoded_len(data: &str) -> Option<usize> {
@@ -7036,6 +7067,7 @@ async fn handle_actor_command(
                     if let Some(provider) = provider
                         && !config.model.has_provider_for_alias(&model.0, provider)
                     {
+                        config.model.discard_prepared_model(&model.0);
                         let outcome = protocol_rejection(
                             "unknown_provider_route",
                             format!(
@@ -7777,9 +7809,12 @@ async fn handle_actor_command(
                     )
                     .await;
                     if result.is_ok() {
+                        config.model.commit_prepared_model(&model.0);
                         state.model_alias = model.0;
                         state.provider = provider;
                         state.thinking = thinking;
+                    } else {
+                        config.model.discard_prepared_model(&model.0);
                     }
                     if let Some(complete) = completion.take() {
                         let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
@@ -23623,6 +23658,7 @@ mod tests {
     fn attachment_validation_is_bounded_provider_neutral_and_vision_gated() {
         let text = Attachment {
             name: "notes.txt".to_owned(),
+            source_path: Some("docs/KNOWN_CANARY notes with spaces.txt".to_owned()),
             media_type: "text/plain".to_owned(),
             data: AttachmentData::Text {
                 content: "bounded KNOWN_CANARY context".to_owned(),
@@ -23634,14 +23670,22 @@ mod tests {
                 .redact(&CanarySecretRedactor);
         assert_eq!(prepared.stored_attachments.len(), 1);
         assert_eq!(prepared.stored_attachments[0].content_hash.len(), 64);
+        assert_eq!(
+            prepared.stored_attachments[0].source_path.as_deref(),
+            Some("docs/[REDACTED] notes with spaces.txt")
+        );
         assert!(matches!(
             &prepared.attachment_blocks[0],
-            Block::Text { text } if text.contains("[REDACTED]") && !text.contains("KNOWN_CANARY")
+            Block::Text { text }
+                if text.contains("docs/[REDACTED] notes with spaces.txt")
+                    && text.contains("[REDACTED]")
+                    && !text.contains("KNOWN_CANARY")
         ));
         assert_eq!(prepared.content, "inspect [REDACTED]");
 
         let image = Attachment {
             name: "screen.png".to_owned(),
+            source_path: None,
             media_type: "image/png".to_owned(),
             data: AttachmentData::InlineBase64 {
                 data: "iVBORw0KGgo=".to_owned(),
@@ -23670,6 +23714,7 @@ mod tests {
 
         let unsafe_name = Attachment {
             name: "../secret.txt".to_owned(),
+            source_path: None,
             media_type: "text/plain".to_owned(),
             data: AttachmentData::Text {
                 content: "secret".to_owned(),
@@ -23677,6 +23722,20 @@ mod tests {
         };
         assert!(
             prepare_user_message("inspect", &[unsafe_name], "fast", &AliasVisionModel).is_err()
+        );
+
+        let unsafe_source_path = Attachment {
+            name: "secret.txt".to_owned(),
+            source_path: Some("../secret.txt".to_owned()),
+            media_type: "text/plain".to_owned(),
+            data: AttachmentData::Text {
+                content: "secret".to_owned(),
+            },
+        };
+        assert!(
+            prepare_user_message("inspect", &[unsafe_source_path], "fast", &AliasVisionModel)
+                .expect_err("traversal source path must fail before acceptance")
+                .contains("workspace-relative")
         );
     }
 

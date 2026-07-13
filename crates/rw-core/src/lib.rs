@@ -19,15 +19,15 @@ pub use rw_types::config::{
     ThinkingLevel, UpdateChannel,
 };
 pub use rw_types::{
-    AccountingAttribution, AttachmentData, CommandDescriptor, CommandSource, ContextItemId,
-    ContextSnapshot, CostSnapshot, McpApprovalReview, McpServerDescriptor, McpServerState, ModeId,
-    ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot,
-    ModelDescriptor, PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
-    PermissionRuleDescriptor, PermissionStateDescriptor, PlanDecision, PromptDump,
-    ProviderAuthChallenge, ProviderAuthKind, ProviderDescriptor, ProviderNextAction,
-    ReviewFileDecision, ReviewFileStatus, SessionReview, SessionReviewFile, UserSettingDescriptor,
-    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor,
-    WorkspaceStatus,
+    AccountingAttribution, Attachment, AttachmentData, CommandDescriptor, CommandSource,
+    ContextItemId, ContextSnapshot, CostSnapshot, McpApprovalReview, McpServerDescriptor,
+    McpServerState, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
+    ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, PermissionAction,
+    PermissionApprovalDescriptor, PermissionApprovalScope, PermissionRuleDescriptor,
+    PermissionStateDescriptor, PlanDecision, PromptDump, ProviderAuthChallenge, ProviderAuthKind,
+    ProviderDescriptor, ProviderNextAction, ReviewFileDecision, ReviewFileStatus, SessionReview,
+    SessionReviewFile, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 
 pub use admin::{

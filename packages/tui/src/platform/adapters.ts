@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process"
+import { constants as fsConstants } from "node:fs"
 import { chmod, lstat, mkdtemp, open, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { basename, extname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 
 const MAX_EDITOR_BYTES = 2 * 1024 * 1024
 const MAX_CLIPBOARD_IMAGE_BYTES = 5 * 1024 * 1024
@@ -31,6 +33,7 @@ export interface ClipboardImage {
 
 export interface ImagePasteAdapter {
   readImage(): Promise<ClipboardImage | null>
+  readPath(value: string): Promise<ClipboardImage | null>
 }
 
 export interface ExternalUrlAdapter {
@@ -85,6 +88,9 @@ export const noExternalEditor: EditorAdapter = {
 
 export const noImagePaste: ImagePasteAdapter = {
   async readImage() {
+    return null
+  },
+  async readPath() {
     return null
   },
 }
@@ -311,6 +317,63 @@ export function createImagePasteAdapter(
       }
       return null
     },
+    async readPath(value) {
+      const candidate = pastedFilePath(value, platform)
+      if (candidate === null) return null
+      const { path, explicit } = candidate
+      const mediaType = imageMediaTypeForPath(path)
+      if (mediaType === null) return null
+      const bytes = await readBoundedRegularFile(path, MAX_CLIPBOARD_IMAGE_BYTES)
+      if (bytes === null || !matchesImageSignature(bytes, mediaType)) {
+        if (!explicit) return null
+        throw new Error(
+          "That image path could not be read safely. Use a regular PNG, JPEG, GIF, or WebP under 5 MiB.",
+        )
+      }
+      return clipboardImage(bytes, mediaType, basename(path))
+    },
+  }
+}
+
+function pastedFilePath(
+  value: string,
+  platform: NodeJS.Platform,
+): { readonly path: string; readonly explicit: boolean } | null {
+  const trimmed = value.trim()
+  if (trimmed.length === 0 || trimmed.includes("\n") || /^https?:\/\//i.test(trimmed)) return null
+  const quoted = (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  const raw = quoted ? trimmed.slice(1, -1) : trimmed
+  if (raw.startsWith("file://")) {
+    try {
+      return { path: fileURLToPath(raw), explicit: true }
+    } catch {
+      throw new Error("That file URL is not a valid local image path.")
+    }
+  }
+  const windowsAbsolute = /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("\\\\")
+  const escapedWhitespace = /\\\s/.test(raw)
+  const path = platform === "win32" || windowsAbsolute ? raw : raw.replace(/\\(.)/g, "$1")
+  const hasWhitespace = /\s/.test(path)
+  const explicit = quoted ||
+    windowsAbsolute ||
+    path.startsWith("/") ||
+    path.startsWith("./") ||
+    path.startsWith("../") ||
+    path.startsWith("~/") ||
+    escapedWhitespace ||
+    (!hasWhitespace && (path.includes("/") || (platform === "win32" && path.includes("\\"))))
+  return { path, explicit }
+}
+
+function imageMediaTypeForPath(path: string): string | null {
+  switch (extname(path).toLowerCase()) {
+    case ".png": return "image/png"
+    case ".jpg":
+    case ".jpeg": return "image/jpeg"
+    case ".gif": return "image/gif"
+    case ".webp": return "image/webp"
+    default: return null
   }
 }
 
@@ -385,23 +448,42 @@ async function readBoundedRegularFile(
   path: string,
   maximumBytes: number,
 ): Promise<Uint8Array | null> {
-  const metadata = await lstat(path).catch(() => null)
-  if (
-    metadata === null ||
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.size === 0 ||
-    metadata.size > maximumBytes
-  ) {
-    return null
+  const before = await lstat(path).catch(() => null)
+  if (before === null || !before.isFile() || before.isSymbolicLink()) return null
+  const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0
+  const file = await open(path, fsConstants.O_RDONLY | noFollow).catch(() => null)
+  if (file === null) return null
+  try {
+    const metadata = await file.stat()
+    if (
+      !metadata.isFile() ||
+      metadata.size === 0 ||
+      metadata.size > maximumBytes ||
+      (before.ino !== 0 && metadata.ino !== before.ino) ||
+      (before.dev !== 0 && metadata.dev !== before.dev)
+    ) return null
+    const expected = Number(metadata.size)
+    const target = Buffer.allocUnsafe(expected)
+    let offset = 0
+    while (offset < expected) {
+      const { bytesRead } = await file.read(target, offset, expected - offset, offset)
+      if (bytesRead === 0) return null
+      offset += bytesRead
+    }
+    return target
+  } finally {
+    await file.close().catch(() => {})
   }
-  return await readFile(path)
 }
 
-function clipboardImage(bytes: Uint8Array, mediaType: string): ClipboardImage {
-  const extension = mediaType === "image/jpeg" ? "jpg" : "png"
+function clipboardImage(
+  bytes: Uint8Array,
+  mediaType: string,
+  name?: string,
+): ClipboardImage {
+  const extension = mediaType === "image/jpeg" ? "jpg" : mediaType.slice("image/".length)
   return {
-    name: `clipboard.${extension}`,
+    name: name ?? `clipboard.${extension}`,
     mediaType,
     base64: Buffer.from(bytes).toString("base64"),
   }
@@ -421,7 +503,16 @@ function matchesImageSignature(bytes: Uint8Array, mediaType: string): boolean {
       bytes[7] === 0x0a
     )
   }
-  return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  if (mediaType === "image/jpeg") {
+    return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+  }
+  if (mediaType === "image/gif") {
+    const header = Buffer.from(bytes.subarray(0, 6)).toString("ascii")
+    return header === "GIF87a" || header === "GIF89a"
+  }
+  return mediaType === "image/webp" && bytes.length >= 12 &&
+    Buffer.from(bytes.subarray(0, 4)).toString("ascii") === "RIFF" &&
+    Buffer.from(bytes.subarray(8, 12)).toString("ascii") === "WEBP"
 }
 
 function providerAuthUrl(source: string): string {

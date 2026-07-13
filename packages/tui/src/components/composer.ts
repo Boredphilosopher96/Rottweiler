@@ -2,6 +2,7 @@ import {
   BoxRenderable,
   TextRenderable,
   TextareaRenderable,
+  type PasteEvent,
   type RenderContext,
 } from "@opentui/core"
 
@@ -17,10 +18,19 @@ export interface ComposerOptions {
     content: string,
     attachments: readonly Attachment[],
   ) => boolean | Promise<boolean>
-  readonly onFileMention: (query: string) => void
+  readonly onFileMention: (mention: ComposerFileMention) => void
+  readonly onManageAttachments?: () => void
+  readonly onAttachmentError?: (message: string) => void
   readonly onInput?: (value: string) => void
   readonly onSubmitted?: () => void
+  readonly onSubmissionSettled?: () => void
   readonly onHeightChange?: (height: number) => void
+}
+
+export interface ComposerFileMention {
+  readonly query: string
+  readonly start: number
+  readonly end: number
 }
 
 export class ComposerRenderable extends BoxRenderable {
@@ -59,6 +69,7 @@ export class ComposerRenderable extends BoxRenderable {
       fg: theme.info,
       height: 1,
       visible: false,
+      onMouseDown: () => this.#options.onManageAttachments?.(),
     })
     this.editor = new TextareaRenderable(ctx, {
       id: "composer-editor",
@@ -68,7 +79,7 @@ export class ComposerRenderable extends BoxRenderable {
       minHeight: 1,
       maxHeight: 5,
       initialValue: "",
-      placeholder: "Message Rottweiler · @ files · ctrl+e $EDITOR",
+      placeholder: "Message Rottweiler · @ files · ctrl+v image · ctrl+e $EDITOR",
       backgroundColor: theme.panel,
       textColor: theme.foreground,
       focusedBackgroundColor: theme.panelRaised,
@@ -93,6 +104,7 @@ export class ComposerRenderable extends BoxRenderable {
       ],
       onSubmit: () => this.submit(),
       onContentChange: () => this.#contentChanged(),
+      onPaste: (event) => void this.#paste(event),
     })
     this.queueText = new TextRenderable(ctx, {
       id: "composer-queue",
@@ -123,6 +135,30 @@ export class ComposerRenderable extends BoxRenderable {
     return this.visible ? this.#dockHeight : 0
   }
 
+  currentFileMention(): ComposerFileMention | null {
+    const value = this.editor.plainText
+    const cursor = characterIndexForByteOffset(value, this.editor.cursorOffset)
+    const prefix = value.slice(0, cursor)
+    const start = prefix.lastIndexOf("@")
+    if (
+      start < 0 ||
+      (start > 0 && !/\s/.test(prefix[start - 1] ?? "")) ||
+      prefix.slice(start + 1).includes("\n")
+    ) return null
+    return { query: prefix.slice(start + 1), start, end: prefix.length }
+  }
+
+  replaceRange(start: number, end: number, replacement: string): boolean {
+    const value = this.editor.plainText
+    if (start < 0 || end < start || end > value.length) return false
+    const next = value.slice(0, start) + replacement + value.slice(end)
+    this.editor.setText(next)
+    const cursorCharacters = start + replacement.length
+    this.editor.cursorOffset = new TextEncoder().encode(next.slice(0, cursorCharacters)).length
+    this.#refreshHeight()
+    return true
+  }
+
   override focus(): void {
     this.editor.focus()
   }
@@ -132,33 +168,95 @@ export class ComposerRenderable extends BoxRenderable {
     if ((content.trim().length === 0 && this.#attachments.length === 0) || this.#submitting) {
       return false
     }
+    if (composerWireBytes(content, this.#attachments) > MAX_COMPOSER_WIRE_BYTES) {
+      this.#options.onAttachmentError?.(
+        "This message is too large to send. Remove some text or attachments and try again.",
+      )
+      return false
+    }
     const submittedAttachments = this.#attachments
     this.#submitting = true
+    this.editor.clear()
+    this.#attachments = []
+    this.#refreshAttachments()
     try {
       const accepted = await this.#options.onSubmit(content, submittedAttachments)
-      if (
-        accepted &&
-        this.editor.plainText === content &&
-        this.#attachments === submittedAttachments
-      ) {
-        this.editor.clear()
-        this.#attachments = []
-        this.#refreshAttachments()
+      if (accepted) {
         this.#options.onSubmitted?.()
+      } else {
+        this.#restoreRejectedSubmission(content, submittedAttachments)
       }
       return accepted
+    } catch (error) {
+      this.#restoreRejectedSubmission(content, submittedAttachments)
+      throw error
     } finally {
       this.#submitting = false
+      this.#options.onSubmissionSettled?.()
     }
   }
 
-  addAttachment(attachment: Attachment): void {
-    this.#attachments = [...this.#attachments, attachment]
+  #restoreRejectedSubmission(content: string, attachments: readonly Attachment[]): void {
+    const current = this.editor.plainText
+    this.editor.setText(current.length === 0 ? content : `${content}\n${current}`)
+    const merged: Attachment[] = []
+    const identities = new Set<string>()
+    for (const attachment of this.#attachments) {
+      const identity = attachmentIdentity(attachment)
+      if (identities.has(identity)) continue
+      identities.add(identity)
+      merged.push(attachment)
+    }
+    let overflow = false
+    for (const attachment of attachments) {
+      const identity = attachmentIdentity(attachment)
+      if (identities.has(identity)) continue
+      if (
+        merged.length < MAX_ATTACHMENTS &&
+        attachmentBudgetError(attachment, merged, this.editor.plainText) === null
+      ) {
+        identities.add(identity)
+        merged.push(attachment)
+      } else {
+        overflow = true
+      }
+    }
+    if (overflow) {
+      this.#options.onAttachmentError?.(
+        "Some attachments from the rejected send could not be restored because the current draft reached its attachment limit.",
+      )
+    }
+    this.#attachments = merged
     this.#refreshAttachments()
   }
 
-  addImage(image: ClipboardImage): void {
-    this.addAttachment({
+  addAttachment(attachment: Attachment): boolean {
+    const identity = attachmentIdentity(attachment)
+    if (this.#attachments.some((existing) => attachmentIdentity(existing) === identity)) return true
+    const error = attachmentBudgetError(attachment, this.#attachments, this.editor.plainText)
+    if (error !== null) {
+      this.#options.onAttachmentError?.(error)
+      return false
+    }
+    this.#attachments = [...this.#attachments, attachment]
+    this.#refreshAttachments()
+    return true
+  }
+
+  removeAttachment(index: number): boolean {
+    if (index < 0 || index >= this.#attachments.length) return false
+    this.#attachments = this.#attachments.filter((_, candidate) => candidate !== index)
+    this.#refreshAttachments()
+    this.editor.focus()
+    return true
+  }
+
+  removeLastAttachment(): boolean {
+    return this.removeAttachment(this.#attachments.length - 1)
+  }
+
+  addImage(image: ClipboardImage): boolean {
+    return this.addAttachment({
       name: image.name,
       media_type: image.mediaType,
       data: { type: "inline_base64", data: image.base64 },
@@ -170,8 +268,57 @@ export class ComposerRenderable extends BoxRenderable {
     if (image === null) {
       return false
     }
-    this.addImage(image)
-    return true
+    return this.addImage(image)
+  }
+
+  async #paste(event: PasteEvent): Promise<void> {
+    if (!this.editor.focused) return
+    let text: string
+    try {
+      text = new TextDecoder("utf-8", { fatal: true }).decode(event.bytes)
+    } catch {
+      event.preventDefault()
+      this.#options.onAttachmentError?.("The pasted content is not valid UTF-8 text.")
+      return
+    }
+    event.preventDefault()
+    const normalized = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    const trimmed = normalized.trim()
+    if (trimmed.length === 0) {
+      if (!(await this.pasteImage())) {
+        this.#options.onAttachmentError?.("The clipboard does not contain a supported image.")
+      }
+      return
+    }
+    let localImage: ClipboardImage | null
+    try {
+      localImage = await this.#options.imagePaste.readPath(trimmed)
+    } catch (error) {
+      this.#options.onAttachmentError?.(
+        error instanceof Error ? error.message : "That image path could not be attached safely.",
+      )
+      return
+    }
+    if (localImage !== null) {
+      this.addImage(localImage)
+      return
+    }
+    const bytes = new TextEncoder().encode(trimmed)
+    const lineCount = (trimmed.match(/\n/g)?.length ?? 0) + 1
+    if ((lineCount >= 3 || trimmed.length > 150) && bytes.length <= 1024 * 1024) {
+      const ordinal = this.#attachments.filter((item) => item.name.startsWith("Pasted text")).length + 1
+      this.addAttachment({
+        name: `Pasted text ${ordinal}`,
+        media_type: "text/plain",
+        data: { type: "text", content: trimmed },
+      })
+      return
+    }
+    if (bytes.length > 1024 * 1024) {
+      this.#options.onAttachmentError?.("Pasted text exceeds the 1 MiB message attachment limit.")
+      return
+    }
+    this.editor.insertText(normalized)
   }
 
   async openExternalEditor(): Promise<void> {
@@ -199,17 +346,17 @@ export class ComposerRenderable extends BoxRenderable {
     this.#refreshHeight()
     const value = this.editor.plainText
     this.#options.onInput?.(value)
-    const mention = /(?:^|\s)@([^\s]*)$/.exec(value)
-    if (mention !== null) {
-      this.#options.onFileMention(mention[1] ?? "")
-    }
+    const mention = this.currentFileMention()
+    if (mention !== null) this.#options.onFileMention(mention)
   }
 
   #refreshAttachments(): void {
     this.attachmentsText.visible = this.#attachments.length > 0
     this.attachmentsText.content = this.#attachments
-      .map((attachment) => `▣ ${attachment.name} (${attachment.media_type})`)
-      .join("  ")
+      .map((attachment, index) =>
+        `▣ ${index + 1}:${attachment.source_path ?? attachment.name}`
+      )
+      .join("  ") + "  · click to manage · Backspace removes last"
     if (this.#imagePreview !== null) {
       this.remove(this.#imagePreview)
       this.#imagePreview.destroyRecursively()
@@ -263,4 +410,80 @@ function estimateWrappedRows(value: string, columns: number): number {
     const cells = Array.from(line).length
     return rows + Math.max(1, Math.ceil(cells / columns))
   }, 0)
+}
+
+function characterIndexForByteOffset(value: string, target: number): number {
+  if (target <= 0) return 0
+  const encoder = new TextEncoder()
+  let bytes = 0
+  let index = 0
+  for (const character of value) {
+    const next = bytes + encoder.encode(character).length
+    if (next > target) break
+    bytes = next
+    index += character.length
+  }
+  return index
+}
+
+function attachmentIdentity(attachment: Attachment): string {
+  if (attachment.source_path !== undefined) return `path:${attachment.source_path}`
+  if (attachment.data.type === "inline_base64") {
+    return `image:${attachment.media_type}:${attachment.data.data}`
+  }
+  return `text:${attachment.media_type}:${attachment.data.content}`
+}
+
+const MAX_ATTACHMENTS = 16
+const MAX_TEXT_ATTACHMENT_BYTES = 1024 * 1024
+const MAX_IMAGE_ATTACHMENT_BYTES = 5 * 1024 * 1024
+const MAX_TOTAL_ATTACHMENT_BYTES = 10 * 1024 * 1024
+// The host accepts a 16 MiB JSON command. Keep one MiB for the command envelope,
+// session identity, and future additive fields while measuring the exact UTF-8
+// JSON representation of all user-controlled composer payloads.
+const MAX_COMPOSER_WIRE_BYTES = 15 * 1024 * 1024
+
+function attachmentBudgetError(
+  attachment: Attachment,
+  current: readonly Attachment[],
+  content = "",
+): string | null {
+  if (current.length >= MAX_ATTACHMENTS) {
+    return `A message can include at most ${MAX_ATTACHMENTS} attachments.`
+  }
+  const bytes = attachmentBytes(attachment)
+  if (bytes === null) return "That attachment has invalid image data."
+  const itemLimit = attachment.data.type === "text"
+    ? MAX_TEXT_ATTACHMENT_BYTES
+    : MAX_IMAGE_ATTACHMENT_BYTES
+  if (bytes > itemLimit) {
+    return attachment.data.type === "text"
+      ? "A text attachment can be at most 1 MiB."
+      : "An image attachment can be at most 5 MiB."
+  }
+  const total = current.reduce((sum, item) => sum + (attachmentBytes(item) ?? 0), bytes)
+  if (total > MAX_TOTAL_ATTACHMENT_BYTES) {
+    return "Attachments in one message can total at most 10 MiB."
+  }
+  return composerWireBytes(content, [...current, attachment]) > MAX_COMPOSER_WIRE_BYTES
+    ? "That attachment would make this message too large to send."
+    : null
+}
+
+function composerWireBytes(content: string, attachments: readonly Attachment[]): number {
+  return new TextEncoder().encode(JSON.stringify({ content, attachments })).length
+}
+
+function attachmentBytes(attachment: Attachment): number | null {
+  if (attachment.data.type === "text") {
+    return new TextEncoder().encode(attachment.data.content).length
+  }
+  const value = attachment.data.data
+  if (
+    value.length === 0 ||
+    value.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(value)
+  ) return null
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0
+  return (value.length / 4) * 3 - padding
 }

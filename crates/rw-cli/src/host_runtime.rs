@@ -28,6 +28,8 @@ use std::{
 
 use async_trait::async_trait;
 #[cfg(unix)]
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+#[cfg(unix)]
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rw_core::runtime_support::PricingTable;
 use rw_core::{
@@ -77,7 +79,8 @@ const GIT_STATUS_DEADLINE: Duration = Duration::from_millis(500);
 const GIT_READER_DEADLINE: Duration = Duration::from_millis(50);
 #[cfg(unix)]
 const GIT_DIFF_DEADLINE: Duration = Duration::from_millis(500);
-const MAX_PREVIEW_BYTES: usize = 1024 * 1024;
+const MAX_TEXT_PREVIEW_BYTES: usize = 1024 * 1024;
+const MAX_PREVIEW_BYTES: usize = 5 * 1024 * 1024;
 const QUERY_DEADLINE: Duration = Duration::from_millis(100);
 const WORKSPACE_STATUS_DEADLINE: Duration = Duration::from_millis(750);
 const WORKSPACE_DIFF_DEADLINE: Duration = Duration::from_secs(2);
@@ -2342,9 +2345,25 @@ fn preview_file(
             "workspace file exceeded the preview byte limit while reading".to_owned(),
         ));
     }
+    if let Some(media_type) = workspace_image_media_type(&bytes) {
+        return Ok(WorkspaceFilePreview {
+            path: relative.to_string_lossy().into_owned(),
+            media_type: media_type.to_owned(),
+            data: AttachmentData::InlineBase64 {
+                data: BASE64_STANDARD.encode(&bytes),
+            },
+            total_bytes: u64::try_from(total_bytes).unwrap_or(u64::MAX),
+            truncated: false,
+        });
+    }
+    if total_bytes > MAX_TEXT_PREVIEW_BYTES {
+        return Err(HostError::Query(
+            "text attachment exceeds the 1 MiB message limit".to_owned(),
+        ));
+    }
     if bytes.contains(&0) {
         return Err(HostError::Query(
-            "binary workspace files are not previewed".to_owned(),
+            "this binary file type cannot be attached".to_owned(),
         ));
     }
     let content = String::from_utf8(bytes)
@@ -2356,6 +2375,21 @@ fn preview_file(
         total_bytes: u64::try_from(total_bytes).unwrap_or(u64::MAX),
         truncated: false,
     })
+}
+
+#[cfg(unix)]
+fn workspace_image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 #[cfg(not(unix))]
@@ -4001,6 +4035,17 @@ mod tests {
                 content: "fn needle() {}\n".to_owned()
             }
         );
+        fs::write(
+            workspace.join("screen shot.png"),
+            b"\x89PNG\r\n\x1a\nattachment bytes",
+        )
+        .expect("image fixture");
+        let preview = factory
+            .preview_workspace_file(&created.descriptor(), "screen shot.png", 1024)
+            .await
+            .expect("image preview");
+        assert_eq!(preview.media_type, "image/png");
+        assert!(matches!(preview.data, AttachmentData::InlineBase64 { .. }));
         drop(created);
         tokio::task::yield_now().await;
         let resumed = factory.resume(&session_id).await.expect("resume");

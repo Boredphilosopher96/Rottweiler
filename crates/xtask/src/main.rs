@@ -1970,6 +1970,7 @@ fn contract_fixture() -> ContractFixture {
                 attachments: vec![
                     Attachment {
                         name: "notes.txt".to_owned(),
+                        source_path: Some("docs/notes.txt".to_owned()),
                         media_type: "text/plain".to_owned(),
                         data: AttachmentData::Text {
                             content: "in-band text".to_owned(),
@@ -1977,6 +1978,7 @@ fn contract_fixture() -> ContractFixture {
                     },
                     Attachment {
                         name: "screen.png".to_owned(),
+                        source_path: None,
                         media_type: "image/png".to_owned(),
                         data: AttachmentData::InlineBase64 {
                             data: "iVBORw0KGgo=".to_owned(),

@@ -130,6 +130,8 @@ security-sensitive and intentionally ignored.
 | Integration | full turns under replay: tool loops, interrupts, compaction, failover, resume-after-kill | replay harness in `tests/` |
 | Protocol contract | fixture ClientCommands/EngineEvents round-tripped through the generated Rust *and* TS types; SSE reconnect/resync scenarios against a mock engine | `protocol/` fixtures, run by both `cargo test` and `bun test` |
 | TUI | golden screens (render to an inspectable in-memory buffer, snapshot cells), input latency harness, component tests. Whether OpenTUI provides this surface natively or we build a thin harness is decided by the M0 go/no-go spike; the budget for building it is reserved in M4 | `bun test` in `packages/tui` + `vhs` for visual review artifacts |
+
+Attachment acceptance includes cursor-anchored `@` paths with spaces, clipboard and local-path images, removal, rejected-preview/send preservation, async-submit reconciliation, safe workspace traversal rejection, and a real authenticated command POST carrying the maximum legal two-image envelope.
 | E2E | print-mode runs on real repos under replay; the M6/M7/M8 acceptance fixtures | `tests/e2e/` |
 | Security | the acceptance list in 05-SECURITY (sandbox EPERM assertions, canary-string leak fuzzing, injection corpus) | dedicated `security-tests` job |
 | Fuzz | config parser, TOON decoder, plugin RPC framing, event-log reader | `cargo fuzz`, nightly job |

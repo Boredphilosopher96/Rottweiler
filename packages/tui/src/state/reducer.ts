@@ -37,6 +37,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "provider_auth_started",
   "provider_configured",
   "provider_auth_finished",
+  "provider_activation_finished",
   "workspace_files_found",
   "workspace_file_preview_ready",
   "workspace_status_ready",
@@ -105,6 +106,7 @@ const ACK_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "provider_auth_started",
   "provider_configured",
   "provider_auth_finished",
+  "provider_activation_finished",
   "workspace_files_found",
   "workspace_file_preview_ready",
   "workspace_status_ready",
@@ -478,6 +480,11 @@ function applyKnownEvent(
             warnings: event.warnings,
           },
         },
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "provider_activation_finished":
+      return {
+        ...state,
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
       }
     case "host_shutdown":
@@ -1402,6 +1409,7 @@ function responseAck(
     | "provider_auth_started"
     | "provider_configured"
     | "provider_auth_finished"
+    | "provider_activation_finished"
     | "workspace_files_found"
     | "workspace_file_preview_ready"
     | "workspace_status_ready"

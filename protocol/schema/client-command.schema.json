@@ -1303,6 +1303,13 @@
         "name": {
           "type": "string"
         },
+        "source_path": {
+          "description": "Optional normalized workspace-relative source path. Local absolute paths\nnever cross the client protocol; their in-band content may still be\nattached under a safe basename.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "media_type": {
           "type": "string"
         },

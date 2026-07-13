@@ -130,7 +130,7 @@ export interface TerminalHandoverAdapter {
 }
 
 type PickerKind =
-  | "palette" | "commands" | "files" | "mcp"
+  | "palette" | "commands" | "files" | "attachments" | "mcp"
   | "mcpInput"
   | "modes" | "models" | "providers" | "providerAuth" | "providerApiKey"
   | "providerRecovery"
@@ -228,12 +228,19 @@ export class RottweilerApp extends BoxRenderable {
   #themeBeforePreview: RottweilerTheme | null = null
   #themePreviewCommitted = false
   #rethemeInProgress = false
+  #composerSubmissionsInFlight = 0
+  #deferredTheme: RottweilerTheme | null = null
   #sessionId: string
   #terminalFocused = true
   #systemThemeMode: ThemeMode | null
   #systemTheme: RottweilerTheme
   #pickerKind: PickerKind | null = null
-  #pendingFilePreview: { readonly path: string; readonly requestId: string } | null = null
+  #pendingFilePreview: {
+    readonly path: string
+    readonly requestId: string
+    readonly draft: string
+    readonly mention: { readonly start: number; readonly end: number } | null
+  } | null = null
   #pendingWorkspaceSearchRequest: string | null = null
   #latestWorkspaceStatusRequest: string | null = null
   #latestWorkspaceDiffRequest: string | null = null
@@ -300,6 +307,18 @@ export class RottweilerApp extends BoxRenderable {
   }
   #onGlobalKey = (key: KeyEvent) => {
     const focusOwner = this.#visibleFocusOwner()
+    if (
+      focusOwner === "composer" &&
+      !this.picker.visible &&
+      key.name === "backspace" &&
+      !key.ctrl && !key.meta && !key.option &&
+      this.composer.value.length === 0 &&
+      this.composer.removeLastAttachment()
+    ) {
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
     const safetyPanelFocused = focusOwner === "interaction" || focusOwner === "review"
     const action =
       focusOwner === "review"
@@ -381,6 +400,11 @@ export class RottweilerApp extends BoxRenderable {
 
   #createThemedSurface(theme: RottweilerTheme): void {
     const rebuilding = this.getChildrenCount() > 0
+    if (rebuilding && this.#composerSubmissionsInFlight > 0) {
+      this.#deferredTheme = theme
+      return
+    }
+    this.#deferredTheme = null
     const draft = rebuilding ? this.composer.value : ""
     const attachments = rebuilding ? [...this.composer.attachments] : []
     const scrollTop = rebuilding ? this.transcript.scroller.scrollTop : 0
@@ -480,11 +504,30 @@ export class RottweilerApp extends BoxRenderable {
     this.composer = new ComposerRenderable(this.ctx, theme, {
       editor: this.#options.editor,
       imagePaste: this.#options.imagePaste,
-      onSubmit: (content, submittedAttachments) =>
-        this.#sendMessage(content, submittedAttachments),
-      onFileMention: (query) => this.openFilePicker(query, true),
+      onSubmit: async (content, submittedAttachments) => {
+        this.#composerSubmissionsInFlight += 1
+        return await this.#sendMessage(content, submittedAttachments)
+      },
+      onFileMention: (mention) => this.openFilePicker(mention.query, true),
+      onManageAttachments: () => this.openAttachmentPicker(),
+      onAttachmentError: (message) =>
+        this.#projectClientError("attachment_unavailable", message, true),
       onInput: (value) => this.#updateComposerAutocomplete(value),
       onSubmitted: () => this.#openPostSubmitPicker(),
+      onSubmissionSettled: () => {
+        this.#composerSubmissionsInFlight = Math.max(0, this.#composerSubmissionsInFlight - 1)
+        const deferred = this.#deferredTheme
+        if (deferred === null || this.#composerSubmissionsInFlight > 0) return
+        queueMicrotask(() => {
+          if (
+            !this.#destroyed &&
+            this.#composerSubmissionsInFlight === 0 &&
+            this.#deferredTheme === deferred
+          ) {
+            this.#createThemedSurface(deferred)
+          }
+        })
+      },
       onHeightChange: (height) => {
         this.interactionPanel.resizeForTerminal(
           this.height === 0 ? this.ctx.height : this.height,
@@ -781,13 +824,27 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingFilePreview !== null
     ) {
       const preview = next.workspacePreview
-      this.composer.addAttachment({
-        name: preview.path,
+      const name = preview.path.split("/").filter(Boolean).at(-1) ?? "attachment"
+      const attached = this.composer.addAttachment({
+        name,
+        source_path: preview.path,
         media_type: preview.mediaType,
         data: preview.data,
       })
+      const pending = this.#pendingFilePreview
+      if (attached && pending.mention !== null) {
+        const original = pending.draft.slice(pending.mention.start, pending.mention.end)
+        const current = this.composer.value
+        const draftOffset = current.indexOf(pending.draft)
+        const exact = current === pending.draft
+          ? pending.mention.start
+          : draftOffset >= 0 && draftOffset === current.lastIndexOf(pending.draft)
+            ? draftOffset + pending.mention.start
+            : -1
+        if (exact >= 0) this.composer.replaceRange(exact, exact + original.length, "")
+      }
       this.#pendingFilePreview = null
-      this.closePicker()
+      if (attached) this.closePicker()
     }
     if (event.type === "session_review_ready" || event.type === "session_review_updated") {
       const path = this.#pendingReviewSelection
@@ -855,17 +912,28 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (event.type === "provider_auth_finished") {
       this.#providerAuthActionInFlight = false
-      this.#providerAuthActionNotice = null
       if (eventRecord.success === true) {
-        this.#requestModels(true)
-        this.openProviderPicker()
+        this.#providerAuthActionNotice = "Signed in. Connecting provider and loading models…"
       } else {
+        this.#providerAuthActionNotice = null
         this.#projectClientError(
           "provider_auth_failed",
           typeof eventRecord.message === "string" ? eventRecord.message : "provider authentication failed",
           true,
         )
       }
+    }
+    if (event.type === "provider_activation_finished") {
+      this.#providerAuthActionNotice = null
+      const message = typeof eventRecord.message === "string"
+        ? eventRecord.message
+        : "provider connection did not become ready"
+      if (eventRecord.success === true) {
+        this.#requestModels(true)
+      } else {
+        this.#projectClientError("provider_activation_failed", message, true)
+      }
+      this.openProviderPicker()
     }
     if (
       event.type === "tool_call_finished" ||
@@ -957,6 +1025,14 @@ export class RottweilerApp extends BoxRenderable {
       this.#command({ type: "search_workspace_files", query, limit: 100 }) ?? null
     this.#refreshPicker()
     if (!anchored) this.picker.input.value = query
+  }
+
+  openAttachmentPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "attachments"
+    this.#refreshPicker()
   }
 
   openModelPicker(provider: string | null = null): void {
@@ -1127,7 +1203,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #previewTheme(theme: RottweilerTheme): void {
-    if (theme.name === this.#theme.name) return
+    if (theme.name === this.#theme.name && this.#deferredTheme === null) return
     this.#createThemedSurface(theme)
   }
 
@@ -1198,7 +1274,10 @@ export class RottweilerApp extends BoxRenderable {
     this.#providerRecoveryProvider = null
     this.#themeBeforePreview = null
     this.#themePreviewCommitted = false
-    if (restoreTheme !== null && restoreTheme.name !== this.#theme.name) {
+    if (
+      restoreTheme !== null &&
+      (restoreTheme.name !== this.#theme.name || this.#deferredTheme !== null)
+    ) {
       this.#createThemedSurface(restoreTheme)
     }
     if (this.#keybindings.preset === "vim") this.#vimFocus = this.#vimFocusBeforePicker
@@ -1296,7 +1375,10 @@ export class RottweilerApp extends BoxRenderable {
         return true
       case "paste_image":
         void this.composer.pasteImage()
-        return true
+        // Let the terminal's normal text-paste path continue. When the
+        // clipboard contains an image pasteImage attaches it asynchronously;
+        // when it does not, Ctrl-V must remain ordinary text paste.
+        return false
       case "open_external_editor":
         if (this.picker.visible || this.#reviewOpen) return false
         void this.composer.openExternalEditor()
@@ -1627,26 +1709,56 @@ export class RottweilerApp extends BoxRenderable {
             if (file.isDirectory) {
               const query = `${file.path.replace(/\/$/, "")}/`
               if (this.#pickerAnchored) {
-                this.composer.value = this.composer.value.replace(
-                  /@[^\s]*$/,
-                  `@${query}`,
-                )
+                const mention = this.composer.currentFileMention()
+                if (mention !== null) {
+                  this.composer.replaceRange(mention.start, mention.end, `@${query}`)
+                }
               } else {
                 this.openFilePicker(query)
               }
               return
             }
+            const draft = this.composer.value
+            const mention = this.#pickerAnchored ? this.composer.currentFileMention() : null
             const requestId = this.#command({
               type: "preview_workspace_file",
               path: file.path,
-              max_bytes: 1_000_000,
+              max_bytes: 5_242_880,
             })
             if (requestId !== null) {
-              this.#pendingFilePreview = { path: file.path, requestId }
+              this.#pendingFilePreview = {
+                path: file.path,
+                requestId,
+                draft,
+                mention: mention === null ? null : { start: mention.start, end: mention.end },
+              }
             }
           }
         )
         break
+      case "attachments": {
+        const attachments = this.composer.attachments
+        const items: PickerItem<number>[] = attachments.map((attachment, index) => ({
+          id: `attachment:${index}`,
+          label: `Remove ${attachment.source_path ?? attachment.name}`,
+          description: `${attachment.media_type} · remove only this attachment`,
+          value: index,
+        }))
+        if (items.length === 0) {
+          this.#showPickerStatus(
+            "Attachments",
+            "No attachments in this draft",
+            "Paste an image or select a file with @ to attach it.",
+          )
+          break
+        }
+        this.#openPicker("Attachments", items, (item) => {
+          this.composer.removeAttachment(item.value as number)
+          if (this.composer.attachments.length === 0) this.closePicker()
+          else this.#refreshPicker()
+        })
+        break
+      }
       case "models":
         const models = this.#state.models.filter(
           (model) =>
@@ -1841,8 +1953,8 @@ export class RottweilerApp extends BoxRenderable {
         const items: PickerItem<"activate" | "reauthenticate">[] = [
           {
             id: "provider-recovery.activate",
-            label: "Retry activation",
-            description: "Rebuild the provider with the stored credential",
+            label: "Refresh models",
+            description: "Retry this provider's live model catalog with the saved sign-in",
             value: "activate",
           },
         ]
@@ -2408,7 +2520,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#refreshPicker()
       return
     }
-    const mention = /(?:^|\s)@([^\s]*)$/.exec(value)
+    const mention = /(?:^|\s)@([^\n]*)$/.exec(value)
     if (mention === null && this.#pickerAnchored) this.closePicker()
   }
 
@@ -3389,7 +3501,7 @@ function mcpStateLabel(state: string): string {
 
 function providerConnectionStatus(provider: ProviderProjection): string {
   if (provider.authenticated && provider.reachable) return "Connected"
-  if (provider.authenticated) return "Signed in · connection unavailable"
+  if (provider.authenticated) return "Signed in · models unavailable"
   if (!provider.configured) return "Not set up"
   switch (provider.authKind) {
     case "oauth": return provider.name === "openai_codex" ? "Sign in with ChatGPT" : "Sign in required"
@@ -3401,7 +3513,18 @@ function providerConnectionStatus(provider: ProviderProjection): string {
 
 function providerStatusDetail(provider: ProviderProjection): string {
   if (provider.authenticated && provider.reachable) return ""
-  if (provider.authenticated && !provider.reachable) return "Reconnect or sign in again"
+  if (provider.authenticated && !provider.reachable) {
+    const status = provider.status?.toLowerCase() ?? ""
+    if (status.includes("auth")) return "GitHub rejected this sign-in · sign in again"
+    if (status.includes("rate limit")) return "Model catalog is rate limited · retry shortly"
+    if (status.includes("timed out") || status.includes("network") || status.includes("server")) {
+      return "Couldn't reach the model catalog · retry"
+    }
+    if (status.includes("invalid") || status.includes("unsupported")) {
+      return "The provider returned an unusable model catalog"
+    }
+    return "Couldn't load available models · retry"
+  }
   const status = provider.status?.toLowerCase() ?? ""
   if (status.includes("setup required") || status.includes("not configured")) {
     return "Complete setup to continue"

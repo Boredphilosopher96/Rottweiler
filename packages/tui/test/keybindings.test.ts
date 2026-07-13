@@ -17,6 +17,7 @@ describe("configurable TUI keybindings", () => {
     expect(standard.preset).toBe("standard")
     expect(standard.bindings("global").get("ctrl+p")).toBe("open_command_picker")
     expect(standard.bindings("global").get("shift+tab")).toBe("cycle_agent_mode")
+    expect(standard.bindings("global").get("ctrl+v")).toBe("paste_image")
     expect(standard.bindings("standard").get("ctrl+e")).toBe("open_external_editor")
 
     const rebound = compileKeybindings({

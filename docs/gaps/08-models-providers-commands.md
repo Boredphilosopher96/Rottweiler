@@ -31,6 +31,8 @@ Do **not** source the picker from `~/.rottweiler/models.toml`. That file is a st
 
 **Resolved (2026-07-12).** The provider picker consumes the engine's bounded provider inventory, including configured-but-unaliased and supported setup targets, and exposes in-app configure/authenticate/recover actions.
 
+**Activation follow-up resolved (2026-07-12).** Credential persistence now completes sign-in independently from catalog availability. Connecting a provider stages its runtime and refreshes its live catalog without replacing the selected model; an explicit later model selection commits the staged runtime transactionally, and previous provider generations remain switchable. The TUI reports “signed in, models unavailable” with a catalog retry instead of falsely reporting login failure.
+
 The `/providers` picker counts provider names across alias descriptors (`app.ts:1032`). The maintainer's aliases are all `openai/*` → exactly one provider shown, which they hit live ("providers option only shows 1"). A configured-but-unaliased provider is invisible; the provider list is a side-effect of alias config. See 09/GAP-09-04 for the full design fix (provider inventory + in-app auth).
 
 ## GAP-08-03 — The `/` command menu shows built-in commands only — **P1 [code]**

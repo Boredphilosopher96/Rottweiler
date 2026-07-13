@@ -580,6 +580,38 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "provider": {
+          "type": "string"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "provider_activation_finished"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider",
+        "success",
+        "message"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "matches": {
           "type": "array",
           "items": {
@@ -3863,6 +3895,12 @@
       "properties": {
         "name": {
           "type": "string"
+        },
+        "source_path": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "media_type": {
           "type": "string"

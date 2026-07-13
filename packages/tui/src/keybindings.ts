@@ -121,7 +121,7 @@ const STANDARD_DEFAULTS = {
     open_model_picker: ["ctrl+m"],
     open_mode_picker: ["ctrl+o"],
     open_session_picker: ["ctrl+s"],
-    paste_image: ["ctrl+i"],
+    paste_image: ["ctrl+v"],
   },
   standard: { close_overlay: ["escape"], open_external_editor: ["ctrl+e"] },
   review: { close_overlay: ["escape"] },
@@ -135,7 +135,7 @@ const VIM_DEFAULTS = {
     open_model_picker: ["ctrl+m"],
     open_mode_picker: ["ctrl+o"],
     open_session_picker: ["ctrl+s"],
-    paste_image: ["ctrl+i"],
+    paste_image: ["ctrl+v"],
   },
   vim_insert: {
     enter_normal: ["escape", "ctrl+["],

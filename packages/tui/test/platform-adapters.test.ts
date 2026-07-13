@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -196,6 +196,31 @@ describe("production TUI platform adapters", () => {
     expect(
       await createImagePasteAdapter({ platform: "linux", executor: invalid }).readImage(),
     ).toBeNull()
+  })
+
+  test("reads quoted, escaped, and file URL image paths without losing spaces", async () => {
+    temporaryDirectory = await mkdtemp(join(tmpdir(), "rw platform images "))
+    const imagePath = join(temporaryDirectory, "screen shot.png")
+    await writeFile(imagePath, PNG)
+    const adapter = createImagePasteAdapter({ platform: "darwin" })
+
+    expect((await adapter.readPath(`'${imagePath}'`))?.name).toBe("screen shot.png")
+    expect((await adapter.readPath(imagePath.replaceAll(" ", "\\ ")))?.mediaType).toBe("image/png")
+    expect((await adapter.readPath(new URL(`file://${imagePath}`).toString()))?.base64)
+      .toBe(Buffer.from(PNG).toString("base64"))
+    expect(await adapter.readPath("https://example.test/screen.png")).toBeNull()
+    expect(await adapter.readPath("please review screenshot.png")).toBeNull()
+    expect(await adapter.readPath("please compare src/screenshot.png")).toBeNull()
+    expect(adapter.readPath("file://%ZZ/private.png"))
+      .rejects.toThrow("not a valid local image path")
+    expect(createImagePasteAdapter({ platform: "linux" }).readPath(
+      String.raw`C:\Users\Alice\screen shot.png`,
+    )).rejects.toThrow("could not be read safely")
+    const linkPath = join(temporaryDirectory, "linked image.png")
+    await symlink(imagePath, linkPath)
+    expect(adapter.readPath(linkPath)).rejects.toThrow("could not be read safely")
+    expect(adapter.readPath(join(temporaryDirectory, "missing image.png")))
+      .rejects.toThrow("could not be read safely")
   })
 
   test("writes and validates the macOS clipboard through a private temporary PNG", async () => {

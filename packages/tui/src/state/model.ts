@@ -168,6 +168,7 @@ export interface CommandAcknowledgement {
     | "provider_auth_started"
     | "provider_configured"
     | "provider_auth_finished"
+    | "provider_activation_finished"
     | "workspace_files_found"
     | "workspace_file_preview_ready"
     | "workspace_status_ready"

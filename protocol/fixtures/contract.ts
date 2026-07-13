@@ -132,6 +132,7 @@ export const contractFixture = {
       "attachments": [
         {
           "name": "notes.txt",
+          "source_path": "docs/notes.txt",
           "media_type": "text/plain",
           "data": {
             "type": "text",

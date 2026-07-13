@@ -658,7 +658,7 @@ impl ConfigLoader {
                 reason: "user configuration has no parent directory".to_owned(),
             })?;
         prepare_tui_config_parent(parent, &self.user_path)?;
-        let _settings_lock = acquire_tui_settings_lock(parent, key)?;
+        let settings_lock = acquire_tui_settings_lock(parent, key)?;
         validate_tui_config_file(&self.user_path, key)?;
         let mut document = read_tui_config_document(&self.user_path)?;
         if let Some(alias) = key.strip_prefix("models.thinking.") {
@@ -700,6 +700,7 @@ impl ConfigLoader {
         // The inverse order could report failure after changing the setting.
         persist_tui_provenance(parent, &self.user_path, key, value)?;
         persist_tui_config_atomic(parent, &self.user_path, encoded.as_bytes(), key)?;
+        drop(settings_lock);
         self.load()
     }
 

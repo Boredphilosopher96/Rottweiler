@@ -151,6 +151,12 @@ pub enum AttachmentData {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct Attachment {
     pub name: String,
+    /// Optional normalized workspace-relative source path. Local absolute paths
+    /// never cross the client protocol; their in-band content may still be
+    /// attached under a safe basename.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_path: Option<String>,
     pub media_type: String,
     pub data: AttachmentData,
 }
@@ -159,6 +165,9 @@ pub struct Attachment {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct StoredAttachment {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub source_path: Option<String>,
     pub media_type: String,
     pub content_hash: String,
     #[serde(with = "decimal_u64")]
@@ -1592,6 +1601,13 @@ pub enum EngineEvent {
         message: String,
         warnings: Vec<String>,
     },
+    ProviderActivationFinished {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        provider: String,
+        success: bool,
+        message: String,
+    },
     WorkspaceFilesFound {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -1982,6 +1998,7 @@ impl EngineEvent {
             | Self::ProviderAuthStarted { .. }
             | Self::ProviderConfigured { .. }
             | Self::ProviderAuthFinished { .. }
+            | Self::ProviderActivationFinished { .. }
             | Self::WorkspaceFilesFound { .. }
             | Self::WorkspaceFilePreviewReady { .. }
             | Self::WorkspaceStatusReady { .. }
@@ -2056,6 +2073,7 @@ impl EngineEvent {
             | Self::ProviderAuthStarted { .. }
             | Self::ProviderConfigured { .. }
             | Self::ProviderAuthFinished { .. }
+            | Self::ProviderActivationFinished { .. }
             | Self::WorkspaceFilesFound { .. }
             | Self::WorkspaceFilePreviewReady { .. }
             | Self::WorkspaceStatusReady { .. }

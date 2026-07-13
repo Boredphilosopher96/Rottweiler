@@ -37,6 +37,8 @@ The status line shows `ctx — │ $— │ cache —` because `context_usage_up
 
 **Resolved (2026-07-12).** The inventory lists all configured and supported setup providers with auth/reachability/model counts. ChatGPT and Copilot use in-app OAuth/device flows with Open/Copy actions; API-key providers use a separate authenticated, non-replayable secret channel. Stored-but-unready and authenticated-but-unreachable providers offer explicit activation retry and credential replacement.
 
+**Attachment interaction follow-up resolved (2026-07-12).** The composer now follows the OpenCode interaction model for structured context: `Ctrl+V`/`Ctrl+I` clipboard images, quoted/escaped/`file://` local image paths, cursor-anchored `@` workspace files with spaces, long-paste chips, image previews, click-to-manage removal, and empty-composer Backspace removal. Failed preview/send paths preserve the draft, while successful sends remove only the submitted snapshot.
+
 Two layers:
 - **Mechanical (GAP-08-02):** the picker derives providers from alias references (`app.ts:1032`); the maintainer's aliases are all `openai/*`, so exactly one appears.
 - **Design (the real ask):** the maintainer expects the provider surface to list **all supported/known providers with auth state** — like opencode, where the provider list comes from the live catalog (models.dev set + configured credentials) and you can pick one and authenticate *in the app*. Rottweiler has rich auth machinery (`rw auth`, device flows, keychain vault) but it is **CLI-only**; the TUI can only render what aliases mention.

@@ -9,7 +9,7 @@ Each finding is tagged **[verified]** (reproduced at runtime), **[code]** (confi
 
 ## The one-paragraph verdict
 
-The reviewed product now ships as one supervised application and the headless and interactive paths share the same durable engine. Startup, approvals, commands, meters, live provider/model catalogs, in-app auth, safe settings, themes, permissions, and MCP management have functional acceptance coverage. Provider credentials remain outside replayable protocol state, while failed activation has an explicit secret-free recovery path. Only the maintainer-parked model-router `auto` integration remains open.
+The reviewed product now ships as one supervised application and the headless and interactive paths share the same durable engine. Startup, approvals, commands, meters, live provider/model catalogs, in-app auth, safe settings, themes, permissions, MCP management, and structured text/image attachments have functional acceptance coverage. Provider sign-in is independent from model selection: credentials remain outside replayable protocol state, catalog refresh is separately retryable, and activation never depends on unrelated aliases. Only the maintainer-parked model-router `auto` integration remains open.
 
 ## Severity index
 
