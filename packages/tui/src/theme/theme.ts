@@ -403,7 +403,9 @@ export function themeByName(name: string, mode: ThemeMode = "dark"): RottweilerT
 
 export function createSyntaxStyle(theme: RottweilerTheme): SyntaxStyle {
   return SyntaxStyle.fromStyles({
-    default: { fg: theme.syntaxVariable },
+    // Markdown prose inherits this default capture. Keep body copy on the
+    // theme's primary foreground; syntax-specific captures still color code.
+    default: { fg: theme.foreground },
     prompt: { fg: theme.accent },
     "markup.heading": { fg: theme.markdownHeading, bold: true },
     "markup.heading.1": { fg: theme.markdownHeading, bold: true, underline: true },

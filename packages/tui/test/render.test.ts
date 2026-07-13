@@ -1,8 +1,120 @@
 import { describe, expect, test } from "bun:test"
 
-import { formatCost, formatSessionCost, formatTokenCount, toolOutputText, TranscriptVirtualizer, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { formatCost, formatSessionCost, formatTokenCount, terminalMarkdown, toolOutputText, TranscriptVirtualizer, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 
 describe("bounded retained rendering", () => {
+  test("renders completed Mermaid and flowchart fences as terminal diagrams without flashing source", () => {
+    const rendered = terminalMarkdown([
+      "## Architecture",
+      "",
+      "```mermaid",
+      "flowchart LR",
+      "  A[Client] --> B[Engine]",
+      "```",
+    ].join("\n"), 80)
+
+    expect(rendered).toContain("Architecture")
+    expect(rendered).toContain("Client")
+    expect(rendered).toContain("Engine")
+    expect(rendered).toMatch(/[┌┐└┘─│►]/)
+    expect(rendered).not.toContain("flowchart LR")
+    expect(rendered).not.toContain("```mermaid")
+
+    const flowchart = terminalMarkdown([
+      "```flowchart",
+      "graph TD",
+      "  Start --> Done",
+      "```",
+    ].join("\n"), 60)
+    expect(flowchart).toContain("Start")
+    expect(flowchart).toContain("Done")
+  })
+
+  test("keeps incomplete and invalid Mermaid definitions user-facing", () => {
+    const streaming = terminalMarkdown("before\n\n```mermaid\nflowchart TB\n A -->", 80, "streaming")
+    expect(streaming).toContain("Rendering diagram")
+    expect(streaming).not.toContain("flowchart TB")
+    expect(streaming).not.toContain("A -->")
+
+    const invalid = terminalMarkdown("```mermaid\nnot a diagram\n```", 80)
+    expect(invalid).toContain("Diagram could not be rendered")
+    expect(invalid).not.toContain("not a diagram")
+
+    const committed = terminalMarkdown("```mermaid\nflowchart TB\n A -->", 80)
+    expect(committed).toContain("closing fence is missing")
+    expect(committed).not.toContain("Rendering diagram")
+  })
+
+  test("supports CommonMark tilde fences and leaves indented code literal", () => {
+    const tilde = terminalMarkdown("~~~mermaid\nflowchart LR\n A --> B\n~~~", 60)
+    expect(tilde).toMatch(/[┌┐└┘─│►]/)
+    expect(tilde).not.toContain("flowchart LR")
+
+    const indented = terminalMarkdown("    ```mermaid\n    flowchart LR\n    A --> B\n    ```", 60)
+    expect(indented).toContain("```mermaid")
+    expect(indented).toContain("flowchart LR")
+
+    const titledTilde = terminalMarkdown("~~~mermaid title=`architecture`\nflowchart LR\n A --> B\n~~~", 60)
+    expect(titledTilde).toMatch(/[┌┐└┘─│►]/)
+    expect(titledTilde).not.toContain("flowchart LR")
+
+    const quoted = terminalMarkdown("> ```mermaid\n> flowchart LR\n> A --> B\n> ```", 60)
+    expect(quoted).toContain("> ```text")
+    expect(quoted).not.toContain("flowchart LR")
+
+    const listed = terminalMarkdown("- Architecture\n  ```mermaid\n  flowchart LR\n  A --> B\n  ```", 60)
+    expect(listed).toContain("  ```text")
+    expect(listed).not.toContain("flowchart LR")
+
+    const outsideClose = terminalMarkdown("> ```mermaid\n> flowchart LR\n> A --> B\n```\nafter", 100)
+    expect(outsideClose).toContain("closing fence is missing")
+    expect(outsideClose).toContain("```\nafter")
+    expect(outsideClose).not.toContain("```text")
+  })
+
+  test("rejects adversarial graph complexity quickly and bounds output width", () => {
+    const source = `\`\`\`mermaid\nflowchart LR\n${Array.from({ length: 50 }, (_, index) => `N${index} --> N${index + 1}`).join("\n")}\n\`\`\``
+    const started = performance.now()
+    const rejected = terminalMarkdown(source, 80)
+    expect(performance.now() - started).toBeLessThan(16)
+    expect(rejected).toContain("too large to render safely")
+
+    const wide = terminalMarkdown("```mermaid\nflowchart LR\n A --> B --> C --> D --> E --> F\n```", 40)
+    const body = wide.split("\n").slice(1, -1)
+    expect(Math.max(...body.map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(40)
+
+    for (const width of [20, 24]) {
+      const narrow = terminalMarkdown("```mermaid\nflowchart LR\n A[界面] --> B[核心引擎]\n```", width)
+      expect(Math.max(...narrow.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(width)
+    }
+  })
+
+  test("rejects grouped-node expansion and bounds aggregate diagram work", () => {
+    const group = Array.from({ length: 80 }, (_, index) => `N${index}`).join(" & ")
+    const grouped = `\`\`\`mermaid\nflowchart LR\n${group} --> ${group}\n\`\`\``
+    const groupedStart = performance.now()
+    expect(terminalMarkdown(grouped, 80)).toContain("too large to render safely")
+    expect(performance.now() - groupedStart).toBeLessThan(16)
+
+    const diagram = "```mermaid\nflowchart LR\n A --> B --> C\n```"
+    const response = Array.from({ length: 20 }, () => diagram).join("\n")
+    const responseStart = performance.now()
+    const rendered = terminalMarkdown(response, 80)
+    expect(performance.now() - responseStart).toBeLessThan(33)
+    expect(rendered).toContain("Additional diagrams were omitted")
+
+    const narrowOmissions = terminalMarkdown(response, 20)
+    expect(Math.max(...narrowOmissions.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(20)
+
+    const nested = terminalMarkdown("> > ```mermaid\n> > flowchart LR\n> > A[界面] --> B[核心]\n> > ```", 20)
+    expect(Math.max(...nested.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(20)
+
+    const deepPrefix = "> ".repeat(8)
+    const deep = terminalMarkdown(`${deepPrefix}\`\`\`mermaid\n${deepPrefix}flowchart LR\n${deepPrefix}A --> B\n${deepPrefix}\`\`\``, 20)
+    expect(Math.max(...deep.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(20)
+    expect(deep).toContain("Dia")
+  })
+
   test("formats compact context counters without confusing them with percentages", () => {
     expect(formatTokenCount("999")).toBe("999")
     expect(formatTokenCount("6400")).toBe("6.4k")

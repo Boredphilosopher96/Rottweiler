@@ -14,6 +14,7 @@ import {
   entryLayoutKey,
   formatCost,
   formatToolArguments,
+  terminalMarkdown,
   toolOutputText,
   TranscriptVirtualizer,
   turnMarkdown,
@@ -503,7 +504,7 @@ class TurnCardRenderable extends BoxRenderable {
     onHeightChange: (layoutKey: string, height: number) => void,
     treeSitterClient?: TreeSitterClient,
   ) {
-    const markdown = turnMarkdown(entry.turn)
+    const markdown = terminalMarkdown(turnMarkdown(entry.turn), Math.max(20, width - 4))
     const reasoning = turnReasoningMarkdown(entry.turn)
     const toolOnly = entry.turn.role === "tool" && markdown === ""
     const role = entry.presentation === "command_result"
@@ -1091,7 +1092,11 @@ export class TranscriptRenderable extends BoxRenderable {
     // the visible plain-text-then-Markdown flicker reported by users.
     this.streamingMarkdown.streaming = tail.finished === null
     this.streamingMarkdown.visible = tail.text.length > 0
-    this.streamingMarkdown.content = tail.text
+    this.streamingMarkdown.content = terminalMarkdown(
+      tail.text,
+      Math.max(20, (this.width || this.ctx.width) - 4),
+      tail.finished === null ? "streaming" : "complete",
+    )
     this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? activity : turnDetail(tail.finished.cost, tail.finished.usage)}`
     if (this.#tailReasoningTurnId !== tail.turnId) {
       this.#tailReasoning.collapse(false)

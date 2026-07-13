@@ -1,5 +1,6 @@
 import type { TranscriptEntry } from "../state"
 import { turnMarkdown } from "./format"
+import { terminalMarkdown } from "./mermaid"
 
 export interface VirtualWindow {
   readonly start: number
@@ -118,7 +119,7 @@ export function entryLayoutKey(
 
 export function estimateEntryHeight(entry: TranscriptEntry, width: number): number {
   const contentWidth = Math.max(8, width - 4)
-  const markdown = turnMarkdown(entry.turn)
+  const markdown = terminalMarkdown(turnMarkdown(entry.turn), contentWidth)
   if (entry.turn.role === "tool" && markdown === "") return 0
   const lines = markdown.split("\n")
   const contentRows = lines.reduce(

@@ -3,11 +3,12 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { TextAttributes, TreeSitterClient, getBaseAttributes } from "@opentui/core"
+import { RGBA, TextAttributes, TreeSitterClient, getBaseAttributes } from "@opentui/core"
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
 import { createInitialState } from "../src/state"
+import { nordTheme } from "../src/theme"
 
 describe("render-aware transcript virtualization", () => {
   let renderer: TestRendererSetup | undefined
@@ -255,6 +256,77 @@ describe("render-aware transcript virtualization", () => {
     expect(renderDiagnostics.join("\n")).not.toMatch(
       /Invalid dimensions|NaNxNaN|Failed to create frame buffer/,
     )
+  }, 20_000)
+
+  test("separates consecutive answers, renders Mermaid, and keeps prose on the primary foreground", async () => {
+    parserDataPath = mkdtempSync(join(tmpdir(), "rottweiler-consecutive-mermaid-"))
+    treeSitter = new TreeSitterClient({
+      dataPath: parserDataPath,
+      workerPath: join(import.meta.dir, "../node_modules/@opentui/core/parser.worker.js"),
+    })
+    await treeSitter.initialize()
+    renderer = await createTestRenderer({ width: 82, height: 40, useThread: false })
+    const app = createRottweilerApp(renderer.renderer, {
+      theme: nordTheme,
+      treeSitterClient: treeSitter,
+      initialState: {
+        ...createInitialState(),
+        transcript: [
+          {
+            sequenceId: "1",
+            agentTurn: "1",
+            turn: {
+              role: "assistant",
+              blocks: [{
+                type: "text",
+                text: [
+                  "## Previous answer",
+                  "",
+                  "Main prose stays readable.",
+                  "",
+                  "```mermaid",
+                  "flowchart TB",
+                  "  UI[OpenTUI] --> CORE[Rust core]",
+                  "```",
+                  "",
+                  "PREVIOUS_ANSWER_END",
+                ].join("\n"),
+              }],
+              meta: { synthetic: false, summary: false },
+            },
+          },
+          {
+            sequenceId: "2",
+            agentTurn: "2",
+            turn: {
+              role: "user",
+              blocks: [{ type: "text", text: "FOLLOW_UP_QUESTION_START\nCan you continue?" }],
+              meta: { synthetic: false, summary: false },
+            },
+          },
+        ],
+      },
+    })
+    renderer.renderer.root.add(app)
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await Bun.sleep(5)
+      await renderer.renderOnce()
+    }
+
+    const cards = [...app.transcript.mountedCards.values()].sort((left, right) => left.y - right.y)
+    expect(cards).toHaveLength(2)
+    expect(cards[0]!.y + cards[0]!.height).toBeLessThanOrEqual(cards[1]!.y)
+    const frame = renderer.captureCharFrame()
+    expect(frame).toContain("PREVIOUS_ANSWER_END")
+    expect(frame).toContain("FOLLOW_UP_QUESTION_START")
+    expect(frame).toContain("OpenTUI")
+    expect(frame).toContain("Rust core")
+    expect(frame).not.toContain("flowchart TB")
+
+    const prose = renderer.captureSpans().lines
+      .flatMap((line) => line.spans)
+      .find((span) => span.text.includes("Main prose stays readable"))
+    expect(prose?.fg.toInts()).toEqual(RGBA.fromHex(nordTheme.foreground).toInts())
   }, 20_000)
 
   test("follows a growing answer at the bottom but preserves deliberate scrollback", async () => {

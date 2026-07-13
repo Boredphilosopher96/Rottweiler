@@ -3,6 +3,7 @@ import { CliRenderEvents } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp, type PresentationFrameScheduler } from "../src/app"
+import { colorContrast, pickerSelectionColors } from "../src/components/picker"
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../src/protocol"
 import { PROTOCOL_VERSION } from "../../../protocol/types"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
@@ -12,6 +13,7 @@ import {
   systemThemeFor,
   themeByName,
   themeCatalog,
+  themeCatalogFor,
   type RottweilerTheme,
 } from "../src/theme"
 
@@ -760,6 +762,16 @@ describe("Rottweiler OpenTUI shell", () => {
     await setup.mockInput.typeText("/")
     expect(app.picker.visible).toBeTrue()
     expect(app.picker.select.getSelectedIndex()).toBe(0)
+    await setup.renderOnce()
+    const commandSpans = setup.captureSpans().lines.flatMap((line) => line.spans)
+    const selectedTitle = commandSpans.find((span) => span.text.includes("/help"))
+    const selectedCaption = commandSpans.find((span) => span.text.includes("List available commands"))
+    const nextCommand = commandSpans.find((span) => span.text.includes("/status"))
+    expect(selectedTitle).toBeDefined()
+    expect(selectedCaption).toBeDefined()
+    expect(nextCommand).toBeDefined()
+    expect(selectedTitle?.fg.toInts()).toEqual(selectedCaption?.fg.toInts())
+    expect(selectedCaption?.fg.toInts()).not.toEqual(nextCommand?.fg.toInts())
     const optionCount = app.picker.select.options.length
 
     setup.mockInput.pressKey("p", { ctrl: true })
@@ -864,6 +876,23 @@ describe("Rottweiler OpenTUI shell", () => {
     app.composer.value = ""
     await setup.mockInput.typeText("/pro")
     expect(app.picker.select.getSelectedOption()?.value).toBe("providers")
+  })
+
+  test("exposes /theme and opens the live theme picker from slash autocomplete", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+
+    await setup.mockInput.typeText("/the")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("theme")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+
+    expect(app.picker.visible).toBeTrue()
+    expect(app.picker.title).toContain("Themes")
+    expect(app.picker.select.options.length).toBeGreaterThan(20)
+    expect(app.picker.select.options.some((option) => option.value === "theme:opencode")).toBeTrue()
   })
 
   test("executes a selected no-argument slash command on Enter and renders its result", async () => {
@@ -2605,6 +2634,22 @@ describe("Rottweiler OpenTUI shell", () => {
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     expect(app.picker.visible).toBeFalse()
+  })
+
+  test("keeps picker selection readable and distinct in every bundled theme", () => {
+    for (const mode of ["dark", "light"] as const) {
+      for (const theme of themeCatalogFor(mode)) {
+        const selected = pickerSelectionColors(theme)
+        expect(colorContrast(selected.foreground, selected.background), theme.name).toBeGreaterThanOrEqual(4.5)
+        expect(colorContrast(selected.background, theme.panelRaised), theme.name).toBeGreaterThanOrEqual(1.4)
+      }
+    }
+    const transparentSelection = pickerSelectionColors({
+      ...kennelTheme,
+      selectedListItemText: "#00000000",
+    })
+    expect(transparentSelection.foreground).toMatch(/^#[0-9A-Fa-f]{6}$/)
+    expect(colorContrast(transparentSelection.foreground, transparentSelection.background)).toBeGreaterThanOrEqual(4.5)
   })
 
   test("suspends before requesting !python and resumes only on durable inactive", async () => {

@@ -159,6 +159,7 @@ const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
   { name: "mode", description: "Show or switch the interaction mode", usage: "/mode [discuss|plan|execute]" },
   { name: "models", description: "Switch the active model", usage: "/models" },
   { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
+  { name: "theme", description: "Preview and change the interface theme", usage: "/theme" },
   { name: "settings", description: "Change safe user settings", usage: "/settings" },
   { name: "permissions", description: "Show or edit session permission rules", usage: "/permissions [list|approvals|add|remove|clear-session|revoke-session|revoke-project]" },
   { name: "plan", description: "Show the pending or approved plan", usage: "/plan" },
@@ -260,7 +261,7 @@ export class RottweilerApp extends BoxRenderable {
   #mcpDraftName: string | null = null
   #reviewOpen = false
   #pendingReviewSelection: string | null = null
-  #postSubmitPicker: "models" | "providers" | "settings" | "permissions" | "mcp" | null = null
+  #postSubmitPicker: "models" | "providers" | "themes" | "settings" | "permissions" | "mcp" | null = null
   #terminalSuspended = false
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
@@ -521,6 +522,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#postSubmitPicker = null
     if (picker === "models") this.openModelPicker()
     else if (picker === "providers") this.openProviderPicker()
+    else if (picker === "themes") this.openThemePicker()
     else if (picker === "settings") this.openSettingsPicker()
     else if (picker === "permissions") this.openPermissionPicker()
     else if (picker === "mcp") this.openMcpPicker()
@@ -1556,6 +1558,12 @@ export class RottweilerApp extends BoxRenderable {
               this.openProviderPicker()
               return
             }
+            if (command.name === "theme") {
+              clearAnchoredTrigger()
+              this.closePicker()
+              this.openThemePicker()
+              return
+            }
             if (command.name === "settings") {
               clearAnchoredTrigger()
               this.closePicker()
@@ -2300,6 +2308,7 @@ export class RottweilerApp extends BoxRenderable {
       { id: "session.list", title: "Switch session", category: "Session", description: "Resume another durable session", run: open(() => this.openSessionPicker()) },
       { id: "model.list", title: "Switch model", category: "Agent", description: "Choose the active model alias", run: open(() => this.openModelPicker()) },
       { id: "provider.list", title: "Provider and model routes", category: "Agent", description: "Choose a configured provider route", run: open(() => this.openProviderPicker()) },
+      { id: "theme.list", title: "Switch theme", category: "Settings", description: "Preview and choose an interface theme", run: open(() => this.openThemePicker()) },
       { id: "settings.open", title: "Settings", category: "Settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
       { id: "mode.list", title: "Switch mode", category: "Agent", description: "Choose discuss, plan, or execute", run: open(() => this.openModePicker()) },
       { id: "review.open", title: "Review changes", category: "Session", description: "Open the cumulative session diff", run: open(() => this.openReview()) },
@@ -2520,6 +2529,11 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (sessionAction?.type === "providers") {
       this.#postSubmitPicker = "providers"
+      this.closePicker()
+      return true
+    }
+    if (sessionAction?.type === "theme") {
+      this.#postSubmitPicker = "themes"
       this.closePicker()
       return true
     }
@@ -3240,6 +3254,7 @@ type SessionAction =
   | { readonly type: "fork"; readonly atTurn: string | null }
   | { readonly type: "models" }
   | { readonly type: "providers" }
+  | { readonly type: "theme" }
   | { readonly type: "settings" }
   | { readonly type: "permissions" }
   | { readonly type: "mcp" }
@@ -3267,6 +3282,11 @@ function parseSessionAction(content: string): SessionAction | null {
     return tokens.length === 1
       ? { type: "providers" }
       : { type: "invalid", message: "usage: /providers" }
+  }
+  if (command === "/theme") {
+    return tokens.length === 1
+      ? { type: "theme" }
+      : { type: "invalid", message: "usage: /theme" }
   }
   if (command === "/settings") {
     return tokens.length === 1

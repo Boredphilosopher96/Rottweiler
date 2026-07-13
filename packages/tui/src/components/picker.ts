@@ -11,6 +11,71 @@ import {
 
 import type { RottweilerTheme } from "../theme"
 
+type Rgb = Readonly<{ r: number; g: number; b: number; a: number }>
+
+export function pickerSelectionColors(theme: RottweilerTheme): {
+  readonly background: string
+  readonly foreground: string
+} {
+  let background = theme.primary
+  if (parseHex(background).a !== 255) {
+    background = theme.mode === "light" ? "#555555" : "#BBBBBB"
+  }
+  const panelContrast = colorContrast(background, theme.panelRaised)
+  if (panelContrast < 1.4) {
+    const target = theme.mode === "light" ? "#000000" : "#FFFFFF"
+    for (const amount of [0.15, 0.25, 0.35, 0.45, 0.55]) {
+      const candidate = mixHex(background, target, amount)
+      background = candidate
+      if (colorContrast(candidate, theme.panelRaised) >= 1.4) break
+    }
+  }
+  const fallbacks = (theme.mode === "light"
+    ? [theme.selectedListItemText, "#000000", "#FFFFFF"]
+    : [theme.selectedListItemText, "#FFFFFF", "#000000"])
+    .filter((candidate) => parseHex(candidate).a === 255)
+  const foreground = fallbacks.find((candidate) => colorContrast(candidate, background) >= 4.5)
+    ?? fallbacks.reduce((best, candidate) =>
+      colorContrast(candidate, background) > colorContrast(best, background) ? candidate : best,
+    )
+  return { background, foreground }
+}
+
+export function colorContrast(left: string, right: string): number {
+  const first = relativeLuminance(parseHex(left))
+  const second = relativeLuminance(parseHex(right))
+  return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05)
+}
+
+function parseHex(value: string): Rgb {
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(value)
+  if (match === null) return { r: 0, g: 0, b: 0, a: 0 }
+  return {
+    r: Number.parseInt(match[1]!, 16),
+    g: Number.parseInt(match[2]!, 16),
+    b: Number.parseInt(match[3]!, 16),
+    a: value.length >= 9 ? Number.parseInt(value.slice(7, 9), 16) : 255,
+  }
+}
+
+function relativeLuminance(color: Rgb): number {
+  const channel = (value: number) => {
+    const normalized = value / 255
+    return normalized <= 0.04045
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4
+  }
+  return 0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+}
+
+function mixHex(base: string, target: string, amount: number): string {
+  const from = parseHex(base)
+  const to = parseHex(target)
+  const channel = (left: number, right: number) =>
+    Math.round(left + (right - left) * amount).toString(16).padStart(2, "0")
+  return `#${channel(from.r, to.r)}${channel(from.g, to.g)}${channel(from.b, to.b)}`
+}
+
 export interface PickerItem<T> {
   readonly id: string
   readonly label: string
@@ -168,6 +233,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     theme: RottweilerTheme,
     onQuery?: (query: string) => void,
   ) {
+    const selected = pickerSelectionColors(theme)
     super(ctx, {
       id: "fuzzy-picker",
       width: "100%",
@@ -201,10 +267,10 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       options: [],
       backgroundColor: theme.panelRaised,
       textColor: theme.foreground,
-      selectedBackgroundColor: theme.selection,
-      selectedTextColor: theme.accentStrong,
+      selectedBackgroundColor: selected.background,
+      selectedTextColor: selected.foreground,
       descriptionColor: theme.muted,
-      selectedDescriptionColor: theme.foreground,
+      selectedDescriptionColor: selected.foreground,
       showScrollIndicator: true,
       wrapSelection: true,
       fastScrollStep: 10,
