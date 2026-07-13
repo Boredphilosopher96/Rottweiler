@@ -37,9 +37,10 @@ SHELL_STDIN_MARKER = "M4_SHELL_CHILD_STDIN_0a19"
 SHELL_INTERRUPT_MARKER = "M4_SHELL_CHILD_INTERRUPT_82bc"
 BLOCKED_TURN_MARKER = "M4_BLOCKED_AGENT_TURN_6d77"
 SHELL_SECRET_VALUE = "M4_SHELL_SECRET_d10f7e62"
-# The composer submits on plain Return; this is Kitty's unmodified Return
-# encoding, which remains unambiguous when a PTY's line discipline maps CR/LF.
-KITTY_SUBMIT = b"\x1b[13u"
+# The gate drives an xterm-compatible PTY, so send the same carriage return a
+# physical Return key produces there. Kitty's CSI-u encoding is only emitted by
+# terminals after negotiating that protocol and is not portable PTY input.
+TERMINAL_SUBMIT = b"\r"
 _origin_request_lock = threading.Lock()
 _origin_requests = 0
 
@@ -508,7 +509,7 @@ def read_until(process: PtyProcess, marker: bytes, timeout: float = 5.0) -> byte
             child_status = f"exited with wait status {status}"
     raise RuntimeError(
         f"PTY process {process.pid} did not render marker {marker!r} ({child_status}); "
-        f"tail={bytes(captured[-1000:])!r}"
+        f"tail={bytes(captured[-4000:])!r}"
     )
 
 
@@ -858,20 +859,24 @@ def supervisor_reattach_gate(
     # explicit non-persisting CI trust escape hatch so the fixture exercises
     # supervision instead of blocking at the interactive folder-trust prompt.
     runtime_root = home / "run"
+    env = isolated_env(home)
+    env["ROTTWEILER_DRIVER_READY_MARKER"] = DRIVER_READY_MARKER.decode("ascii")
     process = spawn_pty(
         rw,
-        isolated_env(home),
+        env,
         workspace,
         ["--dangerously-trust"],
     )
     closed_normally = False
     try:
-        read_until(process, FIRST_PAINT_MARKER, timeout=8)
+        ready = read_until(process, DRIVER_READY_MARKER, timeout=20)
+        if FIRST_PAINT_MARKER not in ready:
+            raise RuntimeError("supervised TUI became driver-ready without first paint")
         first_tui = wait_for_tui_child(process.pid, tui)
-        os.write(process.fd, PROMPT_MARKER.encode() + KITTY_SUBMIT)
+        os.write(process.fd, PROMPT_MARKER.encode())
+        read_until(process, PROMPT_MARKER.encode(), timeout=8)
+        os.write(process.fd, TERMINAL_SUBMIT)
         first_transcript = read_until(process, RESPONSE_MARKER.encode(), timeout=8)
-        if PROMPT_MARKER.encode() not in first_transcript:
-            raise RuntimeError("first TUI did not render the submitted user message")
 
         os.kill(first_tui, signal.SIGKILL)
         second_tui = wait_for_tui_child(process.pid, tui, exclude=first_tui)
@@ -962,9 +967,12 @@ def shell_handover_gate(
     process = spawn_pty(rw, shell_env, workspace, ["--dangerously-trust"])
     try:
         read_until(process, FIRST_PAINT_MARKER, timeout=8)
+        read_until(process, DRIVER_READY_MARKER, timeout=8)
         first_engine = wait_for_engine_child(process.pid, rw)
         baseline_requests = origin_request_count()
-        os.write(process.fd, f"!{child_script}".encode() + KITTY_SUBMIT)
+        os.write(process.fd, f"!{child_script}".encode())
+        read_until(process, b"m4-shell-child.py", timeout=3)
+        os.write(process.fd, TERMINAL_SUBMIT)
         read_until(process, SHELL_READY_MARKER.encode(), timeout=8)
 
         # The child and parent-side PTY broker must survive an engine crash.
@@ -993,10 +1001,27 @@ def shell_handover_gate(
         read_until(process, SHELL_INTERRUPT_MARKER.encode(), timeout=3)
         read_until(process, b"Message Rottweiler", timeout=5)
         # Normal agent execution resumes only after durable shell completion.
-        os.write(process.fd, PROMPT_MARKER.encode() + KITTY_SUBMIT)
+        os.write(process.fd, PROMPT_MARKER.encode())
+        read_until(process, PROMPT_MARKER.encode(), timeout=3)
+        os.write(process.fd, TERMINAL_SUBMIT)
         read_until(process, RESPONSE_MARKER.encode(), timeout=8)
-        if origin_request_count() != baseline_requests + 1:
-            raise RuntimeError("agent turn did not resume exactly once after shell completion")
+        # A completed first turn also triggers the product's fast-model title
+        # generation. Wait for both intentional provider calls so the gate
+        # does not race that asynchronous follow-up.
+        expected_requests = baseline_requests + 2
+        title_deadline = time.monotonic() + 3
+        while (
+            origin_request_count() < expected_requests
+            and time.monotonic() < title_deadline
+        ):
+            time.sleep(0.01)
+        resumed_requests = origin_request_count()
+        if resumed_requests != expected_requests:
+            raise RuntimeError(
+                "agent turn and title generation did not run exactly once after shell "
+                f"completion: expected {expected_requests} origin requests, got "
+                f"{resumed_requests}"
+            )
 
         shell_events = durable_shell_events(home)
         if len(shell_events) != 2:
@@ -1108,8 +1133,10 @@ def ssh_loopback_gate(
         local_ready = read_until(local, DRIVER_READY_MARKER, timeout=20)
         if FIRST_PAINT_MARKER not in local_ready:
             raise RuntimeError("local TUI became driver-ready without rendering its first paint")
-        os.write(local.fd, PROMPT_MARKER.encode() + KITTY_SUBMIT)
-        local_capture = read_until(local, RESPONSE_MARKER.encode(), timeout=10)
+        os.write(local.fd, PROMPT_MARKER.encode())
+        local_capture = read_until(local, PROMPT_MARKER.encode(), timeout=3)
+        os.write(local.fd, TERMINAL_SUBMIT)
+        local_capture += read_until(local, RESPONSE_MARKER.encode(), timeout=10)
         require_visible_markers(local_capture)
         local_transcript = wait_for_canonical_durable_transcript(home)
     finally:
@@ -1137,8 +1164,10 @@ def ssh_loopback_gate(
         remote_ready = read_until(remote, DRIVER_READY_MARKER, timeout=20)
         if FIRST_PAINT_MARKER not in remote_ready:
             raise RuntimeError("remote TUI became driver-ready without rendering its first paint")
-        os.write(remote.fd, PROMPT_MARKER.encode() + KITTY_SUBMIT)
-        remote_capture = read_until(remote, RESPONSE_MARKER.encode(), timeout=10)
+        os.write(remote.fd, PROMPT_MARKER.encode())
+        remote_capture = read_until(remote, PROMPT_MARKER.encode(), timeout=3)
+        os.write(remote.fd, TERMINAL_SUBMIT)
+        remote_capture += read_until(remote, RESPONSE_MARKER.encode(), timeout=10)
         require_visible_markers(remote_capture)
         remote_transcript = wait_for_canonical_durable_transcript(home, session_id)
         if remote_transcript != local_transcript:

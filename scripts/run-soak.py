@@ -21,7 +21,7 @@ from pathlib import Path
 DEFAULT_SECONDS = 8 * 60 * 60
 DEFAULT_RSS_LIMIT_MIB = 500
 DEFAULT_TURN_SECONDS = 2.0
-KITTY_SUBMIT = b"\x1b[13;3u"
+TERMINAL_SUBMIT = b"\r"
 
 
 @dataclass(frozen=True)
@@ -517,10 +517,10 @@ def run_soak(
                     and submitted < len(steps)
                 ):
                     waiting = steps[submitted]
-                    # OpenTUI's multiline composer reserves plain Return for a
-                    # newline. Its production submit binding is Meta+Return in
-                    # Kitty keyboard-protocol form (the same sequence as M4).
-                    os.write(master, waiting.prompt.encode("utf-8") + KITTY_SUBMIT)
+                    # The production composer submits on plain Return. The soak
+                    # drives an xterm-compatible PTY, matching the M4 release
+                    # gate and a physical Return key in that terminal.
+                    os.write(master, waiting.prompt.encode("utf-8") + TERMINAL_SUBMIT)
                     submitted += 1
                     waiting_since = now
 

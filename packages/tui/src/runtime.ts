@@ -568,7 +568,11 @@ export class TuiEngineRuntime {
       this.#driverReady = true
       this.#onDriverReady?.(sessionId)
       if (!this.#config.replayMode) {
-        await this.#requestInitialProjections(sessionId, subscriptionController.signal)
+        // These projections populate secondary UI surfaces. Live model
+        // discovery is deliberately requested only when its picker opens, and
+        // no secondary projection may hold the writable driver lease—or every
+        // composer submission—hostage.
+        void this.#requestInitialProjections(sessionId, subscriptionController.signal)
       }
     } finally {
       this.#controller.signal.removeEventListener("abort", abortTransition)
@@ -630,12 +634,6 @@ export class TuiEngineRuntime {
         type: "get_workspace_status",
         meta: this.#meta(),
         session_id: sessionId,
-      },
-      {
-        type: "list_models",
-        meta: this.#meta(),
-        session_id: sessionId,
-        refresh: false,
       },
       { type: "list_settings", meta: this.#meta(), session_id: sessionId },
       { type: "list_commands", meta: this.#meta(), session_id: sessionId },

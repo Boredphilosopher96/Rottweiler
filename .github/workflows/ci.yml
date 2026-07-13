@@ -41,9 +41,11 @@ jobs:
 
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
-      - name: Install plugin SDK test dependencies
-        run: bun install --frozen-lockfile
-        working-directory: packages/plugin-sdk
+      - name: Install integration test dependencies
+        shell: bash
+        run: |
+          bun install --cwd packages/plugin-sdk --frozen-lockfile
+          bun install --cwd packages/tui --frozen-lockfile
       - run: cargo test --locked --workspace --all-features
       - run: cargo run --locked --quiet -p xtask -- codegen --check
       - run: python3 scripts/check-dependency-direction.py
@@ -86,8 +88,6 @@ jobs:
           bun run --cwd "$root/plugin" typecheck
           bun test --cwd "$root/plugin"
           bun run --cwd "$root/plugin" build
-      - run: bun install --frozen-lockfile
-        working-directory: packages/tui
       - run: bun run test
         working-directory: packages/tui
       - run: bun run typecheck

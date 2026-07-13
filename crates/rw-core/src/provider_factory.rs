@@ -1035,6 +1035,8 @@ impl ProviderRuntime {
             AdapterKind::GitHubCopilot => github_copilot_capabilities(catalog_pricing.as_ref()),
             kind => model_capabilities(kind, catalog_pricing.as_ref()),
         };
+        let defer_capabilities = connection.kind == AdapterKind::GitHubCopilot
+            || (discovered.capabilities.is_none() && catalog_pricing.is_none());
         let mut capabilities = discovered.capabilities.unwrap_or(fallback.clone());
         capabilities.max_context_tokens = capabilities
             .max_context_tokens
@@ -1063,6 +1065,7 @@ impl ProviderRuntime {
             self.network_policy,
             &capabilities,
             &supported_thinking,
+            defer_capabilities,
         )?;
         let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
             inner,
@@ -1070,7 +1073,7 @@ impl ProviderRuntime {
             expected_model: model.to_owned(),
             capabilities: capabilities.clone(),
             supported_thinking,
-            defer_capabilities: connection.kind == AdapterKind::GitHubCopilot,
+            defer_capabilities,
         });
         let accounting = match connection.kind {
             AdapterKind::OpenAiSubscription => UsageAccounting::SubscriptionQuota,
@@ -1665,6 +1668,14 @@ where
                 }
                 _ => model_capabilities(kind, pricing.as_ref()),
             };
+            // A configured route remains usable when its provider does not
+            // expose model discovery and no cached metadata describes the
+            // model. In that case capability support is unknown, not false:
+            // let the protocol endpoint decide instead of rejecting the turn
+            // locally. Live-discovered and cached capabilities remain strict.
+            let defer_capabilities = kind == AdapterKind::GitHubCopilot
+                || (!matches!(kind, AdapterKind::OpenAiSubscription)
+                    && capability_pricing.is_none());
             let accounting = match kind {
                 AdapterKind::OpenAiSubscription => UsageAccounting::SubscriptionQuota,
                 AdapterKind::GitHubCopilot => UsageAccounting::AiCredits {
@@ -1684,6 +1695,7 @@ where
                 self.network_policy,
                 &capabilities,
                 &supported_thinking,
+                defer_capabilities,
             ) {
                 Ok(inner) => inner,
                 Err(error) => {
@@ -1700,7 +1712,7 @@ where
                 expected_model: model.clone(),
                 capabilities: capabilities.clone(),
                 supported_thinking,
-                defer_capabilities: kind == AdapterKind::GitHubCopilot,
+                defer_capabilities,
             });
             let registration_key = format!("__model_{index:08}");
             registration_keys.insert(candidate.clone(), registration_key.clone());
@@ -1787,6 +1799,7 @@ where
                     self.network_policy,
                     &capabilities,
                     &[],
+                    false,
                 )
                 .ok()
                 .map(|provider| (provider_name.clone(), provider))
@@ -3467,6 +3480,7 @@ fn construct_adapter(
     network_policy: NetworkPolicy,
     capabilities: &Capabilities,
     supported_thinking: &[ThinkingLevel],
+    defer_capabilities: bool,
 ) -> Result<Arc<dyn Provider>, ProviderFactoryError> {
     let result: Result<Arc<dyn Provider>, ProviderError> = match kind {
         AdapterKind::Anthropic => AnthropicProvider::new(AnthropicConfig {
@@ -3524,10 +3538,14 @@ fn construct_adapter(
                 proxy_authentication,
                 network_policy,
                 wire_mode,
-                tool_calling: capabilities.tool_calling,
+                // Unknown model capabilities must not become a local denial.
+                // This only enables the standard wire representation; an
+                // endpoint that does not support it still returns its own
+                // authoritative error.
+                tool_calling: capabilities.tool_calling || defer_capabilities,
                 cache_breakpoints: capabilities.cache_breakpoints,
                 supported_reasoning_efforts: supported_thinking.to_vec(),
-                supports_vision: capabilities.vision,
+                supports_vision: capabilities.vision || defer_capabilities,
                 max_context_tokens: capabilities.max_context_tokens,
                 max_output_tokens: capabilities.max_output_tokens,
             })

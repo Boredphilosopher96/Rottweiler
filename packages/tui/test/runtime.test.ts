@@ -453,6 +453,7 @@ describe("OpenTUI engine runtime", () => {
     expect(files.writes).toEqual([{ path: "/private/cursor", content: "5\n" }])
     expect(JSON.stringify(app.state)).not.toContain("secret-never-rendered")
 
+    await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
     await client.subscription?.onReconnect?.()
     expect(client.commands.at(-1)?.type).toBe("take_driver")
 
@@ -672,6 +673,7 @@ describe("OpenTUI engine runtime", () => {
     )
     runtime.bind(new TestApp())
     await runtime.start()
+    await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
     client.outcomes.push({
       type: "rejected",
       error: {
@@ -743,6 +745,7 @@ describe("OpenTUI engine runtime", () => {
     const app = new TestApp()
     runtime.bind(app)
     await runtime.start()
+    await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
 
     expect(delays).toEqual([10])
     expect(client.commands.map((command) => command.type)).toEqual([
@@ -752,7 +755,6 @@ describe("OpenTUI engine runtime", () => {
       "get_context",
       "get_cost",
       "get_workspace_status",
-      "list_models",
       "list_settings",
       "list_commands",
     ])
@@ -792,6 +794,7 @@ describe("OpenTUI engine runtime", () => {
     )
     runtime.bind(new TestApp())
     await runtime.start()
+    await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
 
     expect(delays).toEqual([10])
     expect(client.commands.map((command) => command.type)).toEqual([
@@ -801,7 +804,6 @@ describe("OpenTUI engine runtime", () => {
       "get_context",
       "get_cost",
       "get_workspace_status",
-      "list_models",
       "list_settings",
       "list_commands",
     ])
@@ -912,17 +914,54 @@ describe("OpenTUI engine runtime", () => {
     client.releaseResume()
     await starting
     expect(await sending).toEqual({ type: "accepted" })
-    expect(client.commands.map((command) => command.type)).toEqual([
-      "resume_session",
-      "take_driver",
+    await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
+    const commandTypes = client.commands.map((command) => command.type)
+    expect(commandTypes[0]).toBe("resume_session")
+    expect(commandTypes.indexOf("take_driver")).toBeLessThan(commandTypes.indexOf("send_message"))
+    for (const expected of [
       "get_context",
       "get_cost",
       "get_workspace_status",
-      "list_models",
       "list_settings",
       "list_commands",
       "send_message",
-    ])
+    ] satisfies ClientCommand["type"][]) expect(commandTypes).toContain(expected)
+  })
+
+  test("keeps live model discovery on demand instead of blocking startup submissions", async () => {
+    const client = new ScriptedClient()
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "session-slow-catalog",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+      },
+      client,
+      new MemoryFiles(),
+    )
+    runtime.bind(new TestApp())
+
+    await runtime.start()
+    await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
+    expect(client.commands.some((command) => command.type === "list_models")).toBeFalse()
+    expect(
+      await runtime.sendCommand({
+        type: "send_message",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          client_id: "ui",
+          request_id: "send-during-catalog",
+        },
+        session_id: "session-slow-catalog",
+        content: "stay responsive",
+        attachments: [],
+      }),
+    ).toEqual({ type: "accepted" })
+    expect(client.commands.at(-1)?.type).toBe("send_message")
+    await runtime.stop()
   })
 
   test("waits for the event stream before requesting connection-scoped projections", async () => {
@@ -962,7 +1001,6 @@ describe("OpenTUI engine runtime", () => {
       "get_context",
       "get_cost",
       "get_workspace_status",
-      "list_models",
       "list_settings",
       "list_commands",
     ])

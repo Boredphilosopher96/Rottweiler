@@ -869,6 +869,49 @@ fn extension_provider(
     })
 }
 
+#[tokio::test]
+async fn configured_route_without_live_catalog_defers_unknown_tool_capability_to_endpoint() {
+    let server = spawn_server(
+        "/v1/chat/completions",
+        vec![
+            status_response("501 Not Implemented"),
+            sse_response("configured-route-ok"),
+        ],
+    );
+    let config = config(&server.endpoint, &["fixture/model-a"]);
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestKeychain::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        PricingTable::default(),
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("runtime must compose: {error}"));
+
+    ModelDriver::prepare_model(&runtime, "fast")
+        .await
+        .unwrap_or_else(|error| panic!("configured route must remain selectable: {error}"));
+    let mut routed = request("fast");
+    routed.tools.push(ToolDefinition {
+        name: "read".to_owned(),
+        description: "Read a workspace file".to_owned(),
+        input_schema: json!({"type": "object"}),
+    });
+    let events = ModelDriver::stream(&runtime, "fast", routed)
+        .unwrap_or_else(|error| panic!("configured route must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(events.iter().all(Result::is_ok));
+    let requests = server
+        .task
+        .join()
+        .unwrap_or_else(|_| panic!("fixture server must join"));
+    assert!(requests[0].starts_with("GET /v1/models "));
+    assert!(requests[1].starts_with("POST /v1/chat/completions "));
+    assert!(requests[1].contains("\"tools\""));
+}
+
 fn extension_config(candidate: &str) -> rw_types::config::Config {
     let mut config = rw_types::config::Config::default();
     "fast".clone_into(&mut config.models.default);

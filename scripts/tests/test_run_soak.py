@@ -48,7 +48,7 @@ class SoakHarnessTests(unittest.TestCase):
         self.assertEqual(tool_call[0]["name"], "read")
         self.assertEqual(tool_call[1]["arguments"], {"path": "soak.txt"})
         self.assertTrue(all(step.marker not in step.prompt for step in steps))
-        self.assertEqual(SOAK.KITTY_SUBMIT, b"\x1b[13;3u")
+        self.assertEqual(SOAK.TERMINAL_SUBMIT, b"\r")
 
     def test_process_tree_tracks_combined_rss_and_named_descendants(self) -> None:
         rows = SOAK.parse_process_table(
