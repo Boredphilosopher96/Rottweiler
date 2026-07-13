@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { CliRenderEvents } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 
-import { createRottweilerApp } from "../src/app"
+import { createRottweilerApp, type PresentationFrameScheduler } from "../src/app"
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../src/protocol"
 import { PROTOCOL_VERSION } from "../../../protocol/types"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
@@ -10,6 +10,7 @@ import {
   daylightTheme,
   kennelTheme,
   systemThemeFor,
+  themeByName,
   themeCatalog,
   type RottweilerTheme,
 } from "../src/theme"
@@ -25,6 +26,31 @@ const initialEvent = {
   turn_id: "turn-tui-test",
   text: "hello",
 } satisfies EngineEvent
+
+class ManualPresentationFrame implements PresentationFrameScheduler {
+  #next = 0
+  readonly callbacks = new Map<number, () => void>()
+  readonly delays: number[] = []
+  scheduled = 0
+
+  schedule(callback: () => void, delayMs: number): number {
+    const handle = ++this.#next
+    this.callbacks.set(handle, callback)
+    this.delays.push(delayMs)
+    this.scheduled += 1
+    return handle
+  }
+
+  cancel(handle: unknown): void {
+    if (typeof handle === "number") this.callbacks.delete(handle)
+  }
+
+  flush(): void {
+    const callbacks = [...this.callbacks.values()]
+    this.callbacks.clear()
+    for (const callback of callbacks) callback()
+  }
+}
 
 function rgba(hex: string): [number, number, number, number] {
   return [
@@ -77,6 +103,170 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(cells.lines).toHaveLength(12)
   })
 
+  test("coalesces hundreds of ordered presentation deltas into one frame without losing protocol progress", async () => {
+    const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
+    renderer = setup.renderer
+    const frame = new ManualPresentationFrame()
+    const app = createRottweilerApp(renderer, { presentationFrame: frame })
+    renderer.root.add(app)
+    app.handleEvent({
+      type: "turn_started",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      turn_id: "turn-stream",
+    })
+    let presentationUpdates = 0
+    const update = app.transcript.update.bind(app.transcript)
+    app.transcript.update = (state) => {
+      presentationUpdates += 1
+      update(state)
+    }
+
+    for (let index = 0; index < 300; index += 1) {
+      const sequence = String(index + 2)
+      const meta = {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: sequence,
+        emitted_at: "2026-01-01T00:00:00Z",
+      } as const
+      if (index % 3 === 0) {
+        app.handleEvent({ type: "text_delta", meta, turn_id: "turn-stream", text: "t" })
+      } else if (index % 3 === 1) {
+        app.handleEvent({ type: "thinking_delta", meta, turn_id: "turn-stream", text: "r" })
+      } else {
+        app.handleEvent({
+          type: "citation_delta",
+          meta,
+          turn_id: "turn-stream",
+          uri: `https://example.test/${index}`,
+        })
+      }
+    }
+
+    expect(frame.scheduled).toBe(1)
+    expect(frame.delays).toEqual([16])
+    expect(frame.callbacks.size).toBe(1)
+    expect(presentationUpdates).toBe(0)
+    expect(app.state.lastSequence).toBe("301")
+    expect(app.state.streamingTail?.text).toHaveLength(100)
+    expect(app.state.streamingTail?.thinking).toHaveLength(100)
+    expect(app.state.streamingTail?.citations).toHaveLength(100)
+
+    frame.flush()
+
+    expect(presentationUpdates).toBe(1)
+    expect(frame.callbacks.size).toBe(0)
+    expect(app.transcript.streamingMarkdown.content).toHaveLength(100)
+  })
+
+  test("flushes queued stream content immediately before permission, question, and finish events", async () => {
+    const terminalEvents: EngineEvent[] = [
+      {
+        type: "tool_approval_needed",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "session-local",
+          sequence_id: "3",
+          emitted_at: "2026-01-01T00:00:00Z",
+        },
+        turn_id: "turn-terminal",
+        tool_call_id: "tool-1",
+        name: "bash",
+        args: { command: "pwd" },
+        capabilities: ["execute"],
+        rationale: "inspect the workspace",
+      },
+      {
+        type: "question_asked",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "session-local",
+          sequence_id: "3",
+          emitted_at: "2026-01-01T00:00:00Z",
+        },
+        turn_id: "turn-terminal",
+        question_id: "question-1",
+        questions: [{
+          id: "question-1",
+          prompt: "Continue?",
+          response_kind: "select_one",
+          options: [{ value: "yes", label: "Yes" }],
+        }],
+      },
+      {
+        type: "turn_finished",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "session-local",
+          sequence_id: "3",
+          emitted_at: "2026-01-01T00:00:00Z",
+        },
+        turn_id: "turn-terminal",
+        status: "completed",
+        usage: {
+          input_tokens: "1",
+          output_tokens: "1",
+          cache_read_tokens: "0",
+          cache_write_tokens: "0",
+          reasoning_tokens: "0",
+        },
+        cost: { kind: "unavailable", reason: "fixture" },
+      },
+    ]
+
+    for (const terminalEvent of terminalEvents) {
+      const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
+      renderer = setup.renderer
+      const frame = new ManualPresentationFrame()
+      const app = createRottweilerApp(renderer, { presentationFrame: frame, onCommand: () => ({ type: "accepted" }) })
+      renderer.root.add(app)
+      app.handleEvent({
+        type: "turn_started",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "session-local",
+          sequence_id: "1",
+          emitted_at: "2026-01-01T00:00:00Z",
+        },
+        turn_id: "turn-terminal",
+      })
+      let presentationUpdates = 0
+      const update = app.transcript.update.bind(app.transcript)
+      app.transcript.update = (state) => {
+        presentationUpdates += 1
+        update(state)
+      }
+      app.handleEvent({
+        type: "text_delta",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "session-local",
+          sequence_id: "2",
+          emitted_at: "2026-01-01T00:00:00Z",
+        },
+        turn_id: "turn-terminal",
+        text: "ready",
+      })
+
+      app.handleEvent(terminalEvent)
+
+      expect(presentationUpdates).toBe(1)
+      expect(frame.callbacks.size).toBe(0)
+      expect(app.state.lastSequence).toBe("3")
+      expect(app.transcript.streamingMarkdown.content).toBe("ready")
+      if (terminalEvent.type === "tool_approval_needed") expect(app.interactionPanel.visible).toBeTrue()
+      if (terminalEvent.type === "question_asked") expect(app.interactionPanel.visible).toBeTrue()
+      if (terminalEvent.type === "turn_finished") expect(app.state.turns["turn-terminal"]?.status).toBe("completed")
+      renderer.destroy()
+      renderer = undefined
+    }
+  })
+
   test("constructs the complete app with the persisted startup theme", async () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer
@@ -87,8 +277,8 @@ describe("Rottweiler OpenTUI shell", () => {
     const backgrounds = setup.captureSpans().lines.flatMap((line) =>
       line.spans.map((span) => span.bg.toInts())
     )
-    expect(backgrounds).toContainEqual([247, 245, 239, 255])
-    expect(backgrounds).not.toContainEqual([11, 13, 18, 255])
+    expect(backgrounds).toContainEqual(rgba(daylightTheme.background))
+    expect(backgrounds).not.toContainEqual(rgba(kennelTheme.background))
   })
 
   test("previews the dynamic theme catalog coherently, reverts on Escape, and persists on confirm", async () => {
@@ -109,18 +299,21 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options.map((option) => option.value)).toEqual(
       themeCatalog.map((theme) => `theme:${theme.name}`),
     )
-    const daylight = app.picker.select.options.findIndex(
-      (option) => option.value === "theme:daylight",
+    const previewTheme = themeByName("tokyonight")!
+    const previewIndex = app.picker.select.options.findIndex(
+      (option) => option.value === `theme:${previewTheme.name}`,
     )
     const pickerBeforePreview = app.picker
-    app.picker.select.setSelectedIndex(daylight)
+    app.picker.select.setSelectedIndex(previewIndex)
     await setup.renderOnce()
-    expect(app.picker).not.toBe(pickerBeforePreview)
+    // Theme preview rebuilds the themed render tree while preserving picker
+    // query, selection, focus, and the composer draft.
+    expect(app.picker === pickerBeforePreview).toBeFalse()
     expect(pickerBeforePreview.input.isDestroyed).toBeTrue()
     expect(app.picker.input.isDestroyed).toBeFalse()
     expect(renderer.currentFocusedRenderable?.id).toBe("picker-query")
     expect(setup.captureCharFrame()).toContain("Themes · arrows preview · Enter confirms")
-    expectCoherentTheme(app, daylightTheme)
+    expectCoherentTheme(app, previewTheme)
     expect(app.composer.value).toBe("draft survives retheme")
 
     setup.mockInput.pressEscape()
@@ -134,23 +327,23 @@ describe("Rottweiler OpenTUI shell", () => {
 
     app.openThemePicker()
     app.picker.select.setSelectedIndex(
-      app.picker.select.options.findIndex((option) => option.value === "theme:daylight"),
+      app.picker.select.options.findIndex((option) => option.value === `theme:${previewTheme.name}`),
     )
     app.picker.select.selectCurrent()
     await Bun.sleep(10)
     expect(commands).toContainEqual(expect.objectContaining({
       type: "set_setting",
       key: "ui.theme",
-      value: "daylight",
+      value: previewTheme.name,
     }))
     expect(app.picker.visible).toBeFalse()
-    expectCoherentTheme(app, daylightTheme)
+    expectCoherentTheme(app, previewTheme)
 
     setup.resize(64, 14)
     app.openModePicker()
     await setup.renderOnce()
     expect(app.picker.visible).toBeTrue()
-    expectCoherentTheme(app, daylightTheme)
+    expectCoherentTheme(app, previewTheme)
     expect(setup.captureCharFrame()).toContain("Modes")
   })
 
@@ -172,6 +365,23 @@ describe("Rottweiler OpenTUI shell", () => {
     app.openThemePicker()
     const system = app.picker.select.options.find((option) => option.value === "theme:system")
     expect(system?.description).toContain(daylightTheme.background)
+  })
+
+  test("previews every built-in theme in the terminal's current light variant", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 22, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      theme: daylightTheme,
+      systemThemeMode: "light",
+    })
+    renderer.root.add(app)
+    app.openThemePicker()
+    const preview = themeByName("tokyonight", "light")!
+    app.picker.select.setSelectedIndex(
+      app.picker.select.options.findIndex((option) => option.value === "theme:tokyonight"),
+    )
+    await setup.renderOnce()
+    expectCoherentTheme(app, preview)
   })
 
   test("submits with plain Enter while modified Enter and Ctrl+J insert newlines", async () => {
@@ -266,6 +476,98 @@ describe("Rottweiler OpenTUI shell", () => {
       renderer.destroy()
       renderer = undefined
     }
+  })
+
+  test("uses one constrained bottom-dock input for approvals, choices, and plans", async () => {
+    const setup = await createTestRenderer({ width: 72, height: 10, useThread: false })
+    renderer = setup.renderer
+    const base = createInitialState()
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+
+    const expectExclusiveInteraction = async () => {
+      await setup.renderOnce()
+      expect(app.interactionPanel.visible).toBeTrue()
+      expect(app.interactionPanel.capturesInput).toBeTrue()
+      expect(app.composer.visible).toBeFalse()
+      expect(renderer?.currentFocusedRenderable).toBe(app.interactionPanel.select)
+      expect(app.main.y + app.main.height).toBeLessThanOrEqual(app.interactionPanel.y)
+      expect(app.interactionPanel.y + app.interactionPanel.height).toBeLessThanOrEqual(
+        app.statusLine.y,
+      )
+      expect(app.interactionPanel.height).toBeLessThanOrEqual(8)
+    }
+
+    app.setState({
+      ...base,
+      tools: {
+        edit: {
+          toolCallId: "edit",
+          turnId: "1",
+          name: "edit",
+          args: { path: "src/main.rs" },
+          status: "awaiting_approval",
+          capabilities: ["write_filesystem"],
+          rationale: "Apply the reviewed change",
+          diff: {
+            proposal_id: "proposal",
+            path: "src/main.rs",
+            unified_diff: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+            arguments_hash: "arguments",
+            base_hash: "base",
+            diff_hash: "diff",
+            truncated: false,
+          },
+          chunks: [],
+          output: null,
+          isError: null,
+          callIndex: 0,
+        },
+      },
+    })
+    await expectExclusiveInteraction()
+    expect(app.interactionPanel.select.height).toBeGreaterThan(0)
+
+    app.setState({
+      ...base,
+      questions: {
+        choice: {
+          questionId: "choice",
+          turnId: "2",
+          questions: [{
+            id: "choice",
+            prompt: "Choose the safe option",
+            response_kind: "select_one",
+            options: [
+              { value: "keep", label: "Keep", description: "Keep the change" },
+              { value: "revert", label: "Revert", description: "Revert the change" },
+            ],
+          }],
+          answers: null,
+          answered: false,
+        },
+      },
+    })
+    await expectExclusiveInteraction()
+
+    app.setState({
+      ...base,
+      mode: "plan",
+      pendingPlan: {
+        title: "Implement safely",
+        summary_md: "One reviewed change.",
+        steps: [{ description: "Edit", files_touched: ["src/lib.rs"], verification: "cargo test" }],
+        open_questions: [],
+      },
+    })
+    await expectExclusiveInteraction()
+
+    app.setState(base)
+    await setup.renderOnce()
+    expect(app.interactionPanel.visible).toBeFalse()
+    expect(app.composer.visible).toBeTrue()
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
+    expect(app.composer.y + app.composer.height).toBeLessThanOrEqual(app.statusLine.y)
   })
 
   test("keeps anchored autocomplete above the composer on short terminals", async () => {
@@ -612,8 +914,8 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(commandCard?.markdown.content).toContain("actor idle · queue empty")
   })
 
-  test("answers free-text questions through the multiline composer without changing pasted text", async () => {
-    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+  test("answers free-text questions through one contained composer-backed dock", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 10, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
@@ -641,8 +943,20 @@ describe("Rottweiler OpenTUI shell", () => {
       }],
     })
 
+    await setup.renderOnce()
+
     expect(app.interactionPanel.select.visible).toBeFalse()
+    expect(app.interactionPanel.usesComposer).toBeTrue()
+    expect(app.composer.visible).toBeTrue()
     expect(app.interactionPanel.prompt.plainText).toContain("Type your answer below")
+    expect(app.interactionPanel.y + app.interactionPanel.height).toBeLessThanOrEqual(app.composer.y)
+    expect(app.composer.y + app.composer.height).toBeLessThanOrEqual(app.statusLine.y)
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
+    app.composer.value = Array.from({ length: 12 }, (_, index) => `answer-${index}`).join("\n")
+    await setup.renderOnce()
+    expect(app.interactionPanel.y + app.interactionPanel.height).toBeLessThanOrEqual(app.composer.y)
+    expect(app.composer.y + app.composer.height).toBeLessThanOrEqual(app.statusLine.y)
+    app.composer.value = ""
     const exact = "  first line\nsecond line  "
     await setup.mockInput.pasteBracketedText(exact)
     expect(app.composer.value).toBe(exact)
@@ -1205,8 +1519,8 @@ describe("Rottweiler OpenTUI shell", () => {
           {
             key: "ui.theme",
             label: "Theme",
-            value: "kennel-dark",
-            choices: ["kennel-dark", "daylight"],
+            value: "opencode",
+            choices: ["system", "opencode", "tokyonight"],
             provenance: "built-in",
             appliesImmediately: false,
           },
@@ -1333,15 +1647,15 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(settingOptions).toContain("compaction.auto:false")
     expect(settingOptions).toContain("ui.keybindings.preset:vim")
     expect(settingOptions).toContain("mcp.servers.docs.enabled:false")
-    const daylight = app.picker.select.options.findIndex(
-      (option) => option.value === "ui.theme:daylight",
+    const tokyoNight = app.picker.select.options.findIndex(
+      (option) => option.value === "ui.theme:tokyonight",
     )
-    app.picker.select.setSelectedIndex(daylight)
+    app.picker.select.setSelectedIndex(tokyoNight)
     app.picker.select.selectCurrent()
     expect(emitted).toContainEqual(expect.objectContaining({
       type: "set_setting",
       key: "ui.theme",
-      value: "daylight",
+      value: "tokyonight",
     }))
 
     app.closePicker()

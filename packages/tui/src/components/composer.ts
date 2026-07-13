@@ -20,6 +20,7 @@ export interface ComposerOptions {
   readonly onFileMention: (query: string) => void
   readonly onInput?: (value: string) => void
   readonly onSubmitted?: () => void
+  readonly onHeightChange?: (height: number) => void
 }
 
 export class ComposerRenderable extends BoxRenderable {
@@ -31,6 +32,7 @@ export class ComposerRenderable extends BoxRenderable {
   #options: ComposerOptions
   #theme: RottweilerTheme
   #submitting = false
+  #dockHeight = 4
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, options: ComposerOptions) {
     super(ctx, {
@@ -115,6 +117,10 @@ export class ComposerRenderable extends BoxRenderable {
 
   get attachments(): readonly Attachment[] {
     return this.#attachments
+  }
+
+  get dockHeight(): number {
+    return this.visible ? this.#dockHeight : 0
   }
 
   override focus(): void {
@@ -240,7 +246,11 @@ export class ComposerRenderable extends BoxRenderable {
     const imageVisible = imageRows > 0 && terminalLimit - 2 - fixedExtras - 1 >= imageRows
     if (this.#imagePreview !== null) this.#imagePreview.visible = imageVisible
     const extras = fixedExtras + (imageVisible ? imageRows : 0)
-    this.height = Math.min(terminalLimit, Math.max(3, 2 + editorRows + extras))
+    const nextHeight = Math.min(terminalLimit, Math.max(3, 2 + editorRows + extras))
+    const heightChanged = this.#dockHeight !== nextHeight
+    this.#dockHeight = nextHeight
+    this.height = nextHeight
+    if (heightChanged) this.#options.onHeightChange?.(nextHeight)
   }
 }
 

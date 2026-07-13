@@ -92,6 +92,7 @@ export interface RottweilerAppOptions {
   readonly requestId?: () => string
   readonly theme?: RottweilerTheme
   readonly systemThemeMode?: ThemeMode | null
+  readonly systemTheme?: RottweilerTheme
   readonly treeSitterClient?: TreeSitterClient
   readonly notifications?: NotificationAdapter
   readonly editor?: EditorAdapter
@@ -106,6 +107,21 @@ export interface RottweilerAppOptions {
   readonly replaySessionId?: string
   /** TUI-local bindings. Standard is backward-compatible; Vim enables modal editing/navigation. */
   readonly keybindings?: KeybindingConfiguration
+  /** Injectable frame scheduler used to coalesce presentation-only stream deltas. */
+  readonly presentationFrame?: PresentationFrameScheduler
+}
+
+export interface PresentationFrameScheduler {
+  schedule(callback: () => void, delayMs: number): unknown
+  cancel(handle: unknown): void
+}
+
+interface PendingPresentationEvent {
+  readonly event: WireEngineEvent
+  readonly eventRecord: Record<string, unknown>
+  readonly commandRequestId: string | null
+  readonly previous: RottweilerState
+  readonly next: RottweilerState
 }
 
 export interface TerminalHandoverAdapter {
@@ -214,6 +230,7 @@ export class RottweilerApp extends BoxRenderable {
   #sessionId: string
   #terminalFocused = true
   #systemThemeMode: ThemeMode | null
+  #systemTheme: RottweilerTheme
   #pickerKind: PickerKind | null = null
   #pendingFilePreview: { readonly path: string; readonly requestId: string } | null = null
   #pendingWorkspaceSearchRequest: string | null = null
@@ -256,6 +273,10 @@ export class RottweilerApp extends BoxRenderable {
   #vimFocus: VimFocus = "composer"
   #vimFocusBeforePicker: Exclude<VimFocus, "picker"> = "composer"
   #destroyed = false
+  #presentationQueue: PendingPresentationEvent[] = []
+  #presentationFrameHandle: unknown | null = null
+  #presentingFrame = false
+  #lastPresentationFlushAt = performance.now() - 16
   #onTerminalFocus = () => {
     this.#terminalFocused = true
   }
@@ -264,8 +285,16 @@ export class RottweilerApp extends BoxRenderable {
   }
   #onTerminalThemeMode = (mode: ThemeMode) => {
     this.#systemThemeMode = mode
-    if (this.#theme.name !== "system") return
-    const next = systemThemeFor(mode)
+    if (this.#theme.name !== "system") {
+      const next = themeByName(this.#theme.name, mode)
+      if (next !== undefined && next.background !== this.#theme.background) this.#createThemedSurface(next)
+      return
+    }
+    // Palette refresh is owned by production startup. If the terminal changes
+    // mode during a session, immediately switch to a safe matching fallback
+    // rather than retaining an unreadable stale palette.
+    this.#systemTheme = systemThemeFor(mode)
+    const next = this.#systemTheme
     if (next.background !== this.#theme.background) this.#createThemedSurface(next)
   }
   #onGlobalKey = (key: KeyEvent) => {
@@ -320,6 +349,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#inputMode = this.#keybindings.preset === "vim" ? "normal" : "standard"
     this.#theme = theme
     this.#systemThemeMode = options.systemThemeMode ?? null
+    this.#systemTheme = options.systemTheme ?? systemThemeFor(this.#systemThemeMode)
     this.#treeSitterClient = options.treeSitterClient
     this.#sessionId = this.#options.sessionId
     const initialState = options.initialState ?? createInitialState()
@@ -434,7 +464,9 @@ export class RottweilerApp extends BoxRenderable {
           ? id.slice("ui.theme:".length)
           : null
       if (name === null) return
-      const selected = themeByName(name)
+      const selected = name === "system"
+        ? this.#systemTheme
+        : themeByName(name, this.#systemThemeMode ?? "dark")
       if (selected !== undefined) {
         if (this.#themeBeforePreview === null) this.#themeBeforePreview = this.#theme
         this.#previewTheme(selected)
@@ -452,6 +484,12 @@ export class RottweilerApp extends BoxRenderable {
       onFileMention: (query) => this.openFilePicker(query, true),
       onInput: (value) => this.#updateComposerAutocomplete(value),
       onSubmitted: () => this.#openPostSubmitPicker(),
+      onHeightChange: (height) => {
+        this.interactionPanel.resizeForTerminal(
+          this.height === 0 ? this.ctx.height : this.height,
+          this.interactionPanel.usesComposer ? height : 0,
+        )
+      },
     })
     this.statusLine = new StatusLineRenderable(this.ctx, theme)
     this.add(this.banner)
@@ -490,6 +528,15 @@ export class RottweilerApp extends BoxRenderable {
 
   get state(): RottweilerState {
     return this.#state
+  }
+
+  setSystemTheme(theme: RottweilerTheme): void {
+    if (theme.name !== "system") return
+    this.#systemTheme = theme
+    this.#systemThemeMode = theme.mode
+    if (this.#theme.name === "system" && theme.background !== this.#theme.background) {
+      this.#createThemedSurface(theme)
+    }
   }
 
   /** Update command routing only after the runtime owns the new driver lease. */
@@ -636,7 +683,64 @@ export class RottweilerApp extends BoxRenderable {
     if (event.type === "workspace_files_found") this.#clearProjectionError("files")
     const previous = this.#state
     const next = reduceRottweilerState(previous, engineEvent(event))
-    this.setState(next)
+    // Advance protocol state immediately so reconnect cursors and durable handoff
+    // observe every accepted event even when its presentation waits for a frame.
+    this.#state = next
+    this.#presentationQueue.push({ event, eventRecord, commandRequestId, previous, next })
+    if (isPresentationStreamDelta(event)) {
+      this.#schedulePresentationFrame()
+      return
+    }
+    this.#flushPresentationQueue()
+  }
+
+  #schedulePresentationFrame(): void {
+    if (this.#presentationFrameHandle !== null) return
+    const scheduler = this.#options.presentationFrame
+    if (scheduler === undefined) {
+      const elapsed = performance.now() - this.#lastPresentationFlushAt
+      // Match OpenCode's ingress batching: after an idle frame, show the first
+      // token immediately; only coalesce deltas that arrive inside the active
+      // 16 ms presentation window.
+      if (elapsed >= 16) {
+        this.#flushPresentationQueue()
+        return
+      }
+      this.#presentationFrameHandle = setTimeout(
+        () => this.#flushPresentationQueue(),
+        Math.max(0, 16 - elapsed),
+      )
+      return
+    }
+    this.#presentationFrameHandle = scheduler.schedule(() => this.#flushPresentationQueue(), 16)
+  }
+
+  #cancelPresentationFrame(): void {
+    const handle = this.#presentationFrameHandle
+    if (handle === null) return
+    this.#presentationFrameHandle = null
+    const scheduler = this.#options.presentationFrame
+    if (scheduler === undefined) clearTimeout(handle as ReturnType<typeof setTimeout>)
+    else scheduler.cancel(handle)
+  }
+
+  #flushPresentationQueue(): void {
+    this.#cancelPresentationFrame()
+    if (this.#destroyed || this.#presentationQueue.length === 0) return
+    const pending = this.#presentationQueue
+    this.#presentationQueue = []
+    this.#presentingFrame = true
+    try {
+      this.setState(pending[pending.length - 1]!.next)
+    } finally {
+      this.#presentingFrame = false
+    }
+    this.#lastPresentationFlushAt = performance.now()
+    for (const item of pending) this.#afterPresentedEvent(item)
+  }
+
+  #afterPresentedEvent(item: PendingPresentationEvent): void {
+    const { event, eventRecord, commandRequestId, previous, next } = item
     const modelSwitchOutcome =
       event.type === "command_acknowledged" &&
       commandRequestId !== null &&
@@ -785,6 +889,9 @@ export class RottweilerApp extends BoxRenderable {
 
   setState(state: RottweilerState): void {
     if (this.#destroyed) return
+    if (!this.#presentingFrame && this.#presentationQueue.length > 0) {
+      this.#flushPresentationQueue()
+    }
     const previousFocusOwner = this.#visibleFocusOwner()
     this.#state = state
     if (state.providerAuth.pending === null) {
@@ -798,7 +905,16 @@ export class RottweilerApp extends BoxRenderable {
     this.interactionPanel.update(state)
     this.reviewPanel.update(state, this.#reviewOpen)
     this.composer.setQueuedMessages(state.queuedMessages)
-    this.composer.visible = !state.replay.active && !this.#reviewOpen
+    const composerVisible =
+      !state.replay.active &&
+      !this.#reviewOpen &&
+      (!this.interactionPanel.visible || this.interactionPanel.usesComposer)
+    if (!composerVisible) this.composer.editor.blur()
+    this.composer.visible = composerVisible
+    this.interactionPanel.resizeForTerminal(
+      this.height === 0 ? this.ctx.height : this.height,
+      this.interactionPanel.usesComposer && composerVisible ? this.composer.dockHeight : 0,
+    )
     const focusOwner = this.#visibleFocusOwner()
     if (
       (previousFocusOwner === "interaction" || previousFocusOwner === "review") &&
@@ -1097,6 +1213,10 @@ export class RottweilerApp extends BoxRenderable {
   protected override onResize(width: number, height: number): void {
     this.contextPanel.visible = !this.#state.replay.active && width >= 100
     this.composer.resizeForTerminal(height)
+    this.interactionPanel.resizeForTerminal(
+      height,
+      this.interactionPanel.usesComposer && this.composer.visible ? this.composer.dockHeight : 0,
+    )
     this.reviewPanel.resizeForTerminal(height)
     if (this.#pickerAnchored) this.#positionPicker(true)
   }
@@ -1104,6 +1224,8 @@ export class RottweilerApp extends BoxRenderable {
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
+    this.#cancelPresentationFrame()
+    this.#presentationQueue = []
     this.#clearPendingShellTimer()
     this.#clearPluginNotificationTimer()
     this.#clearSessionSearchTimer()
@@ -1282,7 +1404,7 @@ export class RottweilerApp extends BoxRenderable {
       this.reviewPanel.focusPresentation()
       return
     }
-    if (this.interactionPanel.visible) {
+    if (this.interactionPanel.capturesInput) {
       this.interactionPanel.select.focus()
       return
     }
@@ -1359,7 +1481,7 @@ export class RottweilerApp extends BoxRenderable {
   #visibleFocusOwner(): VimFocus | "interaction" | "review" {
     if (this.picker.visible && !this.#pickerAnchored) return "picker"
     if (this.reviewPanel.visible) return "review"
-    if (this.interactionPanel.visible) return "interaction"
+    if (this.interactionPanel.capturesInput) return "interaction"
     if (this.#state.replay.active) return "transcript"
     return this.#vimFocus
   }
@@ -2099,7 +2221,8 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #resolvedTheme(theme: RottweilerTheme): RottweilerTheme {
-    return theme.name === "system" ? systemThemeFor(this.#systemThemeMode) : theme
+    if (theme.name === "system") return this.#systemTheme
+    return themeByName(theme.name, this.#systemThemeMode ?? theme.mode) ?? theme
   }
 
   #openPicker<T>(
@@ -3326,6 +3449,10 @@ function approvalBinding(diff: unknown): ApprovalBinding | null {
     base_hash: value.base_hash,
     diff_hash: value.diff_hash,
   }
+}
+
+function isPresentationStreamDelta(event: WireEngineEvent): boolean {
+  return event.type === "text_delta" || event.type === "thinking_delta" || event.type === "citation_delta"
 }
 
 /** Build the retained OpenTUI application tree. */

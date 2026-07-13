@@ -1,217 +1,440 @@
 import { SyntaxStyle } from "@opentui/core"
 import { lstat, readFile, readdir } from "node:fs/promises"
-import { join } from "node:path"
+import { basename, join } from "node:path"
 
-export interface RottweilerTheme {
-  readonly name: string
-  readonly background: string
-  readonly panel: string
-  readonly panelRaised: string
-  readonly foreground: string
-  readonly muted: string
-  readonly subtle: string
-  readonly accent: string
-  readonly accentStrong: string
-  readonly success: string
-  readonly warning: string
-  readonly danger: string
-  readonly info: string
-  readonly border: string
-  readonly focus: string
-  readonly selection: string
-  readonly added: string
-  readonly removed: string
+import aura from "./assets/aura.json"
+import ayu from "./assets/ayu.json"
+import carbonfox from "./assets/carbonfox.json"
+import catppuccinFrappe from "./assets/catppuccin-frappe.json"
+import catppuccinMacchiato from "./assets/catppuccin-macchiato.json"
+import catppuccin from "./assets/catppuccin.json"
+import cobalt2 from "./assets/cobalt2.json"
+import cursor from "./assets/cursor.json"
+import dracula from "./assets/dracula.json"
+import everforest from "./assets/everforest.json"
+import flexoki from "./assets/flexoki.json"
+import github from "./assets/github.json"
+import gruvbox from "./assets/gruvbox.json"
+import kanagawa from "./assets/kanagawa.json"
+import lucentOrng from "./assets/lucent-orng.json"
+import material from "./assets/material.json"
+import matrix from "./assets/matrix.json"
+import mercury from "./assets/mercury.json"
+import monokai from "./assets/monokai.json"
+import nightowl from "./assets/nightowl.json"
+import nord from "./assets/nord.json"
+import oneDark from "./assets/one-dark.json"
+import opencode from "./assets/opencode.json"
+import orng from "./assets/orng.json"
+import osakaJade from "./assets/osaka-jade.json"
+import palenight from "./assets/palenight.json"
+import rosepine from "./assets/rosepine.json"
+import solarized from "./assets/solarized.json"
+import synthwave84 from "./assets/synthwave84.json"
+import tokyonight from "./assets/tokyonight.json"
+import vercel from "./assets/vercel.json"
+import vesper from "./assets/vesper.json"
+import zenburn from "./assets/zenburn.json"
+
+export type ThemeMode = "dark" | "light"
+export interface TerminalThemeColors {
+  readonly palette: readonly (string | null)[]
+  readonly defaultForeground: string | null
+  readonly defaultBackground: string | null
+}
+type HexColor = `#${string}`
+type ThemeVariant = Readonly<{ dark: ThemeColorValue; light: ThemeColorValue }>
+export type ThemeColorValue = HexColor | "transparent" | "none" | string | ThemeVariant
+
+export const THEME_ROLE_KEYS = [
+  "primary", "secondary", "accent", "error", "warning", "success", "info",
+  "text", "textMuted", "selectedListItemText", "background", "backgroundPanel",
+  "backgroundElement", "backgroundMenu", "border", "borderActive", "borderSubtle",
+  "diffAdded", "diffRemoved", "diffContext", "diffHunkHeader", "diffHighlightAdded",
+  "diffHighlightRemoved", "diffAddedBg", "diffRemovedBg", "diffContextBg",
+  "diffLineNumber", "diffAddedLineNumberBg", "diffRemovedLineNumberBg",
+  "markdownText", "markdownHeading", "markdownLink", "markdownLinkText",
+  "markdownCode", "markdownBlockQuote", "markdownEmph", "markdownStrong",
+  "markdownHorizontalRule", "markdownListItem", "markdownListEnumeration",
+  "markdownImage", "markdownImageText", "markdownCodeBlock", "syntaxComment",
+  "syntaxKeyword", "syntaxFunction", "syntaxVariable", "syntaxString", "syntaxNumber",
+  "syntaxType", "syntaxOperator", "syntaxPunctuation",
+] as const
+
+export type ThemeRole = typeof THEME_ROLE_KEYS[number]
+type RequiredThemeRole = Exclude<ThemeRole, "selectedListItemText" | "backgroundMenu">
+export type ResolvedThemeRoles = Readonly<Record<ThemeRole, string>>
+
+export interface ThemeJson {
+  readonly $schema?: string
+  readonly defs?: Readonly<Record<string, ThemeColorValue>>
+  readonly theme: Readonly<Record<RequiredThemeRole, ThemeColorValue>> & Readonly<{
+    selectedListItemText?: ThemeColorValue
+    backgroundMenu?: ThemeColorValue
+    thinkingOpacity?: number
+  }>
 }
 
-export const kennelTheme: RottweilerTheme = {
-  name: "kennel-dark",
-  background: "#0B0D12",
-  panel: "#11151D",
-  panelRaised: "#171C26",
-  foreground: "#E8ECF3",
-  muted: "#A5AFC0",
-  subtle: "#687386",
-  accent: "#E6B450",
-  accentStrong: "#F7C56B",
-  success: "#7BD88F",
-  warning: "#F7C56B",
-  danger: "#FF6B6B",
-  info: "#78DCE8",
-  border: "#303849",
-  focus: "#E6B450",
-  selection: "#273449",
-  added: "#173D2A",
-  removed: "#48242B",
+/** Rich OpenCode-compatible roles plus the compact aliases used by existing components. */
+export type RottweilerTheme = ResolvedThemeRoles & Readonly<{
+  name: string
+  mode: ThemeMode
+  thinkingOpacity: number
+  panel: string
+  panelRaised: string
+  foreground: string
+  muted: string
+  subtle: string
+  accentStrong: string
+  danger: string
+  focus: string
+  selection: string
+  added: string
+  removed: string
+}>
+
+const asTheme = (value: unknown): ThemeJson => value as ThemeJson
+
+/** Theme assets synchronized from OpenCode dev cf75036. */
+export const DEFAULT_THEMES: Readonly<Record<string, ThemeJson>> = {
+  aura: asTheme(aura),
+  ayu: asTheme(ayu),
+  carbonfox: asTheme(carbonfox),
+  catppuccin: asTheme(catppuccin),
+  "catppuccin-frappe": asTheme(catppuccinFrappe),
+  "catppuccin-macchiato": asTheme(catppuccinMacchiato),
+  cobalt2: asTheme(cobalt2),
+  cursor: asTheme(cursor),
+  dracula: asTheme(dracula),
+  everforest: asTheme(everforest),
+  flexoki: asTheme(flexoki),
+  github: asTheme(github),
+  gruvbox: asTheme(gruvbox),
+  kanagawa: asTheme(kanagawa),
+  "lucent-orng": asTheme(lucentOrng),
+  material: asTheme(material),
+  matrix: asTheme(matrix),
+  mercury: asTheme(mercury),
+  monokai: asTheme(monokai),
+  nightowl: asTheme(nightowl),
+  nord: asTheme(nord),
+  "one-dark": asTheme(oneDark),
+  opencode: asTheme(opencode),
+  orng: asTheme(orng),
+  "osaka-jade": asTheme(osakaJade),
+  palenight: asTheme(palenight),
+  rosepine: asTheme(rosepine),
+  solarized: asTheme(solarized),
+  synthwave84: asTheme(synthwave84),
+  tokyonight: asTheme(tokyonight),
+  vercel: asTheme(vercel),
+  vesper: asTheme(vesper),
+  zenburn: asTheme(zenburn),
 }
 
-export const daylightTheme: RottweilerTheme = {
-  name: "daylight",
-  background: "#F7F5EF",
-  panel: "#EEEAE0",
-  panelRaised: "#E6E0D3",
-  foreground: "#25221D",
-  muted: "#625D53",
-  subtle: "#8B8376",
-  accent: "#9A5B00",
-  accentStrong: "#7A4700",
-  success: "#267A3F",
-  warning: "#9A5B00",
-  danger: "#B4232F",
-  info: "#176B87",
-  border: "#C7BFAF",
-  focus: "#9A5B00",
-  selection: "#D8E6ED",
-  added: "#D6EFDC",
-  removed: "#F2D8DC",
-}
+const REQUIRED_THEME_ROLE_KEYS = THEME_ROLE_KEYS.filter(
+  (key): key is RequiredThemeRole => key !== "selectedListItemText" && key !== "backgroundMenu",
+)
+const THEME_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/
+const REFERENCE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+const HEX = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
+const MAX_DEFINITIONS = 256
+const MAX_RESOLUTION_DEPTH = 128
 
-export const tokyoNightTheme: RottweilerTheme = {
-  name: "tokyo-night",
-  background: "#1A1B26", panel: "#202330", panelRaised: "#24283B",
-  foreground: "#C0CAF5", muted: "#A9B1D6", subtle: "#565F89",
-  accent: "#BB9AF7", accentStrong: "#7AA2F7", success: "#9ECE6A",
-  warning: "#E0AF68", danger: "#F7768E", info: "#7DCFFF",
-  border: "#3B4261", focus: "#7AA2F7", selection: "#283457",
-  added: "#203A32", removed: "#3D2636",
-}
+export function resolveThemeJson(source: ThemeJson, mode: ThemeMode, name: string): RottweilerTheme {
+  const defs = source.defs ?? {}
+  const resolve = (value: ThemeColorValue, chain: readonly string[] = []): string => {
+    if (typeof value === "object" && value !== null) return resolve(value[mode], chain)
+    if (value === "transparent" || value === "none") return "#00000000"
+    if (HEX.test(value)) return normalizeHex(value)
+    if (!REFERENCE_NAME.test(value)) throw new Error(`Invalid color reference: ${value}`)
+    if (chain.length >= MAX_RESOLUTION_DEPTH) throw new Error("Theme color reference depth exceeded")
+    if (chain.includes(value)) throw new Error(`Circular color reference: ${[...chain, value].join(" -> ")}`)
+    const next = defs[value] ?? source.theme[value as RequiredThemeRole]
+    if (next === undefined) throw new Error(`Color reference not found: ${value}`)
+    return resolve(next, [...chain, value])
+  }
 
-export const catppuccinTheme: RottweilerTheme = {
-  name: "catppuccin-mocha",
-  background: "#1E1E2E", panel: "#252536", panelRaised: "#313244",
-  foreground: "#CDD6F4", muted: "#A6ADC8", subtle: "#6C7086",
-  accent: "#CBA6F7", accentStrong: "#89B4FA", success: "#A6E3A1",
-  warning: "#F9E2AF", danger: "#F38BA8", info: "#89DCEB",
-  border: "#45475A", focus: "#89B4FA", selection: "#363A55",
-  added: "#263B32", removed: "#452C3A",
-}
-
-export const gruvboxTheme: RottweilerTheme = {
-  name: "gruvbox",
-  background: "#282828", panel: "#32302F", panelRaised: "#3C3836",
-  foreground: "#EBDBB2", muted: "#BDAE93", subtle: "#928374",
-  accent: "#D79921", accentStrong: "#FABD2F", success: "#B8BB26",
-  warning: "#FE8019", danger: "#FB4934", info: "#83A598",
-  border: "#504945", focus: "#FABD2F", selection: "#504945",
-  added: "#344327", removed: "#4A2927",
-}
-
-export const nordTheme: RottweilerTheme = {
-  name: "nord",
-  background: "#2E3440", panel: "#343B49", panelRaised: "#3B4252",
-  foreground: "#ECEFF4", muted: "#D8DEE9", subtle: "#7B88A1",
-  accent: "#88C0D0", accentStrong: "#81A1C1", success: "#A3BE8C",
-  warning: "#EBCB8B", danger: "#BF616A", info: "#8FBCBB",
-  border: "#4C566A", focus: "#88C0D0", selection: "#434C5E",
-  added: "#34453D", removed: "#49343B",
-}
-
-/** Follow the terminal's conventional COLORFGBG hint while retaining a stable setting name. */
-export const systemTheme: RottweilerTheme = {
-  ...systemThemeFor(terminalUsesLightBackground() ? "light" : "dark"),
-  name: "system",
-}
-
-export function systemThemeFor(mode: "light" | "dark" | null): RottweilerTheme {
+  const roles = Object.fromEntries(REQUIRED_THEME_ROLE_KEYS.map((key) => [key, resolve(source.theme[key])])) as
+    Record<ThemeRole, string>
+  roles.selectedListItemText = source.theme.selectedListItemText === undefined
+    ? roles.background
+    : resolve(source.theme.selectedListItemText)
+  roles.backgroundMenu = source.theme.backgroundMenu === undefined
+    ? roles.backgroundElement
+    : resolve(source.theme.backgroundMenu)
+  const opacity = source.theme.thinkingOpacity ?? 0.6
+  if (!Number.isFinite(opacity) || opacity < 0 || opacity > 1) {
+    throw new Error("thinkingOpacity must be between 0 and 1")
+  }
   return {
-    ...(mode === "light" ? daylightTheme : kennelTheme),
-    name: "system",
+    ...roles,
+    name,
+    mode,
+    thinkingOpacity: opacity,
+    panel: roles.backgroundPanel,
+    panelRaised: roles.backgroundElement,
+    foreground: roles.text,
+    muted: roles.textMuted,
+    subtle: roles.borderSubtle,
+    accentStrong: roles.primary,
+    danger: roles.error,
+    focus: roles.borderActive,
+    selection: roles.backgroundElement,
+    added: roles.diffAddedBg,
+    removed: roles.diffRemovedBg,
   }
 }
 
-function terminalUsesLightBackground(): boolean {
-  const background = process.env.COLORFGBG?.split(";").at(-1)
-  if (background === undefined || !/^\d+$/.test(background)) return false
-  const paletteIndex = Number(background)
-  return paletteIndex === 7 || paletteIndex === 15
+function normalizeHex(value: string): string {
+  if (value.length !== 4) return value.toUpperCase()
+  return `#${value[1]}${value[1]}${value[2]}${value[2]}${value[3]}${value[3]}`.toUpperCase()
 }
 
-/** Complete built-in theme catalog consumed by startup and the live picker. */
-const builtinThemes: readonly RottweilerTheme[] = [
-  systemTheme,
-  kennelTheme,
-  daylightTheme,
-  tokyoNightTheme,
-  catppuccinTheme,
-  gruvboxTheme,
-  nordTheme,
-]
-const registeredThemes: RottweilerTheme[] = [...builtinThemes]
+export function isThemeJson(value: unknown): value is ThemeJson {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (record.defs !== undefined) {
+    if (typeof record.defs !== "object" || record.defs === null || Array.isArray(record.defs)) return false
+    const definitions = Object.entries(record.defs)
+    if (definitions.length > MAX_DEFINITIONS || definitions.some(([name]) => !REFERENCE_NAME.test(name))) return false
+  }
+  if (typeof record.theme !== "object" || record.theme === null || Array.isArray(record.theme)) return false
+  const theme = record.theme as Record<string, unknown>
+  if (REQUIRED_THEME_ROLE_KEYS.some((key) => theme[key] === undefined)) return false
+  const allowed = new Set<string>([...THEME_ROLE_KEYS, "thinkingOpacity"])
+  if (Object.keys(theme).some((key) => !allowed.has(key))) return false
+  try {
+    resolveThemeJson(value as ThemeJson, "dark", "validation")
+    resolveThemeJson(value as ThemeJson, "light", "validation")
+    return true
+  } catch {
+    return false
+  }
+}
+
+const customThemeJson = new Map<string, ThemeJson>()
+const builtinThemeNames = Object.keys(DEFAULT_THEMES)
+
+export const kennelTheme = resolveThemeJson(DEFAULT_THEMES.opencode!, "dark", "opencode")
+export const daylightTheme = resolveThemeJson(DEFAULT_THEMES.opencode!, "light", "opencode")
+export const tokyoNightTheme = resolveThemeJson(DEFAULT_THEMES.tokyonight!, "dark", "tokyonight")
+export const catppuccinTheme = resolveThemeJson(DEFAULT_THEMES.catppuccin!, "dark", "catppuccin")
+export const gruvboxTheme = resolveThemeJson(DEFAULT_THEMES.gruvbox!, "dark", "gruvbox")
+export const nordTheme = resolveThemeJson(DEFAULT_THEMES.nord!, "dark", "nord")
+
+export function systemThemeFor(mode: ThemeMode | null): RottweilerTheme {
+  return resolveThemeJson(DEFAULT_THEMES.opencode!, mode === "light" ? "light" : "dark", "system")
+}
+
+/** Generate OpenCode's System theme from the terminal's real ANSI palette. */
+export function systemThemeFromPalette(
+  colors: TerminalThemeColors,
+  fallbackMode: ThemeMode = "dark",
+): RottweilerTheme {
+  const background = colors.defaultBackground ?? colors.palette[0]
+  const foreground = colors.defaultForeground ?? colors.palette[7]
+  if (background === null || background === undefined || foreground === null || foreground === undefined) {
+    return systemThemeFor(fallbackMode)
+  }
+  const bg = hexRgb(background)
+  const mode = terminalModeFromPalette(colors) ?? fallbackMode
+  const dark = mode === "dark"
+  const color = (index: number, fallback: string) => colors.palette[index] ?? fallback
+  const red = color(1, "#CD3131")
+  const green = color(2, "#0DBC79")
+  const yellow = color(3, "#E5E510")
+  const blue = color(4, "#2472C8")
+  const magenta = color(5, "#BC3FBC")
+  const cyan = color(6, "#11A8CD")
+  const redBright = color(9, "#F14C4C")
+  const greenBright = color(10, "#23D18B")
+  const grays = systemGrays(bg, dark)
+  const muted = systemMuted(bg, dark)
+  const diffAlpha = dark ? 0.22 : 0.14
+  const roles: ThemeJson = {
+    theme: {
+      primary: cyan, secondary: magenta, accent: cyan,
+      error: red, warning: yellow, success: green, info: cyan,
+      text: foreground, textMuted: muted, selectedListItemText: background,
+      background: "transparent", backgroundPanel: grays[2]!,
+      backgroundElement: grays[3]!, backgroundMenu: grays[3]!,
+      borderSubtle: grays[6]!, border: grays[7]!, borderActive: grays[8]!,
+      diffAdded: green, diffRemoved: red, diffContext: grays[7]!, diffHunkHeader: grays[7]!,
+      diffHighlightAdded: greenBright, diffHighlightRemoved: redBright,
+      diffAddedBg: tintHex(background, green, diffAlpha),
+      diffRemovedBg: tintHex(background, red, diffAlpha),
+      diffContextBg: grays[2]!, diffLineNumber: muted,
+      diffAddedLineNumberBg: tintHex(grays[2]!, green, diffAlpha),
+      diffRemovedLineNumberBg: tintHex(grays[2]!, red, diffAlpha),
+      markdownText: foreground, markdownHeading: foreground, markdownLink: blue,
+      markdownLinkText: cyan, markdownCode: green, markdownBlockQuote: yellow,
+      markdownEmph: yellow, markdownStrong: foreground, markdownHorizontalRule: grays[7]!,
+      markdownListItem: blue, markdownListEnumeration: cyan, markdownImage: blue,
+      markdownImageText: cyan, markdownCodeBlock: foreground,
+      syntaxComment: muted, syntaxKeyword: magenta, syntaxFunction: blue,
+      syntaxVariable: foreground, syntaxString: green, syntaxNumber: yellow,
+      syntaxType: cyan, syntaxOperator: cyan, syntaxPunctuation: foreground,
+    },
+  }
+  return resolveThemeJson(roles, mode, "system")
+}
+
+export function terminalModeFromPalette(colors: TerminalThemeColors): ThemeMode | null {
+  const background = colors.defaultBackground ?? colors.palette[0]
+  if (background === null || background === undefined) return null
+  const { r, g, b } = hexRgb(background)
+  return 0.299 * r + 0.587 * g + 0.114 * b > 127.5 ? "light" : "dark"
+}
+
+function hexRgb(value: string): { r: number; g: number; b: number } {
+  const normalized = normalizeHex(value)
+  const match = /^#([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{2})/.exec(normalized)
+  if (match === null) return { r: 0, g: 0, b: 0 }
+  return { r: Number.parseInt(match[1]!, 16), g: Number.parseInt(match[2]!, 16), b: Number.parseInt(match[3]!, 16) }
+}
+
+function hexFromRgb(r: number, g: number, b: number): HexColor {
+  const channel = (value: number) => Math.max(0, Math.min(255, Math.round(value))).toString(16).padStart(2, "0")
+  return `#${channel(r)}${channel(g)}${channel(b)}`
+}
+
+function tintHex(base: string, overlay: string, alpha: number): HexColor {
+  const from = hexRgb(base)
+  const to = hexRgb(overlay)
+  return hexFromRgb(
+    from.r + (to.r - from.r) * alpha,
+    from.g + (to.g - from.g) * alpha,
+    from.b + (to.b - from.b) * alpha,
+  )
+}
+
+function systemGrays(background: { r: number; g: number; b: number }, dark: boolean): Record<number, HexColor> {
+  const result: Record<number, HexColor> = {}
+  const luminance = 0.299 * background.r + 0.587 * background.g + 0.114 * background.b
+  for (let index = 1; index <= 12; index += 1) {
+    const factor = index / 12
+    if (dark && luminance < 10) {
+      const value = factor * 0.4 * 255
+      result[index] = hexFromRgb(value, value, value)
+      continue
+    }
+    if (!dark && luminance > 245) {
+      const value = 255 - factor * 0.4 * 255
+      result[index] = hexFromRgb(value, value, value)
+      continue
+    }
+    const target = dark ? luminance + (255 - luminance) * factor * 0.4 : luminance * (1 - factor * 0.4)
+    const ratio = luminance === 0 ? 0 : target / luminance
+    result[index] = hexFromRgb(background.r * ratio, background.g * ratio, background.b * ratio)
+  }
+  return result
+}
+
+function systemMuted(background: { r: number; g: number; b: number }, dark: boolean): HexColor {
+  const luminance = 0.299 * background.r + 0.587 * background.g + 0.114 * background.b
+  const value = dark
+    ? luminance < 10 ? 180 : Math.min(Math.floor(160 + luminance * 0.3), 200)
+    : luminance > 245 ? 75 : Math.max(Math.floor(100 - (255 - luminance) * 0.2), 60)
+  return hexFromRgb(value, value, value)
+}
+
+export const systemTheme = systemThemeFor(terminalUsesLightBackground() ? "light" : "dark")
+
+function terminalUsesLightBackground(): boolean {
+  const background = process.env.COLORFGBG?.split(";").at(-1)
+  return background !== undefined && /^\d+$/.test(background) && [7, 15].includes(Number(background))
+}
+
+const registeredThemes: RottweilerTheme[] = []
 export const themeCatalog: readonly RottweilerTheme[] = registeredThemes
 
-const THEME_COLOR_KEYS = [
-  "background", "panel", "panelRaised", "foreground", "muted", "subtle",
-  "accent", "accentStrong", "success", "warning", "danger", "info", "border",
-  "focus", "selection", "added", "removed",
-] as const
+function refreshCatalog(mode: ThemeMode = "dark"): void {
+  const resolved = new Map<string, RottweilerTheme>()
+  resolved.set("system", systemThemeFor(mode))
+  for (const name of builtinThemeNames) resolved.set(name, resolveThemeJson(DEFAULT_THEMES[name]!, mode, name))
+  for (const [name, theme] of customThemeJson) resolved.set(name, resolveThemeJson(theme, mode, name))
+  registeredThemes.splice(0, registeredThemes.length, ...resolved.values())
+}
+refreshCatalog()
 
-/** Load bounded, data-only custom themes. Invalid files are ignored, never executed. */
+export function themeCatalogFor(mode: ThemeMode): readonly RottweilerTheme[] {
+  const themes = new Map<string, RottweilerTheme>()
+  themes.set("system", systemThemeFor(mode))
+  for (const name of builtinThemeNames) themes.set(name, resolveThemeJson(DEFAULT_THEMES[name]!, mode, name))
+  for (const [name, theme] of customThemeJson) themes.set(name, resolveThemeJson(theme, mode, name))
+  return [...themes.values()]
+}
+
+/** Load bounded, data-only OpenCode-schema themes. Files never execute and symlinks are rejected. */
 export async function loadCustomThemes(directory: string): Promise<void> {
   let names: string[]
   try {
     names = (await readdir(directory)).filter((name) => name.endsWith(".json")).sort().slice(0, 64)
   } catch {
+    customThemeJson.clear()
+    refreshCatalog()
     return
   }
-  const custom: RottweilerTheme[] = []
+  const next = new Map<string, ThemeJson>()
   for (const file of names) {
-    const path = join(directory, file)
+    const name = basename(file, ".json")
+    if (!THEME_NAME.test(name)) continue
     try {
+      const path = join(directory, file)
       const metadata = await lstat(path)
-      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 32 * 1024) continue
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 128 * 1024) continue
       const parsed: unknown = JSON.parse(await readFile(path, "utf8"))
-      const theme = validatedTheme(parsed)
-      if (theme !== null && !builtinThemes.some((builtin) => builtin.name === theme.name)) custom.push(theme)
+      if (isThemeJson(parsed)) next.set(name, parsed)
     } catch {
-      // A malformed optional theme must not prevent the coding client starting.
+      // Optional custom themes cannot block startup.
     }
   }
-  registeredThemes.splice(0, registeredThemes.length, ...builtinThemes, ...custom)
+  customThemeJson.clear()
+  for (const [name, theme] of next) customThemeJson.set(name, theme)
+  refreshCatalog()
 }
 
-function validatedTheme(value: unknown): RottweilerTheme | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null
-  const record = value as Record<string, unknown>
-  if (typeof record.name !== "string" || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(record.name)) return null
-  for (const key of THEME_COLOR_KEYS) {
-    if (typeof record[key] !== "string" || !/^#[0-9a-fA-F]{6}$/.test(record[key])) return null
-  }
-  return Object.fromEntries([
-    ["name", record.name],
-    ...THEME_COLOR_KEYS.map((key) => [key, record[key]]),
-  ]) as unknown as RottweilerTheme
-}
-
-export function themeByName(name: string): RottweilerTheme | undefined {
-  return themeCatalog.find((theme) => theme.name === name)
+export function themeByName(name: string, mode: ThemeMode = "dark"): RottweilerTheme | undefined {
+  if (name === "system") return systemThemeFor(mode)
+  const source = customThemeJson.get(name) ?? DEFAULT_THEMES[name]
+  return source === undefined ? undefined : resolveThemeJson(source, mode, name)
 }
 
 export function createSyntaxStyle(theme: RottweilerTheme): SyntaxStyle {
   return SyntaxStyle.fromStyles({
-    default: { fg: theme.foreground },
-    "markup.heading": { fg: theme.accentStrong, bold: true },
-    "markup.heading.1": { fg: theme.accentStrong, bold: true, underline: true },
-    "markup.heading.2": { fg: theme.accentStrong, bold: true },
-    "markup.heading.3": { fg: theme.accentStrong, bold: true },
-    "markup.heading.4": { fg: theme.accentStrong, bold: true },
-    "markup.heading.5": { fg: theme.accentStrong, bold: true },
-    "markup.heading.6": { fg: theme.accentStrong, bold: true },
-    "markup.bold": { fg: theme.foreground, bold: true },
-    "markup.strong": { fg: theme.foreground, bold: true },
-    "markup.italic": { fg: theme.foreground, italic: true },
-    "markup.link": { fg: theme.info, underline: true },
-    "markup.link.label": { fg: theme.info },
-    "markup.link.url": { fg: theme.subtle },
-    "markup.quote": { fg: theme.muted },
-    "markup.list": { fg: theme.accent },
-    "markup.raw": { fg: theme.success },
-    comment: { fg: theme.subtle, italic: true },
-    string: { fg: theme.success },
-    number: { fg: theme.accentStrong },
-    keyword: { fg: theme.info, bold: true },
-    function: { fg: theme.accentStrong },
-    type: { fg: theme.info },
-    variable: { fg: theme.foreground },
-    operator: { fg: theme.muted },
-    punctuation: { fg: theme.muted },
+    default: { fg: theme.syntaxVariable },
+    prompt: { fg: theme.accent },
+    "markup.heading": { fg: theme.markdownHeading, bold: true },
+    "markup.heading.1": { fg: theme.markdownHeading, bold: true, underline: true },
+    "markup.heading.2": { fg: theme.markdownHeading, bold: true },
+    "markup.heading.3": { fg: theme.markdownHeading, bold: true },
+    "markup.heading.4": { fg: theme.markdownHeading, bold: true },
+    "markup.heading.5": { fg: theme.markdownHeading, bold: true },
+    "markup.heading.6": { fg: theme.markdownHeading, bold: true },
+    "markup.bold": { fg: theme.markdownStrong, bold: true },
+    "markup.strong": { fg: theme.markdownStrong, bold: true },
+    "markup.italic": { fg: theme.markdownEmph, italic: true },
+    "markup.link": { fg: theme.markdownLink, underline: true },
+    "markup.link.label": { fg: theme.markdownLinkText },
+    "markup.link.url": { fg: theme.markdownLink },
+    "markup.quote": { fg: theme.markdownBlockQuote },
+    "markup.list": { fg: theme.markdownListItem },
+    "markup.raw": { fg: theme.markdownCode },
+    comment: { fg: theme.syntaxComment, italic: true },
+    "comment.documentation": { fg: theme.syntaxComment, italic: true },
+    string: { fg: theme.syntaxString },
+    symbol: { fg: theme.syntaxString },
+    number: { fg: theme.syntaxNumber },
+    boolean: { fg: theme.syntaxNumber },
+    keyword: { fg: theme.syntaxKeyword, italic: true },
+    "keyword.type": { fg: theme.syntaxType, bold: true, italic: true },
+    "keyword.function": { fg: theme.syntaxFunction },
+    function: { fg: theme.syntaxFunction },
+    "function.method": { fg: theme.syntaxFunction },
+    type: { fg: theme.syntaxType },
+    variable: { fg: theme.syntaxVariable },
+    operator: { fg: theme.syntaxOperator },
+    punctuation: { fg: theme.syntaxPunctuation },
   })
 }

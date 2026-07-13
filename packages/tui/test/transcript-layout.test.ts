@@ -177,4 +177,147 @@ describe("render-aware transcript virtualization", () => {
     expect(renderer.captureCharFrame()).not.toContain("## Live result")
     expect(renderer.captureCharFrame()).not.toContain("**wrapped**")
   }, 20_000)
+
+  test("incrementally retains Markdown blocks and keeps a fenced text diagram intact", async () => {
+    const renderDiagnostics: string[] = []
+    spyOn(console, "error").mockImplementation((...arguments_: unknown[]) => {
+      renderDiagnostics.push(arguments_.map(String).join(" "))
+    })
+    parserDataPath = mkdtempSync(join(tmpdir(), "rottweiler-streaming-diagram-"))
+    treeSitter = new TreeSitterClient({
+      dataPath: parserDataPath,
+      workerPath: join(import.meta.dir, "../node_modules/@opentui/core/parser.worker.js"),
+    })
+    await treeSitter.initialize()
+    renderer = await createTestRenderer({ width: 70, height: 22, useThread: false })
+    const initial = {
+      ...createInitialState(),
+      streamingTail: {
+        turnId: "diagram",
+        text: "",
+        thinking: "",
+        citations: [],
+        toolCallIds: [],
+        finished: null,
+      },
+    }
+    const app = createRottweilerApp(renderer.renderer, {
+      treeSitterClient: treeSitter,
+      initialState: initial,
+    })
+    renderer.renderer.root.add(app)
+    const markdown = app.transcript.streamingMarkdown
+    const answer = [
+      "## Architecture",
+      "",
+      "The stable block stays formatted while the diagram streams:",
+      "",
+      "```text",
+      "┌──────────┐",
+      "│ rw-core  │",
+      "└────┬─────┘",
+      "     ▼",
+      "┌──────────┐",
+      "│ OpenTUI  │",
+      "└──────────┘",
+      "```",
+      "",
+      "DIAGRAM_STREAM_COMPLETE",
+    ].join("\n")
+
+    for (let end = 1; end <= answer.length; end += 4) {
+      app.setState({
+        ...initial,
+        streamingTail: { ...initial.streamingTail, text: answer.slice(0, end) },
+      })
+      await renderer.renderOnce()
+      expect(app.transcript.streamingMarkdown).toBe(markdown)
+      const frame = renderer.captureCharFrame()
+      if (frame.includes("Architecture")) expect(frame).not.toContain("## Architecture")
+      if (frame.includes("stable block")) expect(frame).not.toContain("```text")
+    }
+    app.setState({
+      ...initial,
+      streamingTail: { ...initial.streamingTail, text: answer },
+    })
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await Bun.sleep(5)
+      await renderer.renderOnce()
+    }
+
+    const frame = renderer.captureCharFrame()
+    expect(frame).toContain("┌──────────┐")
+    expect(frame).toContain("│ rw-core  │")
+    expect(frame).toContain("└────┬─────┘")
+    expect(frame).toContain("│ OpenTUI  │")
+    expect(frame).toContain("DIAGRAM_STREAM_COMPLETE")
+    expect(frame).not.toContain("```text")
+    expect(renderDiagnostics.join("\n")).not.toMatch(
+      /Invalid dimensions|NaNxNaN|Failed to create frame buffer/,
+    )
+  }, 20_000)
+
+  test("follows a growing answer at the bottom but preserves deliberate scrollback", async () => {
+    renderer = await createTestRenderer({ width: 62, height: 16, useThread: false })
+    const lines = Array.from({ length: 36 }, (_, index) => `Streaming line ${index + 1}`)
+    const initial = {
+      ...createInitialState(),
+      streamingTail: {
+        turnId: "follow",
+        text: lines.join("\n"),
+        thinking: "",
+        citations: [],
+        toolCallIds: [],
+        finished: null,
+      },
+    }
+    const app = createRottweilerApp(renderer.renderer, { initialState: initial })
+    renderer.renderer.root.add(app)
+    await renderer.flush()
+
+    app.setState({
+      ...initial,
+      streamingTail: {
+        ...initial.streamingTail,
+        text: `${initial.streamingTail.text}\nAUTO_FOLLOW_SENTINEL`,
+      },
+    })
+    await renderer.flush()
+    expect(renderer.captureCharFrame()).toContain("AUTO_FOLLOW_SENTINEL")
+
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await renderer.mockMouse.scroll(
+        app.transcript.scroller.x + 2,
+        app.transcript.scroller.y + 2,
+        "up",
+      )
+      await renderer.renderOnce()
+    }
+    const scrollbackTop = app.transcript.scroller.scrollTop
+    expect(scrollbackTop).toBeLessThan(
+      app.transcript.scroller.scrollHeight - app.transcript.scroller.viewport.height,
+    )
+    app.setState({
+      ...initial,
+      streamingTail: {
+        ...initial.streamingTail,
+        text: `${initial.streamingTail.text}\nAUTO_FOLLOW_SENTINEL\nPRESERVE_SCROLLBACK_SENTINEL`,
+      },
+    })
+    await renderer.flush()
+    expect(app.transcript.scroller.scrollTop).toBeLessThanOrEqual(scrollbackTop + 1)
+    expect(renderer.captureCharFrame()).not.toContain("PRESERVE_SCROLLBACK_SENTINEL")
+
+    app.transcript.scrollTo(Number.MAX_SAFE_INTEGER)
+    await renderer.flush()
+    app.setState({
+      ...initial,
+      streamingTail: {
+        ...initial.streamingTail,
+        text: `${initial.streamingTail.text}\nAUTO_FOLLOW_SENTINEL\nPRESERVE_SCROLLBACK_SENTINEL\nFOLLOW_REENGAGED_SENTINEL`,
+      },
+    })
+    await renderer.flush()
+    expect(renderer.captureCharFrame()).toContain("FOLLOW_REENGAGED_SENTINEL")
+  }, 20_000)
 })

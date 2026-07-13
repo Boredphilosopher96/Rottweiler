@@ -86,6 +86,42 @@ const MAX_COMPLETED_FORK_OPERATIONS: usize = 4_096;
 const MAX_PENDING_FORK_OPERATIONS: usize = 32;
 const MAX_FORK_TEMP_FILES: usize = 16;
 const MAX_FORK_JOURNAL_BYTES: usize = 256 * 1024;
+const TUI_THEME_CHOICES: [&str; 34] = [
+    "system",
+    "aura",
+    "ayu",
+    "carbonfox",
+    "catppuccin",
+    "catppuccin-frappe",
+    "catppuccin-macchiato",
+    "cobalt2",
+    "cursor",
+    "dracula",
+    "everforest",
+    "flexoki",
+    "github",
+    "gruvbox",
+    "kanagawa",
+    "lucent-orng",
+    "material",
+    "matrix",
+    "mercury",
+    "monokai",
+    "nightowl",
+    "nord",
+    "one-dark",
+    "opencode",
+    "orng",
+    "osaka-jade",
+    "palenight",
+    "rosepine",
+    "solarized",
+    "synthwave84",
+    "tokyonight",
+    "vercel",
+    "vesper",
+    "zenburn",
+];
 
 fn unix_millis() -> u64 {
     u64::try_from(
@@ -347,18 +383,7 @@ impl CliSessionFactory {
                 key: "ui.theme".to_owned(),
                 label: "Theme".to_owned(),
                 value: loaded.config.ui.theme.clone(),
-                choices: [
-                    "system",
-                    "kennel-dark",
-                    "daylight",
-                    "tokyo-night",
-                    "catppuccin-mocha",
-                    "gruvbox",
-                    "nord",
-                ]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+                choices: TUI_THEME_CHOICES.map(str::to_owned).to_vec(),
                 provenance: provenance("ui.theme"),
                 applies_immediately: false,
             },

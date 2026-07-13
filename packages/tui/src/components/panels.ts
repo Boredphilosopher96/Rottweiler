@@ -331,6 +331,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
   #syntaxStyle: SyntaxStyle
   #theme: RottweilerTheme
   #treeSitterClient: TreeSitterClient | undefined
+  #terminalHeight: number
 
   constructor(
     ctx: RenderContext,
@@ -342,13 +343,16 @@ export class InteractionPanelRenderable extends BoxRenderable {
     super(ctx, {
       id: "interaction-panel",
       width: "100%",
+      height: 0,
       maxHeight: 18,
+      flexShrink: 0,
       flexDirection: "column",
+      overflow: "hidden",
       border: true,
       borderStyle: "rounded",
       borderColor: theme.warning,
       backgroundColor: theme.panelRaised,
-      padding: 1,
+      paddingX: 1,
       visible: false,
       zIndex: 10,
     })
@@ -356,15 +360,19 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#syntaxStyle = syntaxStyle
     this.#callbacks = callbacks
     this.#treeSitterClient = treeSitterClient
+    this.#terminalHeight = ctx.height
     this.prompt = new TextRenderable(ctx, {
       content: "",
       fg: theme.foreground,
       wrapMode: "word",
       minHeight: 1,
+      flexShrink: 0,
     })
     this.select = new SelectRenderable(ctx, {
       width: "100%",
-      minHeight: 3,
+      height: 0,
+      minHeight: 0,
+      flexShrink: 0,
       options: [],
       backgroundColor: theme.panelRaised,
       textColor: theme.foreground,
@@ -380,6 +388,25 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.add(this.select)
   }
 
+  /** Free-text questions deliberately use the composer as the dock input. */
+  get usesComposer(): boolean {
+    return this.visible && this.#activeQuestion?.questions[0]?.response_kind === "text"
+  }
+
+  /** Selectable approvals, questions, and plans own keyboard focus themselves. */
+  get capturesInput(): boolean {
+    return this.visible && !this.usesComposer
+  }
+
+  /**
+   * Keep the dock in normal flow and allocate its finite rows explicitly.
+   * `reservedRows` belongs to the composer-backed free-text question case.
+   */
+  resizeForTerminal(terminalHeight: number, reservedRows = 0): void {
+    this.#terminalHeight = terminalHeight
+    this.#layout(reservedRows)
+  }
+
   update(state: RottweilerState): void {
     if (state.replay.active) {
       this.#activeTool = null
@@ -387,6 +414,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
       this.#activePlan = null
       this.#removeDiff()
       this.visible = false
+      this.height = 0
       return
     }
     const tool = Object.values(state.tools).find((candidate) => candidate.status === "awaiting_approval")
@@ -409,6 +437,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#activePlan = null
     this.#removeDiff()
     this.visible = false
+    this.height = 0
   }
 
   #showTool(tool: ToolProjection): void {
@@ -428,7 +457,6 @@ export class InteractionPanelRenderable extends BoxRenderable {
         ? "Diff exceeds the review limit. Approval is disabled until the complete change can be reviewed."
         : (tool.rationale ?? "Review this action.")
     }`
-    this.prompt.height = Math.min(6, Math.max(1, this.prompt.plainText.split("\n").length))
     this.select.options = truncated
       ? [{ name: "Deny", description: "A truncated change cannot be approved", value: "deny" }]
       : [
@@ -466,6 +494,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     } else {
       this.#removeDiff()
     }
+    this.#layout()
     this.select.focus()
   }
 
@@ -481,9 +510,9 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.prompt.content = freeText
       ? `${first?.prompt ?? "Your answer"}\nType your answer below. Enter sends; Shift+Enter adds a line.`
       : first?.prompt ?? "Choose an answer"
-    this.prompt.height = Math.min(4, Math.max(1, this.prompt.plainText.split("\n").length))
     this.select.options = questionOptions(first)
     this.select.visible = !freeText
+    this.#layout(freeText ? 4 : 0)
     if (!freeText) {
       this.select.setSelectedIndex(0)
       this.select.focus()
@@ -499,11 +528,11 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.select.visible = true
     this.title = " Plan approval required "
     this.prompt.content = `${plan.title}\n${plan.summary_md}\n${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`
-    this.prompt.height = Math.min(6, Math.max(1, this.prompt.plainText.split("\n").length))
     this.select.options = [
       { name: "Approve plan", description: "Pin this artifact and enter Execute", value: "approve" },
       { name: "Reject plan", description: "Stay in Plan mode", value: "reject" },
     ]
+    this.#layout()
     this.select.setSelectedIndex(0)
     this.select.focus()
   }
@@ -536,6 +565,66 @@ export class InteractionPanelRenderable extends BoxRenderable {
       this.#diff.destroyRecursively()
       this.#diff = null
     }
+  }
+
+  #layout(reservedRows = this.usesComposer ? 4 : 0): void {
+    if (!this.visible) {
+      this.height = 0
+      return
+    }
+
+    const promptDesired = Math.min(6, Math.max(1, this.prompt.plainText.split("\n").length))
+    const selectDesired = this.select.visible
+      ? Math.min(8, Math.max(1, this.select.options.length * 2))
+      : 0
+    const diffDesired = this.#diff === null ? 0 : 8
+    const desiredHeight = 2 + promptDesired + selectDesired + diffDesired
+    // Reserve one transcript row and the one-row status line. On extremely
+    // short terminals, collapse decorative interaction content before it can
+    // paint over the adjacent composer/status surface.
+    const terminalLimit = Math.max(0, this.#terminalHeight - 2 - reservedRows)
+    const panelHeight = Math.min(18, desiredHeight, terminalLimit)
+    this.height = panelHeight
+
+    const framed = panelHeight >= 3
+    this.border = framed
+    const contentRows = Math.max(0, panelHeight - (framed ? 2 : 0))
+    if (contentRows === 0) {
+      this.prompt.height = 0
+      this.prompt.visible = false
+      if (this.#diff !== null) {
+        this.#diff.height = 0
+        this.#diff.visible = false
+      }
+      this.select.height = 0
+      return
+    }
+
+    this.prompt.visible = true
+    const hasSelect = this.select.visible
+    const promptBudget = hasSelect || this.#diff !== null
+      ? Math.max(1, Math.ceil(contentRows * 0.25))
+      : contentRows
+    const promptRows = Math.min(promptDesired, promptBudget, contentRows)
+    this.prompt.height = promptRows
+    let remaining = contentRows - promptRows
+
+    let selectRows = 0
+    let diffRows = 0
+    if (this.#diff !== null) {
+      if (hasSelect && remaining > 0) {
+        selectRows = Math.min(selectDesired, Math.max(1, Math.ceil(remaining * 0.4)))
+      }
+      diffRows = Math.max(0, remaining - selectRows)
+    } else if (hasSelect) {
+      selectRows = Math.min(selectDesired, remaining)
+    }
+
+    if (this.#diff !== null) {
+      this.#diff.height = diffRows
+      this.#diff.visible = diffRows > 0
+    }
+    this.select.height = selectRows
   }
 }
 

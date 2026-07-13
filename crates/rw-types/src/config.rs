@@ -54,7 +54,7 @@ pub struct UiConfig {
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
-            theme: "kennel-dark".to_owned(),
+            theme: "opencode".to_owned(),
         }
     }
 }

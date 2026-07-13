@@ -84,7 +84,7 @@ export class ReasoningBlockRenderable extends BoxRenderable {
       content: "",
       syntaxStyle,
       ...(options.treeSitterClient === undefined ? {} : { treeSitterClient: options.treeSitterClient }),
-      fg: theme.muted,
+      fg: colorWithOpacity(theme.markdownText, theme.thinkingOpacity),
       conceal: true,
       concealCode: false,
       streaming: this.#streaming,
@@ -179,6 +179,14 @@ function reasoningBodyRows(content: string, width: number): number {
     (rows, line) => rows + Math.max(1, Math.ceil(Math.max(1, line.length) / contentWidth)),
     0,
   )
+}
+
+function colorWithOpacity(color: string, opacity: number): string {
+  const match = /^#([0-9A-Fa-f]{6})([0-9A-Fa-f]{2})?$/.exec(color)
+  if (match === null) return color
+  const sourceAlpha = match[2] === undefined ? 255 : Number.parseInt(match[2], 16)
+  const alpha = Math.round(sourceAlpha * Math.max(0, Math.min(1, opacity)))
+  return `#${match[1]}${alpha.toString(16).padStart(2, "0")}`
 }
 
 function markdownIntrinsicRows(markdown: MarkdownRenderable): number | null {
@@ -537,7 +545,7 @@ class TurnCardRenderable extends BoxRenderable {
       content: "",
       syntaxStyle,
       ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
-      fg: theme.foreground,
+      fg: theme.markdownText,
       conceal: true,
       concealCode: false,
       streaming: false,
@@ -549,7 +557,7 @@ class TurnCardRenderable extends BoxRenderable {
       flexShrink: 0,
       visible: !toolOnly,
       internalBlockMode: "top-level",
-      tableOptions: { style: "columns", widthMode: "full", wrapMode: "word" },
+      tableOptions: { style: "grid", widthMode: "full", wrapMode: "word" },
     })
     this.reasoning = reasoning === ""
       ? null
@@ -663,8 +671,7 @@ export class TranscriptRenderable extends BoxRenderable {
   #scrollReconcileScheduled = false
   #heightReconcileScheduled = false
   #nativeScrollWatchPasses = 0
-  #tailMeasureStablePasses = 0
-  #tailEstimatedTextRows = 0
+  #tailToolsSignature = ""
   #tailReasoningTurnId: string | null = null
 
   constructor(
@@ -738,10 +745,18 @@ export class TranscriptRenderable extends BoxRenderable {
       ...(options.treeSitterClient === undefined
         ? {}
         : { treeSitterClient: options.treeSitterClient }),
-      fg: theme.foreground,
+      fg: theme.markdownText,
       conceal: true,
+      concealCode: false,
       streaming: true,
       width: "100%",
+      flexShrink: 0,
+      // OpenTUI's incremental parser can retain every completed top-level
+      // block and only reconcile the unstable trailing block. Keeping one
+      // persistent MarkdownRenderable in this mode prevents the raw-markdown
+      // flash and full document relayout that otherwise occurs on each token.
+      internalBlockMode: "top-level",
+      tableOptions: { style: "grid", widthMode: "full", wrapMode: "word" },
     })
     this.#tailCitations = new TextRenderable(ctx, {
       content: "",
@@ -774,9 +789,7 @@ export class TranscriptRenderable extends BoxRenderable {
           this.#reconcileScrollPosition()
         })
       }
-      const tailHeightChanged = this.#measureStreamingTail()
-      this.#tailMeasureStablePasses = tailHeightChanged ? 0 : this.#tailMeasureStablePasses + 1
-      if (this.#nativeScrollWatchPasses >= 2 && this.#tailMeasureStablePasses >= 3) {
+      if (this.#nativeScrollWatchPasses >= 2) {
         this.ctx.unregisterLifecyclePass(this)
       }
     }
@@ -815,7 +828,6 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#measuredHeightRevision += 1
     }
     this.#nativeScrollWatchPasses = 0
-    this.#tailMeasureStablePasses = 0
     this.ctx.registerLifecyclePass(this)
     this.#updateTail(state)
     this.#reconcile(
@@ -1050,7 +1062,10 @@ export class TranscriptRenderable extends BoxRenderable {
     this.subagentPanel.update(subagents, allSubagents.length)
     this.streamingCard.visible = tail !== null || subagents.length > 0
     if (tail === null) {
-      this.#tailEstimatedTextRows = 0
+      // Finalize the trailing parser block before clearing it. This mirrors
+      // OpenCode's streaming lifecycle and avoids leaving an unfinished code
+      // fence/table parse state behind when the next response starts.
+      this.streamingMarkdown.streaming = false
       this.streamingMarkdown.content = ""
       this.streamingMarkdown.visible = false
       this.#tailHeader.content = "Rottweiler · delegating"
@@ -1058,7 +1073,6 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#tailReasoningTurnId = null
       this.#tailCitations.visible = false
       this.#replaceTailTools([])
-      this.streamingCard.height = subagents.length === 0 ? 0 : subagents.length + 5
       return
     }
     const tools = tail.toolCallIds
@@ -1072,9 +1086,12 @@ export class TranscriptRenderable extends BoxRenderable {
         : reasoning !== ""
           ? "Thinking"
           : "Streaming"
+    // Set the parser mode before appending content. Reversing this order makes
+    // the new chunk take the non-streaming parse path for one frame, which is
+    // the visible plain-text-then-Markdown flicker reported by users.
+    this.streamingMarkdown.streaming = tail.finished === null
     this.streamingMarkdown.visible = tail.text.length > 0
     this.streamingMarkdown.content = tail.text
-    this.streamingMarkdown.streaming = tail.finished === null
     this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? activity : turnDetail(tail.finished.cost, tail.finished.usage)}`
     if (this.#tailReasoningTurnId !== tail.turnId) {
       this.#tailReasoning.collapse(false)
@@ -1085,54 +1102,32 @@ export class TranscriptRenderable extends BoxRenderable {
       tail.finished === null,
       Math.max(20, this.width || this.ctx.width),
     )
-    const thinkingRows = this.#tailReasoning.height
     this.#tailCitations.visible = tail.citations.length > 0
     this.#tailCitations.content = tail.citations
       .map((citation, index) => `[${index + 1}] ${citation.title ?? citation.uri}`)
       .join("  ")
     this.#tailCitations.height = tail.citations.length > 0 ? 1 : 0
     this.#replaceTailTools(tools)
-    const textRows = wrappedTextRows(tail.text, Math.max(12, (this.width || this.ctx.width) - 4))
-    this.#tailEstimatedTextRows = textRows
-    this.streamingMarkdown.height = textRows
-    const toolRows = tools.reduce(
-      (rows, tool) => rows + toolBlockRows(tool, this.#toolExpansion),
-      0,
-    )
-    this.#tailTools.height = toolRows
-    this.streamingCard.height =
-      2 +
-        thinkingRows +
-        textRows +
-        (tail.citations.length > 0 ? 1 : 0) +
-        toolRows +
-        (subagents.length === 0 ? 0 : subagents.length + 3)
-    this.#tailMeasureStablePasses = 0
+    // Markdown, code blocks, tables, tools, and reasoning own their intrinsic
+    // Yoga height. Estimating rows from the raw source corrupts fenced ASCII
+    // diagrams because the source and rendered block trees have different
+    // geometry while a response is still arriving.
     this.ctx.registerLifecyclePass(this)
   }
 
-  #measureStreamingTail(): boolean {
-    if (!this.streamingCard.visible) return false
-    const intrinsicMarkdownRows = markdownIntrinsicRows(this.streamingMarkdown)
-    const markdownRows = this.streamingMarkdown.visible
-      ? Math.max(this.#tailEstimatedTextRows, intrinsicMarkdownRows ?? 0)
-      : 0
-    if (this.streamingMarkdown.height !== markdownRows) this.streamingMarkdown.height = markdownRows
-    const nextHeight = 2 + this.streamingCard.getChildren().reduce((rows, child) => {
-      if (!child.visible) return rows
-      if (child === this.#tailHeader) return rows + 1
-      if (child === this.streamingMarkdown) return rows + markdownRows
-      if (child === this.#tailReasoning) {
-        return rows + (this.#tailReasoning.measuredHeight() ?? this.#tailReasoning.height)
-      }
-      return rows + Math.max(0, child.height)
-    }, 0)
-    if (this.streamingCard.height === nextHeight) return false
-    this.streamingCard.height = nextHeight
-    return true
-  }
-
   #replaceTailTools(tools: readonly ToolProjection[]): void {
+    const signature = tools.map((tool) => [
+      tool.toolCallId,
+      tool.status,
+      tool.name,
+      JSON.stringify(tool.args),
+      tool.chunks.map((chunk) => `${chunk.stream}:${chunk.chunk}`).join(""),
+      JSON.stringify(tool.output),
+      tool.isError,
+      this.#toolExpansion.get(tool.toolCallId) === true,
+    ].join("\u0000")).join("\u0001")
+    if (signature === this.#tailToolsSignature) return
+    this.#tailToolsSignature = signature
     for (const child of this.#tailTools.getChildren()) {
       this.#tailTools.remove(child)
       child.destroyRecursively()
@@ -1178,14 +1173,6 @@ function turnDetail(
   return cost?.kind === "subscription_quota" && (cost.used === null || cost.used === undefined)
     ? `turn usage · ${detail}`
     : detail
-}
-
-function wrappedTextRows(content: string, width: number): number {
-  if (content === "") return 0
-  return content.split("\n").reduce(
-    (rows, line) => rows + Math.max(1, Math.ceil(Math.max(1, line.length) / width)),
-    0,
-  )
 }
 
 function reasoningRowsForEntry(

@@ -107,15 +107,20 @@ async function main(): Promise<void> {
   const keybindings = await parseKeybindingsFromEnvironment(process.env.ROTTWEILER_TUI_KEYBINDINGS)
   const { homedir } = await import("node:os")
   const { join: joinPath } = await import("node:path")
-  const { kennelTheme, loadCustomThemes, systemThemeFor, themeByName } = await import("./theme")
+  const {
+    kennelTheme,
+    loadCustomThemes,
+    systemThemeFor,
+    systemThemeFromPalette,
+    themeByName,
+  } = await import("./theme")
   await loadCustomThemes(joinPath(homedir(), ".rottweiler", "themes"))
   const configuredTheme = process.env.ROTTWEILER_TUI_THEME ?? ""
-  const terminalThemeMode = configuredTheme === "system"
-    ? await renderer.waitForThemeMode(1_000)
-    : renderer.themeMode
+  const terminalThemeMode = renderer.themeMode ?? "dark"
+  const terminalPalette = renderer.getPalette({ size: 16, timeout: 250 }).catch(() => null)
   const theme = configuredTheme === "system"
     ? systemThemeFor(terminalThemeMode)
-    : themeByName(configuredTheme) ?? kennelTheme
+    : themeByName(configuredTheme, terminalThemeMode) ?? themeByName("opencode", terminalThemeMode) ?? kennelTheme
   // OpenTUI workers require real filesystem paths. Bun embeds the selected
   // parser assets inside the executable; materialize a private, bounded runtime
   // after first paint and remove it when the renderer shuts down.
@@ -190,6 +195,10 @@ async function main(): Promise<void> {
   })
   startupFrame.destroy()
   renderer.root.add(app)
+  void terminalPalette.then((colors) => {
+    if (colors === null) return
+    app.setSystemTheme(systemThemeFromPalette(colors, terminalThemeMode))
+  })
 
   void runtimeBootstrap.then(async (bootstrap) => {
     if (bootstrap.error !== null) {
