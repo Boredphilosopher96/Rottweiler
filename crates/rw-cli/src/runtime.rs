@@ -1820,28 +1820,30 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         )
     } else {
         let pricing = load_effective_pricing_table().await?;
-        let runtime = Arc::new(
-            ProviderFactory::system(config_loader.credentials_path(), pricing)
-                .with_extension_providers(
-                    plugin_runtime
-                        .iter()
-                        .flat_map(|runtime| runtime.providers.iter())
-                        .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider))),
-                )
-                .build(&loaded_config.config)
-                .map_err(|error| miette!("provider runtime could not start: {error}"))?,
+        let factory = ProviderFactory::system(config_loader.credentials_path(), pricing)
+            .with_extension_providers(
+                plugin_runtime
+                    .iter()
+                    .flat_map(|runtime| runtime.providers.iter())
+                    .map(|(prefix, provider)| (prefix.clone(), Arc::clone(provider))),
+            );
+        // Line/headless startup follows the same lazy provider boundary as the
+        // hosted TUI. Merely reaching an idle prompt must never touch the OS
+        // credential vault; the first actual model use or explicit provider
+        // activation is the authorization boundary.
+        let redactor = fixture_redactor.clone();
+        let model = lazy_live_provider_model(
+            factory,
+            loaded_config.config.clone(),
+            config_loader
+                .credentials_path()
+                .with_file_name("config.toml"),
+            workspace.join(".rottweiler/config.toml"),
+            persisted_model_alias.clone(),
+            redactor.clone(),
+            built_tools.websearch.clone(),
         );
-        ModelDriver::prepare_model(runtime.as_ref(), &persisted_model_alias)
-            .await
-            .map_err(|error| miette!("selected model could not bind: {error}"))?;
-        if let Some(searcher) = &built_tools.websearch {
-            let runtime = Arc::clone(&runtime);
-            searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-                runtime.native_web_searcher(alias)
-            })));
-        }
-        let redactor = runtime.fixture_redactor();
-        (runtime, redactor)
+        (model, redactor)
     };
     register_credential_environment(&engine_redactor);
     plugin_redactor.bind(engine_redactor.clone());
@@ -2570,125 +2572,22 @@ pub(crate) async fn compose_hosted_actor(
                 .with_extension_providers(extension_providers);
             let user_config_path = extension_credentials_path.with_file_name("config.toml");
             let project_config_path = workspace.join(".rottweiler/config.toml");
-            let fallback_catalog: Arc<dyn ModelCatalogSource> =
-                Arc::new(ReloadingHostedCatalogSource {
-                    factory: factory.clone(),
-                    base_config: options.config.clone(),
-                    user_config_path: user_config_path.clone(),
-                    project_config_path: project_config_path.clone(),
-                });
             // Keep the hosted control plane and its private local transport
             // independent from provider credentials. Provider construction is
             // deliberately deferred until the first model preparation,
             // explicit catalog request, or provider activation. On macOS this
             // is also the boundary that prevents an idle TUI attach from
             // triggering a Keychain authorization prompt.
-            let initial_model: Arc<dyn ModelDriver> = Arc::new(UnavailableHostedModel {
-                alias: persisted_model_alias.clone(),
-                reason: "the provider has not been connected for this session yet".to_owned(),
-                compaction: options.config.compaction.clone(),
-                budget: options.config.budget.clone(),
-            });
             let redactor = fixture_redactor.clone();
-            let initialize_factory = factory.clone();
-            let initialize_base_config = options.config.clone();
-            let initialize_user_config_path = user_config_path.clone();
-            let initialize_project_config_path = project_config_path.clone();
-            let initialize_redactor = redactor.clone();
-            let initialize_searcher = built_tools.websearch.clone();
-            let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move || {
-                let loaded = ConfigLoader::new(
-                    initialize_user_config_path.clone(),
-                    initialize_project_config_path.clone(),
-                )
-                .load()
-                .map_err(|error| {
-                    AgentLoopError::InvalidConfiguration(format!(
-                        "provider initialization configuration could not reload: {error}"
-                    ))
-                })?
-                .config;
-                let config = merge_reloaded_provider_config(initialize_base_config.clone(), loaded);
-                let runtime = Arc::new(
-                    initialize_factory
-                        .build(&config)
-                        .map_err(|error| AgentLoopError::Provider(error.to_string()))?,
-                );
-                let pre_runtime = Arc::clone(&runtime);
-                let pre_redactor = initialize_redactor.clone();
-                let pre_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                    pre_redactor.merge_from(&pre_runtime.fixture_redactor());
-                });
-                let post_runtime = Arc::clone(&runtime);
-                let post_searcher = initialize_searcher.clone();
-                let post_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                    if let Some(searcher) = &post_searcher {
-                        let runtime = Arc::clone(&post_runtime);
-                        searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-                            runtime.native_web_searcher(alias)
-                        })));
-                    }
-                });
-                let model: Arc<dyn ModelDriver> = runtime;
-                Ok(ActivatedHostedProvider {
-                    replacement_model: model,
-                    pre_commit: Some(pre_commit),
-                    post_commit: Some(post_commit),
-                })
-            });
-            let activation_factory = factory.clone();
-            let base_config = options.config.clone();
-            let activation_redactor = redactor.clone();
-            let searcher = built_tools.websearch.clone();
-            let activate: Arc<HostedProviderActivator> = Arc::new(move |provider| {
-                let loaded =
-                    ConfigLoader::new(user_config_path.clone(), project_config_path.clone())
-                        .load()
-                        .map_err(|error| {
-                            AgentLoopError::InvalidConfiguration(format!(
-                                "provider activation configuration could not reload: {error}"
-                            ))
-                        })?
-                        .config;
-                let config = merge_reloaded_provider_config(base_config.clone(), loaded);
-                let config = prepare_provider_activation_config(config, provider)?;
-                // Connecting one provider must not resolve credentials for
-                // every other configured provider. Build the isolated route
-                // directly; live catalog discovery remains a separate,
-                // explicit operation.
-                let isolated = prepare_isolated_provider_activation_config(config, provider)?;
-                let runtime = activation_factory
-                    .build(&isolated)
-                    .map_err(|error| AgentLoopError::Provider(error.to_string()))?;
-                let runtime = Arc::new(runtime);
-                let pre_runtime = Arc::clone(&runtime);
-                let pre_redactor = activation_redactor.clone();
-                let pre_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                    pre_redactor.merge_from(&pre_runtime.fixture_redactor());
-                });
-                let post_runtime = Arc::clone(&runtime);
-                let post_searcher = searcher.clone();
-                let post_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-                    if let Some(searcher) = &post_searcher {
-                        let runtime = Arc::clone(&post_runtime);
-                        searcher.bind_native_resolver(Some(Arc::new(move |alias| {
-                            runtime.native_web_searcher(alias)
-                        })));
-                    }
-                });
-                let model: Arc<dyn ModelDriver> = runtime.clone();
-                Ok(ActivatedHostedProvider {
-                    replacement_model: model,
-                    pre_commit: Some(pre_commit),
-                    post_commit: Some(post_commit),
-                })
-            });
-            let model = Arc::new(RecomposableHostedModel::new_lazy(
-                initial_model,
-                fallback_catalog,
-                activate,
-                initialize,
-            ));
+            let model = lazy_live_provider_model(
+                factory,
+                options.config.clone(),
+                user_config_path,
+                project_config_path,
+                persisted_model_alias.clone(),
+                redactor.clone(),
+                built_tools.websearch.clone(),
+            );
             let source: Arc<dyn ModelCatalogSource> = model.clone();
             (
                 model,
@@ -6309,6 +6208,143 @@ type HostedProviderActivator =
     dyn Fn(&str) -> std::result::Result<ActivatedHostedProvider, AgentLoopError> + Send + Sync;
 type HostedRuntimeInitializer =
     dyn Fn() -> std::result::Result<ActivatedHostedProvider, AgentLoopError> + Send + Sync;
+
+fn live_provider_activator(
+    factory: ProviderFactory,
+    base_config: Config,
+    user_config_path: PathBuf,
+    project_config_path: PathBuf,
+    redactor: FixtureRedactor,
+    searcher: Option<Arc<RuntimeWebSearcher>>,
+) -> Arc<HostedProviderActivator> {
+    Arc::new(move |provider| {
+        let loaded = ConfigLoader::new(user_config_path.clone(), project_config_path.clone())
+            .load()
+            .map_err(|error| {
+                AgentLoopError::InvalidConfiguration(format!(
+                    "provider activation configuration could not reload: {error}"
+                ))
+            })?
+            .config;
+        let config = merge_reloaded_provider_config(base_config.clone(), loaded);
+        let config = prepare_provider_activation_config(config, provider)?;
+        // Connecting one provider must not resolve credentials for every
+        // other configured provider. Live catalog discovery stays separate.
+        let isolated = prepare_isolated_provider_activation_config(config, provider)?;
+        let runtime = Arc::new(
+            factory
+                .build(&isolated)
+                .map_err(|error| AgentLoopError::Provider(error.to_string()))?,
+        );
+        let pre_runtime = Arc::clone(&runtime);
+        let pre_redactor = redactor.clone();
+        let pre_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            pre_redactor.merge_from(&pre_runtime.fixture_redactor());
+        });
+        let post_runtime = Arc::clone(&runtime);
+        let post_searcher = searcher.clone();
+        let post_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(searcher) = &post_searcher {
+                let runtime = Arc::clone(&post_runtime);
+                searcher.bind_native_resolver(Some(Arc::new(move |alias| {
+                    runtime.native_web_searcher(alias)
+                })));
+            }
+        });
+        let model: Arc<dyn ModelDriver> = runtime;
+        Ok(ActivatedHostedProvider {
+            replacement_model: model,
+            pre_commit: Some(pre_commit),
+            post_commit: Some(post_commit),
+        })
+    })
+}
+
+fn lazy_live_provider_model(
+    factory: ProviderFactory,
+    base_config: Config,
+    user_config_path: PathBuf,
+    project_config_path: PathBuf,
+    persisted_model_alias: String,
+    redactor: FixtureRedactor,
+    searcher: Option<Arc<RuntimeWebSearcher>>,
+) -> Arc<RecomposableHostedModel> {
+    let fallback_catalog: Arc<dyn ModelCatalogSource> = Arc::new(ReloadingHostedCatalogSource {
+        factory: factory.clone(),
+        base_config: base_config.clone(),
+        user_config_path: user_config_path.clone(),
+        project_config_path: project_config_path.clone(),
+    });
+    let initial_model: Arc<dyn ModelDriver> = Arc::new(UnavailableHostedModel {
+        alias: persisted_model_alias,
+        reason: "the provider has not been connected for this session yet".to_owned(),
+        compaction: base_config.compaction.clone(),
+        budget: base_config.budget.clone(),
+    });
+
+    let initialize_factory = factory.clone();
+    let initialize_base_config = base_config.clone();
+    let initialize_user_config_path = user_config_path.clone();
+    let initialize_project_config_path = project_config_path.clone();
+    let initialize_redactor = redactor.clone();
+    let initialize_searcher = searcher.clone();
+    let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move || {
+        let loaded = ConfigLoader::new(
+            initialize_user_config_path.clone(),
+            initialize_project_config_path.clone(),
+        )
+        .load()
+        .map_err(|error| {
+            AgentLoopError::InvalidConfiguration(format!(
+                "provider initialization configuration could not reload: {error}"
+            ))
+        })?
+        .config;
+        let config = merge_reloaded_provider_config(initialize_base_config.clone(), loaded);
+        let runtime = Arc::new(
+            initialize_factory
+                .build(&config)
+                .map_err(|error| AgentLoopError::Provider(error.to_string()))?,
+        );
+        let pre_runtime = Arc::clone(&runtime);
+        let pre_redactor = initialize_redactor.clone();
+        let pre_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            pre_redactor.merge_from(&pre_runtime.fixture_redactor());
+        });
+        let post_runtime = Arc::clone(&runtime);
+        let post_searcher = initialize_searcher.clone();
+        let post_commit: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            if let Some(searcher) = &post_searcher {
+                let runtime = Arc::clone(&post_runtime);
+                searcher.bind_native_resolver(Some(Arc::new(move |alias| {
+                    runtime.native_web_searcher(alias)
+                })));
+            }
+        });
+        let model: Arc<dyn ModelDriver> = runtime;
+        Ok(ActivatedHostedProvider {
+            replacement_model: model,
+            pre_commit: Some(pre_commit),
+            post_commit: Some(post_commit),
+        })
+    });
+
+    let activate = live_provider_activator(
+        factory,
+        base_config,
+        user_config_path,
+        project_config_path,
+        redactor,
+        searcher,
+    );
+
+    Arc::new(RecomposableHostedModel::new_lazy(
+        initial_model,
+        fallback_catalog,
+        activate,
+        initialize,
+    ))
+}
 
 /// Prepares a private provider runtime generation and stages it by provider.
 /// Connecting a provider never changes the active model; a staged generation
