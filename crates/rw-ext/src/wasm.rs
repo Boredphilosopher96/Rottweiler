@@ -128,6 +128,16 @@ impl WasmHookHost {
         }
 
         let mut config = Config::new();
+        // Apple-silicon hosted environments can enforce executable-memory
+        // policy more strictly than an interactive shell. Pulley keeps the
+        // private extension tier free of JIT/code-signing requirements while
+        // preserving Wasmtime's component model, fuel, and store limits.
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        config
+            .target("pulley64")
+            .map_err(|error| WasmHookHostError::Compile {
+                message: format!("{error:#}"),
+            })?;
         config.wasm_component_model(true);
         config.consume_fuel(true);
         let engine = Engine::new(&config).map_err(|error| WasmHookHostError::Compile {
@@ -422,6 +432,8 @@ mod tests {
         .expect("component WAT");
         let host = WasmHookHost::from_bytes(manifest(), &component, WasmHookLimits::default())
             .expect("compiled component");
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        assert!(host.engine.is_pulley());
         assert_eq!(
             host.invoke_json("pre_tool", r#"{"tool":"read"}"#)
                 .await

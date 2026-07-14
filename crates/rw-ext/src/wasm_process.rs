@@ -1,6 +1,11 @@
 //! Bounded one-shot protocol for the private WASM helper process.
 
-use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    process::Stdio,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -16,6 +21,7 @@ pub const MAX_WASM_HOST_HEADER_BYTES: usize = 1024 * 1024;
 pub const MAX_WASM_HOST_RESPONSE_BYTES: usize = 1024 * 1024;
 pub const WASM_HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const WASM_HOST_REAP_TIMEOUT: Duration = Duration::from_secs(1);
+static WASM_HELPER_SLOT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
@@ -179,6 +185,17 @@ async fn invoke_helper_with_timeout(
     component: &[u8],
     request_timeout: Duration,
 ) -> Result<WasmHostResponse, WasmHookHostError> {
+    let started = Instant::now();
+    let _permit = tokio::time::timeout(request_timeout, WASM_HELPER_SLOT.acquire())
+        .await
+        .map_err(|_| helper_deadline_error())?
+        .map_err(|_| WasmHookHostError::Execution {
+            message: "private WASM helper is unavailable".to_owned(),
+        })?;
+    let remaining = request_timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Err(helper_deadline_error());
+    }
     let header = serde_json::to_vec(request).map_err(|error| WasmHookHostError::Execution {
         message: format!("WASM helper request could not encode: {error}"),
     })?;
@@ -255,7 +272,7 @@ async fn invoke_helper_with_timeout(
             message: format!("private WASM helper returned malformed output: {error}"),
         })
     };
-    match tokio::time::timeout(request_timeout, exchange).await {
+    match tokio::time::timeout(remaining, exchange).await {
         Ok(Ok(response)) => Ok(response),
         Ok(Err(error)) => {
             terminate_and_reap(&mut child).await;
@@ -263,10 +280,14 @@ async fn invoke_helper_with_timeout(
         }
         Err(_) => {
             terminate_and_reap(&mut child).await;
-            Err(WasmHookHostError::Execution {
-                message: "private WASM helper exceeded its request deadline".to_owned(),
-            })
+            Err(helper_deadline_error())
         }
+    }
+}
+
+fn helper_deadline_error() -> WasmHookHostError {
+    WasmHookHostError::Execution {
+        message: "private WASM helper exceeded its request deadline".to_owned(),
     }
 }
 
