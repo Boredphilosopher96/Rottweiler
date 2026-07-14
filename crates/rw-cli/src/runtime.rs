@@ -34,45 +34,46 @@ use rw_core::runtime_support::{
     ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyEnvironment, ProxySettings,
     QuestionAsker, ReadTool, Recorder, RecordingCommandExecutor, ReferencesTool, RenameResult,
     RenameTool, ReplayCommandExecutor, ReplayProvider, Role, SandboxNetworkPolicy, SandboxPolicy,
-    SandboxSupport, SandboxedLspSpawner, SessionId, SupervisedEgressProxy, SymbolsTool,
-    TemplatePart, ThinkingLevel, TodoTool, TokioCommandExecutor, Tool, ToolCapability, ToolChoice,
-    ToolCommandOutcome, ToolContext, ToolDefinition, ToolDescriptor, ToolError, ToolLimits,
-    ToolOutput, ToolOutputChunk, ToolOutputPart, ToolOutputSink, ToolRegistry, ToolResult,
-    ToolchainConfig, Turn, TurnMeta, UpstreamProxy, WebFetchTool, WebFetcher, WebSearchConfig,
-    WebSearchRequest, WebSearchResponse, WebSearchTool, WebSearcher, WireMode,
-    WorkspaceSymbolIndex, WorkspaceUriMapper, WorktreeIsolation, WorktreeLeaseRecord,
-    WorktreeLimits, WriteTool, compose_agent_registry, default_models_path,
+    SandboxSupport, SandboxedLspSpawner, SessionId, SubagentProgressEvent, SupervisedEgressProxy,
+    SymbolsTool, TemplatePart, ThinkingLevel, TodoTool, TokioCommandExecutor, Tool, ToolCapability,
+    ToolChoice, ToolCommandOutcome, ToolContext, ToolDefinition, ToolDescriptor, ToolError,
+    ToolLimits, ToolOutput, ToolOutputChunk, ToolOutputPart, ToolOutputSink, ToolRegistry,
+    ToolResult, ToolchainConfig, Turn, TurnMeta, UpstreamProxy, WasmHookLimits, WasmProcessHook,
+    WebFetchTool, WebFetcher, WebSearchConfig, WebSearchRequest, WebSearchResponse, WebSearchTool,
+    WebSearcher, WireMode, WorkspaceSymbolIndex, WorkspaceUriMapper, WorktreeIsolation,
+    WorktreeLeaseRecord, WorktreeLimits, WriteTool, compose_agent_registry, default_models_path,
     deny_outbound_network_for_process, discover_sandboxed_lsp_servers, guarded_http_fetch,
-    probe_policy_egress,
+    load_active_wasm_extensions_report, probe_policy_egress,
 };
 use rw_core::{
     AccountingAttribution, ActorSubagentSessionFactory, AgentLoopError, BudgetLedgerQuery,
     BudgetLedgerTotals, CachedModelCatalog, ClientId, Config, EngineEvent, EventClock, EventMeta,
-    FolderTrustController, FolderTrustOperation, HostError, HostRuntimeService, MessageDisposition,
-    ModelCatalogError, ModelCatalogSnapshot, ModelCatalogSource, ModelDriver, MutationCheckpoint,
-    MutationCheckpointCoordinator, MutationCheckpointOutcome, PermissionGate, ProviderFactory,
-    ProviderModelCatalogSource, ProviderNativeWebSearcher, QuestionId, ReviewFileDecision,
-    RewindCheckpoint, RuntimeServiceDescriptor, RuntimeServiceKind, SESSION_EVENT_VERSION,
-    SequenceId, SessionActor, SessionActorConfig, SessionCommandAction, SessionCommandContext,
-    SessionCommandOutput, SessionEventSink, SessionReview, SpawnAgentTool, SubagentLimits,
-    SubagentMetadataStore, SubagentOrchestrator, SubagentSessionFactory, SystemEventClock,
-    ThinkingLevel as ConfigThinkingLevel, ToolOutputStream, TurnStatus, UnrestorablePath, Usage,
-    WorktreeSubagentSessionFactory, base_agent_system_turn, builtin_command_registry,
-    builtin_hook_dispatcher, load_instruction_stack, load_nested_instruction_stack,
-    project_session_events,
+    FolderTrustController, FolderTrustOperation, HostError, HostRuntimeService,
+    HostSubagentService, MessageDisposition, ModelCatalogError, ModelCatalogSnapshot,
+    ModelCatalogSource, ModelDriver, MutationCheckpoint, MutationCheckpointCoordinator,
+    MutationCheckpointOutcome, PermissionGate, ProviderFactory, ProviderModelCatalogSource,
+    ProviderNativeWebSearcher, QuestionId, ReviewFileDecision, RewindCheckpoint,
+    RuntimeServiceDescriptor, RuntimeServiceKind, SESSION_EVENT_VERSION, SequenceId, SessionActor,
+    SessionActorConfig, SessionCommandAction, SessionCommandContext, SessionCommandOutput,
+    SessionEventSink, SessionReview, SpawnAgentTool, StartupNotification, SubagentLimits,
+    SubagentMetadataStore, SubagentObserver, SubagentOrchestrator, SubagentReplay,
+    SubagentSessionFactory, SystemEventClock, ThinkingLevel as ConfigThinkingLevel,
+    ToolOutputStream, TurnStatus, UnrestorablePath, Usage, WorktreeSubagentSessionFactory,
+    base_agent_system_turn, builtin_command_registry, builtin_hook_dispatcher,
+    load_instruction_stack, load_nested_instruction_stack, project_session_events,
 };
 use rw_store::{
     checkpoint::{CheckpointStore, OpaqueMutation, RewindHandle},
     config::ConfigLoader,
     credentials::{CredentialManager, CredentialReference},
     session::{
-        AccountingLedger, SessionEventLog, SessionIndex, SessionProjection, SessionStoreError,
-        SessionSummary, TurnAccountingEntry, UtcTimestamp,
+        AccountingLedger, SessionEventLog, SessionEventPageLimits, SessionIndex, SessionProjection,
+        SessionStoreError, SessionSummary, TurnAccountingEntry, UtcTimestamp,
     },
     trust::FolderTrustStore,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use url::{Host, Url};
 
 use crate::{OutputFormat, PermissionMode};
@@ -933,9 +934,312 @@ pub(crate) struct HostedActorRuntime {
     pub model_catalog: Option<Arc<CachedModelCatalog>>,
     pub mcp: Option<Arc<dyn rw_core::HostMcpService>>,
     pub runtime_services: Arc<dyn HostRuntimeService>,
+    pub subagents: Arc<dyn HostSubagentService>,
     pub model_alias: String,
     pub driver_client_id: Option<rw_core::ClientId>,
     pub shell_active: bool,
+}
+
+const MAX_SUBAGENT_REPLAY_PAGE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_SUBAGENT_REPLAY_PAGE_EVENTS: usize = 16_000;
+const MAX_SUBAGENT_REPLAY_LINE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SUBAGENT_REPLAY_SCAN_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_SUBAGENT_REPLAY_SCAN_EVENTS: u64 = 1_000_000;
+const SUBAGENT_PROGRESS_QUEUE_CAPACITY: usize = 512;
+const SUBAGENT_PROGRESS_BATCH_EVENTS: usize = 64;
+const SUBAGENT_PROGRESS_BATCH_INTERVAL: Duration = Duration::from_millis(8);
+
+struct HostedSubagentController {
+    parent: rw_core::SessionHandle,
+    orchestrator: SubagentOrchestrator,
+    storage_root: PathBuf,
+}
+
+impl HostedSubagentController {
+    fn ensure_parent(&self, parent_session_id: &SessionId) -> Result<(), HostError> {
+        if self.parent.session_id() == parent_session_id {
+            Ok(())
+        } else {
+            Err(HostError::Protocol(
+                "child-agent parent session does not match this controller".to_owned(),
+            ))
+        }
+    }
+}
+
+struct HostedSubagentObserver {
+    parent: rw_core::SessionHandle,
+    progress: mpsc::Sender<HostedSubagentProgressMessage>,
+}
+
+enum HostedSubagentProgressMessage {
+    Event(SubagentProgressEvent),
+    Flush(oneshot::Sender<Result<(), String>>),
+}
+
+impl HostedSubagentObserver {
+    fn new(parent: rw_core::SessionHandle) -> Self {
+        let (progress, receiver) = mpsc::channel(SUBAGENT_PROGRESS_QUEUE_CAPACITY);
+        tokio::spawn(forward_subagent_progress(parent.clone(), receiver));
+        Self { parent, progress }
+    }
+
+    async fn flush_progress(&self) -> Result<(), rw_core::OrchestrationError> {
+        let (send, receive) = oneshot::channel();
+        self.progress
+            .send(HostedSubagentProgressMessage::Flush(send))
+            .await
+            .map_err(|_| {
+                rw_core::OrchestrationError::Observer(
+                    "child progress forwarder is unavailable".to_owned(),
+                )
+            })?;
+        receive
+            .await
+            .map_err(|_| {
+                rw_core::OrchestrationError::Observer(
+                    "child progress forwarder stopped before flushing".to_owned(),
+                )
+            })?
+            .map_err(rw_core::OrchestrationError::Observer)
+    }
+}
+
+async fn forward_subagent_progress(
+    parent: rw_core::SessionHandle,
+    mut receiver: mpsc::Receiver<HostedSubagentProgressMessage>,
+) {
+    let mut batch = Vec::with_capacity(SUBAGENT_PROGRESS_BATCH_EVENTS);
+    let mut interval = tokio::time::interval(SUBAGENT_PROGRESS_BATCH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+    loop {
+        tokio::select! {
+            message = receiver.recv() => match message {
+                Some(HostedSubagentProgressMessage::Event(event)) => {
+                    batch.push(event);
+                    if batch.len() >= SUBAGENT_PROGRESS_BATCH_EVENTS
+                        && parent.publish_subagent_progress_batch(std::mem::take(&mut batch)).await.is_err()
+                    {
+                        return;
+                    }
+                }
+                Some(HostedSubagentProgressMessage::Flush(respond)) => {
+                    let result = if batch.is_empty() {
+                        Ok(())
+                    } else {
+                        parent
+                            .publish_subagent_progress_batch(std::mem::take(&mut batch))
+                            .await
+                            .map_err(|error| error.to_string())
+                    };
+                    let failed = result.is_err();
+                    let _ = respond.send(result);
+                    if failed {
+                        return;
+                    }
+                }
+                None => {
+                    if !batch.is_empty() {
+                        let _ = parent.publish_subagent_progress_batch(batch).await;
+                    }
+                    return;
+                }
+            },
+            _ = interval.tick(), if !batch.is_empty() => {
+                if parent.publish_subagent_progress_batch(std::mem::take(&mut batch)).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+fn load_bounded_subagent_replay(
+    storage_root: &Path,
+    child_session_id: &SessionId,
+    after_sequence: Option<SequenceId>,
+) -> Result<SubagentReplay, HostError> {
+    let limits = SessionEventPageLimits {
+        max_page_bytes: MAX_SUBAGENT_REPLAY_PAGE_BYTES,
+        max_page_events: MAX_SUBAGENT_REPLAY_PAGE_EVENTS,
+        max_line_bytes: MAX_SUBAGENT_REPLAY_LINE_BYTES,
+        max_scan_bytes: MAX_SUBAGENT_REPLAY_SCAN_BYTES,
+        max_scan_events: MAX_SUBAGENT_REPLAY_SCAN_EVENTS,
+    };
+    let page = if let Some(after_sequence) = after_sequence {
+        SessionEventLog::load_existing_page::<EngineEvent>(
+            storage_root,
+            &child_session_id.0,
+            Some(after_sequence),
+            limits,
+        )
+    } else {
+        SessionEventLog::load_existing_tail_page::<EngineEvent>(
+            storage_root,
+            &child_session_id.0,
+            limits,
+        )
+    }
+    .map_err(|_| HostError::Persistence("child session replay is unavailable".to_owned()))?;
+    let through_sequence = page.events.last().map(|envelope| envelope.sequence);
+    let mut events = Vec::with_capacity(page.events.len());
+    for envelope in page.events {
+        let meta = envelope.event.meta().ok_or_else(|| {
+            HostError::Persistence("child session log contains a transient event".to_owned())
+        })?;
+        if meta.session_id != *child_session_id || meta.sequence_id != envelope.sequence {
+            return Err(HostError::Persistence(
+                "child session replay identity is invalid".to_owned(),
+            ));
+        }
+        if after_sequence.is_some_and(|after| envelope.sequence.0 <= after.0) {
+            continue;
+        }
+        let event = serde_json::to_value(envelope.event).map_err(|_| {
+            HostError::Persistence("child session replay could not serialize".to_owned())
+        })?;
+        events.push((envelope.sequence, event));
+    }
+    Ok(SubagentReplay {
+        child_session_id: child_session_id.clone(),
+        events,
+        through_sequence,
+        next_cursor: page.next_cursor,
+        tail_sequence: page.tail_sequence,
+        has_more: page.has_more,
+        events_before_page: page.events_before_page,
+        truncated: page.events_before_page
+            > after_sequence.map_or(0, |cursor| cursor.0.saturating_add(1))
+            || page.has_more,
+    })
+}
+
+#[async_trait]
+impl SubagentObserver for HostedSubagentObserver {
+    async fn spawned(
+        &self,
+        handle: &rw_core::SubagentHandle,
+        task: &str,
+    ) -> Result<(), rw_core::OrchestrationError> {
+        self.parent
+            .record_subagent_spawned(
+                handle.subagent_id.clone(),
+                handle.session_id.clone(),
+                task.to_owned(),
+            )
+            .await
+            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
+    }
+
+    async fn finished(
+        &self,
+        result: &rw_core::SubagentResult,
+    ) -> Result<(), rw_core::OrchestrationError> {
+        self.flush_progress().await?;
+        self.parent
+            .record_subagent_finished(result.clone())
+            .await
+            .map_err(|error| rw_core::OrchestrationError::Observer(error.to_string()))
+    }
+
+    async fn progress(
+        &self,
+        handle: &rw_core::SubagentHandle,
+        child_sequence: Option<u64>,
+        event: serde_json::Value,
+    ) -> Result<(), rw_core::OrchestrationError> {
+        self.progress
+            .send(HostedSubagentProgressMessage::Event(
+                SubagentProgressEvent {
+                    subagent_id: handle.subagent_id.clone(),
+                    child_session_id: handle.session_id.clone(),
+                    child_sequence,
+                    event,
+                },
+            ))
+            .await
+            .map_err(|_| {
+                rw_core::OrchestrationError::Observer(
+                    "child progress forwarder is unavailable".to_owned(),
+                )
+            })
+    }
+}
+
+#[async_trait]
+impl HostSubagentService for HostedSubagentController {
+    async fn list(
+        &self,
+        parent_session_id: &SessionId,
+    ) -> Result<Vec<rw_core::SubagentDescriptor>, HostError> {
+        self.ensure_parent(parent_session_id)?;
+        Ok(self.orchestrator.list_for_parent(parent_session_id))
+    }
+
+    async fn replay(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &rw_core::SubagentId,
+        after_sequence: Option<SequenceId>,
+    ) -> Result<SubagentReplay, HostError> {
+        self.ensure_parent(parent_session_id)?;
+        let descriptor = self
+            .orchestrator
+            .descriptor_for_parent(parent_session_id, subagent_id)
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
+        load_bounded_subagent_replay(
+            &self.storage_root,
+            &descriptor.child_session_id,
+            after_sequence,
+        )
+    }
+
+    async fn continue_child(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &rw_core::SubagentId,
+        content: String,
+    ) -> Result<(), HostError> {
+        self.ensure_parent(parent_session_id)?;
+        let observer: Arc<dyn SubagentObserver> =
+            Arc::new(HostedSubagentObserver::new(self.parent.clone()));
+        self.orchestrator
+            .follow_up(
+                parent_session_id,
+                subagent_id,
+                content,
+                observer,
+                CancellationToken::default(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|error| HostError::Protocol(error.to_string()))
+    }
+
+    async fn interrupt(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &rw_core::SubagentId,
+    ) -> Result<(), HostError> {
+        self.ensure_parent(parent_session_id)?;
+        self.orchestrator
+            .cancel(parent_session_id, subagent_id)
+            .await
+            .map_err(|error| HostError::Protocol(error.to_string()))
+    }
+
+    async fn close(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &rw_core::SubagentId,
+    ) -> Result<(), HostError> {
+        self.ensure_parent(parent_session_id)?;
+        self.orchestrator
+            .close(parent_session_id, subagent_id)
+            .await
+            .map_err(|error| HostError::Protocol(error.to_string()))
+    }
 }
 
 fn canonical_workspace_roots(primary: &Path, additional: &[PathBuf]) -> Result<Vec<PathBuf>> {
@@ -1597,12 +1901,14 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
-    let mut runtime_hooks = compose_runtime_hooks_with_extensions(
-        &loaded_config.config.toolchain,
-        &toolchain_runtime,
-        &extension_catalog,
-        Arc::clone(&built_tools.code_intelligence),
-    )?;
+    let (mut runtime_hooks, wasm_startup_notifications, validated_wasm_hooks) =
+        compose_runtime_hooks_with_extensions_validated(
+            &loaded_config.config.toolchain,
+            &toolchain_runtime,
+            &extension_catalog,
+            Arc::clone(&built_tools.code_intelligence),
+        )
+        .await?;
     if let Some(plugins) = &plugin_runtime {
         for (registration, handler) in &plugins.hooks {
             runtime_hooks
@@ -1637,6 +1943,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         trust_store_path: storage_root.join("trust.json"),
         toolchain_config: loaded_config.config.toolchain.clone(),
         toolchain_runtime,
+        validated_wasm_hooks,
         extension_user_home,
         extension_user_rottweiler,
         dangerously_trust: options.dangerously_trust,
@@ -1829,6 +2136,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
             .workspace_generation
             .max(persisted_workspace_generation),
         initial_session_context: initial_context,
+        startup_notifications: wasm_startup_notifications,
         model_alias,
         model,
         tools: runtime_tools,
@@ -2465,12 +2773,14 @@ pub(crate) async fn compose_hosted_actor(
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
-    let mut runtime_hooks = compose_runtime_hooks_with_extensions(
-        &options.config.toolchain,
-        &toolchain_runtime,
-        &extension_catalog,
-        Arc::clone(&built_tools.code_intelligence),
-    )?;
+    let (mut runtime_hooks, wasm_startup_notifications, validated_wasm_hooks) =
+        compose_runtime_hooks_with_extensions_validated(
+            &options.config.toolchain,
+            &toolchain_runtime,
+            &extension_catalog,
+            Arc::clone(&built_tools.code_intelligence),
+        )
+        .await?;
     if let Some(plugins) = &plugin_runtime {
         for (registration, handler) in &plugins.hooks {
             runtime_hooks
@@ -2505,6 +2815,7 @@ pub(crate) async fn compose_hosted_actor(
         trust_store_path: options.storage_root.join("trust.json"),
         toolchain_config: options.config.toolchain.clone(),
         toolchain_runtime: Arc::clone(&toolchain_runtime),
+        validated_wasm_hooks,
         extension_user_home,
         extension_user_rottweiler,
         dangerously_trust: options.dangerously_trust,
@@ -2693,6 +3004,7 @@ pub(crate) async fn compose_hosted_actor(
             .workspace_generation
             .max(persisted_workspace_generation),
         initial_session_context: initial_context,
+        startup_notifications: wasm_startup_notifications,
         model_alias: persisted_model_alias,
         model,
         tools: runtime_tools,
@@ -2728,6 +3040,11 @@ pub(crate) async fn compose_hosted_actor(
             }
         });
     }
+    let subagents: Arc<dyn HostSubagentService> = Arc::new(HostedSubagentController {
+        parent: handle.clone(),
+        orchestrator,
+        storage_root: options.storage_root.clone(),
+    });
     Ok(HostedActorRuntime {
         handle,
         model_catalog,
@@ -2736,6 +3053,7 @@ pub(crate) async fn compose_hosted_actor(
             intelligence: Arc::clone(&built_tools.code_intelligence),
             toolchain: Arc::clone(&toolchain_runtime),
         }),
+        subagents,
         model_alias: descriptor_model,
         driver_client_id,
         shell_active,
@@ -4673,6 +4991,7 @@ struct RuntimeWorkspaceRootController {
     trust_store_path: PathBuf,
     toolchain_config: ToolchainConfig,
     toolchain_runtime: Arc<ToolchainRuntime>,
+    validated_wasm_hooks: Arc<[NamedWasmHook]>,
     extension_user_home: PathBuf,
     extension_user_rottweiler: PathBuf,
     dangerously_trust: bool,
@@ -4774,6 +5093,7 @@ impl RuntimeWorkspaceRootController {
             &toolchain_runtime,
             &catalog,
             Arc::clone(&built.code_intelligence),
+            &self.validated_wasm_hooks,
         )
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         register_nested_instruction_guard(
@@ -4833,6 +5153,7 @@ impl RuntimeWorkspaceRootController {
             trust_store_path: self.trust_store_path.clone(),
             toolchain_config: self.toolchain_config.clone(),
             toolchain_runtime,
+            validated_wasm_hooks: Arc::clone(&self.validated_wasm_hooks),
             extension_user_home: self.extension_user_home.clone(),
             extension_user_rottweiler: self.extension_user_rottweiler.clone(),
             dangerously_trust: self.dangerously_trust,
@@ -4847,6 +5168,7 @@ impl RuntimeWorkspaceRootController {
             additional_workspace_roots: Vec::new(),
             workspace_generation: recovered.workspace_generation,
             initial_session_context: initial_context,
+            startup_notifications: Vec::new(),
             model_alias: recovered
                 .model_alias
                 .clone()
@@ -5037,6 +5359,7 @@ impl RuntimeWorkspaceRootController {
             &self.toolchain_runtime,
             &catalog,
             Arc::clone(&built.code_intelligence),
+            &self.validated_wasm_hooks,
         )
         .map_err(|_error| {
             AgentLoopError::InvalidConfiguration(
@@ -8749,10 +9072,175 @@ fn compose_runtime_hooks_with_extensions(
     runtime: &Arc<ToolchainRuntime>,
     catalog: &ExtensionCatalog,
     intelligence: Arc<dyn CodeIntelligenceProvider>,
+    validated_wasm_hooks: &[NamedWasmHook],
 ) -> Result<HookDispatcher> {
     let mut hooks = compose_runtime_hooks(config, Arc::clone(runtime), Some(intelligence))?;
     register_declarative_hooks(&mut hooks, catalog, runtime)?;
+    register_retained_wasm_hooks(&mut hooks, validated_wasm_hooks)?;
     Ok(hooks)
+}
+
+async fn compose_runtime_hooks_with_extensions_validated(
+    config: &ToolchainConfig,
+    runtime: &Arc<ToolchainRuntime>,
+    catalog: &ExtensionCatalog,
+    intelligence: Arc<dyn CodeIntelligenceProvider>,
+) -> Result<(
+    HookDispatcher,
+    Vec<StartupNotification>,
+    Arc<[NamedWasmHook]>,
+)> {
+    let mut hooks = compose_runtime_hooks(config, Arc::clone(runtime), Some(intelligence))?;
+    register_declarative_hooks(&mut hooks, catalog, runtime)?;
+    let (validated_wasm_hooks, notices) = register_validated_wasm_hooks(&mut hooks).await?;
+    Ok((hooks, notices, validated_wasm_hooks.into()))
+}
+
+async fn register_validated_wasm_hooks(
+    dispatcher: &mut HookDispatcher,
+) -> Result<(Vec<NamedWasmHook>, Vec<StartupNotification>)> {
+    let (hosts, mut notices) = load_active_wasm_hook_proxies()?;
+    let mut validated = Vec::new();
+    for (name, host) in hosts {
+        if host.validate().await.is_err() {
+            notices.push(wasm_startup_notice(
+                &format!("wasm:{name}"),
+                &format!("Extension {name} was skipped because its component failed validation."),
+            ));
+            continue;
+        }
+        if host.register_hooks(dispatcher).is_err() {
+            notices.push(wasm_startup_notice(
+                &format!("wasm:{name}"),
+                &format!(
+                    "Extension {name} was skipped because its hooks conflict with another extension."
+                ),
+            ));
+            continue;
+        }
+        validated.push((name, host));
+    }
+    Ok((validated, notices))
+}
+
+fn register_retained_wasm_hooks(
+    dispatcher: &mut HookDispatcher,
+    validated_wasm_hooks: &[NamedWasmHook],
+) -> Result<()> {
+    for (name, host) in validated_wasm_hooks {
+        host.register_hooks(dispatcher).map_err(|error| {
+            miette!("validated WASM extension `{name}` could not re-register: {error}")
+        })?;
+    }
+    Ok(())
+}
+
+type NamedWasmHook = (String, WasmProcessHook);
+type WasmHookProxyLoad = (Vec<NamedWasmHook>, Vec<StartupNotification>);
+
+fn load_active_wasm_hook_proxies() -> Result<WasmHookProxyLoad> {
+    let mut notices = Vec::new();
+    let mut hosts = Vec::new();
+    let loader = rw_store::config::ConfigLoader::from_environment()
+        .map_err(|error| miette!("extension configuration root is invalid: {error}"))?;
+    let Some(configuration_root) = loader.credentials_path().parent().map(Path::to_path_buf) else {
+        return Ok((hosts, notices));
+    };
+    let root = configuration_root.join("extensions");
+    if !root.exists() {
+        return Ok((hosts, notices));
+    }
+    let Ok(report) = load_active_wasm_extensions_report(&root) else {
+        notices.push(wasm_startup_notice(
+            "wasm-runtime",
+            "WASM extensions are disabled because the activation ledger is invalid.",
+        ));
+        return Ok((hosts, notices));
+    };
+    for warning in report.warnings {
+        notices.push(wasm_startup_notice("wasm-runtime", &warning));
+    }
+    if report.extensions.is_empty() {
+        return Ok((hosts, notices));
+    }
+    let Ok(helper) = locate_wasm_host_executable() else {
+        notices.push(wasm_startup_notice(
+            "wasm-runtime",
+            "Enabled WASM extensions are unavailable because the bundled runtime helper could not start.",
+        ));
+        return Ok((hosts, notices));
+    };
+    for (manifest, component) in report.extensions {
+        let name = manifest.name.clone();
+        let Ok(host) = WasmProcessHook::new(
+            helper.clone(),
+            manifest,
+            component,
+            WasmHookLimits::default(),
+        ) else {
+            notices.push(wasm_startup_notice(
+                &format!("wasm:{name}"),
+                &format!("Extension {name} was skipped because its manifest is invalid."),
+            ));
+            continue;
+        };
+        hosts.push((name, host));
+    }
+    Ok((hosts, notices))
+}
+
+fn wasm_startup_notice(plugin_id: &str, message: &str) -> StartupNotification {
+    StartupNotification {
+        plugin_id: sanitized_wasm_notice_text(plugin_id, 160),
+        status: "unavailable".to_owned(),
+        title: "WASM extension unavailable".to_owned(),
+        message: sanitized_wasm_notice_text(message, 512),
+    }
+}
+
+fn sanitized_wasm_notice_text(value: &str, limit: usize) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(limit)
+        .collect()
+}
+
+pub(crate) fn locate_wasm_host_executable() -> Result<PathBuf> {
+    if let Some(override_path) = std::env::var_os("ROTTWEILER_WASM_HOST_BIN") {
+        return require_private_helper(PathBuf::from(override_path));
+    }
+    let current = std::env::current_exe().into_diagnostic()?;
+    let installed = std::fs::canonicalize(current).into_diagnostic()?;
+    if let Some(sibling) = installed
+        .parent()
+        .map(|parent| parent.join("rottweiler-wasm-host"))
+        && sibling.is_file()
+    {
+        return require_private_helper(sibling);
+    }
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| workspace.join("target"), PathBuf::from);
+    require_private_helper(target.join("debug/rottweiler-wasm-host"))
+}
+
+fn require_private_helper(path: PathBuf) -> Result<PathBuf> {
+    let metadata = std::fs::symlink_metadata(&path).into_diagnostic()?;
+    #[cfg(unix)]
+    let executable = {
+        use std::os::unix::fs::PermissionsExt as _;
+        metadata.permissions().mode() & 0o111 != 0
+    };
+    #[cfg(not(unix))]
+    let executable = true;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || !executable {
+        return Err(miette!(
+            "private WASM helper is not a regular executable at {}",
+            path.display()
+        ));
+    }
+    Ok(path)
 }
 
 fn compose_runtime_hooks(
@@ -11223,11 +11711,138 @@ mod tests {
 
     use super::*;
     use rw_core::runtime_support::{
-        DiagnosticSeverity, FinishReason, PermissionDecision, Range, Role, ToolCallId,
-        ToolCapability, ToolCommandOutcome, TurnMeta, WebSearchResult, WebSearchSource,
+        DiagnosticSeverity, FinishReason, PermissionDecision, PluginManifest, Range, Role,
+        ToolCallId, ToolCapability, ToolCommandOutcome, TurnMeta, WebSearchResult, WebSearchSource,
     };
     use rw_core::{Cost, ProviderConfig, TurnId};
     use tempfile::{TempDir, tempdir};
+
+    #[test]
+    fn subagent_replay_is_cursor_bounded_and_validates_child_identity() {
+        let storage = TempDir::new().expect("storage");
+        let child = SessionId("child-replay".to_owned());
+        let mut log = SessionEventLog::open(storage.path(), &child.0).expect("child log");
+        for sequence in 0..=1 {
+            log.append(EngineEvent::SessionCreated {
+                meta: EventMeta {
+                    protocol_version: SESSION_EVENT_VERSION,
+                    session_id: child.clone(),
+                    sequence_id: SequenceId(sequence),
+                    emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                    caused_by: None,
+                },
+                driver_client_id: rw_core::ClientId("child-driver".to_owned()),
+            })
+            .expect("append child event");
+        }
+        drop(log);
+
+        let replay = load_bounded_subagent_replay(storage.path(), &child, Some(SequenceId(0)))
+            .expect("bounded replay");
+        assert_eq!(replay.child_session_id, child);
+        assert_eq!(replay.through_sequence, Some(SequenceId(1)));
+        assert_eq!(replay.next_cursor, Some(SequenceId(1)));
+        assert_eq!(replay.tail_sequence, Some(SequenceId(1)));
+        assert!(!replay.has_more);
+        assert_eq!(replay.events_before_page, 1);
+        assert!(!replay.truncated);
+        assert_eq!(replay.events.len(), 1);
+        assert_eq!(replay.events[0].0, SequenceId(1));
+
+        let at_tail = load_bounded_subagent_replay(storage.path(), &child, Some(SequenceId(1)))
+            .expect("empty tail page");
+        assert!(at_tail.events.is_empty());
+        assert_eq!(at_tail.through_sequence, None);
+        assert_eq!(at_tail.next_cursor, Some(SequenceId(1)));
+        assert_eq!(at_tail.tail_sequence, Some(SequenceId(1)));
+        assert!(!at_tail.has_more);
+        assert_eq!(at_tail.events_before_page, 2);
+        assert!(!at_tail.truncated);
+
+        let invalid_storage = TempDir::new().expect("invalid storage");
+        let mut invalid =
+            SessionEventLog::open(invalid_storage.path(), &child.0).expect("invalid child log");
+        invalid
+            .append(EngineEvent::SessionCreated {
+                meta: EventMeta {
+                    protocol_version: SESSION_EVENT_VERSION,
+                    session_id: SessionId("foreign-child".to_owned()),
+                    sequence_id: SequenceId(0),
+                    emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                    caused_by: None,
+                },
+                driver_client_id: rw_core::ClientId("child-driver".to_owned()),
+            })
+            .expect("append invalid event");
+        drop(invalid);
+        assert!(load_bounded_subagent_replay(invalid_storage.path(), &child, None).is_err());
+    }
+
+    #[test]
+    fn subagent_initial_tail_and_forward_pages_handle_large_child_logs() {
+        let storage = TempDir::new().expect("storage");
+        let child = SessionId("large-child-replay".to_owned());
+        let mut log = SessionEventLog::open(storage.path(), &child.0).expect("child log");
+        let payload = "x".repeat(420);
+        log.append_batch((0..20_050).map(|sequence| EngineEvent::UiNotification {
+            meta: EventMeta {
+                protocol_version: SESSION_EVENT_VERSION,
+                session_id: child.clone(),
+                sequence_id: SequenceId(sequence),
+                emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                caused_by: None,
+            },
+            plugin_id: "fixture".to_owned(),
+            title: sequence.to_string(),
+            message: payload.clone(),
+        }))
+        .expect("append large child history");
+        let log_bytes = std::fs::metadata(log.path()).expect("child metadata").len();
+        assert!(log_bytes > 8 * 1024 * 1024);
+        drop(log);
+
+        let initial = load_bounded_subagent_replay(storage.path(), &child, None)
+            .expect("recent tail inspection");
+        assert_eq!(initial.tail_sequence, Some(SequenceId(20_049)));
+        assert_eq!(initial.through_sequence, Some(SequenceId(20_049)));
+        assert_eq!(initial.next_cursor, Some(SequenceId(20_049)));
+        assert!(!initial.has_more);
+        assert!(initial.events_before_page > 0);
+        assert!(initial.truncated);
+        assert!(initial.events.len() < 20_050);
+        assert_eq!(
+            initial.events.first().map(|(sequence, _)| *sequence),
+            Some(SequenceId(initial.events_before_page))
+        );
+
+        let mut cursor = Some(SequenceId(0));
+        let mut expected = 1_u64;
+        let mut pages = 0;
+        loop {
+            let page = load_bounded_subagent_replay(storage.path(), &child, cursor)
+                .expect("forward replay page");
+            pages += 1;
+            assert_eq!(page.events_before_page, expected);
+            assert_eq!(page.tail_sequence, Some(SequenceId(20_049)));
+            for (sequence, _) in &page.events {
+                assert_eq!(*sequence, SequenceId(expected));
+                expected += 1;
+            }
+            assert_eq!(
+                page.through_sequence,
+                page.events.last().map(|(sequence, _)| *sequence)
+            );
+            assert_eq!(page.next_cursor, page.through_sequence.or(cursor));
+            if !page.has_more {
+                assert!(!page.truncated);
+                break;
+            }
+            assert!(page.truncated);
+            cursor = page.next_cursor;
+        }
+        assert!(pages > 1);
+        assert_eq!(expected, 20_050);
+    }
 
     struct RejectMetadataRemove;
 
@@ -12529,6 +13144,7 @@ mod tests {
             additional_workspace_roots: Vec::new(),
             workspace_generation: 0,
             initial_session_context: Vec::new(),
+            startup_notifications: Vec::new(),
             model_alias: "fast".to_owned(),
             model,
             tools: Arc::new(registry),
@@ -12699,6 +13315,8 @@ mod tests {
                     subagent_id: child_id.clone(),
                     session_id: child_session.clone(),
                 },
+                task: "fixture task".to_owned(),
+                agent: "fixture agent".to_owned(),
                 depth,
                 workspace_root: workspace.to_path_buf(),
                 isolation: rw_core::runtime_support::SubagentIsolation::Shared,
@@ -12920,6 +13538,8 @@ mod tests {
                 subagent_id: rw_core::runtime_support::SubagentId("child".to_owned()),
                 session_id: SessionId("child-session".to_owned()),
             },
+            task: "fixture task".to_owned(),
+            agent: "fixture agent".to_owned(),
             depth: 1,
             workspace_root: local.clone(),
             isolation: rw_core::runtime_support::SubagentIsolation::Shared,
@@ -13033,6 +13653,8 @@ mod tests {
                 subagent_id: subagent_id.clone(),
                 session_id: child_session_id.clone(),
             },
+            task: "rewind fixture".to_owned(),
+            agent: "fixture agent".to_owned(),
             depth: 1,
             workspace_root: std::fs::canonicalize(&repository).expect("canonical repository"),
             isolation: rw_core::runtime_support::SubagentIsolation::Worktree,
@@ -13882,6 +14504,7 @@ mod tests {
             &runtime,
             &catalog,
             Arc::new(FixtureCodeIntelligence),
+            &[],
         )
         .expect("dispatcher");
         let ignored = dispatcher
@@ -13907,6 +14530,48 @@ mod tests {
         let calls = executor.calls.lock().expect("calls");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].sandbox, BashSandboxMode::Sandboxed);
+    }
+
+    #[test]
+    fn root_recomposition_reuses_the_validated_wasm_generation() {
+        let fixture = tempdir().expect("fixture");
+        let helper = fixture.path().join("validated-helper");
+        std::fs::write(&helper, b"validated before generation was retained").expect("helper");
+        let manifest = PluginManifest::from_slice(
+            br#"{
+                "name":"retained-hook",
+                "version":"1.0.0",
+                "protocol":1,
+                "capabilities":{"hooks":["post_tool"]}
+            }"#,
+        )
+        .expect("manifest");
+        let host =
+            WasmProcessHook::new(helper.clone(), manifest, vec![0], WasmHookLimits::default())
+                .expect("proxy");
+        let retained = vec![("retained-hook".to_owned(), host)];
+        std::fs::remove_file(helper).expect("remove original helper");
+
+        let mut recomposed = HookDispatcher::new();
+        register_retained_wasm_hooks(&mut recomposed, &retained)
+            .expect("retained generation registers without reloading disk state");
+        assert_eq!(recomposed.registrations(HookEvent::PostTool).len(), 1);
+
+        let error = register_retained_wasm_hooks(&mut recomposed, &retained)
+            .expect_err("registration conflicts must not be discarded");
+        assert!(error.to_string().contains("could not re-register"));
+    }
+
+    #[test]
+    fn wasm_startup_notices_strip_terminal_controls_before_persistence() {
+        let notice = wasm_startup_notice(
+            "wasm:bad\u{1b}[31m\nname",
+            "failure\u{7}\r\nwith\u{1b}[2J controls",
+        );
+        assert_eq!(notice.plugin_id, "wasm:bad[31mname");
+        assert_eq!(notice.message, "failurewith[2J controls");
+        assert!(!notice.plugin_id.chars().any(char::is_control));
+        assert!(!notice.message.chars().any(char::is_control));
     }
 
     #[test]
@@ -15741,6 +16406,7 @@ mod tests {
             additional_workspace_roots: Vec::new(),
             workspace_generation: 0,
             initial_session_context: vec![system],
+            startup_notifications: Vec::new(),
             model_alias: profile.model_alias.clone(),
             model,
             tools: historical_tool_registry(&profile).expect("historical tools"),
@@ -16549,6 +17215,7 @@ mod tests {
                 Arc::new(ReplayCommandExecutor::empty(&primary).expect("offline executor")),
                 std::slice::from_ref(&primary),
             )),
+            validated_wasm_hooks: Arc::from([]),
             extension_user_home: private.clone(),
             extension_user_rottweiler: private.join(".rottweiler"),
             dangerously_trust: false,
@@ -16811,6 +17478,7 @@ mod tests {
                 Arc::new(ReplayCommandExecutor::empty(&primary).expect("offline executor")),
                 &generation.roots,
             )),
+            validated_wasm_hooks: Arc::from([]),
             extension_user_home: private.clone(),
             extension_user_rottweiler: private.join(".rottweiler"),
             dangerously_trust: false,
@@ -17003,6 +17671,7 @@ mod tests {
             additional_workspace_roots: Vec::new(),
             workspace_generation: 0,
             initial_session_context: Vec::new(),
+            startup_notifications: Vec::new(),
             model_alias: "fast".to_owned(),
             model,
             tools: Arc::new(registry),
@@ -17151,6 +17820,7 @@ mod tests {
                 additional_workspace_roots: Vec::new(),
                 workspace_generation: recovered.workspace_generation,
                 initial_session_context: vec![base_agent_system_turn()],
+                startup_notifications: Vec::new(),
                 model_alias: "fast".to_owned(),
                 model,
                 tools,
@@ -17246,6 +17916,8 @@ mod tests {
         let pending = rw_core::SubagentRecoveryRecord {
             parent_session_id: parent.clone(),
             handle: handle.clone(),
+            task: "recoverable fixture".to_owned(),
+            agent: "fixture agent".to_owned(),
             depth: 1,
             workspace_root: canonical_repository.clone(),
             isolation: rw_core::runtime_support::SubagentIsolation::Worktree,

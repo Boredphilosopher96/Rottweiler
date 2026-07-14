@@ -50,15 +50,16 @@ pub use engine::{
     RewindCheckpoint, SESSION_EVENT_VERSION, SecretRedactor, SessionActor, SessionActorConfig,
     SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,
     SessionHandle, SessionProjectionError, SessionRecoveredState, SessionSnapshot,
-    SessionSubscription, SessionUsage, SystemEventClock, TOOL_CANCELLATION_GRACE,
-    WorkspaceRootController, WorkspaceRuntimeGeneration, builtin_command_registry,
-    builtin_hook_dispatcher, project_session_events,
+    SessionSubscription, SessionUsage, StartupNotification, SystemEventClock,
+    TOOL_CANCELLATION_GRACE, WorkspaceRootController, WorkspaceRuntimeGeneration,
+    builtin_command_registry, builtin_hook_dispatcher, project_session_events,
 };
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
     ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostMcpService,
-    HostQueryService, HostRuntimeService, HostedSession, PreparedForkOperation,
-    ProviderApiKeySubmission, ProviderAuthAttempt, ProviderAuthCompletion, SessionFactory,
+    HostQueryService, HostRuntimeService, HostSubagentService, HostedSession,
+    PreparedForkOperation, ProviderApiKeySubmission, ProviderAuthAttempt, ProviderAuthCompletion,
+    SessionFactory, SubagentReplay,
 };
 pub use init::{
     DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,
@@ -104,8 +105,9 @@ pub use rw_types::PROTOCOL_VERSION;
 pub use rw_types::{
     Answer, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, Cost,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, RequestId, SequenceId,
-    SessionDescriptor, SessionId, ShellId, SubagentIsolation, ToolOutputStream, TurnId, TurnStatus,
-    UnrestorablePath, Usage,
+    SessionDescriptor, SessionId, ShellId, SubagentActivity, SubagentDescriptor, SubagentId,
+    SubagentIsolation, SubagentResult, ToolOutputStream, TurnId, TurnStatus, UnrestorablePath,
+    Usage,
 };
 pub use update::{
     EMBEDDED_ROOT_KEY_ID, EMBEDDED_ROOT_KEYS_JSON, EMBEDDED_ROOT_PUBLIC_KEY,
@@ -151,17 +153,24 @@ pub mod runtime_support {
     }
 
     pub use rw_ext::{
-        AgentDefinition, AgentPermissionMode, AgentPromptSource, AgentRegistry, AgentRegistryError,
-        ArtifactLocation, ArtifactOrigin, ArtifactScope, CLAUDE_FRONTMATTER_MIGRATION,
-        CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation,
-        CommandRegistry, CommandRegistryError, CommandSource, CommandTemplate, DiscoveredAgent,
-        DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill, DiscoveredWorkflow,
-        ExtensionCatalog, ExtensionDiscoveryConfig, ExtensionDiscoveryError, HookDirective,
-        HookDispatchStatus, HookDispatcher, HookEffect, HookError, HookEvent, HookFailurePolicy,
-        HookHandler, HookInvocation, HookRegistration, LoadedAgent, TemplatePart,
+        ActiveWasmExtensionLoadReport, AgentDefinition, AgentPermissionMode, AgentPromptSource,
+        AgentRegistry, AgentRegistryError, ArtifactLocation, ArtifactOrigin, ArtifactScope,
+        CLAUDE_FRONTMATTER_MIGRATION, CommandDescriptor, CommandExecutionError, CommandHandler,
+        CommandInvocation, CommandRegistry, CommandRegistryError, CommandSource, CommandTemplate,
+        DiscoveredAgent, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill,
+        DiscoveredWorkflow, ExtensionCatalog, ExtensionDiscoveryConfig, ExtensionDiscoveryError,
+        ExtensionRegistryCatalog, HookDirective, HookDispatchStatus, HookDispatcher, HookEffect,
+        HookError, HookEvent, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
+        InstalledWasmExtension, InstalledWasmExtensionStatus, LoadedAgent, PluginManifest,
+        RegistryError, RegistryRelease, TemplatePart, WasmActivationCatalog,
+        WasmExtensionActivation, WasmHookHostError, WasmHookLimits, WasmProcessHook,
         WorkflowCondition, WorkflowOnFail, WorkflowRunError, WorkflowRunReport, WorkflowRunner,
         WorkflowStep, WorkflowStepArtifact, WorkflowStepExecutionError, WorkflowStepExecutor,
-        WorkflowStepReport, WorkflowStepRequest, WorkflowStepTarget, compose_agent_registry,
+        WorkflowStepReport, WorkflowStepRequest, WorkflowStepTarget,
+        activate_installed_wasm_extension, compose_agent_registry, deactivate_wasm_extension,
+        inspect_installed_wasm_extension, install_verified_component,
+        list_installed_wasm_extensions, load_active_wasm_extensions,
+        load_active_wasm_extensions_report, load_installed_wasm_extension, read_activation_catalog,
     };
     pub use rw_providers::{
         BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,

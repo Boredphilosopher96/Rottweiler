@@ -15,9 +15,10 @@ use rw_types::{
     CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, McpApprovalReview,
     McpServerDescriptor, ModelAlias, ModelCatalogSnapshot, ProviderAuthAttemptId,
     ProviderAuthChallenge, RequestId, RuntimeServiceDescriptor, SequenceId, SessionDescriptor,
-    SessionId, ShellId, TurnId, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceStatus,
+    SessionId, ShellId, SubagentDescriptor, SubagentId, SubagentReplayItem, TurnId, WorkspaceDiff,
+    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
 };
+use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast, mpsc, watch};
 
@@ -27,6 +28,8 @@ use crate::{
 };
 
 const HOST_EVENT_CAPACITY: usize = 256;
+const SUBAGENT_REPLAY_BATCH_EVENTS: usize = 128;
+const SUBAGENT_REPLAY_BATCH_BYTES: usize = 128 * 1024;
 const MAX_WIRE_COMMANDS: usize = 512;
 const MAX_WIRE_COMMAND_CATALOG_BYTES: usize = 48 * 1024;
 const PROVIDER_AUTH_BEGIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
@@ -136,6 +139,7 @@ pub struct HostedSession {
     model_catalog: Option<Arc<CachedModelCatalog>>,
     mcp: Option<Arc<dyn HostMcpService>>,
     runtime_services: Option<Arc<dyn HostRuntimeService>>,
+    subagents: Option<Arc<dyn HostSubagentService>>,
 }
 
 impl fmt::Debug for HostedSession {
@@ -157,6 +161,7 @@ impl HostedSession {
             model_catalog: None,
             mcp: None,
             runtime_services: None,
+            subagents: None,
         }
     }
 
@@ -195,6 +200,18 @@ impl HostedSession {
     #[must_use]
     pub fn runtime_services(&self) -> Option<Arc<dyn HostRuntimeService>> {
         self.runtime_services.clone()
+    }
+
+    /// Attaches parent-owned child-agent control for this exact session.
+    #[must_use]
+    pub fn with_subagents(mut self, subagents: Arc<dyn HostSubagentService>) -> Self {
+        self.subagents = Some(subagents);
+        self
+    }
+
+    #[must_use]
+    pub fn subagents(&self) -> Option<Arc<dyn HostSubagentService>> {
+        self.subagents.clone()
     }
 
     #[must_use]
@@ -439,6 +456,55 @@ pub trait HostMcpService: Send + Sync + 'static {
 #[async_trait]
 pub trait HostRuntimeService: Send + Sync + 'static {
     async fn list(&self) -> Result<Vec<RuntimeServiceDescriptor>, HostError>;
+}
+
+/// One bounded, validated child-log replay owned by a parent session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubagentReplay {
+    pub child_session_id: SessionId,
+    pub events: Vec<(SequenceId, Value)>,
+    pub through_sequence: Option<SequenceId>,
+    pub next_cursor: Option<SequenceId>,
+    pub tail_sequence: Option<SequenceId>,
+    pub has_more: bool,
+    pub events_before_page: u64,
+    pub truncated: bool,
+}
+
+/// Session-scoped child-agent control. Implementations must enforce exact
+/// parent ownership and must never expose a child as a generic hosted session.
+#[async_trait]
+pub trait HostSubagentService: Send + Sync + 'static {
+    async fn list(
+        &self,
+        parent_session_id: &SessionId,
+    ) -> Result<Vec<SubagentDescriptor>, HostError>;
+
+    async fn replay(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+        after_sequence: Option<SequenceId>,
+    ) -> Result<SubagentReplay, HostError>;
+
+    async fn continue_child(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+        content: String,
+    ) -> Result<(), HostError>;
+
+    async fn interrupt(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+    ) -> Result<(), HostError>;
+
+    async fn close(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+    ) -> Result<(), HostError>;
 }
 
 type ProviderAuthPersistence = Box<dyn FnOnce() -> Result<Vec<String>, HostError> + Send + 'static>;
@@ -2310,6 +2376,123 @@ impl EngineHost {
                     }],
                 ))
             }
+            ClientCommand::ListSubagents { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle = Arc::clone(&session.lifecycle).lock_owned().await;
+                ensure_session_driver(&session, &meta.client_id).await?;
+                let subagents = session
+                    .subagents()
+                    .ok_or_else(|| {
+                        HostError::Query(
+                            "child-agent control is unavailable for this session".to_owned(),
+                        )
+                    })?
+                    .list(&session_id)
+                    .await?;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::SubagentsListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        subagents,
+                    }],
+                ))
+            }
+            ClientCommand::ReplaySubagent {
+                meta,
+                session_id,
+                subagent_id,
+                after_sequence,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle = Arc::clone(&session.lifecycle).lock_owned().await;
+                ensure_session_driver(&session, &meta.client_id).await?;
+                let replay = session
+                    .subagents()
+                    .ok_or_else(|| {
+                        HostError::Query(
+                            "child-agent control is unavailable for this session".to_owned(),
+                        )
+                    })?
+                    .replay(&session_id, &subagent_id, after_sequence)
+                    .await?;
+                let completion = subagent_replay_completed(
+                    &meta,
+                    &session_id,
+                    &subagent_id,
+                    &replay,
+                    &*self.clock,
+                );
+                let mut events = subagent_replay_batches(
+                    &meta,
+                    &session_id,
+                    &subagent_id,
+                    &replay.child_session_id,
+                    replay.events,
+                    &*self.clock,
+                );
+                events.push(completion);
+                Ok((CommandOutcome::Accepted, Some(session_id), events))
+            }
+            ClientCommand::ContinueSubagent {
+                meta,
+                session_id,
+                subagent_id,
+                content,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle = Arc::clone(&session.lifecycle).lock_owned().await;
+                ensure_session_driver(&session, &meta.client_id).await?;
+                session
+                    .subagents()
+                    .ok_or_else(|| {
+                        HostError::Query(
+                            "child-agent control is unavailable for this session".to_owned(),
+                        )
+                    })?
+                    .continue_child(&session_id, &subagent_id, content)
+                    .await?;
+                Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()))
+            }
+            ClientCommand::InterruptSubagent {
+                meta,
+                session_id,
+                subagent_id,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle = Arc::clone(&session.lifecycle).lock_owned().await;
+                ensure_session_driver(&session, &meta.client_id).await?;
+                session
+                    .subagents()
+                    .ok_or_else(|| {
+                        HostError::Query(
+                            "child-agent control is unavailable for this session".to_owned(),
+                        )
+                    })?
+                    .interrupt(&session_id, &subagent_id)
+                    .await?;
+                Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()))
+            }
+            ClientCommand::CloseSubagent {
+                meta,
+                session_id,
+                subagent_id,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle = Arc::clone(&session.lifecycle).lock_owned().await;
+                ensure_session_driver(&session, &meta.client_id).await?;
+                session
+                    .subagents()
+                    .ok_or_else(|| {
+                        HostError::Query(
+                            "child-agent control is unavailable for this session".to_owned(),
+                        )
+                    })?
+                    .close(&session_id, &subagent_id)
+                    .await?;
+                Ok((CommandOutcome::Accepted, Some(session_id), Vec::new()))
+            }
             ClientCommand::ShutdownHost { meta } => {
                 self.provider_auth.cancel_all();
                 let opening_waiters = {
@@ -3028,6 +3211,73 @@ impl EngineHost {
     }
 }
 
+fn subagent_replay_batches(
+    meta: &CommandMeta,
+    session_id: &SessionId,
+    subagent_id: &SubagentId,
+    child_session_id: &SessionId,
+    replay: Vec<(SequenceId, Value)>,
+    clock: &dyn EventClock,
+) -> Vec<EngineEvent> {
+    let ack = ack_meta(meta, clock);
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut current_bytes = 0usize;
+    for (child_sequence, event) in replay {
+        let event_bytes =
+            serde_json::to_vec(&event).map_or(SUBAGENT_REPLAY_BATCH_BYTES, |v| v.len());
+        if !current.is_empty()
+            && (current.len() >= SUBAGENT_REPLAY_BATCH_EVENTS
+                || current_bytes.saturating_add(event_bytes) > SUBAGENT_REPLAY_BATCH_BYTES)
+        {
+            batches.push(EngineEvent::SubagentReplayBatch {
+                meta: ack.clone(),
+                session_id: session_id.clone(),
+                subagent_id: subagent_id.clone(),
+                child_session_id: child_session_id.clone(),
+                events: std::mem::take(&mut current),
+            });
+            current_bytes = 0;
+        }
+        current_bytes = current_bytes.saturating_add(event_bytes);
+        current.push(SubagentReplayItem {
+            child_sequence,
+            event,
+        });
+    }
+    if !current.is_empty() {
+        batches.push(EngineEvent::SubagentReplayBatch {
+            meta: ack,
+            session_id: session_id.clone(),
+            subagent_id: subagent_id.clone(),
+            child_session_id: child_session_id.clone(),
+            events: current,
+        });
+    }
+    debug_assert!(batches.len().saturating_add(2) <= HOST_EVENT_CAPACITY);
+    batches
+}
+
+fn subagent_replay_completed(
+    meta: &CommandMeta,
+    session_id: &SessionId,
+    subagent_id: &SubagentId,
+    replay: &SubagentReplay,
+    clock: &dyn EventClock,
+) -> EngineEvent {
+    EngineEvent::SubagentReplayCompleted {
+        meta: ack_meta(meta, clock),
+        session_id: session_id.clone(),
+        subagent_id: subagent_id.clone(),
+        through_sequence: replay.through_sequence,
+        next_cursor: replay.next_cursor,
+        tail_sequence: replay.tail_sequence,
+        has_more: replay.has_more,
+        events_before_page: replay.events_before_page,
+        truncated: replay.truncated,
+    }
+}
+
 fn provider_catalog_is_ready(catalog: &ModelCatalogSnapshot, provider_name: &str) -> bool {
     catalog.providers.iter().any(|provider| {
         provider.name == provider_name && provider.reachable && provider.model_count > 0
@@ -3132,6 +3382,20 @@ fn host_error_code(error: &HostError) -> &'static str {
     }
 }
 
+async fn ensure_session_driver(
+    session: &HostedSession,
+    client_id: &ClientId,
+) -> Result<(), HostError> {
+    let snapshot = session.handle().snapshot().await?;
+    if snapshot.driver_client_id.as_ref() == Some(client_id) {
+        Ok(())
+    } else {
+        Err(HostError::Protocol(
+            "only the current driver may control child agents".to_owned(),
+        ))
+    }
+}
+
 fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
     match command {
         ClientCommand::ResumeSession { session_id, .. }
@@ -3176,7 +3440,12 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::BeginProviderAuth { session_id, .. }
         | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
         | ClientCommand::CompleteProviderAuth { session_id, .. }
-        | ClientCommand::CancelProviderAuth { session_id, .. } => Some(session_id.clone()),
+        | ClientCommand::CancelProviderAuth { session_id, .. }
+        | ClientCommand::ListSubagents { session_id, .. }
+        | ClientCommand::ReplaySubagent { session_id, .. }
+        | ClientCommand::ContinueSubagent { session_id, .. }
+        | ClientCommand::InterruptSubagent { session_id, .. }
+        | ClientCommand::CloseSubagent { session_id, .. } => Some(session_id.clone()),
         ClientCommand::CreateSession { .. }
         | ClientCommand::ListSessions { .. }
         | ClientCommand::SearchSessions { .. }
@@ -3478,6 +3747,82 @@ mod tests {
         },
     };
 
+    #[test]
+    fn subagent_replay_batches_are_lossless_and_fit_the_broadcast_window() {
+        let replay = (1..=1_024)
+            .map(|sequence| {
+                (
+                    SequenceId(sequence),
+                    serde_json::json!({"type": "text_delta", "text": sequence.to_string()}),
+                )
+            })
+            .collect();
+        let batches = subagent_replay_batches(
+            &meta("driver", "replay"),
+            &SessionId("parent".to_owned()),
+            &SubagentId("child".to_owned()),
+            &SessionId("child-session".to_owned()),
+            replay,
+            &SystemEventClock,
+        );
+
+        assert!(batches.len().saturating_add(2) <= HOST_EVENT_CAPACITY);
+        let sequences = batches
+            .iter()
+            .flat_map(|event| match event {
+                EngineEvent::SubagentReplayBatch { events, .. } => events
+                    .iter()
+                    .map(|item| item.child_sequence.0)
+                    .collect::<Vec<_>>(),
+                _ => panic!("unexpected replay event"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sequences, (1..=1_024).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn empty_subagent_replay_completion_keeps_cursor_and_request_correlation() {
+        let command = meta("driver", "tail-replay");
+        let replay = SubagentReplay {
+            child_session_id: SessionId("child-session".to_owned()),
+            events: Vec::new(),
+            through_sequence: None,
+            next_cursor: Some(SequenceId(9)),
+            tail_sequence: Some(SequenceId(9)),
+            has_more: false,
+            events_before_page: 10,
+            truncated: false,
+        };
+        let completion = subagent_replay_completed(
+            &command,
+            &SessionId("parent".to_owned()),
+            &SubagentId("child".to_owned()),
+            &replay,
+            &SystemEventClock,
+        );
+        let EngineEvent::SubagentReplayCompleted {
+            meta,
+            through_sequence,
+            next_cursor,
+            tail_sequence,
+            has_more,
+            events_before_page,
+            truncated,
+            ..
+        } = completion
+        else {
+            panic!("expected replay completion");
+        };
+        assert_eq!(meta.client_id, command.client_id);
+        assert_eq!(meta.request_id, command.request_id);
+        assert_eq!(through_sequence, None);
+        assert_eq!(next_cursor, Some(SequenceId(9)));
+        assert_eq!(tail_sequence, Some(SequenceId(9)));
+        assert!(!has_more);
+        assert_eq!(events_before_page, 10);
+        assert!(!truncated);
+    }
+
     struct IdleModel;
 
     struct ActivatableModel;
@@ -3611,6 +3956,7 @@ mod tests {
                 additional_workspace_roots: Vec::new(),
                 workspace_generation: 0,
                 initial_session_context: Vec::new(),
+                startup_notifications: Vec::new(),
                 model_alias: "fast".to_owned(),
                 model: Arc::clone(&self.model),
                 tools: Arc::new(ToolRegistry::new()),

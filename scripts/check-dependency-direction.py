@@ -25,6 +25,10 @@ ALLOWED = {
         "rw-tools",
         "rw-types",
     },
+    # Private process boundary for the heavyweight WASM runtime. The public
+    # `rw` binary talks to it through rw-ext's bounded wire protocol and does
+    # not link Wasmtime itself.
+    "rw-wasm-host": {"rw-ext"},
     "rw-cli": {"rw-core", "rw-store"},
     "xtask": {"rw-types"},
 }

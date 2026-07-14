@@ -647,6 +647,44 @@ describe("M4 retained components", () => {
     expect(updatedBashCard?.command).toBe(retainedCommand)
   })
 
+  test("renders a retained foreground shell result as a syntax-aware bounded card", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
+    treeSitter.setMockResult({ highlights: [] })
+    const shellEntry = {
+      sequenceId: "1",
+      agentTurn: "shell:shell-card",
+      turn: {
+        role: "system" as const,
+        blocks: [],
+        meta: { synthetic: true, summary: false },
+      },
+      presentation: "shell_result" as const,
+      shell: {
+        shellId: "shell-card",
+        command: "printf '%s\\n' hello",
+        active: false,
+        status: 0,
+        capturedOutput: "hello",
+        outputTruncated: false,
+      },
+    }
+    const app = createRottweilerApp(renderer, {
+      treeSitterClient: treeSitter,
+      initialState: { ...createInitialState(), transcript: [shellEntry] },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.transcript.mountedCards).toHaveLength(1)
+    const card = [...app.transcript.mountedCards.values()][0]
+    expect(card?.shellCommand).toBeInstanceOf(CodeRenderable)
+    expect(card?.shellOutput?.plainText).toContain("hello")
+    expect(card?.header.plainText).toBe("✓ Shell · exited 0")
+    expect(setup.captureCharFrame()).toContain("printf")
+  })
+
   test("routes diff approval through generated commands", async () => {
     const setup = await createTestRenderer({ width: 112, height: 30, useThread: false })
     renderer = setup.renderer

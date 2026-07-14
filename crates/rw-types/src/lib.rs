@@ -27,11 +27,11 @@ pub use protocol::{
     ProviderNextAction, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
     ReviewFileDecision, ReviewFileStatus, RewindTarget, RuntimeServiceDescriptor,
     RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId, SessionMode, SessionReview,
-    SessionReviewFile, ShellId, StoredAttachment, SubagentId, SubagentIsolation, SubagentResult,
-    SubagentStatus, ToolCapability, ToolOutputStream, TouchedFile, TouchedFileStatus,
-    TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
-    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceRootDescriptor, WorkspaceStatus,
+    SessionReviewFile, ShellId, StoredAttachment, SubagentActivity, SubagentDescriptor, SubagentId,
+    SubagentIsolation, SubagentReplayItem, SubagentResult, SubagentStatus, ToolCapability,
+    ToolOutputStream, TouchedFile, TouchedFileStatus, TurnAccounting, TurnId, TurnStatus,
+    UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 
 /// Version of the protocol emitted by these types.

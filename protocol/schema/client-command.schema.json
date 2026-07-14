@@ -1253,6 +1253,136 @@
         "meta": {
           "$ref": "#/$defs/CommandMeta"
         },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_subagents"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "after_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "replay_subagent"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "content": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "continue_subagent"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id",
+        "content"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "type": {
+          "type": "string",
+          "const": "interrupt_subagent"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "type": {
+          "type": "string",
+          "const": "close_subagent"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
         "type": {
           "type": "string",
           "const": "shutdown_host"
@@ -1529,6 +1659,10 @@
     },
     "ProviderAuthAttemptId": {
       "description": "Connection-scoped identifier of one provider authentication attempt.",
+      "type": "string"
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
       "type": "string"
     }
   }

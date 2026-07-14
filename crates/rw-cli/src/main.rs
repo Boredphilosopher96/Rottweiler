@@ -22,6 +22,7 @@ use rw_core::{
 use tracing_subscriber::EnvFilter;
 
 mod doctor;
+mod extension_cli;
 mod history;
 #[allow(dead_code)]
 mod host_runtime;
@@ -224,6 +225,11 @@ enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
+    /// Install and manage signed WASM hook extensions.
+    Extension {
+        #[command(subcommand)]
+        command: ExtensionCommand,
+    },
     /// Expose approved Rottweiler tools and connection-owned sessions over MCP.
     McpServer {
         #[command(subcommand)]
@@ -419,6 +425,47 @@ enum PluginCommand {
     Approve { name: String },
     /// Revoke one durable plugin approval.
     Revoke { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExtensionCommand {
+    /// Browse or install signed releases from a configured registry URL.
+    Registry {
+        #[command(subcommand)]
+        command: ExtensionRegistryCommand,
+    },
+    /// Show exact enabled versions and fingerprints.
+    Status,
+    /// Explicitly enable one installed extension version.
+    Enable {
+        name: String,
+        version: String,
+        /// Confirm the displayed exact capability manifest non-interactively.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Disable an extension without deleting installed versions.
+    Disable { name: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExtensionRegistryCommand {
+    /// List releases from a bounded HTTPS registry catalog.
+    List {
+        #[arg(long, value_name = "HTTPS_URL")]
+        catalog: String,
+    },
+    /// Download and verify a release, leaving it inactive.
+    Install {
+        name: String,
+        #[arg(long)]
+        version: Option<String>,
+        #[arg(long, value_name = "HTTPS_URL")]
+        catalog: String,
+        /// Independently trusted unpadded-base64 Ed25519 publisher key.
+        #[arg(long, value_name = "BASE64_KEY")]
+        publisher_key: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Subcommand)]
@@ -731,6 +778,51 @@ async fn main() -> Result<()> {
             }
             plugin_dev::run(&path).await?;
         }
+        Some(Command::Extension {
+            command:
+                ExtensionCommand::Registry {
+                    command: ExtensionRegistryCommand::List { catalog },
+                },
+        }) => extension_cli::list_registry(&catalog).await?,
+        Some(Command::Extension {
+            command:
+                ExtensionCommand::Registry {
+                    command:
+                        ExtensionRegistryCommand::Install {
+                            name,
+                            version,
+                            catalog,
+                            publisher_key,
+                        },
+                },
+        }) => {
+            let store = configuration_root()?.join("extensions");
+            extension_cli::install_registry_release(
+                &store,
+                &catalog,
+                &name,
+                version.as_deref(),
+                &publisher_key,
+            )
+            .await?;
+        }
+        Some(Command::Extension {
+            command: ExtensionCommand::Status,
+        }) => extension_cli::status(&configuration_root()?.join("extensions"))?,
+        Some(Command::Extension {
+            command: ExtensionCommand::Enable { name, version, yes },
+        }) => {
+            extension_cli::enable(
+                &configuration_root()?.join("extensions"),
+                &name,
+                &version,
+                yes,
+            )
+            .await?;
+        }
+        Some(Command::Extension {
+            command: ExtensionCommand::Disable { name },
+        }) => extension_cli::disable(&configuration_root()?.join("extensions"), &name)?,
         Some(Command::McpServer {
             command: McpServerCommand::Stdio { workspace },
         }) => {

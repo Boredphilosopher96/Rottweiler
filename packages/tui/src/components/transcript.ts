@@ -589,6 +589,8 @@ class TurnCardRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly markdown: MarkdownRenderable
   readonly reasoning: ReasoningBlockRenderable | null
+  shellCommand: CodeRenderable | TextRenderable | null
+  shellOutput: TextRenderable | null
 
   constructor(
     ctx: RenderContext,
@@ -607,10 +609,15 @@ class TurnCardRenderable extends BoxRenderable {
     onInteraction: (() => void) | undefined,
     treeSitterClient?: TreeSitterClient,
   ) {
-    const markdown = terminalMarkdown(turnMarkdown(entry.turn), Math.max(20, width - 4))
-    const reasoning = turnReasoningMarkdown(entry.turn)
+    const shell = entry.presentation === "shell_result" ? entry.shell : undefined
+    const markdown = shell === undefined
+      ? terminalMarkdown(turnMarkdown(entry.turn), Math.max(20, width - 4))
+      : ""
+    const reasoning = shell === undefined ? turnReasoningMarkdown(entry.turn) : ""
     const toolOnly = entry.turn.role === "tool" && markdown === ""
-    const role = entry.presentation === "command_result"
+    const role = shell !== undefined
+      ? "Shell"
+      : entry.presentation === "command_result"
       ? "Command result"
       : entry.turn.role === "assistant"
         ? "Rottweiler"
@@ -622,19 +629,42 @@ class TurnCardRenderable extends BoxRenderable {
       width,
       flexDirection: "column",
       flexShrink: 0,
-      border: false,
-      backgroundColor: entry.turn.role === "user" ? theme.panelRaised : theme.background,
+      border: shell !== undefined,
+      ...(shell === undefined
+        ? {}
+        : {
+            borderStyle: "single" as const,
+            borderColor: shell.active
+              ? theme.info
+              : shell.status === 0
+                ? theme.success
+                : theme.danger,
+          }),
+      backgroundColor: shell !== undefined
+        ? theme.panel
+        : entry.turn.role === "user"
+          ? theme.panelRaised
+          : theme.background,
       paddingX: 1,
       paddingY: toolOnly ? 0 : 1,
+      marginTop: shell === undefined ? 0 : 1,
     })
     this.header = new TextRenderable(ctx, {
-      content: entry.presentation === "command_result"
-        ? `${role} · ${entry.title ?? "completed"}`
-        : `${role}${detail === null ? "" : ` · ${detail}`}`,
-      fg: entry.turn.role === "assistant" ? theme.accentStrong : theme.info,
+      content: shell === undefined
+        ? entry.presentation === "command_result"
+          ? `${role} · ${entry.title ?? "completed"}`
+          : `${role}${detail === null ? "" : ` · ${detail}`}`
+        : shellHeader(shell.active, shell.status),
+      fg: shell === undefined
+        ? entry.turn.role === "assistant" ? theme.accentStrong : theme.info
+        : shell.active
+          ? theme.info
+          : shell.status === 0
+            ? theme.success
+            : theme.danger,
       height: toolOnly ? 0 : 1,
       flexShrink: 0,
-      visible: !toolOnly && markdown !== "",
+      visible: shell !== undefined || (!toolOnly && markdown !== ""),
     })
     this.markdown = new MarkdownRenderable(ctx, {
       id: `markdown-${entryKey(entry)}`,
@@ -662,9 +692,68 @@ class TurnCardRenderable extends BoxRenderable {
           onExpansionChange: onReasoningExpansionChange,
           ...(onInteraction === undefined ? {} : { onInteraction }),
         })
+    this.shellCommand = null
+    this.shellOutput = null
     // Selection can focus a retained transcript node. The app restores its
     // configured keyboard-input target after the pointer interaction ends.
     this.onMouseUp = () => onInteraction?.()
+    if (shell !== undefined) {
+      this.add(this.header)
+      const content = visibleBashCommand(shell.command)
+      const rows = Math.max(1, content.split("\n").length)
+      const commandRow = new BoxRenderable(ctx, {
+        id: `shell-command-row-${shell.shellId}`,
+        width: "100%",
+        height: rows,
+        flexDirection: "row",
+        flexShrink: 0,
+        marginTop: 1,
+      })
+      commandRow.add(new TextRenderable(ctx, {
+        content: bashPrompt(shell.command),
+        fg: theme.muted,
+        width: 2,
+        height: rows,
+        wrapMode: "none",
+      }))
+      const renderedCommand = treeSitterClient === undefined
+        ? new TextRenderable(ctx, {
+            content,
+            fg: theme.foreground,
+            flexGrow: 1,
+            height: rows,
+            wrapMode: "none",
+          })
+        : new CodeRenderable(ctx, {
+            id: `shell-command-${shell.shellId}`,
+            flexGrow: 1,
+            height: rows,
+            content,
+            filetype: "bash",
+            syntaxStyle,
+            treeSitterClient,
+            drawUnstyledText: true,
+            wrapMode: "none",
+            streaming: false,
+          })
+      this.shellCommand = renderedCommand
+      commandRow.add(renderedCommand)
+      this.add(commandRow)
+      const output = shell.capturedOutput.trimEnd()
+      const renderedOutput = new TextRenderable(ctx, {
+        id: `shell-output-${shell.shellId}`,
+        content: output === ""
+          ? shell.active ? "Running in the foreground terminal…" : "Completed with no output."
+          : `Output${shell.outputTruncated ? " · truncated" : ""}\n${output}`,
+        fg: output === "" ? theme.muted : theme.foreground,
+        wrapMode: "word",
+        flexShrink: 0,
+        marginTop: 1,
+      })
+      this.shellOutput = renderedOutput
+      this.add(renderedOutput)
+      return
+    }
     if (!toolOnly) {
       this.add(this.header)
       if (this.reasoning !== null) this.add(this.reasoning)
@@ -689,6 +778,13 @@ class TurnCardRenderable extends BoxRenderable {
       this.add(panel)
     }
   }
+}
+
+function shellHeader(active: boolean, status: number | null): string {
+  if (active) return "◌ Shell · running"
+  if (status === 0) return "✓ Shell · exited 0"
+  if (status === null) return "■ Shell · finished"
+  return `✕ Shell · exited ${status}`
 }
 
 export class TranscriptRenderable extends BoxRenderable {
@@ -1218,6 +1314,7 @@ function presentableTranscript(state: RottweilerState): TranscriptEntry[] {
     Object.values(state.subagents).map((subagent) => subagent.parentTurnId),
   )
   return state.transcript.filter((entry) => {
+    if (entry.presentation === "shell_result" && entry.shell !== undefined) return true
     if (turnMarkdown(entry.turn).trim() !== "") return true
     if (turnReasoningMarkdown(entry.turn) !== "") return true
     if (entry.turn.role === "tool" && toolTurns.has(entry.agentTurn)) return true

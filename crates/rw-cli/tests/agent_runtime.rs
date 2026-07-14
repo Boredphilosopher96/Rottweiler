@@ -1065,7 +1065,11 @@ fn kill_nine_mid_provider_is_closed_as_interrupted_on_resume() {
         .stderr(Stdio::null())
         .spawn()
         .expect("delayed child");
-    wait_until(Duration::from_secs(5), || {
+    // This acceptance test waits for a semantic crash point; cold-start latency
+    // is enforced by the dedicated release performance gate. Debug binaries
+    // include the WASM compiler and can take longer to validate after relink on
+    // macOS, especially under the full parallel workspace test load.
+    wait_until(Duration::from_secs(15), || {
         event_log(&run.home)
             .and_then(|path| fs::read_to_string(path).ok())
             .is_some_and(|log| log.contains("user_message_accepted"))

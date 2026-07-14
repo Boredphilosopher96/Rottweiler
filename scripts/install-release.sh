@@ -49,14 +49,15 @@ root=$(CDPATH= cd -P -- "$(dirname -- "$0")" && pwd)
 
 native=libopentui.so
 [ "$(uname -s)" = Darwin ] && native=libopentui.dylib
-for required in install.sh bin/rw bin/rottweiler-tui "bin/$native"; do
+for required in install.sh bin/rw bin/rottweiler-tui bin/rottweiler-wasm-host "bin/$native"; do
   [ -f "$root/$required" ] && [ ! -L "$root/$required" ] ||
     fail "archive is missing regular file $required"
 done
 [ -x "$root/bin/rw" ] || fail 'bin/rw is not executable'
 [ -x "$root/bin/rottweiler-tui" ] || fail 'bin/rottweiler-tui is not executable'
+[ -x "$root/bin/rottweiler-wasm-host" ] || fail 'bin/rottweiler-wasm-host is not executable'
 entry_count=$(find "$root" -mindepth 1 -print | wc -l | tr -d ' ')
-[ "$entry_count" = 5 ] || fail 'archive contains unexpected entries'
+[ "$entry_count" = 6 ] || fail 'archive contains unexpected entries'
 [ -z "$(find "$root" ! -type f ! -type d -print -quit)" ] ||
   fail 'archive contains a link or special filesystem object'
 [ -z "$(find "$root" -type f -links +1 -print -quit)" ] ||
@@ -143,13 +144,13 @@ version_dir="$prefix/versions/$version"
 if [ -e "$version_dir" ] || [ -L "$version_dir" ]; then
   [ -d "$version_dir" ] && [ ! -L "$version_dir" ] ||
     fail 'existing version generation is unsafe'
-  [ "$(find "$version_dir" -mindepth 1 -print | wc -l | tr -d ' ')" = 5 ] ||
+  [ "$(find "$version_dir" -mindepth 1 -print | wc -l | tr -d ' ')" = 6 ] ||
     fail 'existing version generation contains unexpected entries'
   [ -z "$(find "$version_dir" ! -type f ! -type d -print -quit)" ] ||
     fail 'existing version generation contains a link or special filesystem object'
   [ -z "$(find "$version_dir" -type f -links +1 -print -quit)" ] ||
     fail 'existing version generation contains a hard-linked file'
-  for relative in install.sh bin/rw bin/rottweiler-tui "bin/$native"; do
+  for relative in install.sh bin/rw bin/rottweiler-tui bin/rottweiler-wasm-host "bin/$native"; do
     [ -f "$version_dir/$relative" ] && [ ! -L "$version_dir/$relative" ] ||
       fail 'existing version generation is incomplete'
     cmp -s "$root/$relative" "$version_dir/$relative" ||
@@ -162,9 +163,10 @@ else
   chmod 755 "$staging/bin"
   cp "$root/bin/rw" "$staging/bin/rw"
   cp "$root/bin/rottweiler-tui" "$staging/bin/rottweiler-tui"
+  cp "$root/bin/rottweiler-wasm-host" "$staging/bin/rottweiler-wasm-host"
   cp "$root/bin/$native" "$staging/bin/$native"
   cp "$root/install.sh" "$staging/install.sh"
-  chmod 755 "$staging/bin/rw" "$staging/bin/rottweiler-tui"
+  chmod 755 "$staging/bin/rw" "$staging/bin/rottweiler-tui" "$staging/bin/rottweiler-wasm-host"
   chmod 755 "$staging/install.sh"
   chmod 644 "$staging/bin/$native"
   version_output=$("$staging/bin/rw" --version) || fail 'staged rw failed its version check'
@@ -173,6 +175,7 @@ else
     "$staging/install.sh" \
     "$staging/bin/rw" \
     "$staging/bin/rottweiler-tui" \
+    "$staging/bin/rottweiler-wasm-host" \
     "$staging/bin/$native" \
     "$staging/bin" \
     "$staging" || fail 'staged generation could not be flushed durably'
@@ -184,6 +187,7 @@ fi
   "$version_dir/install.sh" \
   "$version_dir/bin/rw" \
   "$version_dir/bin/rottweiler-tui" \
+  "$version_dir/bin/rottweiler-wasm-host" \
   "$version_dir/bin/$native" \
   "$version_dir/bin" \
   "$version_dir" \

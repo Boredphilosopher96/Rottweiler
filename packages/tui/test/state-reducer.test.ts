@@ -12,6 +12,7 @@ import {
   createInitialState,
   engineEvent,
   MAX_COMPACTION_STREAM_BYTES,
+  MAX_SHELL_OUTPUT_LINES,
   MAX_SUBAGENT_TASK_BYTES,
   MAX_TERMINAL_SUBAGENT_HISTORY,
   MAX_TODO_CONTENT_BYTES,
@@ -1398,5 +1399,51 @@ describe("pure TUI state reducer", () => {
       status: 0,
       capturedOutput: "ok",
     })
+  })
+
+  test("retains one bounded display-safe foreground shell card from start through completion", () => {
+    let state = reduce(createInitialState(), {
+      type: "user_shell_state_changed",
+      meta: meta("1"),
+      shell_id: "shell-visible",
+      command: "printf '\\e[31mhello\\e[0m'",
+      active: true,
+    })
+    expect(state.transcript).toHaveLength(1)
+    expect(state.transcript[0]).toMatchObject({
+      sequenceId: "1",
+      agentTurn: "shell:shell-visible",
+      presentation: "shell_result",
+      shell: {
+        command: "printf '\\e[31mhello\\e[0m'",
+        active: true,
+        status: null,
+      },
+    })
+
+    const noisyOutput = ["\u001b[31mred\u001b[0m\u0000", ...Array.from(
+      { length: MAX_SHELL_OUTPUT_LINES + 20 },
+      (_, index) => `line ${index}`,
+    )].join("\n")
+    state = reduce(state, {
+      type: "user_shell_state_changed",
+      meta: meta("2"),
+      shell_id: "shell-visible",
+      active: false,
+      status: 7,
+      captured_output: noisyOutput,
+    })
+
+    expect(state.transcript).toHaveLength(1)
+    expect(state.transcript[0]?.sequenceId).toBe("1")
+    expect(state.transcript[0]?.shell).toMatchObject({
+      active: false,
+      status: 7,
+      outputTruncated: true,
+    })
+    expect(state.transcript[0]?.shell?.capturedOutput).not.toContain("\u001b")
+    expect(state.transcript[0]?.shell?.capturedOutput).not.toContain("\u0000")
+    expect(state.transcript[0]?.shell?.capturedOutput).toContain("more lines")
+    expect(state.shell.capturedOutput).toBe(state.transcript[0]?.shell?.capturedOutput ?? null)
   })
 })

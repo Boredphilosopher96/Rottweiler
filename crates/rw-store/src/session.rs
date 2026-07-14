@@ -1,8 +1,9 @@
 //! Crash-safe append-only session logs and the derived `SQLite` session index.
 
 use std::{
+    collections::VecDeque,
     fs::{self, File},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read as _, Write},
     path::{Path, PathBuf},
 };
 
@@ -11,7 +12,7 @@ use std::os::unix::fs::FileExt as _;
 #[cfg(not(unix))]
 use std::{
     fs::OpenOptions,
-    io::{Read as _, Seek as _, SeekFrom},
+    io::{Seek as _, SeekFrom},
 };
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -34,6 +35,60 @@ pub struct EventEnvelope<T> {
     pub sequence: SequenceId,
     /// Provider- and UI-neutral event payload.
     pub event: T,
+}
+
+/// Independent resource ceilings for one descriptor-stable event-log page.
+///
+/// Page limits bound retained output while scan limits bound the work required
+/// to validate the complete snapshot and calculate truthful tail metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionEventPageLimits {
+    /// Maximum serialized JSONL bytes retained in one returned page.
+    pub max_page_bytes: u64,
+    /// Maximum envelopes retained in one returned page.
+    pub max_page_events: usize,
+    /// Maximum bytes in one JSON record, excluding its newline delimiter.
+    pub max_line_bytes: usize,
+    /// Maximum descriptor snapshot size which may be scanned.
+    pub max_scan_bytes: u64,
+    /// Maximum envelopes which may be validated in one scan.
+    pub max_scan_events: u64,
+}
+
+impl Default for SessionEventPageLimits {
+    fn default() -> Self {
+        Self {
+            max_page_bytes: 8 * 1024 * 1024,
+            max_page_events: 2_000,
+            max_line_bytes: 16 * 1024 * 1024,
+            max_scan_bytes: 512 * 1024 * 1024,
+            max_scan_events: 1_000_000,
+        }
+    }
+}
+
+/// One validated page from a complete, stable event-log snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionEventPage<T> {
+    /// Cursor-exclusive page contents in durable sequence order.
+    pub events: Vec<EventEnvelope<T>>,
+    /// Serialized JSONL bytes represented by `events`, including delimiters.
+    pub page_bytes: u64,
+    /// Cursor callers should pass to retrieve the next page. It remains equal
+    /// to the input cursor when that cursor was already at the tail.
+    pub next_cursor: Option<SequenceId>,
+    /// Whether at least one validated event remains after `next_cursor`.
+    pub has_more: bool,
+    /// Number of validated events before the first returned event.
+    pub events_before_page: u64,
+    /// Number of validated events after `next_cursor`.
+    pub events_after_page: u64,
+    /// Total validated envelopes in the stable snapshot.
+    pub total_events: u64,
+    /// Exact byte length of the stable descriptor snapshot.
+    pub total_bytes: u64,
+    /// Tail sequence of the stable snapshot, or `None` for an empty log.
+    pub tail_sequence: Option<SequenceId>,
 }
 
 /// Append-only event log for one session actor.
@@ -255,6 +310,63 @@ impl SessionEventLog {
         let file = open_existing_session_file_portable(root, session_id)?;
         ensure_regular_file(&file)?;
         load_events_bounded_with_size(&file, max_bytes, max_events)
+    }
+
+    /// Streams and validates an existing log while retaining only one bounded,
+    /// cursor-exclusive page.
+    ///
+    /// Unlike the legacy bounded whole-log reader, the cursor is applied while
+    /// scanning, so logs larger than one page remain readable. Every traversed
+    /// envelope is still decoded and checked for schema and contiguous sequence;
+    /// the complete stable snapshot is scanned to produce truthful total/tail
+    /// metadata. A concurrent append or mutation fails the entire read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe identity/path components, malformed or
+    /// oversized records, invalid sequence/schema, an out-of-range cursor,
+    /// exceeded page/scan limits, or concurrent descriptor mutation.
+    pub fn load_existing_page<T: DeserializeOwned>(
+        root: &Path,
+        session_id: &str,
+        after_sequence: Option<SequenceId>,
+        limits: SessionEventPageLimits,
+    ) -> Result<SessionEventPage<T>, SessionStoreError> {
+        validate_session_id(session_id)?;
+        #[cfg(unix)]
+        let file = open_existing_session_file(root, session_id)?;
+        #[cfg(not(unix))]
+        let file = open_existing_session_file_portable(root, session_id)?;
+        ensure_regular_file(&file)?;
+        load_event_page_with_hook(&file, after_sequence, limits, || {})
+    }
+
+    /// Streams and validates an existing log while retaining only its most
+    /// recent bounded page.
+    ///
+    /// This is the initial-inspection companion to [`Self::load_existing_page`]:
+    /// it scans the same stable descriptor snapshot and validates every
+    /// envelope, but keeps a rolling page ending at the durable tail instead of
+    /// retaining the oldest page. Callers can therefore inspect a very large
+    /// log without first transferring its entire history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe identity/path components, malformed or
+    /// oversized records, invalid sequence/schema, exceeded page/scan limits,
+    /// or concurrent descriptor mutation.
+    pub fn load_existing_tail_page<T: DeserializeOwned>(
+        root: &Path,
+        session_id: &str,
+        limits: SessionEventPageLimits,
+    ) -> Result<SessionEventPage<T>, SessionStoreError> {
+        validate_session_id(session_id)?;
+        #[cfg(unix)]
+        let file = open_existing_session_file(root, session_id)?;
+        #[cfg(not(unix))]
+        let file = open_existing_session_file_portable(root, session_id)?;
+        ensure_regular_file(&file)?;
+        load_event_tail_page_with_hook(&file, limits, || {})
     }
 
     /// Creates or idempotently completes a child log from an exact parent
@@ -1994,6 +2106,375 @@ fn load_events_bounded_with_size<T: DeserializeOwned>(
     parse_events_bounded(&bytes, max_events).map(|events| (events, byte_count))
 }
 
+fn load_event_page_with_hook<T, Hook>(
+    file: &File,
+    after_sequence: Option<SequenceId>,
+    limits: SessionEventPageLimits,
+    after_snapshot: Hook,
+) -> Result<SessionEventPage<T>, SessionStoreError>
+where
+    T: DeserializeOwned,
+    Hook: FnOnce(),
+{
+    validate_page_limits(limits)?;
+    let snapshot = event_file_snapshot(file)?;
+    if snapshot.len() > limits.max_scan_bytes {
+        return Err(SessionStoreError::EventScanBytesExceeded {
+            max_bytes: limits.max_scan_bytes,
+        });
+    }
+    after_snapshot();
+    let result = scan_event_page(file, snapshot.len(), after_sequence, limits);
+    // Stability wins over any parse result. A writer can expose an incomplete
+    // tail while the scan is in progress; callers must never mistake that race
+    // for durable corruption in the captured session.
+    verify_event_file_snapshot(file, &snapshot)?;
+    result
+}
+
+fn load_event_tail_page_with_hook<T, Hook>(
+    file: &File,
+    limits: SessionEventPageLimits,
+    after_snapshot: Hook,
+) -> Result<SessionEventPage<T>, SessionStoreError>
+where
+    T: DeserializeOwned,
+    Hook: FnOnce(),
+{
+    validate_page_limits(limits)?;
+    let snapshot = event_file_snapshot(file)?;
+    if snapshot.len() > limits.max_scan_bytes {
+        return Err(SessionStoreError::EventScanBytesExceeded {
+            max_bytes: limits.max_scan_bytes,
+        });
+    }
+    after_snapshot();
+    let result = scan_event_tail_page(file, snapshot.len(), limits);
+    verify_event_file_snapshot(file, &snapshot)?;
+    result
+}
+
+fn validate_page_limits(limits: SessionEventPageLimits) -> Result<(), SessionStoreError> {
+    if limits.max_page_bytes == 0
+        || limits.max_page_events == 0
+        || limits.max_line_bytes == 0
+        || limits.max_scan_bytes == 0
+        || limits.max_scan_events == 0
+    {
+        return Err(SessionStoreError::InvalidEventPageLimits);
+    }
+    Ok(())
+}
+
+fn scan_event_page<T: DeserializeOwned>(
+    file: &File,
+    snapshot_bytes: u64,
+    after_sequence: Option<SequenceId>,
+    limits: SessionEventPageLimits,
+) -> Result<SessionEventPage<T>, SessionStoreError> {
+    let mut remaining = snapshot_bytes;
+    let mut reader = BufReader::new(file.take(snapshot_bytes));
+    let mut line = Vec::with_capacity(limits.max_line_bytes.min(16 * 1024));
+    let mut events = Vec::with_capacity(limits.max_page_events.min(2_000));
+    let mut page_bytes = 0_u64;
+    let mut total_events = 0_u64;
+
+    while let Some(line_bytes) = read_bounded_snapshot_line(
+        &mut reader,
+        &mut remaining,
+        limits.max_line_bytes,
+        &mut line,
+    )? {
+        if total_events >= limits.max_scan_events {
+            return Err(SessionStoreError::EventScanCountExceeded {
+                max_events: limits.max_scan_events,
+            });
+        }
+        let envelope: EventEnvelope<T> = serde_json::from_slice(&line)?;
+        if envelope.schema_version != EVENT_SCHEMA_VERSION {
+            return Err(SessionStoreError::UnsupportedEventVersion(
+                envelope.schema_version,
+            ));
+        }
+        if envelope.sequence != SequenceId(total_events) {
+            return Err(SessionStoreError::CorruptEvent(
+                "non-contiguous event sequence",
+            ));
+        }
+        total_events = total_events
+            .checked_add(1)
+            .ok_or(SessionStoreError::SequenceOverflow)?;
+
+        if after_sequence.is_none_or(|cursor| envelope.sequence > cursor)
+            && events.len() < limits.max_page_events
+        {
+            let next_page_bytes = page_bytes
+                .checked_add(line_bytes)
+                .ok_or(SessionStoreError::LimitOverflow)?;
+            if next_page_bytes <= limits.max_page_bytes {
+                page_bytes = next_page_bytes;
+                events.push(envelope);
+            } else if events.is_empty() {
+                return Err(SessionStoreError::EventPageByteLimitTooSmall {
+                    required_bytes: line_bytes,
+                    max_bytes: limits.max_page_bytes,
+                });
+            }
+        }
+    }
+
+    let tail_sequence = total_events.checked_sub(1).map(SequenceId);
+    if after_sequence.is_some_and(|cursor| tail_sequence.is_none_or(|tail| cursor > tail)) {
+        return Err(SessionStoreError::EventPageCursorAhead);
+    }
+    let first_page_sequence = events.first().map(|envelope| envelope.sequence);
+    let next_cursor = events
+        .last()
+        .map(|envelope| envelope.sequence)
+        .or(after_sequence);
+    let covered_events = next_cursor.map_or(0, |cursor| cursor.0.saturating_add(1));
+    let events_after_page = total_events
+        .checked_sub(covered_events)
+        .ok_or(SessionStoreError::EventPageCursorAhead)?;
+    let events_before_page = first_page_sequence.map_or(covered_events, |sequence| sequence.0);
+    Ok(SessionEventPage {
+        events,
+        page_bytes,
+        next_cursor,
+        has_more: events_after_page > 0,
+        events_before_page,
+        events_after_page,
+        total_events,
+        total_bytes: snapshot_bytes,
+        tail_sequence,
+    })
+}
+
+fn scan_event_tail_page<T: DeserializeOwned>(
+    file: &File,
+    snapshot_bytes: u64,
+    limits: SessionEventPageLimits,
+) -> Result<SessionEventPage<T>, SessionStoreError> {
+    let mut remaining = snapshot_bytes;
+    let mut reader = BufReader::new(file.take(snapshot_bytes));
+    let mut line = Vec::with_capacity(limits.max_line_bytes.min(16 * 1024));
+    let mut retained = VecDeque::with_capacity(limits.max_page_events.min(2_000));
+    let mut page_bytes = 0_u64;
+    let mut total_events = 0_u64;
+
+    while let Some(line_bytes) = read_bounded_snapshot_line(
+        &mut reader,
+        &mut remaining,
+        limits.max_line_bytes,
+        &mut line,
+    )? {
+        if total_events >= limits.max_scan_events {
+            return Err(SessionStoreError::EventScanCountExceeded {
+                max_events: limits.max_scan_events,
+            });
+        }
+        let envelope: EventEnvelope<T> = serde_json::from_slice(&line)?;
+        if envelope.schema_version != EVENT_SCHEMA_VERSION {
+            return Err(SessionStoreError::UnsupportedEventVersion(
+                envelope.schema_version,
+            ));
+        }
+        if envelope.sequence != SequenceId(total_events) {
+            return Err(SessionStoreError::CorruptEvent(
+                "non-contiguous event sequence",
+            ));
+        }
+        total_events = total_events
+            .checked_add(1)
+            .ok_or(SessionStoreError::SequenceOverflow)?;
+        if line_bytes > limits.max_page_bytes {
+            return Err(SessionStoreError::EventPageByteLimitTooSmall {
+                required_bytes: line_bytes,
+                max_bytes: limits.max_page_bytes,
+            });
+        }
+        while retained.len() >= limits.max_page_events
+            || page_bytes.saturating_add(line_bytes) > limits.max_page_bytes
+        {
+            let (_, removed_bytes) = retained
+                .pop_front()
+                .ok_or(SessionStoreError::LimitOverflow)?;
+            page_bytes = page_bytes
+                .checked_sub(removed_bytes)
+                .ok_or(SessionStoreError::LimitOverflow)?;
+        }
+        page_bytes = page_bytes
+            .checked_add(line_bytes)
+            .ok_or(SessionStoreError::LimitOverflow)?;
+        retained.push_back((envelope, line_bytes));
+    }
+
+    let events_before_page = retained
+        .front()
+        .map_or(total_events, |(envelope, _)| envelope.sequence.0);
+    let events = retained
+        .into_iter()
+        .map(|(envelope, _)| envelope)
+        .collect::<Vec<_>>();
+    let tail_sequence = total_events.checked_sub(1).map(SequenceId);
+    let next_cursor = events.last().map(|envelope| envelope.sequence);
+    Ok(SessionEventPage {
+        events,
+        page_bytes,
+        next_cursor,
+        has_more: false,
+        events_before_page,
+        events_after_page: 0,
+        total_events,
+        total_bytes: snapshot_bytes,
+        tail_sequence,
+    })
+}
+
+fn read_bounded_snapshot_line<R: BufRead>(
+    reader: &mut R,
+    remaining: &mut u64,
+    max_line_bytes: usize,
+    line: &mut Vec<u8>,
+) -> Result<Option<u64>, SessionStoreError> {
+    line.clear();
+    if *remaining == 0 {
+        return Ok(None);
+    }
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Err(SessionStoreError::CorruptEvent(
+                "event log ended before its descriptor snapshot",
+            ));
+        }
+        let remaining_usize = usize::try_from(*remaining).unwrap_or(usize::MAX);
+        let available_len = available.len().min(remaining_usize);
+        let chunk = &available[..available_len];
+        if let Some(newline) = chunk.iter().position(|byte| *byte == b'\n') {
+            if line.len().saturating_add(newline) > max_line_bytes {
+                return Err(SessionStoreError::EventRecordTooLarge { max_line_bytes });
+            }
+            line.extend_from_slice(&chunk[..newline]);
+            let consumed = newline
+                .checked_add(1)
+                .ok_or(SessionStoreError::LimitOverflow)?;
+            reader.consume(consumed);
+            let consumed = u64::try_from(consumed).map_err(|_| SessionStoreError::LimitOverflow)?;
+            *remaining = remaining
+                .checked_sub(consumed)
+                .ok_or(SessionStoreError::LimitOverflow)?;
+            if line.is_empty() {
+                return Err(SessionStoreError::CorruptEvent("blank JSONL record"));
+            }
+            return Ok(Some(
+                u64::try_from(line.len())
+                    .map_err(|_| SessionStoreError::LimitOverflow)?
+                    .checked_add(1)
+                    .ok_or(SessionStoreError::LimitOverflow)?,
+            ));
+        }
+        if line.len().saturating_add(chunk.len()) > max_line_bytes {
+            return Err(SessionStoreError::EventRecordTooLarge { max_line_bytes });
+        }
+        line.extend_from_slice(chunk);
+        reader.consume(available_len);
+        let consumed =
+            u64::try_from(available_len).map_err(|_| SessionStoreError::LimitOverflow)?;
+        *remaining = remaining
+            .checked_sub(consumed)
+            .ok_or(SessionStoreError::LimitOverflow)?;
+        if *remaining == 0 {
+            return Err(SessionStoreError::CorruptEvent(
+                "incomplete final JSONL record",
+            ));
+        }
+    }
+}
+
+#[cfg(unix)]
+struct EventFileSnapshot {
+    stat: rustix::fs::Stat,
+}
+
+#[cfg(unix)]
+impl EventFileSnapshot {
+    fn len(&self) -> u64 {
+        u64::try_from(self.stat.st_size).unwrap_or(u64::MAX)
+    }
+}
+
+#[cfg(unix)]
+fn event_file_snapshot(file: &File) -> Result<EventFileSnapshot, SessionStoreError> {
+    let stat = rustix::fs::fstat(file).map_err(std::io::Error::from)?;
+    if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() || stat.st_nlink != 1 {
+        return Err(SessionStoreError::UnsafeEventFileType);
+    }
+    u64::try_from(stat.st_size).map_err(|_| SessionStoreError::LimitOverflow)?;
+    Ok(EventFileSnapshot { stat })
+}
+
+#[cfg(unix)]
+fn verify_event_file_snapshot(
+    file: &File,
+    before: &EventFileSnapshot,
+) -> Result<(), SessionStoreError> {
+    let after = rustix::fs::fstat(file).map_err(std::io::Error::from)?;
+    if !rustix::fs::FileType::from_raw_mode(after.st_mode).is_file()
+        || after.st_nlink != 1
+        || after.st_dev != before.stat.st_dev
+        || after.st_ino != before.stat.st_ino
+        || after.st_size != before.stat.st_size
+        || after.st_mtime != before.stat.st_mtime
+        || after.st_mtime_nsec != before.stat.st_mtime_nsec
+        || after.st_ctime != before.stat.st_ctime
+        || after.st_ctime_nsec != before.stat.st_ctime_nsec
+    {
+        return Err(SessionStoreError::EventFileChangedDuringRead);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+struct EventFileSnapshot {
+    len: u64,
+    modified: std::time::SystemTime,
+}
+
+#[cfg(not(unix))]
+impl EventFileSnapshot {
+    const fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+#[cfg(not(unix))]
+fn event_file_snapshot(file: &File) -> Result<EventFileSnapshot, SessionStoreError> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(SessionStoreError::UnsafeEventFileType);
+    }
+    Ok(EventFileSnapshot {
+        len: metadata.len(),
+        modified: metadata.modified()?,
+    })
+}
+
+#[cfg(not(unix))]
+fn verify_event_file_snapshot(
+    file: &File,
+    before: &EventFileSnapshot,
+) -> Result<(), SessionStoreError> {
+    let after = file.metadata()?;
+    if !after.file_type().is_file()
+        || after.len() != before.len
+        || after.modified()? != before.modified
+    {
+        return Err(SessionStoreError::EventFileChangedDuringRead);
+    }
+    Ok(())
+}
+
 fn parse_events<T: DeserializeOwned>(
     bytes: &[u8],
 ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
@@ -2348,6 +2829,24 @@ pub enum SessionStoreError {
     EventLogTooLarge { max_bytes: u64 },
     #[error("session event log exceeds the {max_events}-event read limit")]
     EventCountTooLarge { max_events: usize },
+    /// Paged scans require positive, independently bounded limits.
+    #[error("session event page limits must all be greater than zero")]
+    InvalidEventPageLimits,
+    /// The descriptor snapshot exceeded the caller's total scan budget.
+    #[error("session event log exceeds the {max_bytes}-byte page scan limit")]
+    EventScanBytesExceeded { max_bytes: u64 },
+    /// The validated envelope count exceeded the caller's total scan budget.
+    #[error("session event log exceeds the {max_events}-event page scan limit")]
+    EventScanCountExceeded { max_events: u64 },
+    /// A single JSONL record exceeded the bounded line buffer.
+    #[error("session event record exceeds the {max_line_bytes}-byte line limit")]
+    EventRecordTooLarge { max_line_bytes: usize },
+    /// One legal event cannot fit in an otherwise empty requested page.
+    #[error("session event requires {required_bytes} bytes but the page byte limit is {max_bytes}")]
+    EventPageByteLimitTooSmall { required_bytes: u64, max_bytes: u64 },
+    /// Cursor must identify an event in the captured snapshot.
+    #[error("session event page cursor is ahead of the durable log tail")]
+    EventPageCursorAhead,
     #[error("session search query exceeds 512 bytes")]
     SearchQueryTooLarge,
     #[error("session search internal limit exceeds 1001")]
@@ -2420,8 +2919,9 @@ mod tests {
 
     use super::{
         AccountingLedger, EventEnvelope, MAX_SEARCH_INDEX_BYTES, MAX_SEARCH_INDEX_WAL_BYTES,
-        ProjectionStatus, SessionEventLog, SessionIndex, SessionProjection, SessionStoreError,
-        SessionSummary, TurnAccountingEntry, UtcDayKey, UtcTimestamp, upsert_projection,
+        ProjectionStatus, SessionEventLog, SessionEventPageLimits, SessionIndex, SessionProjection,
+        SessionStoreError, SessionSummary, TurnAccountingEntry, UtcDayKey, UtcTimestamp,
+        upsert_projection,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3732,6 +4232,230 @@ mod tests {
         .unwrap_or_else(|error| panic!("bounded descriptor read: {error}"));
         assert_eq!(events.len(), 1);
         assert_eq!(descriptor_bytes, expected_bytes);
+    }
+
+    #[test]
+    fn paged_history_streams_logs_beyond_twenty_thousand_events() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "paged-many")
+            .unwrap_or_else(|error| panic!("open log: {error}"));
+        log.append_batch((0..20_050).map(|index| FixtureEvent {
+            kind: "fixture".to_owned(),
+            text: format!("event-{index}"),
+        }))
+        .unwrap_or_else(|error| panic!("append events: {error}"));
+        drop(log);
+
+        let page = SessionEventLog::load_existing_page::<FixtureEvent>(
+            root.path(),
+            "paged-many",
+            Some(SequenceId(19_999)),
+            SessionEventPageLimits {
+                max_page_events: 25,
+                max_page_bytes: 1024 * 1024,
+                max_scan_events: 25_000,
+                max_scan_bytes: 64 * 1024 * 1024,
+                max_line_bytes: 64 * 1024,
+            },
+        )
+        .unwrap_or_else(|error| panic!("paged read: {error}"));
+        assert_eq!(page.events.len(), 25);
+        assert_eq!(page.events[0].sequence, SequenceId(20_000));
+        assert_eq!(page.next_cursor, Some(SequenceId(20_024)));
+        assert_eq!(page.total_events, 20_050);
+        assert_eq!(page.tail_sequence, Some(SequenceId(20_049)));
+        assert_eq!(page.events_before_page, 20_000);
+        assert_eq!(page.events_after_page, 25);
+        assert!(page.has_more);
+    }
+
+    #[test]
+    fn paged_history_streams_logs_beyond_eight_megabytes_with_bounded_lines() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "paged-large")
+            .unwrap_or_else(|error| panic!("open log: {error}"));
+        let payload = "x".repeat(1024 * 1024);
+        log.append_batch((0..9).map(|_| FixtureEvent {
+            kind: "fixture".to_owned(),
+            text: payload.clone(),
+        }))
+        .unwrap_or_else(|error| panic!("append events: {error}"));
+        drop(log);
+
+        let limits = SessionEventPageLimits {
+            max_page_events: 1,
+            max_page_bytes: 2 * 1024 * 1024,
+            max_line_bytes: 2 * 1024 * 1024,
+            max_scan_bytes: 16 * 1024 * 1024,
+            max_scan_events: 100,
+        };
+        let page = SessionEventLog::load_existing_page::<FixtureEvent>(
+            root.path(),
+            "paged-large",
+            None,
+            limits,
+        )
+        .unwrap_or_else(|error| panic!("paged read: {error}"));
+        assert!(page.total_bytes > 8 * 1024 * 1024);
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.total_events, 9);
+        assert_eq!(page.events_after_page, 8);
+        assert!(page.has_more);
+
+        assert!(matches!(
+            SessionEventLog::load_existing_page::<FixtureEvent>(
+                root.path(),
+                "paged-large",
+                None,
+                SessionEventPageLimits {
+                    max_line_bytes: 1024,
+                    ..limits
+                },
+            ),
+            Err(SessionStoreError::EventRecordTooLarge {
+                max_line_bytes: 1024
+            })
+        ));
+    }
+
+    #[test]
+    fn paged_history_cursor_walk_has_exact_tail_and_truncation_metadata() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "paged-cursor")
+            .unwrap_or_else(|error| panic!("open log: {error}"));
+        log.append_batch((0..7).map(|index| FixtureEvent {
+            kind: "fixture".to_owned(),
+            text: format!("event-{index}"),
+        }))
+        .unwrap_or_else(|error| panic!("append events: {error}"));
+        drop(log);
+        let limits = SessionEventPageLimits {
+            max_page_events: 3,
+            max_page_bytes: 1024 * 1024,
+            max_line_bytes: 64 * 1024,
+            max_scan_bytes: 1024 * 1024,
+            max_scan_events: 100,
+        };
+        let mut cursor = None;
+        let mut seen = Vec::new();
+        loop {
+            let page = SessionEventLog::load_existing_page::<FixtureEvent>(
+                root.path(),
+                "paged-cursor",
+                cursor,
+                limits,
+            )
+            .unwrap_or_else(|error| panic!("paged read: {error}"));
+            seen.extend(page.events.iter().map(|event| event.sequence));
+            cursor = page.next_cursor;
+            if !page.has_more {
+                assert_eq!(page.total_events, 7);
+                assert_eq!(page.tail_sequence, Some(SequenceId(6)));
+                assert_eq!(page.events_after_page, 0);
+                break;
+            }
+        }
+        assert_eq!(seen, (0..7).map(SequenceId).collect::<Vec<_>>());
+        let tail = SessionEventLog::load_existing_page::<FixtureEvent>(
+            root.path(),
+            "paged-cursor",
+            cursor,
+            limits,
+        )
+        .unwrap_or_else(|error| panic!("tail read: {error}"));
+        assert!(tail.events.is_empty());
+        assert_eq!(tail.next_cursor, Some(SequenceId(6)));
+        assert_eq!(tail.events_before_page, 7);
+        assert!(!tail.has_more);
+    }
+
+    #[test]
+    fn paged_history_validates_sequences_before_and_after_the_requested_cursor() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "paged-corrupt")
+            .unwrap_or_else(|error| panic!("open log: {error}"));
+        log.append_batch((0..4).map(|index| FixtureEvent {
+            kind: "fixture".to_owned(),
+            text: format!("event-{index}"),
+        }))
+        .unwrap_or_else(|error| panic!("append events: {error}"));
+        let path = log.path().to_path_buf();
+        drop(log);
+        let mut lines = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read fixture: {error}"))
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut corrupt: serde_json::Value = serde_json::from_str(&lines[1])
+            .unwrap_or_else(|error| panic!("decode fixture: {error}"));
+        corrupt["sequence"] = serde_json::json!("9");
+        lines[1] = serde_json::to_string(&corrupt)
+            .unwrap_or_else(|error| panic!("encode fixture: {error}"));
+        std::fs::write(&path, format!("{}\n", lines.join("\n")))
+            .unwrap_or_else(|error| panic!("write corruption: {error}"));
+
+        assert!(matches!(
+            SessionEventLog::load_existing_page::<FixtureEvent>(
+                root.path(),
+                "paged-corrupt",
+                Some(SequenceId(2)),
+                SessionEventPageLimits::default(),
+            ),
+            Err(SessionStoreError::CorruptEvent(
+                "non-contiguous event sequence"
+            ))
+        ));
+    }
+
+    #[test]
+    fn paged_history_rejects_concurrent_descriptor_mutation_before_returning_data() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "paged-mutated")
+            .unwrap_or_else(|error| panic!("open log: {error}"));
+        log.append(FixtureEvent {
+            kind: "fixture".to_owned(),
+            text: "first".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("append event: {error}"));
+        let path = log.path().to_path_buf();
+        drop(log);
+        #[cfg(unix)]
+        let file = super::open_existing_session_file(root.path(), "paged-mutated")
+            .unwrap_or_else(|error| panic!("open descriptor: {error}"));
+        #[cfg(not(unix))]
+        let file = super::open_existing_session_file_portable(root.path(), "paged-mutated")
+            .unwrap_or_else(|error| panic!("open descriptor: {error}"));
+        let result = super::load_event_page_with_hook::<FixtureEvent, _>(
+            &file,
+            None,
+            SessionEventPageLimits::default(),
+            || {
+                let envelope = EventEnvelope {
+                    schema_version: super::EVENT_SCHEMA_VERSION,
+                    sequence: SequenceId(1),
+                    event: FixtureEvent {
+                        kind: "fixture".to_owned(),
+                        text: "concurrent".to_owned(),
+                    },
+                };
+                let mut append = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap_or_else(|error| panic!("open append: {error}"));
+                serde_json::to_writer(&mut append, &envelope)
+                    .unwrap_or_else(|error| panic!("append JSON: {error}"));
+                append
+                    .write_all(b"\n")
+                    .unwrap_or_else(|error| panic!("append newline: {error}"));
+                append
+                    .sync_all()
+                    .unwrap_or_else(|error| panic!("sync append: {error}"));
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(SessionStoreError::EventFileChangedDuringRead)
+        ));
     }
 
     #[cfg(unix)]

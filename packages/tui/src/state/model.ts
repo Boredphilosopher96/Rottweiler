@@ -63,8 +63,20 @@ export interface TranscriptEntry {
   readonly agentTurn: string
   readonly turn: Turn
   /** Presentation kind for host results that are not conversation turns. */
-  readonly presentation?: "conversation" | "command_result"
+  readonly presentation?: "conversation" | "command_result" | "shell_result"
   readonly title?: string
+  /** Structured foreground-shell content. Kept out of Markdown so commands and
+   * terminal output cannot be interpreted as user-authored formatting. */
+  readonly shell?: ShellTranscriptPresentation
+}
+
+export interface ShellTranscriptPresentation {
+  readonly shellId: string
+  readonly command: string
+  readonly active: boolean
+  readonly status: number | null
+  readonly capturedOutput: string
+  readonly outputTruncated: boolean
 }
 
 export interface StreamingCitation {
@@ -159,6 +171,9 @@ export interface CommandAcknowledgement {
     | "session_replay_completed"
     | "session_forked"
     | "sessions_listed"
+    | "subagents_listed"
+    | "subagent_replay_batch"
+    | "subagent_replay_completed"
     | "sessions_search_ready"
     | "command_descriptors_listed"
     | "models_listed"

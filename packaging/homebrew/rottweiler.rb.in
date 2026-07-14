@@ -22,6 +22,7 @@ class Rottweiler < Formula
   test do
     assert_equal "rw #{version}\n", shell_output("#{bin}/rw --version")
     assert_predicate libexec/"rottweiler-tui", :executable?
+    assert_predicate libexec/"rottweiler-wasm-host", :executable?
     native = OS.mac? ? "libopentui.dylib" : "libopentui.so"
     assert_predicate libexec/native, :file?
     refute_path_exists bin/"rottweiler-tui"

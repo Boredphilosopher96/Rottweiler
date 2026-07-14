@@ -8,6 +8,9 @@ mod discovery;
 mod hook;
 mod plugin;
 mod plugin_runtime;
+mod registry;
+mod wasm;
+mod wasm_process;
 mod workflow;
 
 pub use agent::{
@@ -33,6 +36,9 @@ pub use hook::{
 };
 pub use plugin::*;
 pub use plugin_runtime::*;
+pub use registry::*;
+pub use wasm::*;
+pub use wasm_process::*;
 pub use workflow::{
     DiscoveredWorkflow, WorkflowCondition, WorkflowOnFail, WorkflowRunError, WorkflowRunReport,
     WorkflowRunner, WorkflowStep, WorkflowStepArtifact, WorkflowStepExecutionError,

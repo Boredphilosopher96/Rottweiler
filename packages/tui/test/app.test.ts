@@ -75,6 +75,17 @@ function expectCoherentTheme(app: ReturnType<typeof createRottweilerApp>, theme:
   expect(app.statusLine.bg.toInts()).toEqual(rgba(theme.panel))
 }
 
+function completeTransportReconnect(app: ReturnType<typeof createRottweilerApp>): void {
+  app.setState({
+    ...app.state,
+    connection: { phase: "reconnecting", attempt: 1, error: null, gap: null },
+  })
+  app.setState({
+    ...app.state,
+    connection: { phase: "connected", attempt: 1, error: null, gap: null },
+  })
+}
+
 describe("Rottweiler OpenTUI shell", () => {
   let renderer: TestRenderer | undefined
 
@@ -269,6 +280,46 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(presentationUpdates).toBe(1)
     expect(frame.callbacks.size).toBe(0)
     expect(app.transcript.streamingMarkdown.content).toHaveLength(100)
+  })
+
+  test("coalesces compaction text and thinking into one presentation frame", async () => {
+    const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
+    renderer = setup.renderer
+    const frame = new ManualPresentationFrame()
+    const app = createRottweilerApp(renderer, { presentationFrame: frame })
+    renderer.root.add(app)
+    app.handleEvent({
+      type: "compaction_started",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      reason: "automatic",
+    })
+    app.handleEvent({
+      type: "compaction_attempt_started",
+      session_id: "session-local",
+      summary_turn_id: "7",
+      attempt: 0,
+    })
+
+    for (let index = 0; index < 200; index += 1) {
+      app.handleEvent({
+        type: index % 2 === 0 ? "compaction_text_delta" : "compaction_thinking_delta",
+        session_id: "session-local",
+        summary_turn_id: "7",
+        attempt: 0,
+        text: "x",
+      })
+    }
+
+    expect(frame.scheduled).toBe(1)
+    expect(frame.callbacks.size).toBe(1)
+    frame.flush()
+    expect(app.state.compaction?.text).toHaveLength(100)
+    expect(app.state.compaction?.thinking).toHaveLength(100)
   })
 
   test("flushes queued stream content immediately before permission, question, and finish events", async () => {
@@ -1221,6 +1272,7 @@ describe("Rottweiler OpenTUI shell", () => {
     const slash = app.picker.select.options.map((option) => option.value)
     expect(slash).toContain("help")
     expect(slash).toContain("providers")
+    expect(slash).toContain("agents")
     expect(slash).toContain("permissions")
     expect(slash.length).toBeGreaterThan(10)
 
@@ -1229,6 +1281,7 @@ describe("Rottweiler OpenTUI shell", () => {
     const palette = app.picker.select.options.map((option) => option.value)
     expect(palette).toContain("session.list")
     expect(palette).toContain("provider.list")
+    expect(palette).toContain("agent.children")
     expect(palette).toContain("mcp.configure")
     expect(palette).not.toContain("mcp.status")
     expect(palette).toContain("permissions.manage")
@@ -1240,6 +1293,2131 @@ describe("Rottweiler OpenTUI shell", () => {
     app.picker.select.setSelectedIndex(statusIndex)
     app.picker.select.selectCurrent()
     expect(app.composer.value).toBe("/status")
+  })
+
+  test("inspects a parent-owned child transcript and routes follow-ups without attaching its session", async () => {
+    const setup = await createTestRenderer({ width: 96, height: 22, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")
+    expect(list?.type).toBe("list_subagents")
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list!.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-one",
+        child_session_id: "child-session",
+        task: "Audit authentication",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "worktree",
+        activity: "running",
+      }],
+    })
+    expect(app.picker.select.options.map((option) => option.value)).toContain("child-one")
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+
+    expect(app.activeSubagentId).toBe("child-one")
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "replay_subagent",
+      session_id: "parent-session",
+      subagent_id: "child-one",
+      after_sequence: null,
+    }))
+    expect(emitted.some((command) => command.type === "resume_session")).toBeFalse()
+
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-one",
+      child_session_id: "child-session",
+      child_sequence: "0",
+      event: {
+        type: "text_delta",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "different-child-session",
+          sequence_id: "1",
+          emitted_at: "2026-01-01T00:00:00Z",
+        },
+        turn_id: "forged-turn",
+        text: "must not cross the child boundary",
+      },
+    })
+    expect(app.visibleState.streamingTail).toBeNull()
+
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-one",
+      child_session_id: "child-session",
+      child_sequence: "1",
+      event: {
+        type: "turn_started",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "1",
+          emitted_at: "2026-01-01T00:00:01Z",
+        },
+        turn_id: "child-turn",
+      },
+    })
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-one",
+      child_session_id: "child-session",
+      child_sequence: "2",
+      event: {
+        type: "text_delta",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "2",
+          emitted_at: "2026-01-01T00:00:02Z",
+        },
+        turn_id: "child-turn",
+        text: "Authentication uses a bounded token exchange.",
+      },
+    })
+    const replay = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: replay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-one",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "1",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "1",
+            emitted_at: "2026-01-01T00:00:01Z",
+          },
+          turn_id: "child-turn",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: replay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-one",
+      through_sequence: "1",
+      next_cursor: null,
+      tail_sequence: "1",
+      has_more: false,
+      events_before_page: "1",
+      truncated: true,
+    })
+    expect(app.state.transcript).toEqual([])
+    expect(app.visibleState.streamingTail?.text).toBe("Authentication uses a bounded token exchange.")
+    expect(app.banner.plainText).toContain("Child · Audit authentication")
+    expect(app.contextPanel.visible).toBeFalse()
+
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-one",
+      child_session_id: "child-session",
+      child_sequence: "4",
+      event: {
+        type: "text_delta",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "4",
+          emitted_at: "2026-01-01T00:00:04Z",
+        },
+        turn_id: "child-turn",
+        text: " Gap recovered.",
+      },
+    })
+    const gapReplay = emitted.filter((command) => command.type === "replay_subagent").at(-1)!
+    expect(gapReplay).toMatchObject({ after_sequence: "2" })
+    expect(app.visibleState.streamingTail?.text).not.toContain("Gap recovered")
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: gapReplay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:04Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-one",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "3",
+        event: {
+          type: "thinking_delta",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "3",
+            emitted_at: "2026-01-01T00:00:03Z",
+          },
+          turn_id: "child-turn",
+          text: "Recovered the missing broadcast.",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: gapReplay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:04Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-one",
+      through_sequence: "3",
+      next_cursor: null,
+      tail_sequence: "3",
+      has_more: false,
+      events_before_page: "2",
+      truncated: true,
+    })
+    expect(app.visibleState.streamingTail?.text).toContain("Gap recovered.")
+
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-one",
+      child_session_id: "child-session",
+      child_sequence: "5",
+      event: {
+        type: "tool_approval_needed",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "5",
+          emitted_at: "2026-01-01T00:00:05Z",
+        },
+        turn_id: "child-turn",
+        tool_call_id: "child-tool",
+        name: "edit",
+        args: { path: "src/auth.rs" },
+        capabilities: ["write_filesystem"],
+        rationale: "Update the child worktree",
+      },
+    })
+    expect(app.banner.plainText).toContain("approval requested by child")
+    expect(app.interactionPanel.visible).toBeFalse()
+
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-one",
+      child_session_id: "child-session",
+      child_sequence: "6",
+      event: {
+        type: "turn_finished",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "6",
+          emitted_at: "2026-01-01T00:00:06Z",
+        },
+        turn_id: "child-turn",
+        status: "completed",
+        usage: {
+          input_tokens: "10",
+          output_tokens: "5",
+          cache_read_tokens: "0",
+          cache_write_tokens: "0",
+          reasoning_tokens: "0",
+        },
+        cost: { kind: "unavailable", reason: "fixture" },
+      },
+    })
+    expect(app.composer.visible).toBeTrue()
+
+    app.composer.value = "Check the refresh path too"
+    expect(await app.composer.submit()).toBeTrue()
+    expect(emitted.at(-1)).toMatchObject({
+      type: "continue_subagent",
+      session_id: "parent-session",
+      subagent_id: "child-one",
+      content: "Check the refresh path too",
+    })
+
+    app.openSubagentActionPicker()
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "inspect",
+      "running",
+      "interrupt",
+      "close",
+    ])
+    app.picker.select.setSelectedIndex(3)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(emitted.at(-1)).toMatchObject({
+      type: "list_subagents",
+      session_id: "parent-session",
+    })
+    expect(emitted.at(-2)).toMatchObject({
+      type: "close_subagent",
+      session_id: "parent-session",
+      subagent_id: "child-one",
+    })
+    expect(app.activeSubagentId).toBeNull()
+    expect(app.state.subagents["child-one"]).toBeUndefined()
+    expect(app.state.subagentOrder).not.toContain("child-one")
+  })
+
+  test("uses Escape to return to the parent and double Escape to interrupt a running child", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.composer.value = "parent draft stays private"
+    app.composer.addAttachment({
+      name: "parent context.txt",
+      media_type: "text/plain",
+      data: { type: "text", content: "parent only" },
+    })
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-running",
+        child_session_id: "child-session",
+        task: "Review runtime",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.activeSubagentId).toBe("child-running")
+    expect(app.composer.value).toBe("")
+    expect(app.composer.attachments).toEqual([])
+    app.composer.value = "child-only follow-up"
+
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.activeSubagentId).toBeNull()
+    expect(app.composer.value).toBe("parent draft stays private")
+    expect(app.composer.attachments.map((attachment) => attachment.name)).toEqual([
+      "parent context.txt",
+    ])
+    expect(app.banner.plainText).toContain("press Esc again to stop the child agent")
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(emitted.at(-1)).toMatchObject({
+      type: "interrupt_subagent",
+      session_id: "parent-session",
+      subagent_id: "child-running",
+    })
+  })
+
+  test("leaves Vim insert mode before Escape exits a child transcript", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      keybindings: { preset: "vim" },
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-vim",
+        child_session_id: "child-session",
+        task: "Vim child",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.activeSubagentId).toBe("child-vim")
+    setup.mockInput.pressKey("i")
+    expect(app.statusLine.plainText).toContain("INSERT")
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.activeSubagentId).toBe("child-vim")
+    expect(app.statusLine.plainText).toContain("NORMAL")
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.activeSubagentId).toBeNull()
+  })
+
+  test("shows running child state without offering or selecting a follow-up action", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-running-actions",
+        child_session_id: "child-session",
+        task: "Finish current work",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.closePicker()
+    app.openSubagentActionPicker("child-running-actions")
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "inspect",
+      "running",
+      "interrupt",
+      "close",
+    ])
+    expect(app.picker.select.options.map((option) => option.name).join(" ")).not.toContain(
+      "Send follow-up",
+    )
+    app.picker.moveSelection(1)
+    expect(app.picker.select.getSelectedOption()?.value).toBe("interrupt")
+
+    const commandCount = emitted.length
+    app.picker.select.setSelectedIndex(1)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.picker.visible).toBeTrue()
+    expect(emitted).toHaveLength(commandCount)
+    expect(emitted.some((command) => command.type === "continue_subagent")).toBeFalse()
+  })
+
+  test("keeps running child inspection read-only and guards follow-up submission", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-read-only",
+        child_session_id: "child-session",
+        task: "Keep inspection passive",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.activeSubagentId).toBe("child-read-only")
+    expect(app.composer.visible).toBeFalse()
+    expect(app.banner.plainText).toContain("read-only; interrupt to reply")
+
+    app.composer.value = "This must not race the active child"
+    expect(await app.composer.submit()).toBeFalse()
+    expect(emitted.some((command) => command.type === "continue_subagent")).toBeFalse()
+    expect(app.composer.value).toBe("This must not race the active child")
+    expect(app.banner.plainText).toContain("interrupt it before sending a follow-up")
+
+    const replay = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: replay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-read-only",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "1",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "1",
+            emitted_at: "2026-01-01T00:00:01Z",
+          },
+          turn_id: "child-turn",
+        },
+      }, {
+        child_sequence: "2",
+        event: {
+          type: "turn_finished",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "2",
+            emitted_at: "2026-01-01T00:00:02Z",
+          },
+          turn_id: "child-turn",
+          status: "completed",
+          usage: {
+            input_tokens: "10",
+            output_tokens: "5",
+            cache_read_tokens: "0",
+            cache_write_tokens: "0",
+            reasoning_tokens: "0",
+          },
+          cost: { kind: "unavailable", reason: "fixture" },
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: replay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-read-only",
+      through_sequence: "2",
+      next_cursor: null,
+      tail_sequence: "2",
+      has_more: false,
+      events_before_page: "1",
+      truncated: true,
+    })
+    expect(app.composer.visible).toBeTrue()
+    expect(await app.composer.submit()).toBeTrue()
+    expect(emitted.at(-1)).toMatchObject({
+      type: "continue_subagent",
+      subagent_id: "child-read-only",
+      content: "This must not race the active child",
+    })
+  })
+
+  test("keeps child shell routing, status, and picker bounds truthful", async () => {
+    const setup = await createTestRenderer({ width: 52, height: 10, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      terminalHandover: { suspend() {}, resume() {} },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-bounded",
+        child_session_id: "child-session",
+        task: `Bounded ${"task ".repeat(300)}`,
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    expect(Number(app.picker.height)).toBeLessThanOrEqual(7)
+    expect(app.picker.select.options[0]?.name.length).toBeLessThanOrEqual(512)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+
+    const replay = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: replay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-bounded",
+      through_sequence: null,
+      next_cursor: null,
+      tail_sequence: null,
+      has_more: false,
+      events_before_page: "0",
+      truncated: false,
+    })
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-bounded",
+      child_session_id: "child-session",
+      child_sequence: "1",
+      event: {
+        type: "context_usage_updated",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "1",
+          emitted_at: "2026-01-01T00:00:01Z",
+        },
+        turn_id: "child-turn",
+        used_tokens: "2000",
+        usable_tokens: "10000",
+        reserved_tokens: "1000",
+        stable_prefix_hash: "fixture",
+        cache_hit_basis_points: 0,
+      },
+    })
+    expect(app.statusLine.plainText).toContain("ctx 2.0k/10k")
+    app.openSubagentActionPicker()
+    expect(Number(app.picker.height)).toBeLessThanOrEqual(7)
+    app.closePicker()
+    expect(app.statusLine.plainText).toContain("ctx 2.0k/10k")
+
+    app.composer.value = "!pwd"
+    expect(await app.composer.submit()).toBeTrue()
+    expect(emitted.at(-1)).toMatchObject({
+      type: "user_shell_started",
+      session_id: "parent-session",
+      command: "pwd",
+    })
+    expect(emitted.at(-1)?.type).not.toBe("continue_subagent")
+    expect(app.activeSubagentId).toBeNull()
+  })
+
+  test("keeps child-list failures retryable instead of claiming the list is empty", async () => {
+    const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
+    renderer = setup.renderer
+    let attempts = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      onCommand(command) {
+        if (command.type === "list_subagents") {
+          attempts += 1
+          return {
+            type: "rejected",
+            error: {
+              category: "protocol",
+              code: "offline",
+              message: "engine temporarily unavailable",
+              retryable: true,
+            },
+          }
+        }
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    await Bun.sleep(0)
+    expect(app.picker.select.options.map((option) => option.value)).toEqual(["agents.retry"])
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(attempts).toBe(2)
+  })
+
+  test("retains live child progress when replay fails and converges through a cursor replay", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const replayResolvers: Array<(outcome: CommandOutcome) => void> = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        if (command.type === "replay_subagent") {
+          return new Promise<CommandOutcome>((resolve) => replayResolvers.push(resolve))
+        }
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-recovery",
+        child_session_id: "child-session",
+        task: "Recover broadcasts",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+
+    for (const sequence of [1, 2]) {
+      app.handleEvent({
+        type: "subagent_progress",
+        parent_session_id: "parent-session",
+        subagent_id: "child-recovery",
+        child_session_id: "child-session",
+        child_sequence: String(sequence),
+        event: sequence === 1
+          ? {
+              type: "turn_started",
+              meta: {
+                protocol_version: PROTOCOL_VERSION,
+                session_id: "child-session",
+                sequence_id: "1",
+                emitted_at: "2026-01-01T00:00:01Z",
+              },
+              turn_id: "child-turn",
+            }
+          : {
+              type: "text_delta",
+              meta: {
+                protocol_version: PROTOCOL_VERSION,
+                session_id: "child-session",
+                sequence_id: "2",
+                emitted_at: "2026-01-01T00:00:02Z",
+              },
+              turn_id: "child-turn",
+              text: "Buffered before failure. ",
+            },
+      })
+    }
+    replayResolvers[0]?.({
+      type: "rejected",
+      error: {
+        category: "protocol",
+        code: "replay_failed",
+        message: "temporary replay failure",
+        retryable: true,
+      },
+    })
+    await Bun.sleep(0)
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-recovery",
+      child_session_id: "child-session",
+      child_sequence: "3",
+      event: {
+        type: "text_delta",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "3",
+          emitted_at: "2026-01-01T00:00:03Z",
+        },
+        turn_id: "child-turn",
+        text: "Still retained.",
+      },
+    })
+    const replays = emitted.filter((command) => command.type === "replay_subagent")
+    expect(replays).toHaveLength(2)
+    expect(replays[1]).toMatchObject({ after_sequence: null })
+    const recovery = replays[1]!
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: recovery.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-recovery",
+      child_session_id: "child-session",
+      events: [
+        {
+          child_sequence: "1",
+          event: {
+            type: "turn_started",
+            meta: {
+              protocol_version: PROTOCOL_VERSION,
+              session_id: "child-session",
+              sequence_id: "1",
+              emitted_at: "2026-01-01T00:00:01Z",
+            },
+            turn_id: "child-turn",
+          },
+        },
+        {
+          child_sequence: "2",
+          event: {
+            type: "text_delta",
+            meta: {
+              protocol_version: PROTOCOL_VERSION,
+              session_id: "child-session",
+              sequence_id: "2",
+              emitted_at: "2026-01-01T00:00:02Z",
+            },
+            turn_id: "child-turn",
+            text: "Buffered before failure. ",
+          },
+        },
+      ],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: recovery.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-recovery",
+      through_sequence: "2",
+      next_cursor: null,
+      tail_sequence: "2",
+      has_more: false,
+      events_before_page: "1",
+      truncated: true,
+    })
+    expect(app.visibleState.streamingTail?.text).toBe(
+      "Buffered before failure. Still retained.",
+    )
+    replayResolvers[1]?.({ type: "accepted" })
+  })
+
+  test("ignores a stale replay rejection without deleting the newer replay correlation", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const replayResolvers: Array<(outcome: CommandOutcome) => void> = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        if (command.type === "replay_subagent") {
+          return new Promise<CommandOutcome>((resolve) => replayResolvers.push(resolve))
+        }
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-race",
+        child_session_id: "child-session",
+        task: "Replay race",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    app.openSubagentActionPicker("child-race")
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const replays = emitted.filter((command) => command.type === "replay_subagent")
+    expect(replays).toHaveLength(2)
+
+    replayResolvers[0]?.({
+      type: "rejected",
+      error: {
+        category: "protocol",
+        code: "stale",
+        message: "stale replay rejected",
+        retryable: true,
+      },
+    })
+    await Bun.sleep(0)
+    const current = replays[1]!
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: current.meta.request_id,
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-race",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "1",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "1",
+            emitted_at: "2026-01-01T00:00:01Z",
+          },
+          turn_id: "child-turn",
+        },
+      }, {
+        child_sequence: "2",
+        event: {
+          type: "text_delta",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "2",
+            emitted_at: "2026-01-01T00:00:02Z",
+          },
+          turn_id: "child-turn",
+          text: "Newest replay survived.",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: current.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-race",
+      through_sequence: "2",
+      next_cursor: null,
+      tail_sequence: "2",
+      has_more: false,
+      events_before_page: "1",
+      truncated: true,
+    })
+    expect(app.visibleState.streamingTail?.text).toBe("Newest replay survived.")
+    replayResolvers[1]?.({ type: "accepted" })
+  })
+
+  test("reissues an accepted child replay after reconnect and preserves buffered progress", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-reconnect-accepted",
+        child_session_id: "child-session",
+        task: "Reconnect after acceptance",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const first = emitted.find((command) => command.type === "replay_subagent")!
+
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-reconnect-accepted",
+      child_session_id: "child-session",
+      child_sequence: "2",
+      event: {
+        type: "text_delta",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "2",
+          emitted_at: "2026-01-01T00:00:02Z",
+        },
+        turn_id: "child-turn",
+        text: "Buffered across reconnect.",
+      },
+    })
+    completeTransportReconnect(app)
+    const replays = emitted.filter((command) => command.type === "replay_subagent")
+    expect(replays).toHaveLength(2)
+    const recovered = replays[1]!
+    expect(recovered).toMatchObject({ after_sequence: null })
+    expect(recovered.meta.request_id).not.toBe(first.meta.request_id)
+
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-accepted",
+      through_sequence: null,
+      next_cursor: null,
+      tail_sequence: null,
+      has_more: false,
+      events_before_page: "0",
+      truncated: false,
+    })
+    expect(app.banner.plainText).toContain("loading transcript")
+    expect(emitted.filter((command) => command.type === "replay_subagent")).toHaveLength(2)
+
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: recovered.meta.request_id,
+        emitted_at: "2026-01-01T00:00:04Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-accepted",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "1",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "1",
+            emitted_at: "2026-01-01T00:00:01Z",
+          },
+          turn_id: "child-turn",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: recovered.meta.request_id,
+        emitted_at: "2026-01-01T00:00:04Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-accepted",
+      through_sequence: "1",
+      next_cursor: null,
+      tail_sequence: "1",
+      has_more: false,
+      events_before_page: "1",
+      truncated: true,
+    })
+    expect(app.visibleState.streamingTail?.text).toBe("Buffered across reconnect.")
+  })
+
+  test("reissues child replay from the verified cursor when reconnect interrupts a page", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-reconnect-batch",
+        child_session_id: "child-session",
+        task: "Reconnect between batch and completion",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const first = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-batch",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "1",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "1",
+            emitted_at: "2026-01-01T00:00:01Z",
+          },
+          turn_id: "child-turn",
+        },
+      }, {
+        child_sequence: "2",
+        event: {
+          type: "text_delta",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "2",
+            emitted_at: "2026-01-01T00:00:02Z",
+          },
+          turn_id: "child-turn",
+          text: "Applied before reconnect.",
+        },
+      }],
+    })
+
+    completeTransportReconnect(app)
+    const recovered = emitted.filter((command) => command.type === "replay_subagent").at(-1)!
+    expect(recovered).toMatchObject({ after_sequence: "2" })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-batch",
+      through_sequence: "2",
+      next_cursor: null,
+      tail_sequence: "2",
+      has_more: false,
+      events_before_page: "1",
+      truncated: true,
+    })
+    expect(app.banner.plainText).toContain("loading transcript")
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: recovered.meta.request_id,
+        emitted_at: "2026-01-01T00:00:04Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-batch",
+      through_sequence: "2",
+      next_cursor: null,
+      tail_sequence: "2",
+      has_more: false,
+      events_before_page: "2",
+      truncated: true,
+    })
+    expect(app.visibleState.streamingTail?.text).toBe("Applied before reconnect.")
+    expect(emitted.filter((command) => command.type === "replay_subagent")).toHaveLength(2)
+  })
+
+  test("replaces the pending next-page request when reconnect occurs between replay pages", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-reconnect-pages",
+        child_session_id: "child-session",
+        task: "Reconnect between pages",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const first = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-pages",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "1",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "1",
+            emitted_at: "2026-01-01T00:00:01Z",
+          },
+          turn_id: "child-turn",
+        },
+      }, {
+        child_sequence: "2",
+        event: {
+          type: "text_delta",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "2",
+            emitted_at: "2026-01-01T00:00:02Z",
+          },
+          turn_id: "child-turn",
+          text: "Page one. ",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-pages",
+      through_sequence: "2",
+      next_cursor: "2",
+      tail_sequence: "3",
+      has_more: true,
+      events_before_page: "1",
+      truncated: true,
+    })
+    const second = emitted.filter((command) => command.type === "replay_subagent").at(-1)!
+    expect(second).toMatchObject({ after_sequence: "2" })
+
+    completeTransportReconnect(app)
+    const third = emitted.filter((command) => command.type === "replay_subagent").at(-1)!
+    expect(third).toMatchObject({ after_sequence: "2" })
+    expect(third.meta.request_id).not.toBe(second.meta.request_id)
+
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: second.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-pages",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "3",
+        event: {
+          type: "text_delta",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "3",
+            emitted_at: "2026-01-01T00:00:03Z",
+          },
+          turn_id: "child-turn",
+          text: "Stale page must be ignored.",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: second.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-pages",
+      through_sequence: "3",
+      next_cursor: null,
+      tail_sequence: "3",
+      has_more: false,
+      events_before_page: "2",
+      truncated: true,
+    })
+    expect(app.visibleState.streamingTail?.text).toBe("Page one. ")
+
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: third.meta.request_id,
+        emitted_at: "2026-01-01T00:00:04Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-pages",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "3",
+        event: {
+          type: "text_delta",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "3",
+            emitted_at: "2026-01-01T00:00:04Z",
+          },
+          turn_id: "child-turn",
+          text: "Page two.",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: third.meta.request_id,
+        emitted_at: "2026-01-01T00:00:04Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-reconnect-pages",
+      through_sequence: "3",
+      next_cursor: null,
+      tail_sequence: "3",
+      has_more: false,
+      events_before_page: "2",
+      truncated: true,
+    })
+    expect(app.visibleState.streamingTail?.text).toBe("Page one. Page two.")
+    expect(emitted.filter((command) => command.type === "replay_subagent")).toHaveLength(3)
+  })
+
+  test("restores a rejected child submission only to its originating child draft", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let rejectFollowUp: ((outcome: CommandOutcome) => void) | undefined
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        if (command.type === "continue_subagent") {
+          return new Promise<CommandOutcome>((resolve) => {
+            rejectFollowUp = resolve
+          })
+        }
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.composer.value = "parent draft"
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-draft",
+        child_session_id: "child-session",
+        task: "Keep drafts isolated",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "idle",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    app.composer.value = "child submission that will fail"
+    const submission = app.composer.submit()
+    await Bun.sleep(0)
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.activeSubagentId).toBeNull()
+    expect(app.composer.value).toBe("parent draft")
+
+    rejectFollowUp?.({
+      type: "rejected",
+      error: {
+        category: "protocol",
+        code: "child_busy",
+        message: "child is temporarily busy",
+        retryable: true,
+      },
+    })
+    expect(await submission).toBeFalse()
+    expect(app.composer.value).toBe("parent draft")
+    app.openSubagentActionPicker("child-draft")
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.activeSubagentId).toBe("child-draft")
+    expect(app.composer.value).toBe("child submission that will fail")
+  })
+
+  test("keeps the newly inspected child active when an older child shell command is accepted", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let acceptShell: ((outcome: CommandOutcome) => void) | undefined
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      terminalHandover: { suspend() {}, resume() {} },
+      onCommand(command) {
+        emitted.push(command)
+        if (command.type === "user_shell_started") {
+          return new Promise<CommandOutcome>((resolve) => {
+            acceptShell = resolve
+          })
+        }
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [
+        {
+          subagent_id: "child-a",
+          child_session_id: "child-session-a",
+          task: "Origin child",
+          agent: "reviewer",
+          model: "fast",
+          isolation: "shared",
+          activity: "running",
+        },
+        {
+          subagent_id: "child-b",
+          child_session_id: "child-session-b",
+          task: "New child",
+          agent: "reviewer",
+          model: "fast",
+          isolation: "shared",
+          activity: "running",
+        },
+      ],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.activeSubagentId).toBe("child-a")
+    app.composer.value = "!pwd"
+    const submission = app.composer.submit()
+    await Bun.sleep(0)
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    app.openSubagentActionPicker("child-b")
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.activeSubagentId).toBe("child-b")
+    acceptShell?.({ type: "accepted" })
+    expect(await submission).toBeTrue()
+    expect(app.activeSubagentId).toBe("child-b")
+  })
+
+  test("bounds buffered child broadcasts by bytes and restarts replay from the durable cursor", async () => {
+    const setup = await createTestRenderer({ width: 60, height: 12, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-bytes",
+        child_session_id: "child-session",
+        task: "Bound broadcast memory",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const firstReplay = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-bytes",
+      child_session_id: "child-session",
+      child_sequence: "1",
+      event: {
+        type: "text_delta",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "1",
+          emitted_at: "2026-01-01T00:00:01Z",
+        },
+        turn_id: "child-turn",
+        text: "x".repeat(8 * 1024 * 1024),
+      },
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: firstReplay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-bytes",
+      through_sequence: null,
+      next_cursor: null,
+      tail_sequence: null,
+      has_more: false,
+      events_before_page: "0",
+      truncated: false,
+    })
+    const replays = emitted.filter((command) => command.type === "replay_subagent")
+    expect(replays).toHaveLength(2)
+    expect(replays[1]).toMatchObject({ after_sequence: null })
+  })
+
+  test("paginates child replay to a stable tail before draining buffered live progress", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-pages",
+        child_session_id: "child-session",
+        task: "Page replay",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const first = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-pages",
+      child_session_id: "child-session",
+      child_sequence: "4",
+      event: {
+        type: "text_delta",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "4",
+          emitted_at: "2026-01-01T00:00:04Z",
+        },
+        turn_id: "child-turn",
+        text: "live progress",
+      },
+    })
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-pages",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "1",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "1",
+            emitted_at: "2026-01-01T00:00:01Z",
+          },
+          turn_id: "child-turn",
+        },
+      }, {
+        child_sequence: "2",
+        event: {
+          type: "text_delta",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "2",
+            emitted_at: "2026-01-01T00:00:02Z",
+          },
+          turn_id: "child-turn",
+          text: "page one; ",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-pages",
+      through_sequence: "2",
+      next_cursor: "2",
+      tail_sequence: "3",
+      has_more: true,
+      events_before_page: "1",
+      truncated: true,
+    })
+    const second = emitted.filter((command) => command.type === "replay_subagent").at(-1)!
+    expect(second).toMatchObject({ after_sequence: "2" })
+    expect(app.visibleState.streamingTail?.text).toBe("page one; ")
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: second.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-pages",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "3",
+        event: {
+          type: "text_delta",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "3",
+            emitted_at: "2026-01-01T00:00:03Z",
+          },
+          turn_id: "child-turn",
+          text: "page two; ",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: second.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-pages",
+      through_sequence: "3",
+      next_cursor: null,
+      tail_sequence: "3",
+      has_more: false,
+      events_before_page: "2",
+      truncated: true,
+    })
+    expect(app.visibleState.streamingTail?.text).toBe("page one; page two; live progress")
+    expect(emitted.filter((command) => command.type === "replay_subagent")).toHaveLength(2)
+  })
+
+  test("rejects a nonadvancing child replay cursor and retries loudly from the verified event", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-cursor",
+        child_session_id: "child-session",
+        task: "Validate cursors",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const first = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-cursor",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "1",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "1",
+            emitted_at: "2026-01-01T00:00:01Z",
+          },
+          turn_id: "child-turn",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-cursor",
+      through_sequence: "1",
+      next_cursor: "1",
+      tail_sequence: "3",
+      has_more: true,
+      events_before_page: "1",
+      truncated: true,
+    })
+    const second = emitted.filter((command) => command.type === "replay_subagent").at(-1)!
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: second.meta.request_id,
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-cursor",
+      through_sequence: null,
+      next_cursor: "1",
+      tail_sequence: "3",
+      has_more: true,
+      events_before_page: "1",
+      truncated: true,
+    })
+    const replays = emitted.filter((command) => command.type === "replay_subagent")
+    expect(replays).toHaveLength(3)
+    expect(replays.at(-1)).toMatchObject({ after_sequence: "1" })
+    expect(app.banner.plainText).toContain("invalid next-page cursor")
+  })
+
+  test("retries loudly when a final child replay page stops before its declared tail", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-tail",
+        child_session_id: "child-session",
+        task: "Verify replay tail",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const first = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-tail",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "1",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "1",
+            emitted_at: "2026-01-01T00:00:01Z",
+          },
+          turn_id: "child-turn",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: first.meta.request_id,
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-tail",
+      through_sequence: "1",
+      next_cursor: null,
+      tail_sequence: "2",
+      has_more: false,
+      events_before_page: "1",
+      truncated: true,
+    })
+    const replays = emitted.filter((command) => command.type === "replay_subagent")
+    expect(replays).toHaveLength(2)
+    expect(replays.at(-1)).toMatchObject({ after_sequence: "1" })
+    expect(app.banner.plainText).toContain("stopped before its durable tail")
+  })
+
+  test("labels an intentional initial child replay tail without claiming data loss", async () => {
+    const setup = await createTestRenderer({ width: 92, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-recent",
+        child_session_id: "child-session",
+        task: "Recent retained history",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "idle",
+      }],
+    })
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const replay = emitted.find((command) => command.type === "replay_subagent")!
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: replay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:09Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-recent",
+      child_session_id: "child-session",
+      events: [{
+        child_sequence: "9",
+        event: {
+          type: "turn_started",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "9",
+            emitted_at: "2026-01-01T00:00:09Z",
+          },
+          turn_id: "child-turn",
+        },
+      }, {
+        child_sequence: "10",
+        event: {
+          type: "text_delta",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            session_id: "child-session",
+            sequence_id: "10",
+            emitted_at: "2026-01-01T00:00:10Z",
+          },
+          turn_id: "child-turn",
+          text: "Recent retained work.",
+        },
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: replay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:10Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-recent",
+      through_sequence: "10",
+      next_cursor: null,
+      tail_sequence: "10",
+      has_more: false,
+      events_before_page: "9",
+      truncated: true,
+    })
+    expect(app.visibleState.streamingTail?.text).toBe("Recent retained work.")
+    expect(app.banner.plainText).toContain("Showing recent activity; 9 earlier events retained")
+    expect(app.banner.plainText).not.toContain("data loss")
+    expect(emitted.filter((command) => command.type === "replay_subagent")).toHaveLength(1)
   })
 
   test("searches settings actions and never one-clicks destructive choices", async () => {
@@ -3330,7 +5508,11 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
 
     app.composer.value = "!python -q"
+    expect(app.composer.shellMode).toBeTrue()
+    expect(app.composer.title).toBe(" Shell ")
+    expect(app.composer.editor.placeholder).toContain("Shell command")
     expect(await app.composer.submit()).toBeTrue()
+    expect(app.composer.shellMode).toBeFalse()
     expect(ordering).toEqual(["suspend", "command"])
     expect(commands).toHaveLength(1)
     expect(commands[0]).toMatchObject({
@@ -3352,6 +5534,10 @@ describe("Rottweiler OpenTUI shell", () => {
       active: true,
     })
     expect(ordering).toEqual(["suspend", "command"])
+    await setup.renderOnce()
+    expect(app.transcript.mountedCards).toHaveLength(1)
+    expect([...app.transcript.mountedCards.values()][0]?.header.plainText).toContain("Shell · running")
+    expect(setup.captureCharFrame()).toContain("python -q")
 
     app.handleEvent({
       type: "user_shell_state_changed",
@@ -3365,13 +5551,17 @@ describe("Rottweiler OpenTUI shell", () => {
       command: "python -q",
       active: false,
       status: 0,
-      captured_output: "",
+      captured_output: "hello from shell",
     })
     expect(ordering).toEqual(["suspend", "command", "resume", "command"])
     expect(commands.at(-1)).toMatchObject({
       type: "get_workspace_status",
       session_id: "session-tui-test",
     })
+    await setup.renderOnce()
+    expect(app.transcript.mountedCards).toHaveLength(1)
+    expect([...app.transcript.mountedCards.values()][0]?.header.plainText).toContain("exited 0")
+    expect(setup.captureCharFrame()).toContain("hello from shell")
   })
 
   test("preserves a rejected draft and surfaces the protocol error", async () => {

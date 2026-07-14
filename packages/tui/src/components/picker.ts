@@ -82,6 +82,8 @@ export interface PickerItem<T> {
   readonly description: string
   readonly value: T
   readonly searchText?: string
+  /** Render this row as status/context, but never focus or activate it. */
+  readonly selectable?: boolean
 }
 
 export class FuzzyPickerRenderable<T> extends BoxRenderable {
@@ -294,7 +296,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.input.on(InputRenderableEvents.ENTER, () => this.select.selectCurrent())
     this.select.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) => {
       const item = this.#filtered[index]
-      if (item !== undefined) {
+      if (item !== undefined && item.selectable !== false) {
         this.#onSelect?.(item)
       }
     })
@@ -302,6 +304,11 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       if (event.button !== 0) return
       const index = this.#mouseIndex(event.y)
       if (index === null) return
+      if (this.#filtered[index]?.selectable === false) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
       this.#setSelectionAtEdge(index)
       event.preventDefault()
       event.stopPropagation()
@@ -310,6 +317,11 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       if (event.button !== 0) return
       const index = this.#mouseIndex(event.y)
       if (index === null) return
+      if (this.#filtered[index]?.selectable === false) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
       this.#setSelectionAtEdge(index)
       this.select.selectCurrent()
       event.preventDefault()
@@ -481,22 +493,32 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     return height
   }
 
+  constrainModalHeight(availableRows: number): number {
+    const height = Math.max(1, Math.min(this.#desiredHeight, Math.floor(availableRows)))
+    if (!this.#anchored) this.height = height
+    return height
+  }
+
   /** OpenCode-style keyboard navigation keeps the active result centered. */
   moveSelection(delta: number, wrap = true): void {
-    const count = this.select.options.length
-    if (count === 0) return
+    const selectable = this.#selectableIndices()
+    if (selectable.length === 0) return
     const current = this.select.getSelectedIndex()
-    let target = current + delta
-    if (wrap && delta === -1 && current === 0) target = count - 1
-    else if (wrap && delta === 1 && current === count - 1) target = 0
-    else target = Math.min(Math.max(target, 0), count - 1)
-    this.#setKeyboardSelection(target)
+    const currentPosition = selectable.indexOf(current)
+    const origin = currentPosition >= 0 ? currentPosition : 0
+    let target = origin + delta
+    if (wrap) target = ((target % selectable.length) + selectable.length) % selectable.length
+    else target = Math.min(Math.max(target, 0), selectable.length - 1)
+    this.#setKeyboardSelection(selectable[target]!)
   }
 
   moveToBoundary(end: boolean): void {
-    const count = this.select.options.length
-    if (count === 0) return
-    this.#setKeyboardSelection(end ? count - 1 : 0, end ? "end" : "start")
+    const selectable = this.#selectableIndices()
+    if (selectable.length === 0) return
+    this.#setKeyboardSelection(
+      end ? selectable.at(-1)! : selectable[0]!,
+      end ? "end" : "start",
+    )
   }
 
   close(): void {
@@ -573,10 +595,12 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     }))
     if (this.#filtered.length === 0) return
     const retainedIndex = this.#filtered.findIndex((item) => item.id === selectedId)
-    const nextIndex =
+    const candidateIndex =
       retainedIndex >= 0
         ? retainedIndex
         : Math.min(Math.max(selectedIndex, 0), this.#filtered.length - 1)
+    const nextIndex = this.#nearestSelectableIndex(candidateIndex)
+    if (nextIndex === null) return
     this.select.setSelectedIndex(nextIndex)
     if (preserveSelection) {
       this.#setScrollOffset(
@@ -586,6 +610,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   }
 
   #setSelectionAtEdge(target: number, boundary?: "start" | "end"): void {
+    if (this.#filtered[target]?.selectable === false) return
     const previousOffset = this.#scrollOffset()
     const visible = this.#visibleItemCount()
     this.select.setSelectedIndex(target)
@@ -603,6 +628,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   }
 
   #setKeyboardSelection(target: number, boundary?: "start" | "end"): void {
+    if (this.#filtered[target]?.selectable === false) return
     const visible = this.#visibleItemCount()
     this.select.setSelectedIndex(target)
     const maximum = Math.max(0, this.select.options.length - visible)
@@ -638,6 +664,25 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     if (localRow < 0 || localRow >= this.select.height) return null
     const index = this.#scrollOffset() + Math.floor(localRow / (this.#compact ? 1 : 2))
     return index >= 0 && index < this.select.options.length ? index : null
+  }
+
+  #selectableIndices(): number[] {
+    const selectable: number[] = []
+    for (let index = 0; index < this.#filtered.length; index += 1) {
+      if (this.#filtered[index]?.selectable !== false) selectable.push(index)
+    }
+    return selectable
+  }
+
+  #nearestSelectableIndex(origin: number): number | null {
+    if (this.#filtered[origin]?.selectable !== false) return origin
+    for (let distance = 1; distance < this.#filtered.length; distance += 1) {
+      const after = origin + distance
+      if (after < this.#filtered.length && this.#filtered[after]?.selectable !== false) return after
+      const before = origin - distance
+      if (before >= 0 && this.#filtered[before]?.selectable !== false) return before
+    }
+    return null
   }
 }
 

@@ -1,12 +1,13 @@
 //! Layered TOML configuration loading with per-leaf provenance.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 use rw_types::config::{
     Config, ConfigFile, EngineConfigFile, PermissionDecision, ProviderConfig, ThinkingLevel,
@@ -41,8 +42,7 @@ const ENV_TELEMETRY_ENABLED: &str = "RW_TELEMETRY_ENABLED";
 const ENV_UPDATE_CHANNEL: &str = "RW_UPDATE_CHANNEL";
 const MAX_TUI_AUX_CONFIG_BYTES: usize = 64 * 1024;
 static TUI_SETTING_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-#[cfg(not(unix))]
-static TUI_SETTING_PORTABLE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static TUI_SETTING_PROCESS_LOCKS: OnceLock<(Mutex<BTreeSet<PathBuf>>, Condvar)> = OnceLock::new();
 
 /// A layer that supplied one effective configuration leaf.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2177,11 +2177,61 @@ fn prepare_tui_config_parent(parent: &Path, user_path: &Path) -> Result<(), Conf
     Ok(())
 }
 
-#[cfg(unix)]
-fn acquire_tui_settings_lock(
+struct TuiSettingsProcessLock {
+    parent: PathBuf,
+}
+
+impl Drop for TuiSettingsProcessLock {
+    fn drop(&mut self) {
+        let (active, available) =
+            TUI_SETTING_PROCESS_LOCKS.get_or_init(|| (Mutex::new(BTreeSet::new()), Condvar::new()));
+        // A panic while holding the registry still must release this path for
+        // already-waiting writers. Future acquisitions observe the poison and
+        // fail closed instead of silently trusting possibly inconsistent state.
+        let mut active = active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active.remove(&self.parent);
+        available.notify_all();
+    }
+}
+
+fn acquire_tui_settings_process_lock(
     parent: &Path,
     key: &str,
-) -> Result<std::os::fd::OwnedFd, ConfigError> {
+) -> Result<TuiSettingsProcessLock, ConfigError> {
+    let (active, available) =
+        TUI_SETTING_PROCESS_LOCKS.get_or_init(|| (Mutex::new(BTreeSet::new()), Condvar::new()));
+    let active = active.lock().map_err(|_| ConfigError::InvalidUserSetting {
+        key: key.to_owned(),
+        reason: "user settings lock is unavailable".to_owned(),
+    })?;
+    let mut active = available
+        .wait_while(active, |paths| paths.contains(parent))
+        .map_err(|_| ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "user settings lock is unavailable".to_owned(),
+        })?;
+    active.insert(parent.to_owned());
+    Ok(TuiSettingsProcessLock {
+        parent: parent.to_owned(),
+    })
+}
+
+#[cfg(unix)]
+struct TuiSettingsLock {
+    _process: TuiSettingsProcessLock,
+    _descriptor: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+fn acquire_tui_settings_lock(parent: &Path, key: &str) -> Result<TuiSettingsLock, ConfigError> {
+    // Serialize this process before entering the deliberately short, fail-closed
+    // cross-process lock window. A durable rewrite can include several fsyncs and
+    // legitimately exceed that window under I/O pressure; making sibling threads
+    // race through it would cause spurious failures and could tempt callers to
+    // retry a read-modify-write with stale state.
+    let process = acquire_tui_settings_process_lock(parent, key)?;
     let path = parent.join("config.toml.lock");
     let descriptor = rustix::fs::open(
         &path,
@@ -2227,20 +2277,18 @@ fn acquire_tui_settings_lock(
             }
         }
     }
-    Ok(descriptor)
+    Ok(TuiSettingsLock {
+        _process: process,
+        _descriptor: descriptor,
+    })
 }
 
 #[cfg(not(unix))]
 fn acquire_tui_settings_lock(
-    _parent: &Path,
+    parent: &Path,
     key: &str,
-) -> Result<std::sync::MutexGuard<'static, ()>, ConfigError> {
-    TUI_SETTING_PORTABLE_LOCK
-        .lock()
-        .map_err(|_| ConfigError::InvalidUserSetting {
-            key: key.to_owned(),
-            reason: "user settings lock is unavailable".to_owned(),
-        })
+) -> Result<TuiSettingsProcessLock, ConfigError> {
+    acquire_tui_settings_process_lock(parent, key)
 }
 
 fn validate_tui_config_file(path: &Path, key: &str) -> Result<(), ConfigError> {
@@ -3034,6 +3082,8 @@ fn nonempty_value<'a>(environment: &'a BTreeMap<String, String>, key: &str) -> O
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     use rw_types::config::{PermissionDecision, UpdateChannel};
     use tempfile::tempdir;
@@ -3107,6 +3157,38 @@ mod tests {
         assert!(persisted.contains("last updated via TUI"));
         assert!(persisted.contains("theme = \"daylight\""));
         assert!(persisted.contains("default = \"deny\""));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tui_settings_same_process_writer_waits_past_external_deadline() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        let held = super::acquire_tui_settings_lock(
+            user.parent().expect("user parent"),
+            "test-same-process-contention",
+        )
+        .expect("held lock");
+        let loader = ConfigLoader::new(user, project);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).expect("signal writer");
+            loader.persist_tui_setting("ui.theme", "daylight")
+        });
+        started_rx.recv().expect("writer started");
+
+        // Longer than the external flock deadline: a sibling thread must wait
+        // for the in-process read-modify-write, not consume that deadline.
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        drop(held);
+
+        writer
+            .join()
+            .expect("writer thread")
+            .expect("serialized setting");
     }
 
     #[test]
@@ -3422,11 +3504,16 @@ kind = "openai_codex"
         let project = root.path().join("repo/.rottweiler/config.toml");
         fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
         fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
-        let held = super::acquire_tui_settings_lock(
-            user.parent().expect("user parent"),
-            "test-contention",
-        )
-        .expect("held lock");
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(user.parent().expect("user parent").join("config.toml.lock"))
+            .expect("lock file");
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::LockExclusive)
+            .expect("held external lock");
         let loader = ConfigLoader::new(user, project);
         let started = std::time::Instant::now();
 

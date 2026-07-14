@@ -50,6 +50,7 @@ rottweiler/
 │   ├── rw-mcp/                # MCP client/server (rmcp), deferred loading
 │   ├── rw-ext/                # extension host: RPC plugins, hooks, commands/skills/agents loaders
 │   ├── rw-core/               # the engine: session loop, modes, orchestration, permissions
+│   ├── rw-wasm-host/          # private capability-bounded WASM runtime helper
 │   └── rw-cli/                # `rw` binary: arg parsing, print mode, serve mode, spawns the TUI
 ├── packages/
 │   └── tui/                   # OpenTUI frontend (TypeScript, Bun; compiled with `bun build --compile`)
@@ -66,9 +67,10 @@ Dependency rule: arrows point downward only. No Rust crate depends on anything i
 `rw` (Rust) is the single entry point. In TUI mode it: binds the engine server to a unix socket (localhost TCP on Windows) with a per-engine auth token, spawns the bundled TUI executable with the socket address + token, and supervises it. Engine and TUI fail independently: TUI crash → `rw` restarts it and reattaches to the live session; engine crash → TUI shows a reconnect state, sessions recover from the event log. Print/serve/SDK paths never touch Bun — headless usage is pure Rust.
 
 The process boundary is not a product boundary. Every supported release is one
-platform application bundle containing `rw`, `rottweiler-tui`, and exactly one
-native OpenTUI library. Homebrew installs all three together under private
-`libexec` and exposes only an `rw` wrapper; the standalone bootstrap downloads
+platform application bundle containing `rw`, `rottweiler-tui`, the private
+`rottweiler-wasm-host`, and exactly one native OpenTUI library. Homebrew installs
+the complete bundle together under private `libexec` and exposes only an `rw`
+wrapper; the standalone bootstrap downloads
 the identical signed archive and its installer exposes only `rw`. Consequently
 ordinary install, launch, and close are each one user action even though crash
 isolation remains process-based. Source builds may expose component paths to

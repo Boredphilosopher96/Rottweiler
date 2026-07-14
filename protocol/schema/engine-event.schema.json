@@ -248,6 +248,140 @@
         "meta": {
           "$ref": "#/$defs/CommandAckMeta"
         },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubagentDescriptor"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "subagents_listed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagents"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "child_session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "events": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SubagentReplayItem"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "subagent_replay_batch"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id",
+        "child_session_id",
+        "events"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "through_sequence": {
+          "description": "Last child sequence included in this page, if the page is non-empty.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "next_cursor": {
+          "description": "Cursor to pass as `after_sequence` for the next forward page.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tail_sequence": {
+          "description": "Durable tail observed by the descriptor-stable page scan.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "has_more": {
+          "description": "Whether another forward page remains after `next_cursor`.",
+          "type": "boolean"
+        },
+        "events_before_page": {
+          "description": "Number of durable child events preceding the first event in this page.",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "Whether the requested view omitted events before or after this page.",
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "subagent_replay_completed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id",
+        "has_more",
+        "events_before_page",
+        "truncated"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
         "query": {
           "type": "string"
         },
@@ -3276,6 +3410,83 @@
         "shell_active"
       ]
     },
+    "SubagentDescriptor": {
+      "description": "Human-readable child metadata exposed only through its owning parent.",
+      "type": "object",
+      "properties": {
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "child_session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "task": {
+          "type": "string"
+        },
+        "agent": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "isolation": {
+          "$ref": "#/$defs/SubagentIsolation"
+        },
+        "activity": {
+          "$ref": "#/$defs/SubagentActivity"
+        }
+      },
+      "required": [
+        "subagent_id",
+        "child_session_id",
+        "task",
+        "agent",
+        "model",
+        "isolation",
+        "activity"
+      ]
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    },
+    "SubagentIsolation": {
+      "description": "Filesystem isolation selected for one child agent.",
+      "oneOf": [
+        {
+          "description": "Run in a private detached Git worktree and return a diff artifact.",
+          "type": "string",
+          "const": "worktree"
+        },
+        {
+          "description": "Share the parent workspace. This requires the parent's ordinary write approvals.",
+          "type": "string",
+          "const": "shared"
+        }
+      ]
+    },
+    "SubagentActivity": {
+      "description": "Current parent-visible lifecycle state of a retained child agent.",
+      "type": "string",
+      "enum": [
+        "running",
+        "idle"
+      ]
+    },
+    "SubagentReplayItem": {
+      "description": "One ordered durable child event carried inside a bounded replay batch.",
+      "type": "object",
+      "properties": {
+        "child_sequence": {
+          "$ref": "#/$defs/SequenceId"
+        },
+        "event": true
+      },
+      "required": [
+        "child_sequence",
+        "event"
+      ]
+    },
     "CommandDescriptor": {
       "type": "object",
       "properties": {
@@ -4306,10 +4517,6 @@
         "manual",
         "provider_overflow"
       ]
-    },
-    "SubagentId": {
-      "description": "Stable identifier of a child agent session.",
-      "type": "string"
     },
     "SubagentResult": {
       "description": "Predictable result returned from `spawn_agent` and workflow agent steps.",

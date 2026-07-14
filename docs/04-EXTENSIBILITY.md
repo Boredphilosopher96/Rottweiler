@@ -125,9 +125,27 @@ fixture. It adds searchable navigation and direct schema/fixture downloads
 without introducing a second protocol source; CI rebuilds and tests the static
 site alongside the TypeScript SDK.
 
-## Tier 3 — WASM (post-v1)
+## Tier 3 — WASM hook components
 
-wasmtime component-model host for latency-critical in-process hooks. Same capability manifest, same hook names. Not in v1 (ADR-003).
+Private Wasmtime component-model helper for hook extensions (ADR-021). It is bundled beside `rw` but is not a second app or public command: `rw` starts it only to validate or invoke an enabled extension. A component exports this versioned WIT surface:
+
+```wit
+package rottweiler:extension@1.0.0;
+
+world hook-extension {
+  export invoke: func(event: string, payload-json: string) -> string;
+}
+```
+
+The return value is a bounded JSON directive: `continue`, `replace` with a typed JSON payload, `block` with a user-facing message, or `error`. The component declares protocol-1 hooks through the same `PluginManifest` used by Tier 2 and is registered on the same `HookDispatcher`; ordering, deadlines, cancellation, and fail-open/fail-closed behavior therefore do not fork.
+
+The public `rw` binary does not link Wasmtime. It communicates with the private helper over a one-shot typed, length-prefixed stdio exchange containing the exact signature-verified component bytes; malformed or oversized frames fail closed. There are no host imports and no WASI. Every call uses a fresh store with bounded component and serialized-input bytes, per-memory size, memory/table/instance counts, and fuel. The entire helper exchange, including validation, stdin writes, stdout reads, and process exit, has a fixed deadline; a timed-out or malformed helper is explicitly killed and reaped. Fuel periodically yields from the async Wasmtime call so dispatcher cancellation stops guest execution rather than merely abandoning a blocking worker. Enabled components are also bounded by count and aggregate installed bytes. The owned-string result is checked immediately after canonical lifting; its unavoidable pre-check allocation remains bounded by the store's linear-memory ceiling. This first production slice intentionally rejects tool, command, provider, event-subscription, and push capabilities: those remain RPC plugins until component interfaces can preserve their streaming and permission contracts.
+
+### Signed extension registry
+
+Registry catalogs are bounded refreshable caches, and every entry is validated before it can be printed. Every release binds the exact name, semantic version, capability manifest, HTTPS artifact URL, byte length, lowercase BLAKE3 digest, and publisher public key with an Ed25519 signature. The catalog cannot nominate its own trust: installation succeeds only when the publisher key is supplied independently and pinned in the separate `trusted-publishers.json` approval catalog, and component bytes must match the signed size and digest. A staged install atomically publishes the artifact and signed release record, but never embeds its own trust anchor. Enabling re-verifies the release against the separate publisher pin before displaying capabilities and records lowercase publisher-key, manifest, and component fingerprints in `enabled.json`. Activation names use the same bounded canonical grammar as manifests. Installed files are opened with no-follow descriptor traversal on Unix and bounded opened-handle checks elsewhere. A broken enabled extension is skipped with a control-stripped durable warning so `rw extension disable` remains available for recovery. Workspace-root changes reuse the session's already validated hook generation; they neither reread mutable extension files nor ignore registration conflicts.
+
+`rw extension registry list --catalog <https-url>` fetches a bounded catalog through the hardened signed-update network path. `rw extension registry install <name> --catalog <https-url> --publisher-key <base64>` selects the latest semantic version (or an explicit `--version`), verifies the independently supplied publisher key, signature, URL, size, and digest, then installs it inactive. `rw extension enable <name> <version>` safely reloads the signed local record, displays and confirms the exact manifest, asks the bundled helper to compile the component, and pins its manifest/component fingerprints. `status` shows inactive, enabled, missing, and tampered records explicitly; `disable` removes only activation. A changed installed file is rejected and skipped on the next session start, with a durable warning visible to attached clients.
 
 ## Extension of the extension system
 

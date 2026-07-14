@@ -71,7 +71,13 @@ import {
   themeCatalog,
   type RottweilerTheme,
 } from "./theme"
-import { isRecord, isSessionForkedEvent, type WireEngineEvent } from "./transport"
+import {
+  durableSequenceId,
+  isRecord,
+  isSessionForkedEvent,
+  isWireEngineEvent,
+  type WireEngineEvent,
+} from "./transport"
 
 export interface RottweilerAppOptions {
   readonly initialEvent?: EngineEvent
@@ -138,11 +144,33 @@ type PickerKind =
   | "permissions"
   | "permissionInput"
   | "sessions" | "settings"
+  | "agents" | "agentActions"
   | "themes"
 type ProjectionKind = "commands" | "models" | "sessions" | "files" | "settings" | "permissions" | "mcp" | "runtime_services"
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
+const MAX_VISIBLE_SUBAGENTS = 256
+const MAX_SUBAGENT_ID_LENGTH = 256
+const MAX_BUFFERED_SUBAGENT_LIVE_EVENTS = 4_096
+const MAX_BUFFERED_SUBAGENT_LIVE_BYTES = 8 * 1_024 * 1_024
+
+interface ComposerDraft {
+  readonly content: string
+  readonly attachments: readonly Attachment[]
+}
+
+interface SubagentReplayRequest {
+  readonly requestId: string
+  readonly afterSequence: string | null
+}
 
 type CommandChoice = RottweilerState["commands"][number]
+type SubagentDescriptor = Extract<EngineEvent, { type: "subagents_listed" }>["subagents"][number]
+type SubagentAction =
+  | { readonly kind: "inspect"; readonly subagent: SubagentDescriptor }
+  | { readonly kind: "continue"; readonly subagent: SubagentDescriptor }
+  | { readonly kind: "running"; readonly subagent: SubagentDescriptor }
+  | { readonly kind: "interrupt"; readonly subagent: SubagentDescriptor }
+  | { readonly kind: "close"; readonly subagent: SubagentDescriptor }
 type ProviderProjection = RottweilerState["providers"][number]
 type ProviderIdentity = Pick<ProviderProjection, "name" | "authKind">
 type ModelPickerChoice = { readonly kind: "model"; readonly model: RottweilerState["models"][number] }
@@ -161,6 +189,7 @@ const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
   { name: "mode", description: "Show or switch the interaction mode", usage: "/mode [discuss|plan|execute]" },
   { name: "models", description: "Switch the active model", usage: "/models" },
   { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
+  { name: "agents", description: "Inspect and manage child agents", usage: "/agents" },
   { name: "theme", description: "Preview and change the interface theme", usage: "/theme" },
   { name: "settings", description: "Change safe user settings", usage: "/settings" },
   { name: "permissions", description: "Show or edit session permission rules", usage: "/permissions [list|mode|approvals|add|remove|clear-session|revoke-session|revoke-project]" },
@@ -254,6 +283,25 @@ export class RottweilerApp extends BoxRenderable {
   #latestPermissionsRequest: string | null = null
   #latestMcpRequest: string | null = null
   #latestRuntimeServicesRequest: string | null = null
+  #latestSubagentsRequest: string | null = null
+  #subagentListError: string | null = null
+  #subagentReplayRequests = new Map<string, SubagentReplayRequest>()
+  #subagentReplayTails = new Map<string, string | null>()
+  #subagentHistoryNotices = new Map<string, bigint>()
+  #subagentReplayOmittedPrefixStarts = new Map<string, bigint>()
+  #subagentLiveBuffers = new Map<string, WireEngineEvent[]>()
+  #subagentLiveBufferBytes = new Map<string, number>()
+  #subagentReplayOverflow = new Set<string>()
+  #subagentReplayGap = new Set<string>()
+  #subagentDescriptors: readonly SubagentDescriptor[] = []
+  #subagentStates = new Map<string, RottweilerState>()
+  #activeSubagentReadOnly = false
+  #parentComposerDraft: ComposerDraft = { content: "", attachments: [] }
+  #subagentComposerDrafts = new Map<string, ComposerDraft>()
+  #activeSubagentId: string | null = null
+  #subagentActionId: string | null = null
+  #interruptSubagentId: string | null = null
+  #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
   #commandsRequested = false
   #modelsRequested = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
@@ -270,7 +318,7 @@ export class RottweilerApp extends BoxRenderable {
   #mcpDraftName: string | null = null
   #reviewOpen = false
   #pendingReviewSelection: string | null = null
-  #postSubmitPicker: "models" | "providers" | "themes" | "settings" | "permissions" | "mcp" | null = null
+  #postSubmitPicker: "models" | "providers" | "themes" | "settings" | "permissions" | "mcp" | "agents" | null = null
   #terminalSuspended = false
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
@@ -287,6 +335,7 @@ export class RottweilerApp extends BoxRenderable {
   #vimFocusBeforePicker: Exclude<VimFocus, "picker"> = "composer"
   #destroyed = false
   #presentationQueue: PendingPresentationEvent[] = []
+  #subagentPresentationDirty = false
   #presentationFrameHandle: unknown | null = null
   #presentingFrame = false
   #lastPresentationFlushAt = performance.now() - 16
@@ -317,6 +366,26 @@ export class RottweilerApp extends BoxRenderable {
     if (!plainEscape && this.#interruptEscapeArmed) this.#clearInterruptEscape()
     if (
       plainEscape &&
+      this.#activeSubagentId !== null &&
+      !this.picker.visible &&
+      !this.#reviewOpen
+    ) {
+      if (this.#keybindings.preset === "vim" && this.#inputMode === "insert") {
+        this.#setInputMode("normal")
+        key.preventDefault()
+        key.stopPropagation()
+        return
+      }
+      const subagentId = this.#activeSubagentId
+      const running = this.#subagentDescriptor(subagentId)?.activity === "running"
+      this.#leaveSubagent()
+      if (running) this.#armInterruptEscape(subagentId)
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (
+      plainEscape &&
       !this.picker.visible &&
       !this.#reviewOpen &&
       this.#isInterruptible()
@@ -325,8 +394,9 @@ export class RottweilerApp extends BoxRenderable {
       // counts as the first half of the universal double-Escape interrupt.
       if (this.#inputMode === "insert") this.#setInputMode("normal")
       if (this.#interruptEscapeArmed) {
+        const subagentId = this.#interruptSubagentId
         this.#clearInterruptEscape()
-        void this.#interruptActiveResponse()
+        void this.#interruptActiveResponse(subagentId)
       } else {
         this.#armInterruptEscape()
       }
@@ -551,6 +621,9 @@ export class RottweilerApp extends BoxRenderable {
         this.#composerSubmissionsInFlight += 1
         return await this.#sendMessage(content, submittedAttachments)
       },
+      submissionScope: () => this.#composerScope(),
+      onDetachedSubmissionRejected: (scope, content, attachments) =>
+        this.#restoreDetachedSubmission(scope, content, attachments),
       onFileMention: (mention) => this.openFilePicker(mention.query, true),
       onManageAttachments: () => this.openAttachmentPicker(),
       onAttachmentError: (message) =>
@@ -612,10 +685,20 @@ export class RottweilerApp extends BoxRenderable {
     else if (picker === "settings") this.openSettingsPicker()
     else if (picker === "permissions") this.openPermissionPicker()
     else if (picker === "mcp") this.openMcpPicker()
+    else if (picker === "agents") this.openSubagentPicker()
   }
 
   get state(): RottweilerState {
     return this.#state
+  }
+
+  get activeSubagentId(): string | null {
+    return this.#activeSubagentId
+  }
+
+  /** Presentation state is exposed for focused UI tests; parent state remains `state`. */
+  get visibleState(): RottweilerState {
+    return this.#presentedState()
   }
 
   setSystemTheme(theme: RottweilerTheme): void {
@@ -639,6 +722,23 @@ export class RottweilerApp extends BoxRenderable {
       this.#latestPermissionsRequest = null
       this.#latestMcpRequest = null
       this.#latestRuntimeServicesRequest = null
+      this.#latestSubagentsRequest = null
+      this.#subagentListError = null
+      this.#subagentReplayRequests.clear()
+      this.#subagentReplayTails.clear()
+      this.#subagentHistoryNotices.clear()
+      this.#subagentReplayOmittedPrefixStarts.clear()
+      this.#subagentLiveBuffers.clear()
+      this.#subagentLiveBufferBytes.clear()
+      this.#subagentReplayOverflow.clear()
+      this.#subagentReplayGap.clear()
+      this.#subagentDescriptors = []
+      this.#subagentStates.clear()
+      this.#parentComposerDraft = { content: "", attachments: [] }
+      this.#subagentComposerDrafts.clear()
+      this.#activeSubagentId = null
+      this.#subagentActionId = null
+      this.#subagentErrorBaseline = undefined
       this.#commandsRequested = false
       this.#modelsRequested = false
       this.#projectionErrors = {}
@@ -666,6 +766,176 @@ export class RottweilerApp extends BoxRenderable {
       isRecord(eventRecord.meta) && typeof eventRecord.meta.request_id === "string"
         ? eventRecord.meta.request_id
         : null
+    if (event.type === "subagents_listed") {
+      const listed = event as Extract<EngineEvent, { type: "subagents_listed" }>
+      if (
+        listed.session_id !== this.#sessionId ||
+        this.#latestSubagentsRequest === null ||
+        commandRequestId !== this.#latestSubagentsRequest
+      ) return
+      this.#latestSubagentsRequest = null
+      this.#subagentListError = null
+      this.#subagentDescriptors = listed.subagents
+        .slice(0, MAX_VISIBLE_SUBAGENTS)
+        .map(sanitizeSubagentDescriptor)
+        .filter((descriptor): descriptor is SubagentDescriptor => descriptor !== null)
+      if (
+        this.#activeSubagentId !== null &&
+        this.#subagentDescriptor(this.#activeSubagentId) === undefined
+      ) this.#leaveSubagent()
+      else this.setState(this.#state)
+      return
+    }
+    if (event.type === "subagent_replay_batch") {
+      const replay = event as Extract<EngineEvent, { type: "subagent_replay_batch" }>
+      if (replay.session_id !== this.#sessionId) return
+      const request = this.#subagentReplayRequests.get(replay.subagent_id)
+      if (request === undefined || request.requestId !== commandRequestId) return
+      const descriptor = this.#subagentDescriptor(replay.subagent_id)
+      if (descriptor === undefined || descriptor.child_session_id !== replay.child_session_id) return
+      for (const item of replay.events) {
+        const childEvent = childEngineEvent(item.event, replay.child_session_id)
+        if (childEvent === null || durableSequenceId(childEvent) !== item.child_sequence) continue
+        this.#ingestReplayedSubagentEvent(replay.subagent_id, childEvent)
+      }
+      return
+    }
+    if (event.type === "subagent_replay_completed") {
+      const completed = event as Extract<EngineEvent, { type: "subagent_replay_completed" }>
+      if (completed.session_id !== this.#sessionId) return
+      const request = this.#subagentReplayRequests.get(completed.subagent_id)
+      if (request === undefined || request.requestId !== commandRequestId) return
+      const eventsBeforePage = parseSequence(completed.events_before_page)
+      const omittedPrefixStart = this.#subagentReplayOmittedPrefixStarts.get(completed.subagent_id)
+      if (omittedPrefixStart !== undefined) {
+        this.#subagentReplayOmittedPrefixStarts.delete(completed.subagent_id)
+        if (
+          request.afterSequence !== null ||
+          !completed.truncated ||
+          eventsBeforePage === null ||
+          eventsBeforePage !== omittedPrefixStart
+        ) {
+          this.#restartSubagentReplay(
+            completed.subagent_id,
+            "The child transcript omitted an unverified durable prefix; restarting the initial replay.",
+            true,
+          )
+          return
+        }
+      }
+      const replayOverflowed = this.#subagentReplayOverflow.delete(completed.subagent_id)
+      const replayGapped = this.#subagentReplayGap.delete(completed.subagent_id)
+      if (replayOverflowed) {
+        this.#clearSubagentLiveBuffer(completed.subagent_id)
+        this.#restartSubagentReplay(
+          completed.subagent_id,
+          "Child transcript updates exceeded the safe live buffer; reloading from the durable cursor.",
+        )
+        return
+      }
+      if (replayGapped) {
+        this.#restartSubagentReplay(
+          completed.subagent_id,
+          "A child transcript page skipped durable events; reloading from the last verified cursor.",
+        )
+        return
+      }
+      const through = parseSequence(completed.through_sequence ?? null)
+      const applied = parseSequence(this.#lastAppliedSubagentSequence(completed.subagent_id))
+      if (through !== null && applied !== through) {
+        this.#restartSubagentReplay(
+          completed.subagent_id,
+          "The child transcript page did not reach its declared cursor; reloading from the last verified event.",
+        )
+        return
+      }
+      const tail = parseSequence(completed.tail_sequence ?? null)
+      const observedTail = tail?.toString() ?? null
+      if (!this.#subagentReplayTails.has(completed.subagent_id)) {
+        this.#subagentReplayTails.set(completed.subagent_id, observedTail)
+      } else if (this.#subagentReplayTails.get(completed.subagent_id) !== observedTail) {
+        this.#restartSubagentReplay(
+          completed.subagent_id,
+          "The durable child transcript changed while pages were loading; restarting from the verified cursor.",
+        )
+        return
+      }
+      if (
+        request.afterSequence === null &&
+        completed.truncated &&
+        eventsBeforePage !== null &&
+        eventsBeforePage > 0n
+      ) {
+        this.#subagentHistoryNotices.set(completed.subagent_id, eventsBeforePage)
+      }
+      if (completed.has_more) {
+        const nextCursor = parseSequence(completed.next_cursor ?? null)
+        const currentCursor = parseSequence(request.afterSequence)
+        const minimumCursor = currentCursor ?? 0n
+        if (
+          nextCursor === null ||
+          nextCursor <= minimumCursor ||
+          applied === null ||
+          nextCursor !== applied ||
+          tail === null ||
+          nextCursor >= tail
+        ) {
+          this.#restartSubagentReplay(
+            completed.subagent_id,
+            "The child transcript returned an invalid next-page cursor; reloading from the last verified event.",
+          )
+          return
+        }
+        void this.#requestSubagentReplay(completed.subagent_id, nextCursor.toString())
+        return
+      }
+      this.#subagentReplayRequests.delete(completed.subagent_id)
+      this.#subagentReplayTails.delete(completed.subagent_id)
+      if (applied !== tail) {
+        this.#restartSubagentReplay(
+          completed.subagent_id,
+          "The child transcript stopped before its durable tail; reloading from the last verified event.",
+        )
+        return
+      }
+      const buffered = this.#subagentLiveBuffers.get(completed.subagent_id) ?? []
+      this.#clearSubagentLiveBuffer(completed.subagent_id)
+      buffered
+        .map((progress) => ({ progress, sequence: subagentProgressSequence(progress) }))
+        .sort((left, right) => compareOptionalSequence(left.sequence, right.sequence))
+        .forEach(({ progress }) => {
+          if (progress.type !== "subagent_progress") return
+          const live = progress as Extract<EngineEvent, { type: "subagent_progress" }>
+          this.#ingestLiveSubagentProgress(live)
+        })
+      if (this.#activeSubagentId === completed.subagent_id) this.setState(this.#state)
+      return
+    }
+    if (event.type === "subagent_progress") {
+      const progress = event as Extract<EngineEvent, { type: "subagent_progress" }>
+      if (progress.parent_session_id !== this.#sessionId) return
+      const descriptor = this.#subagentDescriptor(progress.subagent_id)
+      if (descriptor === undefined || descriptor.child_session_id !== progress.child_session_id) return
+      const childEvent = childEngineEvent(progress.event, progress.child_session_id)
+      if (this.#subagentReplayRequests.has(progress.subagent_id)) {
+        this.#bufferSubagentProgress(progress)
+      } else if (progress.subagent_id === this.#activeSubagentId && childEvent !== null) {
+        if (
+          this.#subagentReplayOverflow.has(progress.subagent_id) ||
+          (this.#subagentLiveBuffers.get(progress.subagent_id)?.length ?? 0) > 0
+        ) {
+          this.#bufferSubagentProgress(progress)
+          void this.#requestSubagentReplay(
+            progress.subagent_id,
+            this.#lastAppliedSubagentSequence(progress.subagent_id),
+          )
+        } else {
+          this.#ingestLiveSubagentProgress(progress)
+        }
+      }
+      const existing = this.#state.subagents[progress.subagent_id]
+      if (existing === undefined || existing.childSessionId !== progress.child_session_id) return
+    }
     if (event.type === "session_forked") {
       if (
         !isSessionForkedEvent(event) ||
@@ -824,12 +1094,19 @@ export class RottweilerApp extends BoxRenderable {
 
   #flushPresentationQueue(): void {
     this.#cancelPresentationFrame()
-    if (this.#destroyed || this.#presentationQueue.length === 0) return
+    if (
+      this.#destroyed ||
+      (this.#presentationQueue.length === 0 && !this.#subagentPresentationDirty)
+    ) return
     const pending = this.#presentationQueue
     this.#presentationQueue = []
+    const subagentDirty = this.#subagentPresentationDirty
+    this.#subagentPresentationDirty = false
     this.#presentingFrame = true
     try {
-      this.setState(pending[pending.length - 1]!.next)
+      const latest = pending.at(-1)
+      if (latest !== undefined) this.setState(latest.next)
+      else if (subagentDirty) this.setState(this.#state)
     } finally {
       this.#presentingFrame = false
     }
@@ -923,6 +1200,9 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (event.type === "command_finished" && event.name === "add-dir" && !next.replay.active) {
       this.#requestCommands()
+    }
+    if (event.type === "subagent_spawned" || event.type === "subagent_finished") {
+      this.#requestSubagents()
     }
     if (event.type === "provider_auth_started") {
       const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
@@ -1021,22 +1301,31 @@ export class RottweilerApp extends BoxRenderable {
     if (!this.#presentingFrame && this.#presentationQueue.length > 0) {
       this.#flushPresentationQueue()
     }
+    const previousConnectionPhase = this.#state.connection.phase
     const previousFocusOwner = this.#visibleFocusOwner()
     this.#state = state
     if (state.providerAuth.pending === null) {
       this.#providerAuthActionInFlight = false
       this.#providerAuthActionNotice = null
     }
-    this.transcript.update(state)
+    const presented = this.#presentedState()
+    const viewingSubagent = this.#activeSubagentId !== null
+    this.transcript.update(presented)
     this.contextPanel.update(state)
     this.contextPanel.visible =
-      !state.replay.active && (this.width === 0 ? this.ctx.width >= 100 : this.width >= 100)
-    this.interactionPanel.update(state)
-    this.reviewPanel.update(state, this.#reviewOpen)
-    this.composer.setQueuedMessages(state.queuedMessages)
+      !viewingSubagent &&
+      !state.replay.active &&
+      (this.width === 0 ? this.ctx.width >= 100 : this.width >= 100)
+    this.interactionPanel.update(viewingSubagent ? childPassiveInteractionState(presented) : state)
+    this.reviewPanel.update(state, !viewingSubagent && this.#reviewOpen)
+    this.composer.setQueuedMessages(viewingSubagent ? [] : state.queuedMessages)
+    const subagentReadOnly = this.#isActiveSubagentRunning()
+    const subagentBecameWritable = this.#activeSubagentReadOnly && !subagentReadOnly
+    this.#activeSubagentReadOnly = subagentReadOnly
     const composerVisible =
       !state.replay.active &&
       !this.#reviewOpen &&
+      !subagentReadOnly &&
       (!this.interactionPanel.visible || this.interactionPanel.usesComposer)
     if (!composerVisible) this.composer.editor.blur()
     this.composer.visible = composerVisible
@@ -1051,22 +1340,33 @@ export class RottweilerApp extends BoxRenderable {
       focusOwner !== "review"
     ) {
       this.#focusForInputMode()
+    } else if (subagentBecameWritable) {
+      this.#focusForInputMode()
     }
-    this.statusLine.setBranch(state.workspaceStatus?.branch ?? null)
+    this.statusLine.setBranch(viewingSubagent ? null : state.workspaceStatus?.branch ?? null)
     this.statusLine.setKeybindingMode(
       this.#inputMode === "standard" ? null : this.#inputMode,
       this.#inputMode === "standard" ? null : focusOwner,
     )
-    this.statusLine.update(state)
-    this.banner.update(state)
+    this.statusLine.update(presented)
+    this.banner.update(presented)
+    if (viewingSubagent) this.#updateSubagentBanner(presented)
     if (!this.#isInterruptible()) this.#clearInterruptEscape(false)
     if (this.#interruptEscapeArmed) {
       this.banner.visible = true
       this.banner.fg = this.#theme.warning
-      this.banner.content = "Press Esc again to stop the active response"
+      this.banner.content = this.#interruptSubagentId === null
+        ? "Press Esc again to stop the active response"
+        : "Back in parent · press Esc again to stop the child agent"
     }
     if (this.#pickerKind !== null) {
       this.#refreshPicker()
+    }
+    if (
+      state.connection.phase === "connected" &&
+      (previousConnectionPhase === "reconnecting" || previousConnectionPhase === "disconnected")
+    ) {
+      this.#recoverPendingSubagentReplays()
     }
   }
 
@@ -1308,6 +1608,32 @@ export class RottweilerApp extends BoxRenderable {
     this.#refreshPicker()
   }
 
+  openSubagentPicker(): void {
+    if (this.#state.replay.active) {
+      this.#projectClientError(
+        "subagents_unavailable_in_replay",
+        "Child-agent controls are available from the live parent session, not historical replay.",
+      )
+      return
+    }
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "agents"
+    this.#requestSubagents()
+    this.#refreshPicker()
+  }
+
+  openSubagentActionPicker(subagentId = this.#activeSubagentId): void {
+    if (subagentId === null || this.#subagentDescriptor(subagentId) === undefined) return
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#subagentActionId = subagentId
+    this.#pickerKind = "agentActions"
+    this.#refreshPicker()
+  }
+
   openReview(): void {
     if (this.#state.replay.active) return
     if (this.#state.shell.active) {
@@ -1337,6 +1663,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#pendingFilePreview = null
     this.#providerApiKeyProvider = null
     this.#providerRecoveryProvider = null
+    this.#subagentActionId = null
     this.#themeBeforePreview = null
     this.#themePreviewCommitted = false
     if (
@@ -1352,19 +1679,23 @@ export class RottweilerApp extends BoxRenderable {
         this.#inputMode === "normal" ? "normal" : "insert",
         this.#visibleFocusOwner(),
       )
-      this.statusLine.update(this.#state)
+      this.statusLine.update(this.#presentedState())
     }
   }
 
   protected override onResize(width: number, height: number): void {
-    this.contextPanel.visible = !this.#state.replay.active && width >= 100 && height >= 12
+    this.contextPanel.visible =
+      this.#activeSubagentId === null &&
+      !this.#state.replay.active &&
+      width >= 100 &&
+      height >= 12
     this.composer.resizeForTerminal(height)
     this.interactionPanel.resizeForTerminal(
       height,
       this.interactionPanel.usesComposer && this.composer.visible ? this.composer.dockHeight : 0,
     )
     this.reviewPanel.resizeForTerminal(height)
-    if (this.#pickerAnchored) this.#positionPicker(true)
+    if (this.picker.visible) this.#positionPicker(this.#pickerAnchored)
   }
 
   override destroy(): void {
@@ -1372,6 +1703,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#destroyed = true
     this.#cancelPresentationFrame()
     this.#presentationQueue = []
+    this.#subagentPresentationDirty = false
     this.#clearPendingShellTimer()
     this.#clearPluginNotificationTimer()
     this.#clearSessionSearchTimer()
@@ -1547,7 +1879,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#inputMode = mode
     this.#focusForInputMode()
     this.statusLine.setKeybindingMode(mode, this.#visibleFocusOwner())
-    this.statusLine.update(this.#state)
+    this.statusLine.update(this.#presentedState())
   }
 
   #focusForInputMode(): void {
@@ -1557,6 +1889,11 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (this.interactionPanel.capturesInput) {
       this.interactionPanel.select.focus()
+      return
+    }
+    if (this.#isActiveSubagentRunning()) {
+      this.composer.editor.showCursor = false
+      this.transcript.scroller.focus()
       return
     }
     if (this.#inputMode === "standard") {
@@ -1587,7 +1924,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#vimFocus = targets[(current + direction + targets.length) % targets.length] ?? "composer"
     this.#focusForInputMode()
     this.statusLine.setKeybindingMode("normal", this.#vimFocus)
-    this.statusLine.update(this.#state)
+    this.statusLine.update(this.#presentedState())
   }
 
   #moveVertical(direction: 1 | -1): void {
@@ -1619,14 +1956,14 @@ export class RottweilerApp extends BoxRenderable {
   #restoreFocusAfterTranscriptInteraction(): void {
     if (this.#destroyed || this.#state.replay.active) return
     if (this.#inputMode === "standard") {
-      this.composer.focus()
+      this.#focusForInputMode()
       return
     }
     this.#vimFocus = "transcript"
     this.#vimFocusBeforePicker = "transcript"
     this.#focusForInputMode()
     this.statusLine.setKeybindingMode(this.#inputMode, "transcript")
-    this.statusLine.update(this.#state)
+    this.statusLine.update(this.#presentedState())
   }
 
   #visibleFocusOwner(): VimFocus | "interaction" | "review" {
@@ -1634,6 +1971,7 @@ export class RottweilerApp extends BoxRenderable {
     if (this.reviewPanel.visible) return "review"
     if (this.interactionPanel.capturesInput) return "interaction"
     if (this.#state.replay.active) return "transcript"
+    if (this.#isActiveSubagentRunning()) return "transcript"
     return this.#vimFocus
   }
 
@@ -1705,6 +2043,12 @@ export class RottweilerApp extends BoxRenderable {
               clearAnchoredTrigger()
               this.closePicker()
               this.openProviderPicker()
+              return
+            }
+            if (command.name === "agents") {
+              clearAnchoredTrigger()
+              this.closePicker()
+              this.openSubagentPicker()
               return
             }
             if (command.name === "theme") {
@@ -2371,6 +2715,104 @@ export class RottweilerApp extends BoxRenderable {
           },
         )
         break
+      case "agents": {
+        if (this.#subagentListError !== null) {
+          this.#openPicker(
+            "Child agents · load failed",
+            [{
+              id: "agents.retry",
+              label: "Retry loading child agents",
+              description: boundedUiText(this.#subagentListError, 160),
+              value: null,
+            }],
+            () => this.#requestSubagents(),
+          )
+          break
+        }
+        if (this.#latestSubagentsRequest !== null && this.#subagentDescriptors.length === 0) {
+          this.#showPickerLoading("Child agents", "Loading child agents")
+          break
+        }
+        const items: PickerItem<SubagentDescriptor>[] = this.#subagentDescriptors.map((subagent) => ({
+          id: subagent.subagent_id,
+          label: subagent.task,
+          description: `${subagent.activity === "running" ? "Running" : "Idle"} · ${subagent.agent} · ${subagent.model} · ${subagent.isolation}`,
+          searchText: `${subagent.task} ${subagent.agent} ${subagent.model} ${subagent.activity}`,
+          value: subagent,
+        }))
+        if (items.length === 0) {
+          this.#showPickerStatus(
+            "Child agents",
+            "No child agents",
+            "Child agents started by this session will appear here.",
+          )
+          break
+        }
+        this.#openPicker("Child agents · Enter to inspect", items, (item) => {
+          this.closePicker()
+          void this.#enterSubagent(item.value.subagent_id)
+        })
+        break
+      }
+      case "agentActions": {
+        const subagent = this.#subagentActionId === null
+          ? undefined
+          : this.#subagentDescriptor(this.#subagentActionId)
+        if (subagent === undefined) {
+          this.closePicker()
+          break
+        }
+        const items: PickerItem<SubagentAction>[] = [
+          {
+            id: "inspect",
+            label: "Inspect transcript",
+            description: "Open this child's live, typed event stream",
+            value: { kind: "inspect", subagent },
+          },
+          ...(subagent.activity === "running"
+            ? [{
+                id: "running",
+                label: "Child is still running",
+                description: "Inspect progress or interrupt before sending a follow-up",
+                value: { kind: "running", subagent } as SubagentAction,
+                selectable: false,
+              }]
+            : [{
+                id: "continue",
+                label: "Resume with follow-up",
+                description: "Focus the child composer; Enter sends to this child",
+                value: { kind: "continue", subagent } as SubagentAction,
+              }]),
+          ...(subagent.activity === "running"
+            ? [{
+                id: "interrupt",
+                label: "Interrupt child",
+                description: "Stop the active child response",
+                value: { kind: "interrupt", subagent } as SubagentAction,
+              }]
+            : []),
+          {
+            id: "close",
+            label: "Close child",
+            description: "Release this retained child agent",
+            value: { kind: "close", subagent },
+          },
+        ]
+        this.#openPicker(`Child actions · ${boundedUiText(subagent.task, 64)}`, items, (item) => {
+          const action = item.value
+          if (action.kind === "running") return
+          this.closePicker()
+          if (action.kind === "inspect") void this.#enterSubagent(action.subagent.subagent_id)
+          else if (action.kind === "continue") {
+            void this.#enterSubagent(action.subagent.subagent_id)
+          } else if (action.kind === "interrupt") {
+            void this.#interruptSubagent(action.subagent.subagent_id)
+          } else {
+            void this.#closeSubagent(action.subagent.subagent_id)
+          }
+        })
+        break
+      }
       case "sessions":
         const sessionError = this.#projectionErrors.sessions
         if (
@@ -2454,6 +2896,7 @@ export class RottweilerApp extends BoxRenderable {
           select,
           this.#pickerKind === "palette",
         )
+        this.#positionPicker(false)
       }
     } finally {
       this.#rethemeInProgress = rethemeWasInProgress
@@ -2507,6 +2950,7 @@ export class RottweilerApp extends BoxRenderable {
     const actions: PaletteAction[] = [
       { id: "session.list", title: "Switch session", category: "Session", description: "Resume another durable session", run: open(() => this.openSessionPicker()) },
       { id: "model.list", title: "Switch model", category: "Agent", description: "Choose the active model alias", run: open(() => this.openModelPicker()) },
+      { id: "agent.children", title: "Child agents", category: "Agent", description: "Inspect, resume, interrupt, or close child agents", run: open(() => this.openSubagentPicker()) },
       { id: "provider.list", title: "Provider and model routes", category: "Agent", description: "Choose a configured provider route", run: open(() => this.openProviderPicker()) },
       { id: "theme.list", title: "Switch theme", category: "Settings", description: "Preview and choose an interface theme", run: open(() => this.openThemePicker()) },
       { id: "settings.open", title: "Settings", category: "Settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
@@ -2531,6 +2975,15 @@ export class RottweilerApp extends BoxRenderable {
       { id: "help.show", title: "Show command help", category: "System", description: "List every available slash command", run: submit("/help") },
       { id: "app.exit", title: "Exit Rottweiler", category: "System", description: "Close the TUI and its supervised engine", run: open(() => this.#options.onExit?.()) },
     ]
+    if (this.#activeSubagentId !== null) {
+      actions.splice(1, 0, {
+        id: "agent.current.actions",
+        title: "Current child actions",
+        category: "Agent",
+        description: "Inspect, continue, interrupt, or close the visible child",
+        run: open(() => this.openSubagentActionPicker(this.#activeSubagentId)),
+      })
+    }
     const mcpIndex = actions.findIndex((action) => action.id === "permissions.manage")
     if (this.#state.commands.some((command) => command.name === "mcp")) {
       actions.splice(
@@ -2606,6 +3059,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #positionPicker(anchored: boolean): void {
+    const terminalHeight = this.height === 0 ? this.ctx.height : this.height
     if (anchored) {
       const statusHeight = Math.max(1, this.statusLine.height || 1)
       // Composer growth happens in the same input tick as anchored picker
@@ -2613,7 +3067,7 @@ export class RottweilerApp extends BoxRenderable {
       // stale; derive the dock boundary from the current measured height.
       const composerTop = Math.max(
         0,
-        this.ctx.height - statusHeight - this.composer.dockHeight,
+        terminalHeight - statusHeight - this.composer.dockHeight,
       )
       // Hidden absolute renderables have no measured height before their first
       // frame. Position from the picker's configured anchored height instead
@@ -2625,8 +3079,11 @@ export class RottweilerApp extends BoxRenderable {
       this.picker.left = 0
       this.picker.width = "100%"
     } else {
+      const top = Math.min(2, Math.max(0, terminalHeight - 2))
+      const statusHeight = Math.max(1, this.statusLine.height || 1)
+      this.picker.constrainModalHeight(Math.max(1, terminalHeight - top - statusHeight))
       this.picker.bottom = undefined
-      this.picker.top = 2
+      this.picker.top = top
       this.picker.left = "15%"
       this.picker.width = "70%"
     }
@@ -2636,6 +3093,395 @@ export class RottweilerApp extends BoxRenderable {
     this.#commandsRequested = true
     this.#clearProjectionError("commands")
     this.#latestCommandsRequest = this.#command({ type: "list_commands" })
+  }
+
+  #requestSubagents(): void {
+    if (this.#state.replay.active) return
+    this.#subagentListError = null
+    const meta = this.#meta()
+    this.#latestSubagentsRequest = meta.request_id
+    void this.#emit({
+      type: "list_subagents",
+      meta,
+      session_id: this.#sessionId,
+    }).then((outcome) => {
+      if (outcome?.type === "rejected" && this.#latestSubagentsRequest === meta.request_id) {
+        this.#latestSubagentsRequest = null
+        this.#subagentListError = outcome.error.message
+        this.#projectRejection(outcome)
+        if (this.#pickerKind === "agents") this.#refreshPicker()
+      } else if (outcome == null && this.#latestSubagentsRequest === meta.request_id) {
+        this.#latestSubagentsRequest = null
+        this.#subagentListError = "The engine connection is unavailable."
+        this.#projectClientError(
+          "subagents_unavailable",
+          "Couldn't load child agents because the engine connection is unavailable.",
+          true,
+        )
+        if (this.#pickerKind === "agents") this.#refreshPicker()
+      }
+    }).catch((error) => {
+      if (this.#latestSubagentsRequest !== meta.request_id) return
+      this.#latestSubagentsRequest = null
+      this.#subagentListError = safeErrorMessage(error)
+      this.#projectClientError("subagents_failed", safeErrorMessage(error), true)
+      if (this.#pickerKind === "agents") this.#refreshPicker()
+    })
+  }
+
+  async #enterSubagent(subagentId: string): Promise<void> {
+    const descriptor = this.#subagentDescriptor(subagentId)
+    if (descriptor === undefined) return
+    this.#saveComposerDraft()
+    this.#activeSubagentId = subagentId
+    this.#restoreComposerDraft(subagentId)
+    this.#subagentErrorBaseline = this.#state.errors.at(-1)
+    this.#subagentStates.set(subagentId, initialSubagentState(this.#state, descriptor))
+    this.#subagentReplayTails.delete(subagentId)
+    this.#subagentHistoryNotices.delete(subagentId)
+    this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
+    this.setState(this.#state)
+    this.#focusForInputMode()
+
+    await this.#requestSubagentReplay(subagentId, null)
+  }
+
+  async #requestSubagentReplay(
+    subagentId: string,
+    afterSequence: string | null,
+  ): Promise<void> {
+    const meta = this.#meta()
+    this.#subagentReplayRequests.set(subagentId, {
+      requestId: meta.request_id,
+      afterSequence,
+    })
+    try {
+      const outcome = await this.#emit({
+        type: "replay_subagent",
+        meta,
+        session_id: this.#sessionId,
+        subagent_id: subagentId,
+        after_sequence: afterSequence,
+      })
+      if (outcome?.type === "rejected") {
+        if (this.#subagentReplayRequests.get(subagentId)?.requestId !== meta.request_id) return
+        this.#subagentReplayRequests.delete(subagentId)
+        this.#subagentReplayTails.delete(subagentId)
+        this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
+        this.#projectRejection(outcome)
+      } else if (outcome == null) {
+        if (this.#subagentReplayRequests.get(subagentId)?.requestId !== meta.request_id) return
+        this.#subagentReplayRequests.delete(subagentId)
+        this.#subagentReplayTails.delete(subagentId)
+        this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
+        this.#projectClientError(
+          "subagent_replay_unavailable",
+          "Couldn't load the child transcript because the engine connection is unavailable.",
+          true,
+        )
+      }
+    } catch (error) {
+      if (this.#subagentReplayRequests.get(subagentId)?.requestId !== meta.request_id) return
+      this.#subagentReplayRequests.delete(subagentId)
+      this.#subagentReplayTails.delete(subagentId)
+      this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
+      this.#projectClientError("subagent_replay_failed", safeErrorMessage(error), true)
+    }
+  }
+
+  #restartSubagentReplay(subagentId: string, message: string, resetProjection = false): void {
+    this.#subagentReplayRequests.delete(subagentId)
+    this.#subagentReplayTails.delete(subagentId)
+    this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
+    if (resetProjection) {
+      const descriptor = this.#subagentDescriptor(subagentId)
+      if (descriptor !== undefined) {
+        this.#subagentStates.set(subagentId, initialSubagentState(this.#state, descriptor))
+      }
+    }
+    this.#projectClientError("subagent_replay_gap", message, true)
+    void this.#requestSubagentReplay(
+      subagentId,
+      resetProjection ? null : this.#lastAppliedSubagentSequence(subagentId),
+    )
+  }
+
+  #recoverPendingSubagentReplays(): void {
+    const pendingSubagentIds = [...this.#subagentReplayRequests.keys()]
+    for (const subagentId of pendingSubagentIds) {
+      if (this.#subagentDescriptor(subagentId) === undefined) {
+        this.#subagentReplayRequests.delete(subagentId)
+        this.#subagentReplayTails.delete(subagentId)
+        this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
+        this.#clearSubagentLiveBuffer(subagentId)
+        this.#subagentReplayOverflow.delete(subagentId)
+        this.#subagentReplayGap.delete(subagentId)
+        continue
+      }
+      const afterSequence = this.#lastAppliedSubagentSequence(subagentId)
+      // Replacing the request ID invalidates any late batches or completion
+      // from the dead transport generation. Buffered live progress remains
+      // bounded and is deduplicated against the durable replay on completion.
+      this.#subagentReplayRequests.delete(subagentId)
+      this.#subagentReplayTails.delete(subagentId)
+      this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
+      this.#subagentReplayGap.delete(subagentId)
+      void this.#requestSubagentReplay(subagentId, afterSequence)
+    }
+  }
+
+  #leaveSubagent(): void {
+    if (this.#activeSubagentId === null) return
+    this.#saveComposerDraft()
+    this.#activeSubagentId = null
+    this.#restoreComposerDraft(null)
+    this.#subagentActionId = null
+    this.#subagentErrorBaseline = undefined
+    this.setState(this.#state)
+    this.#focusForInputMode()
+  }
+
+  #saveComposerDraft(): void {
+    const draft: ComposerDraft = {
+      content: this.composer.value,
+      attachments: [...this.composer.attachments],
+    }
+    if (this.#activeSubagentId === null) this.#parentComposerDraft = draft
+    else this.#subagentComposerDrafts.set(this.#activeSubagentId, draft)
+  }
+
+  #composerScope(): string {
+    return this.#activeSubagentId === null ? "parent" : `child:${this.#activeSubagentId}`
+  }
+
+  #restoreDetachedSubmission(
+    scope: string,
+    content: string,
+    attachments: readonly Attachment[],
+  ): void {
+    const childId = scope.startsWith("child:") ? scope.slice("child:".length) : null
+    if (scope !== "parent" && (childId === null || this.#subagentDescriptor(childId) === undefined)) return
+    const current = childId === null
+      ? this.#parentComposerDraft
+      : this.#subagentComposerDrafts.get(childId) ?? { content: "", attachments: [] }
+    const restored = mergeComposerDraft(current, content, attachments)
+    if (childId === null) this.#parentComposerDraft = restored
+    else this.#subagentComposerDrafts.set(childId, restored)
+  }
+
+  #restoreComposerDraft(subagentId: string | null): void {
+    const draft = subagentId === null
+      ? this.#parentComposerDraft
+      : this.#subagentComposerDrafts.get(subagentId) ?? { content: "", attachments: [] }
+    this.composer.restoreDraft(draft.content, draft.attachments)
+  }
+
+  #applySubagentEvent(subagentId: string, event: WireEngineEvent): void {
+    const descriptor = this.#subagentDescriptor(subagentId)
+    if (descriptor === undefined) return
+    const previous = this.#subagentStates.get(subagentId) ?? initialSubagentState(this.#state, descriptor)
+    const next = boundSubagentState(reduceRottweilerState(previous, engineEvent(event)))
+    this.#subagentStates.set(subagentId, next)
+    this.#subagentErrorBaseline = this.#state.errors.at(-1)
+    if (event.type === "turn_finished") this.#setSubagentActivity(subagentId, "idle")
+    else if (event.type === "turn_started") this.#setSubagentActivity(subagentId, "running")
+    this.#subagentPresentationDirty = true
+    if (isPresentationStreamDelta(event)) this.#schedulePresentationFrame()
+    else this.#flushPresentationQueue()
+  }
+
+  #ingestReplayedSubagentEvent(subagentId: string, event: WireEngineEvent): void {
+    if (this.#subagentReplayGap.has(subagentId)) return
+    const sequence = parseSequence(durableSequenceId(event))
+    if (sequence === null) return
+    const last = parseSequence(this.#lastAppliedSubagentSequence(subagentId))
+    if (last !== null && sequence <= last) return
+    const request = this.#subagentReplayRequests.get(subagentId)
+    if (last === null && request?.afterSequence === null) {
+      this.#subagentReplayOmittedPrefixStarts.set(subagentId, sequence)
+      this.#applySubagentEvent(subagentId, event)
+      return
+    }
+    if (sequence !== (last ?? 0n) + 1n) {
+      this.#subagentReplayGap.add(subagentId)
+      return
+    }
+    this.#applySubagentEvent(subagentId, event)
+  }
+
+  #ingestLiveSubagentProgress(
+    progress: Extract<EngineEvent, { type: "subagent_progress" }>,
+  ): void {
+    const event = childEngineEvent(progress.event, progress.child_session_id)
+    const eventSequence = event === null ? null : parseSequence(durableSequenceId(event))
+    const progressSequence = parseSequence(progress.child_sequence ?? null)
+    if (
+      event === null ||
+      eventSequence === null ||
+      (progressSequence !== null && progressSequence !== eventSequence)
+    ) return
+    const last = parseSequence(this.#lastAppliedSubagentSequence(progress.subagent_id))
+    if (last !== null && eventSequence <= last) return
+    if (eventSequence !== (last ?? 0n) + 1n) {
+      this.#bufferSubagentProgress(progress)
+      if (!this.#subagentReplayRequests.has(progress.subagent_id)) {
+        void this.#requestSubagentReplay(progress.subagent_id, last?.toString() ?? null)
+      }
+      return
+    }
+    this.#applySubagentEvent(progress.subagent_id, event)
+  }
+
+  #bufferSubagentProgress(
+    progress: Extract<EngineEvent, { type: "subagent_progress" }>,
+  ): void {
+    const subagentId = progress.subagent_id
+    if (this.#subagentReplayOverflow.has(subagentId)) return
+    const buffered = this.#subagentLiveBuffers.get(subagentId) ?? []
+    const eventBytes = wireEventBytes(progress)
+    const bufferedBytes = this.#subagentLiveBufferBytes.get(subagentId) ?? 0
+    if (
+      buffered.length >= MAX_BUFFERED_SUBAGENT_LIVE_EVENTS ||
+      eventBytes > MAX_BUFFERED_SUBAGENT_LIVE_BYTES ||
+      bufferedBytes + eventBytes > MAX_BUFFERED_SUBAGENT_LIVE_BYTES
+    ) {
+      this.#subagentReplayOverflow.add(subagentId)
+      return
+    }
+    buffered.push(progress)
+    this.#subagentLiveBuffers.set(subagentId, buffered)
+    this.#subagentLiveBufferBytes.set(subagentId, bufferedBytes + eventBytes)
+  }
+
+  #clearSubagentLiveBuffer(subagentId: string): void {
+    this.#subagentLiveBuffers.delete(subagentId)
+    this.#subagentLiveBufferBytes.delete(subagentId)
+  }
+
+  #lastAppliedSubagentSequence(subagentId: string): string | null {
+    return this.#subagentStates.get(subagentId)?.lastSequence ?? null
+  }
+
+  #subagentDescriptor(subagentId: string): SubagentDescriptor | undefined {
+    return this.#subagentDescriptors.find((subagent) => subagent.subagent_id === subagentId)
+  }
+
+  #isActiveSubagentRunning(): boolean {
+    return this.#activeSubagentId !== null &&
+      this.#subagentDescriptor(this.#activeSubagentId)?.activity === "running"
+  }
+
+  #setSubagentActivity(subagentId: string, activity: SubagentDescriptor["activity"]): void {
+    this.#subagentDescriptors = this.#subagentDescriptors.map((subagent) =>
+      subagent.subagent_id === subagentId ? { ...subagent, activity } : subagent,
+    )
+  }
+
+  #presentedState(): RottweilerState {
+    if (this.#activeSubagentId === null) return this.#state
+    const descriptor = this.#subagentDescriptor(this.#activeSubagentId)
+    if (descriptor === undefined) return this.#state
+    return this.#subagentStates.get(this.#activeSubagentId) ?? initialSubagentState(this.#state, descriptor)
+  }
+
+  #updateSubagentBanner(state: RottweilerState): void {
+    if (this.#activeSubagentId === null) return
+    const descriptor = this.#subagentDescriptor(this.#activeSubagentId)
+    if (descriptor === undefined) return
+    const approval = Object.values(state.tools).some((tool) => tool.status === "awaiting_approval")
+    const replaying = this.#subagentReplayRequests.has(this.#activeSubagentId)
+    const retainedHistory = this.#subagentHistoryNotices.get(this.#activeSubagentId)
+    const latestError = this.#state.errors.at(-1)
+    this.banner.visible = true
+    this.banner.fg = latestError !== undefined && latestError !== this.#subagentErrorBaseline
+      ? this.#theme.danger
+      : approval
+        ? this.#theme.warning
+        : this.#theme.info
+    this.banner.content = latestError !== undefined && latestError !== this.#subagentErrorBaseline
+      ? `Child · ${descriptor.task} · ${latestError.message}`
+      : approval
+      ? `Child · ${descriptor.task} · approval requested by child · Esc returns to parent`
+      : retainedHistory !== undefined && !replaying
+      ? `Child · ${descriptor.task} · Showing recent activity; ${retainedHistory.toString()} earlier events retained · Esc returns to parent`
+      : `Child · ${descriptor.task} · ${
+          replaying
+            ? "loading transcript"
+            : descriptor.activity === "running"
+              ? "running · read-only; interrupt to reply"
+              : descriptor.activity
+        } · Esc returns to parent · Ctrl+P actions`
+  }
+
+  async #interruptSubagent(subagentId: string): Promise<void> {
+    let outcome: void | CommandOutcome | null
+    try {
+      outcome = await this.#emit({
+        type: "interrupt_subagent",
+        meta: this.#meta(),
+        session_id: this.#sessionId,
+        subagent_id: subagentId,
+      })
+    } catch (error) {
+      this.#projectClientError("subagent_interrupt_failed", safeErrorMessage(error), true)
+      return
+    }
+    if (outcome?.type === "rejected") this.#projectRejection(outcome)
+    else if (outcome == null) {
+      this.#projectClientError(
+        "subagent_interrupt_unavailable",
+        "Couldn't interrupt the child because the engine connection is unavailable.",
+        true,
+      )
+    }
+  }
+
+  async #closeSubagent(subagentId: string): Promise<void> {
+    let outcome: void | CommandOutcome | null
+    try {
+      outcome = await this.#emit({
+        type: "close_subagent",
+        meta: this.#meta(),
+        session_id: this.#sessionId,
+        subagent_id: subagentId,
+      })
+    } catch (error) {
+      this.#projectClientError("subagent_close_failed", safeErrorMessage(error), true)
+      return
+    }
+    if (outcome?.type === "rejected") {
+      this.#projectRejection(outcome)
+      return
+    }
+    if (outcome == null) {
+      this.#projectClientError(
+        "subagent_close_unavailable",
+        "Couldn't close the child because the engine connection is unavailable.",
+        true,
+      )
+      return
+    }
+    if (this.#activeSubagentId === subagentId) this.#leaveSubagent()
+    const { [subagentId]: _closed, ...subagents } = this.#state.subagents
+    this.#state = {
+      ...this.#state,
+      subagents,
+      subagentOrder: this.#state.subagentOrder.filter((candidate) => candidate !== subagentId),
+    }
+    this.#subagentDescriptors = this.#subagentDescriptors.filter(
+      (subagent) => subagent.subagent_id !== subagentId,
+    )
+    this.#subagentReplayRequests.delete(subagentId)
+    this.#subagentReplayTails.delete(subagentId)
+    this.#subagentHistoryNotices.delete(subagentId)
+    this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
+    this.#clearSubagentLiveBuffer(subagentId)
+    this.#subagentReplayOverflow.delete(subagentId)
+    this.#subagentReplayGap.delete(subagentId)
+    this.#subagentStates.delete(subagentId)
+    this.#subagentComposerDrafts.delete(subagentId)
+    this.setState(this.#state)
+    this.#requestSubagents()
   }
 
   #requestModels(refresh = false): void {
@@ -2700,6 +3546,67 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#state.replay.active) {
       return false
     }
+    if (content.startsWith("!")) {
+      const originatingSubagentId = this.#activeSubagentId
+      const accepted = await this.#startForegroundShell(content, attachments)
+      if (accepted && originatingSubagentId !== null && this.#activeSubagentId === originatingSubagentId) {
+        this.#leaveSubagent()
+      }
+      return accepted
+    }
+    if (this.#activeSubagentId !== null) {
+      const action = attachments.length === 0 ? parseSessionAction(content) : null
+      if (action?.type === "exit") {
+        this.#options.onExit?.()
+        return true
+      }
+      if (action?.type === "agents") {
+        this.#postSubmitPicker = "agents"
+        this.closePicker()
+        return true
+      }
+      if (attachments.length > 0) {
+        this.#projectClientError(
+          "subagent_attachments_unsupported",
+          "Child follow-ups are text-only; remove attachments or return to the parent session.",
+        )
+        return false
+      }
+      const subagentId = this.#activeSubagentId
+      if (this.#subagentDescriptor(subagentId)?.activity === "running") {
+        this.#projectClientError(
+          "subagent_still_running",
+          "This child is still working. Inspect its progress or interrupt it before sending a follow-up.",
+        )
+        return false
+      }
+      let outcome: void | CommandOutcome | null
+      try {
+        outcome = await this.#emit({
+          type: "continue_subagent",
+          meta: this.#meta(),
+          session_id: this.#sessionId,
+          subagent_id: subagentId,
+          content,
+        })
+      } catch (error) {
+        this.#projectClientError("subagent_continue_failed", safeErrorMessage(error), true)
+        return false
+      }
+      if (outcome?.type !== "accepted") {
+        if (outcome?.type === "rejected") this.#projectRejection(outcome)
+        else this.#projectClientError(
+          "subagent_continue_unavailable",
+          "Couldn't continue the child because the engine connection is unavailable.",
+          true,
+        )
+        return false
+      }
+      this.#subagentErrorBaseline = this.#state.errors.at(-1)
+      this.#setSubagentActivity(subagentId, "running")
+      this.setState(this.#state)
+      return true
+    }
     const textQuestion = Object.values(this.#state.questions).find(
       (question) => !question.answered && question.questions[0]?.response_kind === "text",
     )
@@ -2741,6 +3648,11 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (sessionAction?.type === "providers") {
       this.#postSubmitPicker = "providers"
+      this.closePicker()
+      return true
+    }
+    if (sessionAction?.type === "agents") {
+      this.#postSubmitPicker = "agents"
       this.closePicker()
       return true
     }
@@ -2793,35 +3705,6 @@ export class RottweilerApp extends BoxRenderable {
     if (sessionAction?.type === "fork") {
       return await this.#requestFork(sessionAction.atTurn)
     }
-    if (content.startsWith("!")) {
-      const command = content.slice(1).trim()
-      if (command.length === 0 || attachments.length > 0) {
-        return false
-      }
-      this.#suspendTerminal()
-      this.#clearPendingShellTimer()
-      this.#pendingShellTimer = setTimeout(() => {
-        this.#pendingShellTimer = null
-        if (!this.#state.shell.active) {
-          this.#resumeTerminal()
-        }
-      }, 5_000)
-      const outcome = await this.#emit({
-        type: "user_shell_started",
-        meta: this.#meta(),
-        session_id: this.#sessionId,
-        command,
-      })
-      if (outcome?.type !== "accepted") {
-        this.#clearPendingShellTimer()
-        if (!this.#state.shell.active) {
-          this.#resumeTerminal()
-        }
-        this.#projectRejection(outcome)
-        return false
-      }
-      return true
-    }
     const outcome = await this.#emit({
       type: "send_message",
       meta: this.#meta(),
@@ -2830,6 +3713,33 @@ export class RottweilerApp extends BoxRenderable {
       attachments: [...attachments],
     })
     if (outcome?.type !== "accepted") {
+      this.#projectRejection(outcome)
+      return false
+    }
+    return true
+  }
+
+  async #startForegroundShell(
+    content: string,
+    attachments: readonly Attachment[],
+  ): Promise<boolean> {
+    const command = content.slice(1).trim()
+    if (command.length === 0 || attachments.length > 0) return false
+    this.#suspendTerminal()
+    this.#clearPendingShellTimer()
+    this.#pendingShellTimer = setTimeout(() => {
+      this.#pendingShellTimer = null
+      if (!this.#state.shell.active) this.#resumeTerminal()
+    }, 5_000)
+    const outcome = await this.#emit({
+      type: "user_shell_started",
+      meta: this.#meta(),
+      session_id: this.#sessionId,
+      command,
+    })
+    if (outcome?.type !== "accepted") {
+      this.#clearPendingShellTimer()
+      if (!this.#state.shell.active) this.#resumeTerminal()
       this.#projectRejection(outcome)
       return false
     }
@@ -3358,16 +4268,20 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #isInterruptible(): boolean {
-    return this.#state.compaction.active ||
+    return this.#interruptSubagentId !== null ||
+      this.#state.compaction.active ||
       Object.values(this.#state.turns).some((turn) => turn.status === "running")
   }
 
-  #armInterruptEscape(): void {
+  #armInterruptEscape(subagentId: string | null = null): void {
     this.#clearInterruptEscape(false)
     this.#interruptEscapeArmed = true
+    this.#interruptSubagentId = subagentId
     this.banner.visible = true
     this.banner.fg = this.#theme.warning
-    this.banner.content = "Press Esc again to stop the active response"
+    this.banner.content = subagentId === null
+      ? "Press Esc again to stop the active response"
+      : "Back in parent · press Esc again to stop the child agent"
     this.#interruptEscapeTimer = setTimeout(() => this.#clearInterruptEscape(), 900)
   }
 
@@ -3378,10 +4292,16 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (!this.#interruptEscapeArmed) return
     this.#interruptEscapeArmed = false
+    this.#interruptSubagentId = null
     if (refresh && !this.#destroyed) this.banner.update(this.#state)
   }
 
-  async #interruptActiveResponse(): Promise<void> {
+  async #interruptActiveResponse(subagentId: string | null = this.#interruptSubagentId): Promise<void> {
+    if (subagentId !== null) {
+      this.#interruptSubagentId = null
+      await this.#interruptSubagent(subagentId)
+      return
+    }
     const outcome = await this.#emit({
       type: "interrupt",
       meta: this.#meta(),
@@ -3512,12 +4432,148 @@ export class RottweilerApp extends BoxRenderable {
   }
 }
 
+const MAX_CHILD_TRANSCRIPT_ENTRIES = 256
+const MAX_CHILD_PROJECTION_ENTRIES = 512
+
+function initialSubagentState(
+  parent: RottweilerState,
+  descriptor: SubagentDescriptor,
+): RottweilerState {
+  const state = createInitialState()
+  return {
+    ...state,
+    connection: { ...state.connection, phase: "connected" },
+    mode: parent.mode ?? "execute",
+    model: descriptor.model,
+  }
+}
+
+function sanitizeSubagentDescriptor(descriptor: SubagentDescriptor): SubagentDescriptor | null {
+  if (
+    !safeSubagentIdentifier(descriptor.subagent_id) ||
+    !safeSubagentIdentifier(descriptor.child_session_id)
+  ) return null
+  const task = boundedUiText(descriptor.task, 512)
+  return {
+    ...descriptor,
+    task: task.length === 0 ? "Untitled child agent" : task,
+    agent: boundedUiText(descriptor.agent, 128),
+    model: boundedUiText(descriptor.model, 256),
+  }
+}
+
+function safeSubagentIdentifier(value: string): boolean {
+  return value.length > 0 && value.length <= MAX_SUBAGENT_ID_LENGTH && !/[\u0000-\u001f\u007f]/.test(value)
+}
+
+function childEngineEvent(value: unknown, expectedSessionId: string): WireEngineEvent | null {
+  if (!isWireEngineEvent(value)) return null
+  const record = value as unknown as Record<string, unknown>
+  if (!isRecord(record.meta) || record.meta.session_id !== expectedSessionId) return null
+  return value
+}
+
+function subagentProgressSequence(event: WireEngineEvent): bigint | null {
+  if (event.type !== "subagent_progress") return null
+  const progress = event as Extract<EngineEvent, { type: "subagent_progress" }>
+  const nested = isRecord(progress.event) && isRecord(progress.event.meta)
+    ? progress.event.meta.sequence_id
+    : null
+  const sequence = progress.child_sequence ?? (typeof nested === "string" ? nested : null)
+  if (sequence === null || !/^\d+$/.test(sequence)) return null
+  try {
+    return BigInt(sequence)
+  } catch {
+    return null
+  }
+}
+
+function compareOptionalSequence(left: bigint | null, right: bigint | null): number {
+  if (left === null) return right === null ? 0 : 1
+  if (right === null) return -1
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+function parseSequence(value: string | null): bigint | null {
+  if (value === null || !/^(0|[1-9][0-9]*)$/.test(value)) return null
+  try {
+    return BigInt(value)
+  } catch {
+    return null
+  }
+}
+
+function wireEventBytes(event: WireEngineEvent): number {
+  try {
+    return new TextEncoder().encode(JSON.stringify(event)).byteLength
+  } catch {
+    return MAX_BUFFERED_SUBAGENT_LIVE_BYTES + 1
+  }
+}
+
+function boundedUiText(value: string, maximum: number): string {
+  const safe = value
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+  return safe.length <= maximum ? safe : `${safe.slice(0, Math.max(0, maximum - 1))}…`
+}
+
+function mergeComposerDraft(
+  draft: ComposerDraft,
+  rejectedContent: string,
+  rejectedAttachments: readonly Attachment[],
+): ComposerDraft {
+  const content = draft.content.length === 0
+    ? rejectedContent
+    : `${rejectedContent}\n${draft.content}`
+  const attachments: Attachment[] = [...draft.attachments]
+  const identities = new Set(attachments.map((attachment) => JSON.stringify(attachment)))
+  for (const attachment of rejectedAttachments) {
+    const identity = JSON.stringify(attachment)
+    if (identities.has(identity) || attachments.length >= 16) continue
+    identities.add(identity)
+    attachments.push(attachment)
+  }
+  return { content, attachments }
+}
+
+function boundSubagentState(state: RottweilerState): RottweilerState {
+  return {
+    ...state,
+    transcript: state.transcript.slice(-MAX_CHILD_TRANSCRIPT_ENTRIES),
+    turns: boundProjectionRecord(state.turns),
+    tools: boundProjectionRecord(state.tools),
+    questions: boundProjectionRecord(state.questions),
+    commandAcks: boundProjectionRecord(state.commandAcks),
+  }
+}
+
+function boundProjectionRecord<T>(record: Readonly<Record<string, T>>): Readonly<Record<string, T>> {
+  const entries = Object.entries(record)
+  return entries.length <= MAX_CHILD_PROJECTION_ENTRIES
+    ? record
+    : Object.fromEntries(entries.slice(-MAX_CHILD_PROJECTION_ENTRIES))
+}
+
+function childPassiveInteractionState(state: RottweilerState): RottweilerState {
+  return {
+    ...state,
+    tools: Object.fromEntries(
+      Object.entries(state.tools).filter(([, tool]) => tool.status !== "awaiting_approval"),
+    ),
+    questions: {},
+    pendingPlan: null,
+  }
+}
+
 type SessionAction =
   | { readonly type: "exit" }
   | { readonly type: "review" }
   | { readonly type: "fork"; readonly atTurn: string | null }
   | { readonly type: "models" }
   | { readonly type: "providers" }
+  | { readonly type: "agents" }
   | { readonly type: "theme" }
   | { readonly type: "settings" }
   | { readonly type: "permissions" }
@@ -3546,6 +4602,11 @@ function parseSessionAction(content: string): SessionAction | null {
     return tokens.length === 1
       ? { type: "providers" }
       : { type: "invalid", message: "usage: /providers" }
+  }
+  if (command === "/agents") {
+    return tokens.length === 1
+      ? { type: "agents" }
+      : { type: "invalid", message: "usage: /agents" }
   }
   if (command === "/theme") {
     return tokens.length === 1
@@ -3749,7 +4810,11 @@ function approvalBinding(diff: unknown): ApprovalBinding | null {
 }
 
 function isPresentationStreamDelta(event: WireEngineEvent): boolean {
-  return event.type === "text_delta" || event.type === "thinking_delta" || event.type === "citation_delta"
+  return event.type === "text_delta" ||
+    event.type === "thinking_delta" ||
+    event.type === "citation_delta" ||
+    event.type === "compaction_text_delta" ||
+    event.type === "compaction_thinking_delta"
 }
 
 /** Build the retained OpenTUI application tree. */

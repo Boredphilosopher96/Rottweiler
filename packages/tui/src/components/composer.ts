@@ -21,6 +21,12 @@ export interface ComposerOptions {
   readonly onFileMention: (mention: ComposerFileMention) => void
   readonly onManageAttachments?: () => void
   readonly onAttachmentError?: (message: string) => void
+  readonly submissionScope?: () => string
+  readonly onDetachedSubmissionRejected?: (
+    scope: string,
+    content: string,
+    attachments: readonly Attachment[],
+  ) => void
   readonly onInput?: (value: string) => void
   readonly onSubmitted?: () => void
   readonly onSubmissionSettled?: () => void
@@ -42,6 +48,7 @@ export class ComposerRenderable extends BoxRenderable {
   #options: ComposerOptions
   #theme: RottweilerTheme
   #submitting = false
+  #shellMode = false
   #dockHeight = 4
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, options: ComposerOptions) {
@@ -124,6 +131,7 @@ export class ComposerRenderable extends BoxRenderable {
 
   set value(value: string) {
     this.editor.setText(value)
+    this.setShellMode(value.startsWith("!"))
     this.#refreshHeight()
   }
 
@@ -131,8 +139,31 @@ export class ComposerRenderable extends BoxRenderable {
     return this.#attachments
   }
 
+  /** Replace the visible draft when switching between parent and child sessions. */
+  restoreDraft(content: string, attachments: readonly Attachment[]): void {
+    this.editor.setText(content)
+    this.#attachments = [...attachments]
+    this.setShellMode(content.startsWith("!"))
+    this.#refreshAttachments()
+  }
+
   get dockHeight(): number {
     return this.visible ? this.#dockHeight : 0
+  }
+
+  get shellMode(): boolean {
+    return this.#shellMode
+  }
+
+  setShellMode(active: boolean): void {
+    if (this.#shellMode === active) return
+    this.#shellMode = active
+    this.title = active ? " Shell " : ""
+    this.borderColor = active ? this.#theme.warning : this.#theme.border
+    this.focusedBorderColor = active ? this.#theme.warning : this.#theme.focus
+    this.editor.placeholder = active
+      ? "Shell command · Enter to run in foreground"
+      : "Message Rottweiler · @ files · ctrl+v image · ctrl+e $EDITOR"
   }
 
   currentFileMention(): ComposerFileMention | null {
@@ -153,6 +184,7 @@ export class ComposerRenderable extends BoxRenderable {
     if (start < 0 || end < start || end > value.length) return false
     const next = value.slice(0, start) + replacement + value.slice(end)
     this.editor.setText(next)
+    this.setShellMode(next.startsWith("!"))
     const cursorCharacters = start + replacement.length
     this.editor.cursorOffset = new TextEncoder().encode(next.slice(0, cursorCharacters)).length
     this.#refreshHeight()
@@ -175,8 +207,10 @@ export class ComposerRenderable extends BoxRenderable {
       return false
     }
     const submittedAttachments = this.#attachments
+    const submissionScope = this.#options.submissionScope?.() ?? "default"
     this.#submitting = true
     this.editor.clear()
+    this.setShellMode(false)
     this.#attachments = []
     this.#refreshAttachments()
     try {
@@ -184,11 +218,11 @@ export class ComposerRenderable extends BoxRenderable {
       if (accepted) {
         this.#options.onSubmitted?.()
       } else {
-        this.#restoreRejectedSubmission(content, submittedAttachments)
+        this.#restoreRejectedSubmissionForScope(submissionScope, content, submittedAttachments)
       }
       return accepted
     } catch (error) {
-      this.#restoreRejectedSubmission(content, submittedAttachments)
+      this.#restoreRejectedSubmissionForScope(submissionScope, content, submittedAttachments)
       throw error
     } finally {
       this.#submitting = false
@@ -196,9 +230,22 @@ export class ComposerRenderable extends BoxRenderable {
     }
   }
 
+  #restoreRejectedSubmissionForScope(
+    scope: string,
+    content: string,
+    attachments: readonly Attachment[],
+  ): void {
+    if ((this.#options.submissionScope?.() ?? "default") === scope) {
+      this.#restoreRejectedSubmission(content, attachments)
+    } else {
+      this.#options.onDetachedSubmissionRejected?.(scope, content, attachments)
+    }
+  }
+
   #restoreRejectedSubmission(content: string, attachments: readonly Attachment[]): void {
     const current = this.editor.plainText
     this.editor.setText(current.length === 0 ? content : `${content}\n${current}`)
+    this.setShellMode(this.editor.plainText.startsWith("!"))
     const merged: Attachment[] = []
     const identities = new Set<string>()
     for (const attachment of this.#attachments) {
@@ -325,6 +372,7 @@ export class ComposerRenderable extends BoxRenderable {
     const result = await this.#options.editor.compose(this.editor.plainText)
     if (result !== null) {
       this.editor.replaceText(result)
+      this.setShellMode(result.startsWith("!"))
       this.editor.focus()
     }
   }
@@ -345,6 +393,7 @@ export class ComposerRenderable extends BoxRenderable {
   #contentChanged(): void {
     this.#refreshHeight()
     const value = this.editor.plainText
+    this.setShellMode(value.startsWith("!"))
     this.#options.onInput?.(value)
     const mention = this.currentFileMention()
     if (mention !== null) this.#options.onFileMention(mention)

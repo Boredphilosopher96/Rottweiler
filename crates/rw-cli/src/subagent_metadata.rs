@@ -602,6 +602,8 @@ mod tests {
                 subagent_id: SubagentId("child".to_owned()),
                 session_id: rw_core::runtime_support::SessionId("child-session".to_owned()),
             },
+            task: "fixture task".to_owned(),
+            agent: "fixture agent".to_owned(),
             depth: 1,
             workspace_root: std::path::PathBuf::from("/private/worktree"),
             isolation: SubagentIsolation::Worktree,

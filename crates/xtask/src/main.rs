@@ -21,11 +21,12 @@ use rw_types::{
     ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget, Role,
     RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
-    SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentId, SubagentIsolation,
-    SubagentResult, SubagentStatus, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
-    ToolOutputStream, TouchedFile, TouchedFileStatus, Turn, TurnAccounting, TurnId, TurnMeta,
-    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
+    SubagentDescriptor, SubagentId, SubagentIsolation, SubagentReplayItem, SubagentResult,
+    SubagentStatus, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart, ToolOutputStream,
+    TouchedFile, TouchedFileStatus, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
+    UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use semver::Version;
@@ -1687,6 +1688,9 @@ fn generate_typescript() -> String {
     declaration!(QuestionId);
     declaration!(SubagentId);
     declaration!(SubagentIsolation);
+    declaration!(SubagentActivity);
+    declaration!(SubagentDescriptor);
+    declaration!(SubagentReplayItem);
     declaration!(SubagentStatus);
     declaration!(TouchedFileStatus);
     declaration!(TouchedFile);

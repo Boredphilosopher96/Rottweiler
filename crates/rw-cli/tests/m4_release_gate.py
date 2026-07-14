@@ -748,22 +748,70 @@ def socket_latency_gate(
             ("list_models", "models_listed"),
         ]
 
-        def run_query(index: int, measured: bool) -> float:
-            command_type, event_type = query_types[index % len(query_types)]
-            request_id = f"m4-latency-{'sample' if measured else 'warmup'}-{index}"
+        # Authenticated transport readiness deliberately precedes deferred
+        # session composition. Command discovery became session-scoped once it
+        # included trusted project and extension commands, so wait outside the
+        # measured window until that actor is loaded. Rejections have no result
+        # event; inspect the HTTP outcome before waiting on SSE to avoid turning
+        # a typed startup state into an opaque socket timeout.
+        ready_deadline = time.monotonic() + 5
+        ready_attempt = 0
+        while True:
+            request_id = f"m4-latency-ready-{ready_attempt}"
+            ready_attempt += 1
             command = json.dumps(
                 {
-                    "type": command_type,
+                    "type": "list_commands",
                     "meta": {
                         "protocol_version": 1,
-                        # The server must overwrite this with the authenticated
-                        # identity before dispatching the typed command.
                         "client_id": "transport-spoof",
                         "request_id": request_id,
                     },
+                    "session_id": session_id,
                 },
                 separators=(",", ":"),
             ).encode("utf-8")
+            commands.send_request("POST", "/v1/command", headers, command)
+            status, _, response = commands.read_response()
+            if status != 202:
+                raise RuntimeError(
+                    f"session readiness query returned HTTP {status}: {response!r}"
+                )
+            outcome = json.loads(response)
+            if outcome.get("type") == "accepted":
+                events.next_matching_event(request_id, "command_descriptors_listed")
+                break
+            error = outcome.get("error")
+            if (
+                not isinstance(error, dict)
+                or error.get("code") != "session_not_loaded"
+                or time.monotonic() >= ready_deadline
+            ):
+                raise RuntimeError(
+                    f"session did not become query-ready: {outcome!r}"
+                )
+            time.sleep(0.001)
+
+        def run_query(index: int, measured: bool) -> float:
+            command_type, event_type = query_types[index % len(query_types)]
+            request_id = f"m4-latency-{'sample' if measured else 'warmup'}-{index}"
+            command_payload: dict[str, object] = {
+                "type": command_type,
+                "meta": {
+                    "protocol_version": 1,
+                    # The server must overwrite this with the authenticated
+                    # identity before dispatching the typed command.
+                    "client_id": "transport-spoof",
+                    "request_id": request_id,
+                },
+            }
+            # Command discovery is session-scoped because its runtime registry
+            # includes trusted project and extension commands. Keep the release
+            # gate on the generated protocol instead of relying on the older
+            # global-list shape.
+            if command_type == "list_commands":
+                command_payload["session_id"] = session_id
+            command = json.dumps(command_payload, separators=(",", ":")).encode("utf-8")
             started = time.perf_counter_ns()
             commands.send_request("POST", "/v1/command", headers, command)
             event = events.next_matching_event(request_id, event_type)

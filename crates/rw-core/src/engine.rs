@@ -1668,6 +1668,9 @@ fn recovered_pending_event(
         | EngineEvent::SessionReplayCompleted { .. }
         | EngineEvent::SessionForked { .. }
         | EngineEvent::SessionsListed { .. }
+        | EngineEvent::SubagentsListed { .. }
+        | EngineEvent::SubagentReplayBatch { .. }
+        | EngineEvent::SubagentReplayCompleted { .. }
         | EngineEvent::SessionsSearchReady { .. }
         | EngineEvent::SessionReviewReady { .. }
         | EngineEvent::SessionReviewUpdated { .. }
@@ -4153,12 +4156,21 @@ pub fn builtin_hook_dispatcher() -> Result<HookDispatcher, AgentLoopError> {
 }
 
 /// Dependencies and guardrails for one headless session actor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartupNotification {
+    pub plugin_id: String,
+    pub status: String,
+    pub title: String,
+    pub message: String,
+}
+
 pub struct SessionActorConfig {
     pub session_id: SessionId,
     pub workspace_root: PathBuf,
     pub additional_workspace_roots: Vec<PathBuf>,
     pub workspace_generation: u64,
     pub initial_session_context: Vec<Turn>,
+    pub startup_notifications: Vec<StartupNotification>,
     pub model_alias: String,
     pub model: Arc<dyn ModelDriver>,
     pub tools: Arc<ToolRegistry>,
@@ -4191,6 +4203,7 @@ impl fmt::Debug for SessionActorConfig {
             )
             .field("workspace_generation", &self.workspace_generation)
             .field("initial_session_context", &self.initial_session_context)
+            .field("startup_notifications", &self.startup_notifications)
             .field("model_alias", &self.model_alias)
             .field("recovered", &self.recovered)
             .field("max_turns", &self.max_turns)
@@ -4213,6 +4226,7 @@ impl SessionActorConfig {
             additional_workspace_roots: self.additional_workspace_roots.clone(),
             workspace_generation: self.workspace_generation,
             initial_session_context: self.initial_session_context.clone(),
+            startup_notifications: self.startup_notifications.clone(),
             model_alias,
             model: Arc::clone(&self.model),
             tools: Arc::clone(&self.tools),
@@ -4756,6 +4770,67 @@ impl SessionHandle {
         receive.await.map_err(|_| AgentLoopError::Closed)
     }
 
+    /// Persists a parent-owned child invocation through the parent actor's
+    /// single-writer journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the parent actor is closed or its journal append fails.
+    pub async fn record_subagent_spawned(
+        &self,
+        subagent_id: SubagentId,
+        child_session_id: SessionId,
+        task: String,
+    ) -> Result<(), AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::RecordSubagentSpawned {
+                subagent_id,
+                child_session_id,
+                task,
+                respond,
+            })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
+    /// Persists a terminal parent-owned child invocation through the parent
+    /// actor's single-writer journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the parent actor is closed or its journal append fails.
+    pub async fn record_subagent_finished(
+        &self,
+        result: rw_types::SubagentResult,
+    ) -> Result<(), AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::RecordSubagentFinished { result, respond })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
+    /// Broadcasts display-only child progress without appending it to the
+    /// parent journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns when the parent actor is closed.
+    pub async fn publish_subagent_progress_batch(
+        &self,
+        progress: Vec<SubagentProgressEvent>,
+    ) -> Result<(), AgentLoopError> {
+        let (respond, receive) = oneshot::channel();
+        self.commands
+            .send(ActorCommand::PublishSubagentProgressBatch { progress, respond })
+            .await
+            .map_err(|_| AgentLoopError::Closed)?;
+        receive.await.map_err(|_| AgentLoopError::Closed)?
+    }
+
     /// Completes a foreground shell on behalf of the trusted CLI TTY broker.
     ///
     /// This is deliberately not a client protocol dispatch: the broker owns
@@ -5137,6 +5212,20 @@ enum ActorCommand {
         shell_id: ShellId,
         status: i32,
         captured_output: Option<String>,
+        respond: oneshot::Sender<Result<(), AgentLoopError>>,
+    },
+    RecordSubagentSpawned {
+        subagent_id: SubagentId,
+        child_session_id: SessionId,
+        task: String,
+        respond: oneshot::Sender<Result<(), AgentLoopError>>,
+    },
+    RecordSubagentFinished {
+        result: rw_types::SubagentResult,
+        respond: oneshot::Sender<Result<(), AgentLoopError>>,
+    },
+    PublishSubagentProgressBatch {
+        progress: Vec<SubagentProgressEvent>,
         respond: oneshot::Sender<Result<(), AgentLoopError>>,
     },
     PluginInjectMessage {
@@ -5532,6 +5621,33 @@ async fn run_actor(
     let interrupted_turn = config.recovered.interrupted_turn;
     let mut config = Arc::new(config);
     let (turn_signals, mut signals) = mpsc::unbounded_channel();
+    if !config.startup_notifications.is_empty() {
+        let startup_events = config.startup_notifications.iter().flat_map(|notice| {
+            [
+                PendingEvent::PluginStatusChanged {
+                    plugin_id: notice.plugin_id.clone(),
+                    status: notice.status.clone(),
+                },
+                PendingEvent::UiNotification {
+                    plugin_id: notice.plugin_id.clone(),
+                    title: notice.title.clone(),
+                    message: notice.message.clone(),
+                },
+            ]
+        });
+        if emit_batch(
+            &mut state,
+            &events,
+            &config.event_sink,
+            startup_events.collect(),
+        )
+        .await
+        .is_err()
+        {
+            end_actor_session(&mut state, &config, &events).await;
+            return;
+        }
+    }
     if !dispatch_lifecycle_hook(HookEvent::SessionStart, &mut state, &config, &events).await {
         end_actor_session(&mut state, &config, &events).await;
         return;
@@ -5711,6 +5827,11 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::PreviewWorkspaceFile { meta, .. }
         | ClientCommand::GetWorkspaceStatus { meta, .. }
         | ClientCommand::GetWorkspaceDiff { meta, .. }
+        | ClientCommand::ListSubagents { meta, .. }
+        | ClientCommand::ReplaySubagent { meta, .. }
+        | ClientCommand::ContinueSubagent { meta, .. }
+        | ClientCommand::InterruptSubagent { meta, .. }
+        | ClientCommand::CloseSubagent { meta, .. }
         | ClientCommand::ShutdownHost { meta, .. } => meta,
     }
 }
@@ -5764,7 +5885,12 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::BeginProviderAuth { session_id, .. }
         | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
         | ClientCommand::CompleteProviderAuth { session_id, .. }
-        | ClientCommand::CancelProviderAuth { session_id, .. } => Some(session_id),
+        | ClientCommand::CancelProviderAuth { session_id, .. }
+        | ClientCommand::ListSubagents { session_id, .. }
+        | ClientCommand::ReplaySubagent { session_id, .. }
+        | ClientCommand::ContinueSubagent { session_id, .. }
+        | ClientCommand::InterruptSubagent { session_id, .. }
+        | ClientCommand::CloseSubagent { session_id, .. } => Some(session_id),
     }
 }
 
@@ -8321,6 +8447,11 @@ async fn handle_actor_command(
                 | ClientCommand::PreviewWorkspaceFile { .. }
                 | ClientCommand::GetWorkspaceStatus { .. }
                 | ClientCommand::GetWorkspaceDiff { .. }
+                | ClientCommand::ListSubagents { .. }
+                | ClientCommand::ReplaySubagent { .. }
+                | ClientCommand::ContinueSubagent { .. }
+                | ClientCommand::InterruptSubagent { .. }
+                | ClientCommand::CloseSubagent { .. }
                 | ClientCommand::ShutdownHost { .. }
                 | ClientCommand::Rewind {
                     target: RewindTarget::Checkpoint { .. },
@@ -9053,6 +9184,54 @@ async fn handle_actor_command(
                 persisted
             };
             let _ = respond.send(result);
+        }
+        ActorCommand::RecordSubagentSpawned {
+            subagent_id,
+            child_session_id,
+            task,
+            respond,
+        } => {
+            let result = emit(
+                state,
+                events,
+                &config.event_sink,
+                PendingEvent::SubagentSpawned {
+                    subagent_id,
+                    child_session_id,
+                    task,
+                },
+            )
+            .await;
+            let _ = respond.send(result);
+        }
+        ActorCommand::RecordSubagentFinished { result, respond } => {
+            let subagent_id = result.subagent_id.clone();
+            let result = emit(
+                state,
+                events,
+                &config.event_sink,
+                PendingEvent::SubagentFinished {
+                    subagent_id,
+                    result,
+                },
+            )
+            .await;
+            let _ = respond.send(result);
+        }
+        ActorCommand::PublishSubagentProgressBatch { progress, respond } => {
+            for progress in progress {
+                let _ = events.send(RoutedEvent {
+                    target: None,
+                    event: EngineEvent::SubagentProgress {
+                        parent_session_id: state.session_id.clone(),
+                        subagent_id: progress.subagent_id,
+                        child_session_id: progress.child_session_id,
+                        child_sequence: progress.child_sequence.map(SequenceId),
+                        event: progress.event,
+                    },
+                });
+            }
+            let _ = respond.send(Ok(()));
         }
         ActorCommand::Snapshot { respond } => {
             let _ = respond.send(SessionSnapshot {
@@ -16097,6 +16276,7 @@ mod tests {
             additional_workspace_roots: Vec::new(),
             workspace_generation: 0,
             initial_session_context: Vec::new(),
+            startup_notifications: Vec::new(),
             model_alias: "fast".to_owned(),
             model,
             tools,
@@ -16116,6 +16296,52 @@ mod tests {
             thinking: ThinkingLevel::Off,
             event_capacity: 256,
         }
+    }
+
+    #[tokio::test]
+    async fn startup_notifications_are_persisted_as_status_and_ui_events() {
+        let root = tempfile::tempdir().expect("root");
+        let sink = Arc::new(RecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(ScriptedModel::new(Vec::new())),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            HookDispatcher::new(),
+        );
+        actor_config.event_sink = sink.clone();
+        actor_config.startup_notifications = vec![StartupNotification {
+            plugin_id: "wasm:fixture".to_owned(),
+            status: "unavailable".to_owned(),
+            title: "WASM extension unavailable".to_owned(),
+            message: "The component failed validation.".to_owned(),
+        }];
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if sink.events.lock().expect("events").len() >= 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("startup events");
+        let events = sink.events.lock().expect("events");
+        assert!(matches!(
+            &events[0].wire,
+            EngineEvent::PluginStatusChanged { plugin_id, status, .. }
+                if plugin_id == "wasm:fixture" && status == "unavailable"
+        ));
+        assert!(matches!(
+            &events[1].wire,
+            EngineEvent::UiNotification { plugin_id, title, message, .. }
+                if plugin_id == "wasm:fixture"
+                    && title == "WASM extension unavailable"
+                    && message == "The component failed validation."
+        ));
+        drop(events);
+        drop(handle);
     }
 
     #[derive(Debug)]

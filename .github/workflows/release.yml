@@ -346,6 +346,7 @@ jobs:
               f"{release_root}/install.sh",
               f"{release_root}/bin/rw",
               f"{release_root}/bin/rottweiler-tui",
+              f"{release_root}/bin/rottweiler-wasm-host",
               f"{release_root}/bin/{native}",
           }
           names = {member.name.rstrip("/") for member in members}

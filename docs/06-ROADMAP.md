@@ -78,4 +78,6 @@ Background process manager; vim keybindings; `rw stats` (incl. cost attribution:
 
 ## Post-v1 (explicitly deferred)
 
-WASM extension tier · IDE integration · web client over `rw serve` · extension registry · Windows-native sandbox · AWS Bedrock / Google Vertex adapters (v1 route: OpenAI-compatible gateway) · voice · team/shared-session features.
+IDE integration · web client over `rw serve` · Windows-native sandbox · AWS Bedrock / Google Vertex adapters (v1 route: OpenAI-compatible gateway) · voice · team/shared-session features.
+
+The WASM hook tier and signed extension-registry foundation moved forward under ADR-021: component hooks reuse the production dispatcher with no WASI/imports and bounded execution; signed, independently trusted release installation is the registry trust boundary. Broader component tools/providers remain future work.

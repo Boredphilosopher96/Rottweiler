@@ -1440,7 +1440,9 @@ impl CliSessionFactory {
         } else {
             session
         };
-        let session = session.with_runtime_services(runtime.runtime_services);
+        let session = session
+            .with_runtime_services(runtime.runtime_services)
+            .with_subagents(runtime.subagents);
         Ok(if let Some(mcp) = runtime.mcp {
             session.with_mcp(mcp)
         } else {

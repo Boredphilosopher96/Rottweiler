@@ -11,6 +11,7 @@ members = [
     "crates/rw-store",
     "crates/rw-tools",
     "crates/rw-types",
+    "crates/rw-wasm-host",
     "crates/xtask",
 ]
 resolver = "3"
@@ -89,6 +90,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 url = "2.5"
+wasmtime = { version = "46.0.1", default-features = false, features = ["async", "component-model-async", "cranelift", "runtime", "std"] }
 
 rw-context = { version = "0.1.0", path = "crates/rw-context" }
 rw-core = { version = "0.1.0", path = "crates/rw-core" }

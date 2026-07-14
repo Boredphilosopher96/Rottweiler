@@ -6,9 +6,15 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+wasm-runtime = ["dep:wasmtime"]
+
 [dependencies]
 async-trait = "0.1.89"
+base64.workspace = true
 blake3.workspace = true
+ed25519-dalek.workspace = true
 futures-util = "0.3.31"
 rw-providers.workspace = true
 rw-tools.workspace = true
@@ -16,12 +22,16 @@ rw-types.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rustix.workspace = true
+semver.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 toml.workspace = true
+wasmtime = { workspace = true, optional = true }
+url.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+wat = "1.251.0"
 
 [lints]
 workspace = true

@@ -1129,6 +1129,32 @@ pub enum ClientCommand {
         path: String,
         max_bytes: u32,
     },
+    ListSubagents {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
+    ReplaySubagent {
+        meta: CommandMeta,
+        session_id: SessionId,
+        subagent_id: SubagentId,
+        after_sequence: Option<SequenceId>,
+    },
+    ContinueSubagent {
+        meta: CommandMeta,
+        session_id: SessionId,
+        subagent_id: SubagentId,
+        content: String,
+    },
+    InterruptSubagent {
+        meta: CommandMeta,
+        session_id: SessionId,
+        subagent_id: SubagentId,
+    },
+    CloseSubagent {
+        meta: CommandMeta,
+        session_id: SessionId,
+        subagent_id: SubagentId,
+    },
     ShutdownHost {
         meta: CommandMeta,
     },
@@ -1188,6 +1214,11 @@ impl ClientCommand {
             | Self::PreviewWorkspaceFile { meta, .. }
             | Self::GetWorkspaceStatus { meta, .. }
             | Self::GetWorkspaceDiff { meta, .. }
+            | Self::ListSubagents { meta, .. }
+            | Self::ReplaySubagent { meta, .. }
+            | Self::ContinueSubagent { meta, .. }
+            | Self::InterruptSubagent { meta, .. }
+            | Self::CloseSubagent { meta, .. }
             | Self::ShutdownHost { meta, .. } => meta,
         }
     }
@@ -1244,6 +1275,11 @@ impl ClientCommand {
             | Self::PreviewWorkspaceFile { meta, .. }
             | Self::GetWorkspaceStatus { meta, .. }
             | Self::GetWorkspaceDiff { meta, .. }
+            | Self::ListSubagents { meta, .. }
+            | Self::ReplaySubagent { meta, .. }
+            | Self::ContinueSubagent { meta, .. }
+            | Self::InterruptSubagent { meta, .. }
+            | Self::CloseSubagent { meta, .. }
             | Self::ShutdownHost { meta, .. } => meta,
         }
     }
@@ -1368,6 +1404,34 @@ pub enum SubagentIsolation {
     Worktree,
     /// Share the parent workspace. This requires the parent's ordinary write approvals.
     Shared,
+}
+
+/// Current parent-visible lifecycle state of a retained child agent.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SubagentActivity {
+    Running,
+    Idle,
+}
+
+/// Human-readable child metadata exposed only through its owning parent.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct SubagentDescriptor {
+    pub subagent_id: SubagentId,
+    pub child_session_id: SessionId,
+    pub task: String,
+    pub agent: String,
+    pub model: String,
+    pub isolation: SubagentIsolation,
+    pub activity: SubagentActivity,
+}
+
+/// One ordered durable child event carried inside a bounded replay batch.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct SubagentReplayItem {
+    pub child_sequence: SequenceId,
+    pub event: Value,
 }
 
 /// A path affected by an isolated child patch.
@@ -1558,6 +1622,38 @@ pub enum EngineEvent {
     SessionsListed {
         meta: CommandAckMeta,
         sessions: Vec<SessionDescriptor>,
+    },
+    SubagentsListed {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        subagents: Vec<SubagentDescriptor>,
+    },
+    SubagentReplayBatch {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        subagent_id: SubagentId,
+        child_session_id: SessionId,
+        events: Vec<SubagentReplayItem>,
+    },
+    SubagentReplayCompleted {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        subagent_id: SubagentId,
+        /// Last child sequence included in this page, if the page is non-empty.
+        through_sequence: Option<SequenceId>,
+        /// Cursor to pass as `after_sequence` for the next forward page.
+        next_cursor: Option<SequenceId>,
+        /// Durable tail observed by the descriptor-stable page scan.
+        tail_sequence: Option<SequenceId>,
+        /// Whether another forward page remains after `next_cursor`.
+        has_more: bool,
+        /// Number of durable child events preceding the first event in this page.
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        events_before_page: u64,
+        /// Whether the requested view omitted events before or after this page.
+        truncated: bool,
     },
     SessionsSearchReady {
         meta: CommandAckMeta,
@@ -2057,6 +2153,9 @@ impl EngineEvent {
             | Self::SessionReplayCompleted { .. }
             | Self::SessionForked { .. }
             | Self::SessionsListed { .. }
+            | Self::SubagentsListed { .. }
+            | Self::SubagentReplayBatch { .. }
+            | Self::SubagentReplayCompleted { .. }
             | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
             | Self::ModelsListed { .. }
@@ -2138,6 +2237,9 @@ impl EngineEvent {
             | Self::SessionReplayCompleted { .. }
             | Self::SessionForked { .. }
             | Self::SessionsListed { .. }
+            | Self::SubagentsListed { .. }
+            | Self::SubagentReplayBatch { .. }
+            | Self::SubagentReplayCompleted { .. }
             | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
             | Self::ModelsListed { .. }
@@ -2208,7 +2310,10 @@ impl EngineEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientCommand, ClientId, CommandMeta, RequestId};
+    use super::{
+        ClientCommand, ClientId, CommandAckMeta, CommandMeta, EngineEvent, RequestId, SequenceId,
+        SessionId, SubagentId,
+    };
 
     #[test]
     fn transport_can_replace_untrusted_wire_client_identity() {
@@ -2221,5 +2326,34 @@ mod tests {
         };
         command.meta_mut().client_id = ClientId("bound-connection".to_owned());
         assert_eq!(command.meta().client_id.0, "bound-connection");
+    }
+
+    #[test]
+    fn subagent_replay_completion_exposes_page_and_tail_state()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let event = EngineEvent::SubagentReplayCompleted {
+            meta: CommandAckMeta {
+                protocol_version: 1,
+                client_id: ClientId("driver".to_owned()),
+                request_id: RequestId("replay".to_owned()),
+                emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+            session_id: SessionId("parent".to_owned()),
+            subagent_id: SubagentId("child".to_owned()),
+            through_sequence: Some(SequenceId(15)),
+            next_cursor: Some(SequenceId(15)),
+            tail_sequence: Some(SequenceId(30)),
+            has_more: true,
+            events_before_page: 8,
+            truncated: true,
+        };
+        let wire = serde_json::to_value(event)?;
+        assert_eq!(wire["through_sequence"], "15");
+        assert_eq!(wire["next_cursor"], "15");
+        assert_eq!(wire["tail_sequence"], "30");
+        assert_eq!(wire["has_more"], true);
+        assert_eq!(wire["events_before_page"], "8");
+        assert_eq!(wire["truncated"], true);
+        Ok(())
     }
 }

@@ -17,7 +17,10 @@ class Rottweiler < Formula
   preserve_rpath
 
   def install
+    # Keep the public binary's dependency features isolated from the private
+    # Wasmtime helper. Selecting both roots together would unify rw-ext features.
     system "scripts/cargo-release.sh", "build", "--locked", "--release", "-p", "rw-cli"
+    system "scripts/cargo-release.sh", "build", "--locked", "--release", "-p", "rw-wasm-host"
     system "bun", "install", "--cwd", "packages/tui", "--frozen-lockfile"
     if OS.linux?
       with_env(ROTTWEILER_STRIP_BIN: formula_opt_bin("binutils")/"strip") do
@@ -29,6 +32,7 @@ class Rottweiler < Formula
 
     release_dir = Utils.safe_popen_read("scripts/cargo-release.sh", "artifact-dir").strip
     libexec.install "#{release_dir}/rw"
+    libexec.install "#{release_dir}/rottweiler-wasm-host"
     libexec.install "packages/tui/dist/rottweiler-tui"
     native = OS.mac? ? "libopentui.dylib" : "libopentui.so"
     libexec.install "packages/tui/dist/#{native}"
@@ -38,6 +42,7 @@ class Rottweiler < Formula
   test do
     assert_match(/^rw \d+\.\d+\.\d+/, shell_output("#{bin}/rw --version"))
     assert_predicate libexec/"rottweiler-tui", :executable?
+    assert_predicate libexec/"rottweiler-wasm-host", :executable?
     native = OS.mac? ? "libopentui.dylib" : "libopentui.so"
     assert_predicate libexec/native, :file?
     refute_path_exists bin/"rottweiler-tui"

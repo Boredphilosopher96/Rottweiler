@@ -20,8 +20,8 @@ use rw_tools::{
 use rw_types::config::PermissionDecision;
 use rw_types::{
     Block, Cost, DiffArtifact, DiffArtifactRef, EngineEvent, Role, SessionId, SessionMode,
-    SubagentId, SubagentIsolation, SubagentResult, SubagentStatus, ToolCapability, ToolOutput,
-    ToolOutputPart, Turn, TurnMeta, TurnStatus, Usage,
+    SubagentActivity, SubagentDescriptor, SubagentId, SubagentIsolation, SubagentResult,
+    SubagentStatus, ToolCapability, ToolOutput, ToolOutputPart, Turn, TurnMeta, TurnStatus, Usage,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -138,6 +138,10 @@ pub struct SubagentRecoveryPolicy {
 pub struct SubagentRecoveryRecord {
     pub parent_session_id: SessionId,
     pub handle: SubagentHandle,
+    #[serde(default)]
+    pub task: String,
+    #[serde(default)]
+    pub agent: String,
     pub depth: usize,
     pub workspace_root: PathBuf,
     pub isolation: SubagentIsolation,
@@ -416,6 +420,9 @@ struct OrchestratorInner {
 
 struct SessionRecord {
     handle: SubagentHandle,
+    task: String,
+    agent: String,
+    model: String,
     session: Arc<dyn SubagentSession>,
     state: SessionState,
     result: Option<watch::Receiver<Option<Result<SubagentResult, String>>>>,
@@ -688,6 +695,8 @@ impl SubagentOrchestrator {
         let mut recovery_record = SubagentRecoveryRecord {
             parent_session_id: parent_session_id.clone(),
             handle: handle.clone(),
+            task: request.task.clone(),
+            agent: request.agent.clone(),
             depth,
             workspace_root: request.workspace_root.clone(),
             isolation: request.isolation,
@@ -765,6 +774,9 @@ impl SubagentOrchestrator {
                 handle.subagent_id.clone(),
                 SessionRecord {
                     handle: handle.clone(),
+                    task: request.task.clone(),
+                    agent: request.agent.clone(),
+                    model: request.model.clone(),
                     session: Arc::clone(&session),
                     state: SessionState::Active,
                     result: Some(result_rx),
@@ -1197,6 +1209,44 @@ impl SubagentOrchestrator {
         Ok(())
     }
 
+    /// Lists retained children owned directly by one parent session.
+    #[must_use]
+    pub fn list_for_parent(&self, parent_session_id: &SessionId) -> Vec<SubagentDescriptor> {
+        let mut descriptors = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|record| record.parent_session_id == *parent_session_id)
+            .map(session_record_descriptor)
+            .collect::<Vec<_>>();
+        descriptors.sort_by(|left, right| left.subagent_id.0.cmp(&right.subagent_id.0));
+        descriptors
+    }
+
+    /// Resolves one retained child only when it belongs directly to the caller parent.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same opaque unknown-child error for missing and cross-parent ids.
+    pub fn descriptor_for_parent(
+        &self,
+        parent_session_id: &SessionId,
+        subagent_id: &SubagentId,
+    ) -> Result<SubagentDescriptor, OrchestrationError> {
+        let sessions = self
+            .inner
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = sessions
+            .get(subagent_id)
+            .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))?;
+        ensure_child_owner(parent_session_id, subagent_id, record)?;
+        Ok(session_record_descriptor(record))
+    }
+
     /// Rebinds a persisted child so follow-up survives a parent process restart.
     ///
     /// # Errors
@@ -1243,6 +1293,9 @@ impl SubagentOrchestrator {
                 handle.subagent_id.clone(),
                 SessionRecord {
                     handle,
+                    task: "Recovered subagent".to_owned(),
+                    agent: "subagent".to_owned(),
+                    model: policy.model_alias.clone(),
                     session,
                     state: SessionState::Inactive,
                     result: None,
@@ -1262,6 +1315,7 @@ impl SubagentOrchestrator {
     /// # Errors
     ///
     /// Returns when depth, lease identity, or child-log recovery fails.
+    #[allow(clippy::too_many_lines)]
     pub async fn recover_record(
         &self,
         record: SubagentRecoveryRecord,
@@ -1349,6 +1403,17 @@ impl SubagentOrchestrator {
                 record.handle.subagent_id.clone(),
                 SessionRecord {
                     handle: record.handle,
+                    task: if record.task.is_empty() {
+                        "Recovered subagent".to_owned()
+                    } else {
+                        record.task
+                    },
+                    agent: if record.agent.is_empty() {
+                        "subagent".to_owned()
+                    } else {
+                        record.agent
+                    },
+                    model: record.policy.model_alias.clone(),
                     session,
                     state: SessionState::Inactive,
                     result: None,
@@ -1400,6 +1465,22 @@ impl SubagentOrchestrator {
             .get(subagent_id)
             .map(|record| record.session.worktree_record())
             .ok_or_else(|| OrchestrationError::UnknownSubagent(subagent_id.0.clone()))
+    }
+}
+
+fn session_record_descriptor(record: &SessionRecord) -> SubagentDescriptor {
+    SubagentDescriptor {
+        subagent_id: record.handle.subagent_id.clone(),
+        child_session_id: record.handle.session_id.clone(),
+        task: record.task.clone(),
+        agent: record.agent.clone(),
+        model: record.model.clone(),
+        isolation: record.isolation,
+        activity: if record.state == SessionState::Active {
+            SubagentActivity::Running
+        } else {
+            SubagentActivity::Idle
+        },
     }
 }
 
@@ -2255,10 +2336,7 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
         config.additional_workspace_roots.clear();
         config.model_alias.clone_from(&launch.request.model);
         config.tools = Arc::new(bind_child_tools(&config.tools, &launch.tools)?);
-        config.permissions = Arc::new(
-            crate::PermissionGate::new(PermissionDecision::Allow)
-                .with_workspace_roots([&launch.workspace_root]),
-        );
+        config.permissions = autonomous_child_permissions(&launch.workspace_root);
         apply_child_policy(
             &mut config,
             &launch.request.model,
@@ -2287,6 +2365,10 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
         config.session_id = session_id.clone();
         config.workspace_root = workspace_root.to_path_buf();
         config.additional_workspace_roots.clear();
+        // Child sessions are deliberately non-interactive. The exact tool
+        // allowlist selected at spawn/recovery is the authorization boundary;
+        // a recovered child must never pause on a parent-only approval prompt.
+        config.permissions = autonomous_child_permissions(workspace_root);
         if let Some(allowed_tools) = allowed_tools {
             config.tools = Arc::new(bind_child_tools(&config.tools, allowed_tools)?);
         }
@@ -2301,6 +2383,13 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
             .map_err(|error| OrchestrationError::Session(error.to_string()))?;
         Ok(Some(Arc::new(ActorSubagentSession { handle })))
     }
+}
+
+fn autonomous_child_permissions(workspace_root: &Path) -> Arc<crate::PermissionGate> {
+    Arc::new(
+        crate::PermissionGate::new(PermissionDecision::Allow)
+            .with_workspace_roots([workspace_root]),
+    )
 }
 
 fn apply_child_policy(
@@ -2326,7 +2415,7 @@ fn apply_child_policy(
             "Child permission mode: plan. Use only read-only tools and return a structured plan."
         }
         SubagentPermissionMode::Execute => {
-            "Child permission mode: execute. Mutations still require the ordinary permission chokepoint."
+            "Child permission mode: execute. Work autonomously within the exact tool grant selected by the parent; do not request interactive approval."
         }
     };
     if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
@@ -2964,6 +3053,8 @@ mod tests {
                 subagent_id: SubagentId(subagent.to_owned()),
                 session_id: SessionId(session.to_owned()),
             },
+            task: "fixture task".to_owned(),
+            agent: "fixture agent".to_owned(),
             depth: 1,
             workspace_root: std::env::current_dir().expect("cwd"),
             isolation: SubagentIsolation::Shared,
@@ -3068,6 +3159,14 @@ mod tests {
         ) -> Result<ToolResult, ToolError> {
             Ok(self.result.clone())
         }
+    }
+
+    #[test]
+    fn fresh_and_recovered_children_share_the_autonomous_permission_invariant() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let permissions = autonomous_child_permissions(workspace.path());
+        assert_eq!(permissions.snapshot().default, PermissionDecision::Allow);
+        assert!(permissions.snapshot().runtime_mode.is_none());
     }
 
     #[test]
@@ -3767,6 +3866,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn child_control_is_scoped_to_the_exact_parent_session() {
         let factory = Arc::new(FakeFactory::default());
         let orchestrator = orchestrator(SubagentLimits::default(), Arc::clone(&factory));
@@ -3796,6 +3896,29 @@ mod tests {
             .wait(&nested_attacker)
             .await
             .expect("finish nested attacker");
+
+        let listed = orchestrator.list_for_parent(&parent);
+        assert_eq!(listed.len(), 2);
+        let victim_descriptor = listed
+            .iter()
+            .find(|descriptor| descriptor.subagent_id == victim.subagent_id)
+            .expect("victim descriptor");
+        assert_eq!(victim_descriptor.task, "victim");
+        assert_eq!(victim_descriptor.agent, "fixture");
+        assert_eq!(victim_descriptor.model, "fast");
+        assert_eq!(victim_descriptor.activity, SubagentActivity::Idle);
+        assert!(
+            orchestrator
+                .list_for_parent(&SessionId("sibling-parent".to_owned()))
+                .is_empty()
+        );
+        assert!(matches!(
+            orchestrator.descriptor_for_parent(
+                &SessionId("sibling-parent".to_owned()),
+                &victim.subagent_id
+            ),
+            Err(OrchestrationError::UnknownSubagent(_))
+        ));
 
         for attacker in [
             SessionId("sibling-parent".to_owned()),
@@ -3868,6 +3991,11 @@ mod tests {
             .close(&parent, &victim.subagent_id)
             .await
             .expect("owner closes child");
+        assert!(
+            orchestrator
+                .descriptor_for_parent(&parent, &victim.subagent_id)
+                .is_err()
+        );
         assert_eq!(factory.cancelled.load(Ordering::Acquire), 1);
     }
 
