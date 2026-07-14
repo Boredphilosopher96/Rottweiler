@@ -268,18 +268,14 @@ security-sensitive sections are rejected before merging, so they never become
 effective even transiently.
 
 **M1 provider/network contract.** `[providers.<name>]` holds an adapter kind,
-optional endpoint, API-key environment/keychain references, and an optional
+optional endpoint, API-key environment/credential references, and an optional
 provider-specific proxy. `[models].aliases` remains the provider-blind ordered
 `provider/model` routing table; `[models].thinking` maps aliases to
 `off|low|medium|high`. Proxy authentication is configured as a non-secret
 username plus a `proxy_password_credential` identifier; the password resolves
-as one logical key inside Rottweiler's single versioned OS-keychain vault (or
-warned 0600 fallback) and is never rendered. Production managers share a
-process cache. Whole-vault writes serialize through one fixed per-OS-user lock,
-fresh-read the durable vault, merge one logical key, then replace it, so separate
-CLI/engine processes and alternate config roots cannot lose each other's writes.
-`ROTTWEILER_CREDENTIAL_BACKEND=file` prevents every OS-keychain call and selects
-the warned fallback explicitly (used by hermetic subprocess tests).
+as one logical key inside Rottweiler's single versioned owner-private credential
+file (mode 0600 on Unix) and is never rendered. Production does not link or call
+an operating-system credential-store backend, including during provider authentication.
 The global `[network]` form uses the same fields. Provider definitions and all
 proxy/authentication fields are user-scoped and ignored in project config.
 An API key uses `api_key_credential` when configured, otherwise the stable
@@ -362,7 +358,7 @@ is accepted only for an explicitly configured loopback endpoint.
 The recorder redactor is a shared registry rather than a construction-time
 snapshot: OAuth registers each newly issued access token synchronously before
 returning bearer material and registers a rotated refresh token immediately
-after durable persistence. Credential-store fallback warnings produced by a
+after durable persistence. Credential persistence warnings produced by a
 later rotation remain visible through the runtime warning snapshot.
 
 Routing is model-bound rather than pretending endpoint-wide capabilities are
@@ -392,5 +388,5 @@ Built on OpenTUI (per ADR-001), which supplies the retained component tree and t
 
 - **Errors**: `rw-types::Error` with categories (Provider, Tool, Sandbox, Config, Extension); user-facing messages are actionable ("model X hit rate limit, failing over to Y"), full chains in the debug log.
 - **Cancellation**: every async boundary takes a `CancelToken`. No detached tasks without a registered owner.
-- **Redaction**: a single `Redactor`, with **scoped aggressiveness**: content entering model context (file reads, `bash`/`webfetch` output) is redacted only via *known secrets* (registered env values, keychain entries) and strict key-format regexes — no entropy heuristic there, because false positives corrupt what the model sees and cause wrong edits. The entropy heuristic applies only at export/share boundaries, where a false positive is cosmetic.
+- **Redaction**: a single `Redactor`, with **scoped aggressiveness**: content entering model context (file reads, `bash`/`webfetch` output) is redacted only via *known secrets* (registered environment values and credential-file entries) and strict key-format regexes — no entropy heuristic there, because false positives corrupt what the model sees and cause wrong edits. The entropy heuristic applies only at export/share boundaries, where a false positive is cosmetic.
 - **Time & randomness** injected via traits — required for deterministic replay.

@@ -543,6 +543,19 @@ impl TerminalChild for TokioTerminalChild {
         self.cancelled.store(true, Ordering::Release);
         let input_result = join_io_thread(&mut self.input_thread, "PTY input").await;
         drop(self.idle_writer.take());
+        // A login shell can leave helpers from shell startup files holding the
+        // slave PTY after the requested foreground command exits. Reap that
+        // foreground session before joining the reader; otherwise one inherited
+        // descriptor can hang app shutdown forever. Foreground shell mode owns
+        // this process group, so detached work must use the background-process
+        // tools instead of escaping this lifecycle.
+        match rustix::process::kill_process_group(
+            self.target.process_group,
+            rustix::process::Signal::HUP,
+        ) {
+            Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+            Err(error) => return Err(error.into()),
+        }
         let restore_result = if let Some(mut terminal_mode) = self.terminal_mode.take() {
             terminal_mode.restore()
         } else {

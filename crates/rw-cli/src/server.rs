@@ -1244,7 +1244,7 @@ mod tests {
             Ok(ProviderApiKeySubmission {
                 stored: true,
                 activated: true,
-                warnings: vec!["fixture keychain warning".to_owned()],
+                warnings: vec!["fixture credential-store warning".to_owned()],
             })
         }
 
@@ -1490,7 +1490,9 @@ mod tests {
                 .windows(canary.len())
                 .any(|window| window == canary.as_bytes())
         );
-        assert!(String::from_utf8_lossy(&response_bytes).contains("fixture keychain warning"));
+        assert!(
+            String::from_utf8_lossy(&response_bytes).contains("fixture credential-store warning")
+        );
         {
             let keys = engine.provider_keys.lock().expect("provider keys");
             assert_eq!(keys.len(), 1);

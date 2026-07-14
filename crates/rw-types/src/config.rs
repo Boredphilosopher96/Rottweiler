@@ -229,7 +229,7 @@ pub struct ProviderConfig {
     pub proxy: Option<String>,
     /// Optional username for HTTP Basic proxy authentication.
     pub proxy_username: Option<String>,
-    /// Optional keychain credential identifier containing the proxy password.
+    /// Optional credential identifier containing the proxy password.
     pub proxy_password_credential: Option<String>,
     /// Optional environment-variable name containing an API key.
     pub api_key_env: Option<String>,
@@ -260,7 +260,7 @@ pub struct NetworkConfig {
     pub proxy: Option<String>,
     /// Optional username for HTTP Basic proxy authentication.
     pub proxy_username: Option<String>,
-    /// Optional keychain credential identifier containing the proxy password.
+    /// Optional credential identifier containing the proxy password.
     pub proxy_password_credential: Option<String>,
 }
 
@@ -492,7 +492,7 @@ pub struct NetworkConfigFile {
     pub proxy: Option<String>,
     /// Optional global proxy username.
     pub proxy_username: Option<String>,
-    /// Optional keychain credential identifier for the global proxy password.
+    /// Optional credential identifier for the global proxy password.
     pub proxy_password_credential: Option<String>,
 }
 

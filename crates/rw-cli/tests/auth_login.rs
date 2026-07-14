@@ -36,7 +36,6 @@ oauth_scopes = ["models", "offline_access"]
         .current_dir(root.path())
         .env("HOME", root.path())
         .env("ROTTWEILER_HOME", &user_root)
-        .env("ROTTWEILER_CREDENTIAL_BACKEND", "file")
         .args(["auth", "login", "subscription"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -125,7 +124,6 @@ api_key_env = "COPILOT_TOKEN_MUST_NOT_BE_READ"
         .current_dir(root.path())
         .env("HOME", root.path())
         .env("ROTTWEILER_HOME", &user_root)
-        .env("ROTTWEILER_CREDENTIAL_BACKEND", "file")
         .args(["auth", "login", "github-copilot"])
         .output()
         .expect("rw auth login should exit");

@@ -41,7 +41,7 @@ The status line shows `ctx — │ $— │ cache —` because `context_usage_up
 
 Two layers:
 - **Mechanical (GAP-08-02):** the picker derives providers from alias references (`app.ts:1032`); the maintainer's aliases are all `openai/*`, so exactly one appears.
-- **Design (the real ask):** the maintainer expects the provider surface to list **all supported/known providers with auth state** — like opencode, where the provider list comes from the live catalog (models.dev set + configured credentials) and you can pick one and authenticate *in the app*. Rottweiler has rich auth machinery (`rw auth`, device flows, keychain vault) but it is **CLI-only**; the TUI can only render what aliases mention.
+- **Historical diagnosis:** the maintainer expected the provider surface to list **all supported/known providers with auth state** — like opencode, with live provider catalogs and in-app authentication. The resolved implementation exposes that live inventory and persists Rottweiler-owned credentials in its owner-private file; the TUI no longer derives provider choices only from aliases.
 
 **Fix:** engine exposes a provider inventory — `{ name, auth_kind, authenticated?, reachable?, model_count }` for configured providers *plus* known-supported providers in an "available to set up" section — and the TUI provider picker drives an in-app auth flow (device-code display for Copilot/ChatGPT, key prompt for API providers) instead of pointing users at config files.
 

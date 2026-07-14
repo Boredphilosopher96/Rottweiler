@@ -37,7 +37,7 @@ authorization URL, sends an adversarial callback state, and verifies that the
 process rejects it without echoing the state or authorization code.
 
 The production `rw-core::ProviderFactory` is exercised separately from adapter
-unit construction. Deterministic loopback tests cover env-over-keychain API
+unit construction. Deterministic loopback tests cover environment-over-private-file API
 keys, static OAuth bearer auth, an actual refresh request plus durable rotation,
 provider-proxy Basic auth, known-secret fixture redaction, mixed-auth rejection,
 and exact model binding. A two-model/one-provider fixture gives the models
@@ -47,7 +47,7 @@ at absent aliases fail before any socket can open.
 The refresh fixture deliberately echoes the newly issued bearer token and
 rotated refresh token from the model endpoint after the recorder is already
 constructed; both are absent from fixture JSON, redactor/runtime diagnostics,
-and a keychain-fallback warning remains visible. A poisoned-registry test proves
+and private-file storage metadata remains secret. A poisoned-registry test proves
 previous and subsequent registrations still redact. Catalog tests also bind an
 official kind to its canonical namespace despite a conflicting logical-name
 entry, while a compatible adapter uses only its explicit logical entry.
@@ -70,7 +70,7 @@ polling intervals, slow-down handling, expiry, denial, and cancellation without
 opening a browser or reading a real credential backend. Captured `/models`
 fixtures cover policy filtering, required capabilities, Messages > Responses >
 Chat endpoint selection, nominal AI-credit conversion, and malformed/401/403
-failure classes. Factory fixtures use injected vault/keychain backends and a
+failure classes. Factory fixtures use injected credential-store backends and a
 test-only loopback runtime; the credential canary is registered before discovery
 or inference, API-key and endpoint mixing fail before network, and an offline
 `ReplayProvider` consumes the recorded inference without a discovery socket.
@@ -233,7 +233,7 @@ the provider, tools, commands, and session actor, and observes a marker emitted
 only at that boundary. The subprocess harness requires three distinct child
 PIDs, complete `/mcp status` catalog evidence, and successful child reaping. It
 uses an in-memory provider and denied-network MCP sandboxes, so it neither reads
-the OS keychain nor opens a network connection. After five policy/executable
+the production credential file nor opens a network connection. After five policy/executable
 warmups, release p99 across at least 100 independent fresh-process samples with
 identically seeded security state must remain below 250ms; this is explicitly a
 warm-cache, fresh-process budget. The isolated Cargo target is deleted on exit.

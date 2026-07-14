@@ -2592,9 +2592,8 @@ pub(crate) async fn compose_hosted_actor(
             // Keep the hosted control plane and its private local transport
             // independent from provider credentials. Provider construction is
             // deliberately deferred until the first model preparation,
-            // explicit catalog request, or provider activation. On macOS this
-            // is also the boundary that prevents an idle TUI attach from
-            // triggering a Keychain authorization prompt.
+            // explicit catalog request, or provider activation. This keeps an
+            // idle TUI attach free of provider credential I/O and network work.
             let redactor = fixture_redactor.clone();
             let model = lazy_live_provider_model(
                 factory,
@@ -2605,18 +2604,22 @@ pub(crate) async fn compose_hosted_actor(
                 redactor.clone(),
                 built_tools.websearch.clone(),
             );
-            let source: Arc<dyn ModelCatalogSource> = model.clone();
-            let initial_catalog =
-                load_model_catalog_cache(&options.storage_root.join("model-catalog.json"))
-                    .ok()
-                    .flatten()
-                    .or_else(|| Some(ProviderModelCatalogSource::placeholder(&options.config)));
+            let cache_path = options.storage_root.join("model-catalog.json");
+            let initial_catalog = load_model_catalog_cache(&cache_path)
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| ProviderModelCatalogSource::placeholder(&options.config));
+            let source: Arc<dyn ModelCatalogSource> = Arc::new(PersistingHostedCatalogSource {
+                inner: model.clone(),
+                cache_path,
+                initial: initial_catalog.clone(),
+            });
             (
                 model,
                 redactor,
                 Some(Arc::new(CachedModelCatalog::with_initial(
                     source,
-                    initial_catalog,
+                    Some(initial_catalog),
                 ))),
             )
         }
@@ -6130,6 +6133,93 @@ struct ReloadingHostedCatalogSource {
     project_config_path: PathBuf,
 }
 
+/// Persists both full and provider-scoped live catalogs. Provider auth uses
+/// the scoped path, so omitting this wrapper would leave the process cache
+/// healthy while the next app launch fell back to an unauthenticated
+/// placeholder until the provider modal forced another refresh.
+struct PersistingHostedCatalogSource {
+    inner: Arc<dyn ModelCatalogSource>,
+    cache_path: PathBuf,
+    initial: ModelCatalogSnapshot,
+}
+
+#[async_trait]
+impl ModelCatalogSource for PersistingHostedCatalogSource {
+    async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let snapshot = self.inner.discover().await?;
+        persist_catalog_snapshot(self.cache_path.clone(), snapshot.clone()).await;
+        Ok(snapshot)
+    }
+
+    async fn discover_provider(
+        &self,
+        provider: &str,
+    ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let update = self.inner.discover_provider(provider).await?;
+        let base = load_model_catalog_cache(&self.cache_path)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| self.initial.clone());
+        let durable = merge_catalog_provider(base, update.clone(), provider);
+        persist_catalog_snapshot(self.cache_path.clone(), durable).await;
+        Ok(update)
+    }
+}
+
+async fn persist_catalog_snapshot(path: PathBuf, snapshot: ModelCatalogSnapshot) {
+    // Catalog persistence is a cache optimization. A successful authenticated
+    // provider operation must not be relabelled as failed if the private cache
+    // cannot be refreshed.
+    let _ = tokio::task::spawn_blocking(move || store_model_catalog_cache(&path, &snapshot)).await;
+}
+
+fn merge_catalog_provider(
+    mut base: ModelCatalogSnapshot,
+    mut update: ModelCatalogSnapshot,
+    provider: &str,
+) -> ModelCatalogSnapshot {
+    fn candidate_provider(candidate: &str) -> Option<&str> {
+        candidate.split_once('/').map(|(owner, _)| owner)
+    }
+    update.providers.retain(|row| row.name == provider);
+    update.models.retain(|model| model.provider == provider);
+    update.aliases.retain_mut(|alias| {
+        alias
+            .candidates
+            .retain(|candidate| candidate_provider(candidate) == Some(provider));
+        !alias.candidates.is_empty()
+    });
+
+    base.providers.retain(|row| row.name != provider);
+    base.providers.append(&mut update.providers);
+    base.providers
+        .sort_by(|left, right| left.name.cmp(&right.name));
+    base.models.retain(|model| model.provider != provider);
+    base.models.append(&mut update.models);
+    base.models.sort_by(|left, right| left.id.cmp(&right.id));
+    for alias in &mut base.aliases {
+        alias
+            .candidates
+            .retain(|candidate| candidate_provider(candidate) != Some(provider));
+        if let Some(position) = update
+            .aliases
+            .iter()
+            .position(|updated| updated.alias == alias.alias)
+        {
+            let updated = update.aliases.remove(position);
+            alias.candidates.extend(updated.candidates);
+            alias.current |= updated.current;
+        }
+    }
+    base.aliases.retain(|alias| !alias.candidates.is_empty());
+    base.aliases.append(&mut update.aliases);
+    base.aliases
+        .sort_by(|left, right| left.alias.0.cmp(&right.alias.0));
+    base.truncated |= update.truncated;
+    base.cached = false;
+    base
+}
+
 #[async_trait]
 impl ModelCatalogSource for ReloadingHostedCatalogSource {
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
@@ -6478,6 +6568,7 @@ struct PreparedHostedSelection {
     provider: Option<String>,
     replacement_model: Arc<dyn ModelDriver>,
     post_commit: Option<Arc<dyn Fn() + Send + Sync>>,
+    completes_initialization: bool,
 }
 
 #[derive(Clone)]
@@ -6614,6 +6705,7 @@ impl RecomposableHostedModel {
                     provider: Some(provider.to_owned()),
                     replacement_model: activated.replacement_model,
                     post_commit: activated.post_commit,
+                    completes_initialization: false,
                 },
             );
         Ok(true)
@@ -6627,15 +6719,24 @@ impl RecomposableHostedModel {
         if !self.initial_load_pending.load(Ordering::Acquire) {
             return Ok(false);
         }
+        if self
+            .prepared
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(alias)
+        {
+            return Ok(true);
+        }
         let Some(initialize) = self.initialize.clone() else {
             return Ok(false);
         };
-        // This is an explicitly authorized first provider use and may include
-        // an OS credential prompt. Do not impose the short provider-menu
-        // activation deadline: timing out while macOS is awaiting approval is
-        // indistinguishable from the historical false "activation failed"
-        // state. If this future is cancelled, the private result owns no live
-        // session state and therefore cannot commit late.
+        // This is an explicitly requested first provider use and can include a
+        // browser/device handshake plus live model discovery. Do not impose the
+        // short provider-menu activation deadline on that network-bound flow.
+        // Credentials come from Rottweiler's private file, so this path never
+        // invokes an operating-system credential prompt. If this future is
+        // cancelled, the private result owns no live session state and cannot
+        // commit late.
         let alias_owned = alias.to_owned();
         let mut initialized = tokio::task::spawn_blocking(move || initialize(&alias_owned))
             .await
@@ -6649,24 +6750,18 @@ impl RecomposableHostedModel {
                 "model {alias:?} is not available from the initialized provider runtime"
             )));
         }
-        {
-            let mut current = self
-                .model
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *current = Arc::clone(&initialized.replacement_model);
-        }
-        {
-            let mut active = self
-                .active_post_commit
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            active.clone_from(&initialized.post_commit);
-        }
-        if let Some(post_commit) = initialized.post_commit {
-            post_commit();
-        }
-        self.initial_load_pending.store(false, Ordering::Release);
+        self.prepared
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                alias.to_owned(),
+                PreparedHostedSelection {
+                    provider: None,
+                    replacement_model: initialized.replacement_model,
+                    post_commit: initialized.post_commit,
+                    completes_initialization: true,
+                },
+            );
         Ok(true)
     }
 }
@@ -6712,7 +6807,38 @@ impl ModelDriver for RecomposableHostedModel {
         if self.initial_load_pending.load(Ordering::Acquire) {
             return !alias.trim().is_empty();
         }
-        self.current().has_model_alias(alias)
+        if self.current().has_model_alias(alias) {
+            return true;
+        }
+        let Some((provider, model)) = alias.split_once('/') else {
+            return false;
+        };
+        if provider.is_empty() || model.trim().is_empty() {
+            return false;
+        }
+        if self
+            .standby
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(provider)
+            .is_some_and(|activated| activated.replacement_model.has_model_alias(alias))
+        {
+            return true;
+        }
+        if self
+            .prepared
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(alias)
+            .is_some_and(|prepared| prepared.replacement_model.has_model_alias(alias))
+        {
+            return true;
+        }
+        self.retained
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|retained| retained.model.has_model_alias(alias))
     }
 
     fn title_model_alias(&self) -> Option<String> {
@@ -6720,6 +6846,15 @@ impl ModelDriver for RecomposableHostedModel {
     }
 
     async fn prepare_model(&self, alias: &str) -> std::result::Result<(), AgentLoopError> {
+        if self.initial_load_pending.load(Ordering::Acquire)
+            && self
+                .prepared
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(alias)
+        {
+            return Ok(());
+        }
         self.prepared
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6755,6 +6890,7 @@ impl ModelDriver for RecomposableHostedModel {
                             provider: None,
                             replacement_model: candidate.model,
                             post_commit: candidate.post_commit,
+                            completes_initialization: false,
                         },
                     );
                 return Ok(());
@@ -6810,6 +6946,9 @@ impl ModelDriver for RecomposableHostedModel {
         }
         if let Some(post_commit) = prepared.post_commit {
             post_commit();
+        }
+        if prepared.completes_initialization {
+            self.initial_load_pending.store(false, Ordering::Release);
         }
     }
 
@@ -6867,7 +7006,36 @@ impl ModelDriver for RecomposableHostedModel {
     }
 
     fn has_provider_for_alias(&self, alias: &str, provider: &str) -> bool {
+        let exact_provider_route = alias
+            .split_once('/')
+            .is_some_and(|(alias_provider, model)| {
+                alias_provider == provider && !model.trim().is_empty()
+            });
+        if exact_provider_route && self.initial_load_pending.load(Ordering::Acquire) {
+            // The initial lazy runtime is intentionally unavailable until the
+            // user selects a model. Exact concrete routes still need to pass
+            // protocol prevalidation so the context-transfer choice can be
+            // shown before provider preparation touches credentials.
+            return true;
+        }
         if self.current().has_provider_for_alias(alias, provider) {
+            return true;
+        }
+        if self
+            .standby
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(provider)
+            .is_some_and(|activated| {
+                activated
+                    .replacement_model
+                    .has_provider_for_alias(alias, provider)
+                    || (exact_provider_route && activated.replacement_model.has_model_alias(alias))
+            })
+        {
+            // A successfully authenticated provider is staged independently
+            // of the active model. Its exact routes are selectable before the
+            // later prepare/commit step swaps the runtime generation.
             return true;
         }
         if self
@@ -12424,6 +12592,8 @@ mod tests {
         provider_discoveries: Mutex<Vec<String>>,
     }
 
+    struct FixedProviderCatalogSource(ModelCatalogSnapshot);
+
     #[async_trait]
     impl ModelCatalogSource for QuickCatalogSource {
         async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
@@ -12466,6 +12636,71 @@ mod tests {
                 truncated: true,
             })
         }
+    }
+
+    #[async_trait]
+    impl ModelCatalogSource for FixedProviderCatalogSource {
+        async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            Ok(self.0.clone())
+        }
+
+        async fn discover_provider(
+            &self,
+            _provider: &str,
+        ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_scoped_auth_refresh_survives_process_restart_cache_load() {
+        let storage = tempdir().expect("storage");
+        let cache_path = storage.path().join("model-catalog.json");
+        let mut config = Config::default();
+        config.providers.insert(
+            "github_copilot".to_owned(),
+            ProviderConfig {
+                kind: "github_copilot".to_owned(),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.aliases.insert(
+            "copilot".to_owned(),
+            vec!["github_copilot/gpt-5-mini".to_owned()],
+        );
+        let initial = ProviderModelCatalogSource::placeholder(&config);
+        let mut update = initial.clone();
+        let provider = update
+            .providers
+            .iter_mut()
+            .find(|provider| provider.name == "github_copilot")
+            .expect("copilot provider row");
+        provider.authenticated = true;
+        provider.reachable = true;
+        provider.model_count = 1;
+        provider.status = None;
+
+        let source = PersistingHostedCatalogSource {
+            inner: Arc::new(FixedProviderCatalogSource(update)),
+            cache_path: cache_path.clone(),
+            initial,
+        };
+        source
+            .discover_provider("github_copilot")
+            .await
+            .expect("provider refresh");
+
+        let restarted = load_model_catalog_cache(&cache_path)
+            .expect("cache read")
+            .expect("durable catalog");
+        let provider = restarted
+            .providers
+            .iter()
+            .find(|provider| provider.name == "github_copilot")
+            .expect("persisted copilot row");
+        assert!(provider.authenticated);
+        assert!(provider.reachable);
+        assert_eq!(provider.model_count, 1);
     }
 
     #[async_trait]
@@ -12664,6 +12899,8 @@ mod tests {
         );
 
         assert_eq!(calls.load(Ordering::Acquire), 0);
+        assert!(model.has_provider_for_alias("openai/live-model", "openai"));
+        assert!(!model.has_provider_for_alias("openai/live-model", "github_copilot"));
         assert!(
             model
                 .stream("openai/live-model", quick_connect_request())
@@ -12677,9 +12914,16 @@ mod tests {
             .await
             .expect("first model use should initialize the provider runtime");
         assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert!(
+            model
+                .stream("openai/live-model", quick_connect_request())
+                .is_err(),
+            "preparation must not activate the initialized runtime before persistence"
+        );
+        model.commit_prepared_model("openai/live-model");
         let events = model
             .stream("openai/live-model", quick_connect_request())
-            .expect("initialized model should stream")
+            .expect("committed initialized model should stream")
             .collect::<Vec<_>>()
             .await;
         assert!(events.iter().any(|event| {
@@ -12721,6 +12965,133 @@ mod tests {
         first.expect("retry should initialize");
         second.expect("concurrent waiter should observe initialized runtime");
         assert_eq!(calls.load(Ordering::Acquire), 2);
+    }
+
+    struct FailModelChangedSink {
+        inner: rw_core::NoopSessionEventSink,
+    }
+
+    #[async_trait]
+    impl SessionEventSink for FailModelChangedSink {
+        async fn append(
+            &self,
+            event: EngineEvent,
+        ) -> std::result::Result<EngineEvent, AgentLoopError> {
+            if matches!(event, EngineEvent::ModelChanged { .. }) {
+                return Err(AgentLoopError::Persistence(
+                    "model change fixture failure".to_owned(),
+                ));
+            }
+            self.inner.append(event).await
+        }
+
+        async fn read_after(
+            &self,
+            last_seen: Option<SequenceId>,
+        ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
+            self.inner.read_after(last_seen).await
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_first_model_switch_does_not_activate_when_persistence_fails() {
+        let initialize_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&initialize_calls);
+        let post_commit_ran = Arc::new(AtomicBool::new(false));
+        let callback_ran = Arc::clone(&post_commit_ran);
+        let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move |alias| {
+            assert_eq!(alias, "openai/live-model");
+            calls.fetch_add(1, Ordering::AcqRel);
+            let callback_ran = Arc::clone(&callback_ran);
+            Ok(ActivatedHostedProvider {
+                replacement_model: Arc::new(QuickConnectedModel),
+                pre_commit: None,
+                post_commit: Some(Arc::new(move || {
+                    callback_ran.store(true, Ordering::Release);
+                })),
+            })
+        });
+        let model = Arc::new(RecomposableHostedModel::new_lazy(
+            unavailable_hosted_model("local/base"),
+            Arc::new(QuickCatalogSource(false)),
+            unused_hosted_activator(),
+            initialize,
+        ));
+        let workspace = tempdir().expect("workspace");
+        let session_id = SessionId("failed-lazy-model-switch".to_owned());
+        let actor = SessionActor::spawn(SessionActorConfig {
+            session_id: session_id.clone(),
+            workspace_root: workspace.path().to_path_buf(),
+            additional_workspace_roots: Vec::new(),
+            workspace_generation: 0,
+            initial_session_context: Vec::new(),
+            startup_notifications: Vec::new(),
+            model_alias: "local/base".to_owned(),
+            model: model.clone(),
+            tools: Arc::new(ToolRegistry::new()),
+            permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
+            hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
+            commands: Arc::new(builtin_command_registry().expect("commands")),
+            event_sink: Arc::new(FailModelChangedSink {
+                inner: rw_core::NoopSessionEventSink::default(),
+            }),
+            event_clock: Arc::new(SystemEventClock),
+            secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
+            checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
+            folder_trust: Arc::new(rw_core::NoopFolderTrustController),
+            workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
+            recovered: rw_core::SessionRecoveredState {
+                driver_client_id: Some(ClientId("driver".to_owned())),
+                ..rw_core::SessionRecoveredState::default()
+            },
+            max_turns: 2,
+            identical_tool_failure_limit: 2,
+            max_output_tokens: 512,
+            thinking: ThinkingLevel::Off,
+            event_capacity: 32,
+        })
+        .expect("actor");
+
+        assert_eq!(
+            actor
+                .dispatch(rw_core::ClientCommand::SwitchModel {
+                    meta: rw_core::CommandMeta {
+                        protocol_version: rw_core::PROTOCOL_VERSION,
+                        client_id: ClientId("driver".to_owned()),
+                        request_id: rw_core::RequestId("switch".to_owned()),
+                    },
+                    session_id,
+                    model: rw_core::ModelAlias("openai/live-model".to_owned()),
+                    provider: Some("openai".to_owned()),
+                })
+                .await
+                .expect("command acknowledgement"),
+            rw_core::CommandOutcome::Accepted
+        );
+        assert_eq!(initialize_calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            actor.snapshot().await.expect("snapshot").model_alias,
+            "local/base"
+        );
+        assert!(!post_commit_ran.load(Ordering::Acquire));
+        assert!(
+            model
+                .stream("openai/live-model", quick_connect_request())
+                .is_err(),
+            "the unavailable initial runtime must remain active"
+        );
+        model
+            .prepare_model("openai/live-model")
+            .await
+            .expect("failed persistence must leave initialization retryable");
+        assert_eq!(initialize_calls.load(Ordering::Acquire), 2);
+        assert!(
+            model
+                .stream("openai/live-model", quick_connect_request())
+                .is_err(),
+            "a retry must also remain staged until its durable commit"
+        );
+        model.discard_prepared_model("openai/live-model");
     }
 
     #[tokio::test]
@@ -12906,8 +13277,10 @@ mod tests {
             .activate_provider("openai", Some("local/base"))
             .await
             .expect("connecting a provider must not validate or switch the selected model");
+        assert!(model.has_model_alias("openai/live-model"));
+        assert!(model.has_provider_for_alias("openai/live-model", "openai"));
+        assert!(!model.has_provider_for_alias("openai/live-model", "github_copilot"));
         assert!(model.has_model_alias("local/base"));
-        assert!(!model.has_model_alias("openai/live-model"));
         model
             .prepare_model("openai/live-model")
             .await
@@ -12922,14 +13295,100 @@ mod tests {
             .expect("concurrent title preparation stays on the current runtime");
         model.commit_prepared_model("openai/live-model");
         assert!(model.has_model_alias("openai/live-model"));
-        assert!(!model.has_model_alias("local/base"));
+        assert!(
+            model.has_model_alias("local/base"),
+            "the retained previous generation must remain selectable"
+        );
         model
             .prepare_model("local/base")
             .await
             .expect("the previous provider generation remains selectable");
         model.commit_prepared_model("local/base");
         assert!(model.has_model_alias("local/base"));
-        assert!(!model.has_model_alias("openai/live-model"));
+        assert!(
+            model.has_model_alias("openai/live-model"),
+            "the prior provider generation must remain selectable after switching back"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_switches_to_an_exact_model_route_staged_by_provider_activation() {
+        let activate: Arc<HostedProviderActivator> = Arc::new(move |_| {
+            Ok(ActivatedHostedProvider {
+                replacement_model: Arc::new(QuickConnectedModel),
+                pre_commit: None,
+                post_commit: None,
+            })
+        });
+        let model = Arc::new(RecomposableHostedModel::new(
+            Arc::new(ExistingRouteModel),
+            Arc::new(QuickCatalogSource(false)),
+            activate,
+        ));
+        model
+            .activate_provider("openai", Some("local/base"))
+            .await
+            .expect("provider activation");
+
+        let workspace = tempdir().expect("workspace");
+        let session_id = SessionId("staged-provider-switch".to_owned());
+        let actor = SessionActor::spawn(SessionActorConfig {
+            session_id: session_id.clone(),
+            workspace_root: workspace.path().to_path_buf(),
+            additional_workspace_roots: Vec::new(),
+            workspace_generation: 0,
+            initial_session_context: Vec::new(),
+            startup_notifications: Vec::new(),
+            model_alias: "local/base".to_owned(),
+            model,
+            tools: Arc::new(ToolRegistry::new()),
+            permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
+            hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
+            commands: Arc::new(builtin_command_registry().expect("commands")),
+            event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
+            event_clock: Arc::new(SystemEventClock),
+            secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
+            checkpoints: Arc::new(rw_core::NoopMutationCheckpointCoordinator),
+            folder_trust: Arc::new(rw_core::NoopFolderTrustController),
+            workspace_roots: Arc::new(rw_core::NoopWorkspaceRootController),
+            recovered: rw_core::SessionRecoveredState {
+                driver_client_id: Some(ClientId("driver".to_owned())),
+                ..rw_core::SessionRecoveredState::default()
+            },
+            max_turns: 2,
+            identical_tool_failure_limit: 2,
+            max_output_tokens: 512,
+            thinking: ThinkingLevel::Off,
+            event_capacity: 32,
+        })
+        .expect("actor");
+        let command_meta = |request: &str| rw_core::CommandMeta {
+            protocol_version: rw_core::PROTOCOL_VERSION,
+            client_id: ClientId("driver".to_owned()),
+            request_id: rw_core::RequestId(request.to_owned()),
+        };
+        assert_eq!(
+            actor
+                .dispatch(rw_core::ClientCommand::SwitchModel {
+                    meta: command_meta("switch"),
+                    session_id,
+                    model: rw_core::ModelAlias("openai/live-model".to_owned()),
+                    provider: Some("openai".to_owned()),
+                })
+                .await
+                .expect("switch"),
+            rw_core::CommandOutcome::Accepted
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if actor.snapshot().await.expect("snapshot").model_alias == "openai/live-model" {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("staged model committed");
     }
 
     #[test]
@@ -13238,7 +13697,10 @@ mod tests {
             vec!["initial", "pre"]
         );
         assert!(model.has_model_alias("local/base"));
-        assert!(!model.has_model_alias("openai/live-model"));
+        assert!(
+            model.has_model_alias("openai/live-model"),
+            "staged route visibility must not run the post-commit callback"
+        );
         model
             .prepare_model("openai/live-model")
             .await
@@ -13262,7 +13724,10 @@ mod tests {
             *callbacks.lock().expect("callback log"),
             vec!["initial", "pre", "post"]
         );
-        assert!(!model.has_model_alias("local/base"));
+        assert!(
+            model.has_model_alias("local/base"),
+            "committing a provider switch must retain the previous selectable generation"
+        );
         assert!(model.has_model_alias("openai/live-model"));
         model
             .prepare_model("local/base")
@@ -19179,7 +19644,11 @@ mod tests {
             Arc::new(BlockedPluginEventPublisher),
         );
         let started = std::time::Instant::now();
-        for index in 0..10_000 {
+        // Fill the bounded queue, then cross the exact sustained-overflow
+        // threshold. Tens of thousands of JSON allocations only benchmarked a
+        // debug build and made this logical non-blocking regression host-load
+        // dependent without exercising another state transition.
+        for index in 0..=(PLUGIN_EVENT_QUEUE_CAPACITY + PLUGIN_EVENT_SUSTAINED_OVERFLOW) {
             worker.publish(
                 "text_delta",
                 "TextDelta",

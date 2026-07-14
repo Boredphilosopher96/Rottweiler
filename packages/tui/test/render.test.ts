@@ -1,28 +1,9 @@
 import { describe, expect, test } from "bun:test"
 
-import { CustomSpeedScroll, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, presentableUnifiedDiff, terminalMarkdown, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { CustomSpeedScroll, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, presentableUnifiedDiff, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 import { embeddedParserConfigurations } from "../src/tree-sitter-runtime"
 
 describe("bounded retained rendering", () => {
-  test("presents Mermaid as authored source without terminal-renderer claims", () => {
-    const source = "## Architecture\n\n```mermaid\nflowchart LR\n  A[Client] --> B[Engine]\n```"
-    const rendered = terminalMarkdown(source, 80)
-
-    expect(rendered).toContain("```text")
-    expect(rendered).toContain("flowchart LR")
-    expect(rendered).toContain("A[Client] --> B[Engine]")
-    expect(rendered).not.toContain("Mermaid diagram")
-    expect(rendered).not.toContain("Rendering diagram")
-    expect(rendered).not.toContain("cannot render")
-  })
-
-  test("keeps streaming, quoted, and tilde Mermaid fences as plain source", () => {
-    const streaming = terminalMarkdown("```mermaid\nflowchart TB\n A -->", 24, "streaming")
-    expect(streaming).toBe("```text\nflowchart TB\n A -->")
-    expect(terminalMarkdown("~~~mmd title=x\ngraph LR\nA --> B\n~~~", 24)).toContain("~~~text")
-    expect(terminalMarkdown("> ```flowchart\n> A --> B\n> ```", 24)).toContain("> ```text")
-  })
-
   test("only exposes filetypes backed by the embedded parser catalog", () => {
     const configured = new Set(
       embeddedParserConfigurations("/tmp/parser-assets")
@@ -234,14 +215,6 @@ describe("bounded retained rendering", () => {
     expect(structuredOnly).not.toContain("tool_definitions")
     expect(structuredOnly).not.toContain("/private/repo")
 
-    expect(toolOutputText({
-      type: "text",
-      text: JSON.stringify({
-        data: { paths: ["src/main.rs"], machine_local_path: "/private/repo" },
-        stable_prefix_hash: "internal-hash",
-        truncated: false,
-      }),
-    })).toBe("src/main.rs")
     expect(toolOutputText({
       type: "text",
       text: "{\n  \"name\": \"user-authored.json\"\n}",

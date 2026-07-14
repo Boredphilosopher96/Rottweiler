@@ -42,7 +42,6 @@ async fn client(
                 .env_clear()
                 .env("HOME", home)
                 .env("ROTTWEILER_HOME", home)
-                .env("ROTTWEILER_CREDENTIAL_BACKEND", "file")
                 .current_dir(workspace)
                 .arg("--in-memory-replay-script")
                 .arg(script)

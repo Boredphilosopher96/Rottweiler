@@ -435,13 +435,18 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   #contentChanged(): void {
-    if (!this.#restoringHistory) {
+    const restoringHistory = this.#restoringHistory
+    if (!restoringHistory) {
       this.#historyIndex = null
       this.#historyDraft = ""
     }
     this.#refreshHeight()
     const value = this.editor.plainText
     this.setShellMode(value.startsWith("!"))
+    // Recalling a slash command must not open autocomplete and steal the next
+    // Down key. The recalled draft becomes ordinary editable input on the
+    // first real content change, which resumes autocomplete normally.
+    if (restoringHistory) return
     this.#options.onInput?.(value)
     const mention = this.currentFileMention()
     if (mention !== null) this.#options.onFileMention(mention)

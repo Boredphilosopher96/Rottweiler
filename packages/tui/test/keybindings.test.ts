@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { parseKeypress } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
@@ -88,6 +89,17 @@ describe("standard TUI keyboard safety", () => {
   afterEach(() => {
     renderer?.destroy()
     renderer = undefined
+  })
+
+  test("decodes macOS Command arrows separately from a physical Ctrl+E", () => {
+    const commandRight = parseKeypress("\u001b[1;9C", { useKittyKeyboard: true })
+    const commandLeft = parseKeypress("\u001b[1;9D", { useKittyKeyboard: true })
+    const controlE = parseKeypress("\u0005", { useKittyKeyboard: true })
+
+    expect(commandRight).toMatchObject({ name: "right", super: true, ctrl: false })
+    expect(commandLeft).toMatchObject({ name: "left", super: true, ctrl: false })
+    expect(controlE).toMatchObject({ name: "e", ctrl: true })
+    expect(controlE?.super).not.toBe(true)
   })
 
   test("uses double Escape to interrupt an active response", async () => {
@@ -206,6 +218,37 @@ describe("standard TUI keyboard safety", () => {
     setup.mockInput.pressArrow("up")
     expect(app.composer.value).toBe("top line\nbottom line")
     expect(app.composer.editor.logicalCursor.row).toBe(0)
+  })
+
+  test("restores the unsent draft after cycling slash-command history", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      onCommand() {
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.composer.value = "/status"
+    expect(await app.composer.submit()).toBeTrue()
+    app.composer.value = "/cost"
+    expect(await app.composer.submit()).toBeTrue()
+    app.composer.value = "draft in progress"
+    app.composer.focus()
+
+    setup.mockInput.pressArrow("up")
+    expect(app.composer.value).toBe("/cost")
+    expect(app.picker.visible).toBeFalse()
+    setup.mockInput.pressArrow("up")
+    expect(app.composer.value).toBe("/status")
+    expect(app.picker.visible).toBeFalse()
+    setup.mockInput.pressArrow("down")
+    expect(app.composer.value).toBe("/cost")
+    expect(app.picker.visible).toBeFalse()
+    setup.mockInput.pressArrow("down")
+    expect(app.composer.value).toBe("draft in progress")
+    expect(app.picker.visible).toBeFalse()
   })
 })
 

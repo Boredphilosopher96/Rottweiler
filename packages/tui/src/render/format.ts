@@ -1,5 +1,14 @@
 import type { Cost, CostSnapshot, ToolOutput, Turn, Usage } from "../protocol"
 
+/** Markdown is preserved verbatim; unsupported diagram languages remain ordinary code fences. */
+export function terminalMarkdown(
+  markdown: string,
+  _width: number,
+  _phase: "streaming" | "complete" = "complete",
+): string {
+  return markdown
+}
+
 export function formatCost(cost: Cost | null | undefined, usage?: Usage | null): string {
   if (cost === null || cost === undefined) {
     return "—"
@@ -126,21 +135,47 @@ export function toolOutputText(output: ToolOutput | null): string {
     case "structured":
       return structuredToolSummary(output.value)
     case "mixed": {
-      const text = output.parts
-        .filter((part): part is Extract<(typeof output.parts)[number], { type: "text" }> => part.type === "text")
-        .map((part) => presentableTextToolOutput(part.text))
-        .filter(Boolean)
       const images = output.parts
         .filter((part): part is Extract<(typeof output.parts)[number], { type: "image" }> => part.type === "image")
         .map((part) => `Image attachment · ${part.media_type}`)
-      if (text.length > 0) return [...text, ...images].join("\n")
       const structured = output.parts
         .filter((part): part is Extract<(typeof output.parts)[number], { type: "structured" }> => part.type === "structured")
         .map((part) => structuredToolSummary(part.value))
         .filter(Boolean)
-      return [...structured, ...images].join("\n")
+      if (structured.length > 0) return [...structured, ...images].join("\n")
+      const text = output.parts
+        .filter((part): part is Extract<(typeof output.parts)[number], { type: "text" }> => part.type === "text")
+        .map((part) => presentableTextToolOutput(part.text))
+        .filter(Boolean)
+      return [...text, ...images].join("\n")
     }
   }
+}
+
+/** Last structured payload emitted for a tool invocation, with the wire envelope removed. */
+export function toolStructuredData(output: ToolOutput | null): unknown | null {
+  if (output === null) return null
+  const values = output.type === "structured"
+    ? [output.value]
+    : output.type === "mixed"
+      ? output.parts.flatMap((part) => part.type === "structured" ? [part.value] : [])
+      : []
+  return values.length === 0 ? null : unwrapToolPayload(values.at(-1))
+}
+
+/** Plain result text for tools whose user-facing result is text, never protected model framing. */
+export function toolPlainText(output: ToolOutput | null): string {
+  if (output === null) return ""
+  const values = output.type === "text"
+    ? [output.text]
+    : output.type === "mixed"
+      ? output.parts.flatMap((part) => part.type === "text" ? [part.text] : [])
+      : []
+  return values
+    .map(presentableTextToolOutput)
+    .filter((value) => !/^\s*<rottweiler_untrusted_[a-z0-9_]+(?:\s[^>]*)?>/i.test(value))
+    .filter(Boolean)
+    .join("\n")
 }
 
 function presentableTextToolOutput(source: string): string {
@@ -149,25 +184,7 @@ function presentableTextToolOutput(source: string): string {
     .replaceAll("\r", "\n")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
-  const trimmed = safe.trim()
-  // Some provider adapters serialize a structured ToolOutput as text. Decode
-  // only recognizable protocol envelopes; a file read containing ordinary
-  // JSON remains the file content the user asked to inspect.
-  if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length <= 512 * 1024) {
-    try {
-      const parsed: unknown = JSON.parse(trimmed)
-      if (looksLikeToolEnvelope(parsed)) return structuredToolSummary(parsed)
-    } catch {
-      // User-authored or partial JSON is ordinary output, not a UI failure.
-    }
-  }
   return safe
-}
-
-function looksLikeToolEnvelope(value: unknown): boolean {
-  if (!isRecord(value)) return false
-  return "data" in value || "truncated" in value || "machine_local_path" in value ||
-    "stable_prefix_hash" in value || "tool_call_id" in value
 }
 
 /** Compact, terminal-safe tool arguments for approval and activity surfaces. */
@@ -194,7 +211,7 @@ function argumentPairs(value: unknown): string {
     .join(" · ")
 }
 
-function structuredToolSummary(value: unknown): string {
+export function structuredToolSummary(value: unknown): string {
   const payload = unwrapToolPayload(value)
   if (isRecord(payload)) {
     if (Array.isArray(payload.paths)) {
@@ -256,10 +273,9 @@ function displayScalar(value: unknown): string {
   if (typeof value === "string") return value.length <= 160 ? value : `${value.slice(0, 159)}…`
   if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value)
   if (Array.isArray(value)) {
-    const shown = value.slice(0, 8).map(displayScalar).join(", ")
-    return value.length <= 8 ? shown : `${shown}, …`
+    return `${value.length} item${value.length === 1 ? "" : "s"}`
   }
-  return "details available"
+  return "structured result"
 }
 
 function friendlyKey(key: string): string {

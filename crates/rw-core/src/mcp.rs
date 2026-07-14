@@ -30,7 +30,7 @@ use rw_providers::{
     ProviderError, ProviderErrorKind, RefreshTokenSink, RefreshingOAuth, Secret as ProviderSecret,
 };
 use rw_store::credentials::{
-    CredentialEnvironment, CredentialKeychain, CredentialManager, CredentialReference,
+    CredentialEnvironment, CredentialManager, CredentialReference, CredentialStore,
 };
 use rw_tools::{
     CapabilityManifest, EgressDecision, EgressPin, EgressPolicy, SupervisedEgressProxy, Tool,
@@ -958,7 +958,7 @@ impl<E, K> fmt::Debug for McpRefreshTokenSink<E, K> {
 impl<E, K> RefreshTokenSink for McpRefreshTokenSink<E, K>
 where
     E: CredentialEnvironment + Send + Sync + 'static,
-    K: CredentialKeychain + Send + Sync + 'static,
+    K: CredentialStore + Send + Sync + 'static,
 {
     async fn persist(&self, refresh_token: &ProviderSecret) -> Result<(), ProviderError> {
         let resolved = self.credentials.resolve(&self.reference).map_err(|_| {
@@ -1005,7 +1005,7 @@ where
 impl<E, K> VaultMcpTokenProvider<E, K>
 where
     E: CredentialEnvironment + Send + Sync + 'static,
-    K: CredentialKeychain + Send + Sync + 'static,
+    K: CredentialStore + Send + Sync + 'static,
 {
     fn load_credential(
         &self,
@@ -1073,7 +1073,7 @@ where
 impl<E, K> McpAuthorizationProvider for VaultMcpTokenProvider<E, K>
 where
     E: CredentialEnvironment + Send + Sync + 'static,
-    K: CredentialKeychain + Send + Sync + 'static,
+    K: CredentialStore + Send + Sync + 'static,
 {
     async fn token(
         &self,
@@ -1557,7 +1557,7 @@ mod tests {
         SessionSummary,
     };
     use rw_store::credentials::{
-        CredentialError, CredentialKeychain, KeychainUnavailable, Secret as StoredSecret,
+        CredentialError, CredentialStore, CredentialStoreUnavailable, Secret as StoredSecret,
     };
 
     const HTTP_BEARER_CANARY: &str = "mcp-http-bearer-canary-never-log";
@@ -1572,17 +1572,17 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct MemoryCredentialKeychain(Arc<StdMutex<BTreeMap<String, String>>>);
+    struct MemoryCredentialStore(Arc<StdMutex<BTreeMap<String, String>>>);
 
-    impl CredentialKeychain for MemoryCredentialKeychain {
+    impl CredentialStore for MemoryCredentialStore {
         fn get(
             &self,
             identifier: &str,
-        ) -> Result<Option<StoredSecret<String>>, KeychainUnavailable> {
+        ) -> Result<Option<StoredSecret<String>>, CredentialStoreUnavailable> {
             Ok(self
                 .0
                 .lock()
-                .map_err(|_| KeychainUnavailable)?
+                .map_err(|_| CredentialStoreUnavailable)?
                 .get(identifier)
                 .cloned()
                 .map(StoredSecret::new))
@@ -1592,10 +1592,10 @@ mod tests {
             &self,
             identifier: &str,
             secret: &StoredSecret<String>,
-        ) -> Result<(), KeychainUnavailable> {
+        ) -> Result<(), CredentialStoreUnavailable> {
             self.0
                 .lock()
-                .map_err(|_| KeychainUnavailable)?
+                .map_err(|_| CredentialStoreUnavailable)?
                 .insert(identifier.to_owned(), secret.expose_secret().clone());
             Ok(())
         }
@@ -1803,10 +1803,10 @@ mod tests {
         ))
         .expect("token endpoint");
         let reference = CredentialReference::new("mcp.oauth-refresh.oauth");
-        let keychain = MemoryCredentialKeychain::default();
+        let credential_store = MemoryCredentialStore::default();
         let manager = Arc::new(CredentialManager::with_backends(
             EmptyCredentialEnvironment,
-            keychain,
+            credential_store,
             std::env::temp_dir().join("unused-mcp-refresh-fixture.toml"),
         ));
         let stored = StoredMcpOAuthCredential {

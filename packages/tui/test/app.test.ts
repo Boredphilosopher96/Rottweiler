@@ -94,7 +94,7 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer = undefined
   })
 
-  test("copies selections across transcript and non-transcript surfaces with confirmation", async () => {
+  test("copies a completed mouse selection once, clears it, and restores composer focus", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
     const copied: string[] = []
@@ -122,21 +122,158 @@ describe("Rottweiler OpenTUI shell", () => {
     const card = [...app.transcript.mountedCards.values()][0]
     expect(card?.markdown.selectable).toBeTrue()
 
-    renderer.emit(CliRenderEvents.SELECTION, {
-      selectedRenderables: [card!.markdown],
-      getSelectedText: () => "transcript excerpt",
-    } as unknown as Selection)
-    await Bun.sleep(0)
-    expect(copied).toEqual(["transcript excerpt"])
+    await setup.mockMouse.pressDown(
+      card!.markdown.x + 1,
+      card!.markdown.y,
+    )
+    expect(renderer.getSelection()).not.toBeNull()
+    await setup.mockMouse.emitMouseEvent(
+      "drag",
+      card!.markdown.x + "Selectable".length,
+      card!.markdown.y,
+    )
+    await setup.mockMouse.release(
+      card!.markdown.x + "Selectable".length,
+      card!.markdown.y,
+    )
+    await setup.waitFor(() => copied.length === 1)
+    expect(copied[0]).toBe("electable")
+    expect(renderer.getSelection()).toBeNull()
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
     expect(app.banner.plainText).toBe("Copied to clipboard")
+
+    // Composer selections use the same completed-selection path without
+    // handing keyboard focus away from the editor.
+    app.composer.value = "composer draft"
+    await setup.renderOnce()
+    await setup.mockMouse.drag(
+      app.composer.editor.x + 1,
+      app.composer.editor.y,
+      app.composer.editor.x + "composer".length,
+      app.composer.editor.y,
+    )
+    await setup.waitFor(() => copied.length === 2)
+    expect(copied[1]).toBe("omposer")
+    expect(renderer.getSelection()).toBeNull()
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
+    expect(app.banner.plainText).toBe("Copied to clipboard")
+  })
+
+  test("does not clear a newer selection when an older clipboard write finishes", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const copied: string[] = []
+    const complete: Array<() => void> = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "1",
+          agentTurn: "turn-copy-race",
+          turn: {
+            role: "assistant",
+            blocks: [{ type: "text", text: "First selectable value" }],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+      },
+      textClipboard: {
+        writeText(value) {
+          copied.push(value)
+          return new Promise<void>((resolve) => complete.push(resolve))
+        },
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    const card = [...app.transcript.mountedCards.values()][0]!
+
+    await setup.mockMouse.drag(
+      card.markdown.x + 1,
+      card.markdown.y,
+      card.markdown.x + "First".length,
+      card.markdown.y,
+    )
+    await setup.waitFor(() => copied.length === 1)
+
+    app.composer.value = "Second selectable value"
+    await setup.renderOnce()
+    await setup.mockMouse.drag(
+      app.composer.editor.x + 1,
+      app.composer.editor.y,
+      app.composer.editor.x + "Second".length,
+      app.composer.editor.y,
+    )
+    await setup.waitFor(() => copied.length === 2)
+    const newerSelection = renderer.getSelection()
+    expect(newerSelection).not.toBeNull()
+
+    complete[0]?.()
+    await Bun.sleep(0)
+    expect(renderer.getSelection()).toBe(newerSelection)
+
+    complete[1]?.()
+    await Bun.sleep(0)
+    expect(renderer.getSelection()).toBeNull()
+    expect(app.banner.plainText).toBe("Copied to clipboard")
+  })
+
+  test("fails closed for malformed command JSON and redacts command secrets", () => {
+    const eventMeta = (sequence: string) => ({
+      protocol_version: PROTOCOL_VERSION,
+      session_id: "session-command-safety",
+      sequence_id: sequence,
+      emitted_at: "2026-01-01T00:00:00Z",
+    })
+    let state = createInitialState()
+    state = reduceRottweilerState(state, engineEvent({
+      type: "command_finished",
+      meta: eventMeta("1"),
+      name: "extension",
+      message: "{\"api_key\":\"must-not-render\",\"nested\":{\"access_token\":\"also-secret\"}}",
+      unrestorable_paths: [],
+    }))
+    state = reduceRottweilerState(state, engineEvent({
+      type: "command_finished",
+      meta: eventMeta("2"),
+      name: "extension",
+      message: "{\"machine_local_path\":\"/private/repo\",",
+      unrestorable_paths: [],
+    }))
+
+    const results = state.transcript.slice(-2).map((entry) =>
+      entry.turn.blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n")
+    )
+    expect(results[0]).toContain("Api key: [redacted]")
+    expect(results[0]).toContain("Access token: [redacted]")
+    expect(results[0]).not.toContain("must-not-render")
+    expect(results[0]).not.toContain("also-secret")
+    expect(results[1]).toBe("_Command returned structured details that could not be displayed safely._")
+    expect(results[1]).not.toContain("machine_local_path")
+    expect(results[1]).not.toContain("/private/repo")
+  })
+
+  test("reports clipboard failures without mislabeling non-transcript selections", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      textClipboard: {
+        async writeText() {
+          throw new Error("clipboard unavailable")
+        },
+      },
+    })
+    renderer.root.add(app)
 
     renderer.emit(CliRenderEvents.SELECTION, {
       selectedRenderables: [app.composer.editor],
       getSelectedText: () => "composer draft",
     } as unknown as Selection)
     await Bun.sleep(0)
-    expect(copied).toEqual(["transcript excerpt", "composer draft"])
-    expect(app.banner.plainText).toBe("Copied to clipboard")
+    expect(app.state.errors.at(-1)).toMatchObject({
+      code: "selection_copy_failed",
+      message: "Couldn't copy the selected text to the clipboard.",
+    })
   })
 
   test("refreshes live runtime services around tool execution", async () => {
@@ -3840,6 +3977,103 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options.map((option) => option.value)).toEqual(["fast", "steady"])
   })
 
+  test("clicking a model presents the three typed context choices with summary selected", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "session-model-context",
+      requestId: () => `model-context-${request++}`,
+      initialState: {
+        ...createInitialState(),
+        models: [{
+          id: "openai/gpt-5",
+          alias: "openai/gpt-5",
+          displayName: "GPT-5",
+          provider: "openai",
+          providers: ["openai"],
+          available: true,
+          vision: true,
+          thinking: true,
+          toolCalling: true,
+        }],
+      },
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openModelPicker()
+    await setup.renderOnce()
+
+    await setup.mockMouse.click(app.picker.select.x + 2, app.picker.select.y)
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "switch_model",
+      session_id: "session-model-context",
+      model: "openai/gpt-5",
+      provider: "openai",
+    }))
+
+    app.handleEvent({
+      type: "question_asked",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-model-context",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      turn_id: "4",
+      question_id: "model-switch-1",
+      questions: [{
+        id: "model-switch-1",
+        prompt: "How should the new model receive this conversation?",
+        response_kind: "select_one",
+        model_switch: { model: "openai/gpt-5", provider: "openai" },
+        options: [
+          {
+            value: "pass_summary",
+            label: "Pass summary",
+            description: "Compact this conversation, then switch models",
+            model_context_transfer: "pass_summary",
+          },
+          {
+            value: "pass_full_context",
+            label: "Pass full context",
+            description: "Switch models with the complete current history",
+            model_context_transfer: "pass_full_context",
+          },
+          {
+            value: "start_without_context",
+            label: "Start without context",
+            description: "Keep project instructions but start a fresh conversation",
+            model_context_transfer: "start_without_context",
+          },
+        ],
+      }],
+    })
+    await setup.renderOnce()
+
+    expect(app.interactionPanel.select.options.map((option) => option.value)).toEqual([
+      "pass_summary",
+      "pass_full_context",
+      "start_without_context",
+    ])
+    expect(app.interactionPanel.select.getSelectedIndex()).toBe(0)
+    expect(app.interactionPanel.select.getSelectedOption()?.name).toBe("Pass summary")
+    setup.mockInput.pressEnter()
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "answer_question",
+      session_id: "session-model-context",
+      question_id: "model-switch-1",
+      answers: [{
+        question_id: "model-switch-1",
+        values: ["pass_summary"],
+      }],
+    }))
+  })
+
   test("uses provider inventory, concrete models, command sources, and persisted settings", async () => {
     const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
     renderer = setup.renderer
@@ -4420,6 +4654,9 @@ describe("Rottweiler OpenTUI shell", () => {
       user_code: "ABCD-1234",
     })
 
+    const refreshesBeforeAuthFinished = emitted.filter(
+      (command) => command.type === "list_models" && command.refresh,
+    ).length
     app.handleEvent({
       type: "provider_auth_finished",
       meta: {
@@ -4435,10 +4672,9 @@ describe("Rottweiler OpenTUI shell", () => {
       message: "provider authentication completed",
       warnings: [],
     })
-    expect(emitted).not.toContainEqual(expect.objectContaining({
-      type: "list_models",
-      refresh: true,
-    }))
+    expect(emitted.filter(
+      (command) => command.type === "list_models" && command.refresh,
+    )).toHaveLength(refreshesBeforeAuthFinished)
     app.handleEvent({
       type: "provider_activation_finished",
       meta: {
@@ -4456,6 +4692,9 @@ describe("Rottweiler OpenTUI shell", () => {
       type: "list_models",
       refresh: true,
     }))
+    expect(emitted.filter(
+      (command) => command.type === "list_models" && command.refresh,
+    )).toHaveLength(refreshesBeforeAuthFinished + 1)
 
     app.openProviderPicker()
     const codex = app.picker.select.options.findIndex((option) => option.value === "openai_codex")

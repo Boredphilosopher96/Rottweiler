@@ -2219,9 +2219,9 @@ async fn run_serve(
         )
         .map_err(|error| miette!(error.to_string()))?;
         // The authenticated control plane is usable as soon as the host and
-        // its bounded registries exist. Session composition may wait for an
-        // explicit OS-keychain authorization, so it must never gate health or
-        // make the supervisor kill an otherwise healthy engine after 30s.
+        // its bounded registries exist. Session composition and provider
+        // discovery must never gate health or make the supervisor kill an
+        // otherwise healthy engine after 30s.
         let resume = session_metadata_path(&storage_root, &session_id).is_file();
         let hosted = server::HostedEngine::new(host.clone());
         host.prepare_session_after_reservation(

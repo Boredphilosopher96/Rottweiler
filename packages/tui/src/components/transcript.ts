@@ -13,11 +13,10 @@ import {
 import {
   formatCost,
   filetypeForPath,
-  formatToolArguments,
   getScrollAcceleration,
+  presentTool,
   presentableUnifiedDiff,
   terminalMarkdown,
-  toolOutputText,
   turnMarkdown,
   turnReasoningMarkdown,
 } from "../render"
@@ -239,9 +238,13 @@ export class ToolBlockRenderable extends BoxRenderable {
         this.toggle()
       }
     }
-    // Collapse from the disclosure row only. Dragging across output or a diff
-    // must remain a text-selection gesture instead of collapsing the card.
-    this.header.onMouseDown = () => this.toggle()
+    // Toggle only after a deliberate click. Mouse-down must remain available
+    // to start a text selection, and a completed header drag must not reflow
+    // the card underneath the selection gesture.
+    this.header.onMouseUp = () => {
+      const selection = this.ctx.getSelection()
+      if (selection === null || selection.getSelectedText().trim() === "") this.toggle()
+    }
     this.add(this.header)
     this.add(this.body)
     this.update(tool)
@@ -272,13 +275,18 @@ export class ToolBlockRenderable extends BoxRenderable {
           : tool.status === "finished"
             ? this.#theme.success
             : this.#theme.info
+    if (this.#commandContainer !== null) this.#commandContainer.visible = !this.#collapsed
+    if (this.diff !== null) this.diff.visible = !this.#collapsed
     if (this.#collapsed) {
       this.body.content = ""
       this.body.height = 0
-      this.height = 1 + (this.#commandContainer?.height ?? 0) + (this.diff?.height ?? 0)
+      this.height = 1
       return
     }
-    this.body.content = boundedLines(toolBodyContent(tool), 8)
+    const body = toolBodyContent(tool)
+    this.body.content = tool.status === "running"
+      ? boundedTailLines(body, 8)
+      : boundedLines(body, 8)
     const bodyRows = Math.min(8, Math.max(1, this.body.plainText.split("\n").length))
     this.body.height = bodyRows
     this.height = bodyRows + 1 + (this.#commandContainer?.height ?? 0) + (this.diff?.height ?? 0)
@@ -395,79 +403,27 @@ export class ToolBlockRenderable extends BoxRenderable {
 
 function toolBodyContent(tool: ToolProjection): string {
   const live = tool.chunks.map((chunk) => chunk.chunk).join("")
-  const final = toolOutputText(tool.output)
-  const rawOutput = tool.status === "finished" && final !== "" ? final : live
-  const output = presentableToolText(rawOutput, tool.isError === true)
+  const presentation = presentTool(tool)
+  const output = tool.status === "finished"
+    ? presentation.details
+    : bashCommand(tool) !== null && tool.chunks.length > 0
+      ? presentation.details
+    : live === ""
+      ? ""
+      : `Live output\n${live}`
   const activity = tool.status === "awaiting_approval"
     ? "Awaiting approval…"
     : tool.status === "running"
       ? "Running…"
-      : final === "" && live === ""
+      : output === ""
         ? "Completed with no output."
         : ""
-  const argumentsLine = bashCommand(tool) === null ? detailedToolArguments(tool) : ""
   const rationale = tool.rationale === null || tool.rationale.trim() === ""
     ? ""
     : `Why · ${singleLine(tool.rationale, 240)}`
-  const outputLabel = output === ""
-    ? ""
-    : `${tool.isError === true ? "Error" : tool.status === "running" ? "Live output" : "Result"}\n${output}`
-  return [argumentsLine, rationale, outputLabel, activity]
+  return [rationale, output, activity]
     .filter(Boolean)
     .join("\n")
-}
-
-function presentableToolText(value: string, isError: boolean): string {
-  const lines = value
-    .replaceAll("\r\n", "\n")
-    .replaceAll("\r", "\n")
-    .split("\n")
-    .map((line) => {
-      if (/^error parsing diff:/i.test(line) || /line count did not match for hunk/i.test(line)) {
-        return isError ? "Couldn't apply the requested change." : ""
-      }
-      return line
-    })
-    .filter((line, index, all) => line !== "" || (index > 0 && all[index - 1] !== ""))
-  return lines.join("\n").trim()
-}
-
-function detailedToolArguments(tool: ToolProjection): string {
-  if (!isRecord(tool.args)) {
-    const summary = formatToolArguments(tool.args)
-    return summary === "" ? "" : `Details · ${summary}`
-  }
-  const path = typeof tool.args.path === "string" ? tool.args.path : ""
-  const pattern = typeof tool.args.pattern === "string" ? tool.args.pattern : ""
-  const query = typeof tool.args.query === "string" ? tool.args.query : ""
-  const url = typeof tool.args.url === "string" ? tool.args.url : ""
-  const task = typeof tool.args.task === "string" ? tool.args.task : ""
-  switch (tool.name) {
-    case "read":
-    case "write":
-    case "edit":
-      return path === "" ? "" : `File · ${path}`
-    case "multi_edit":
-    case "apply_worktree_diff":
-      return path === "" ? "" : `Changes · ${path}`
-    case "ls":
-      return `Directory · ${path === "" ? "." : path}`
-    case "glob":
-      return `Pattern · ${pattern || "*"}${path === "" || path === "." ? "" : ` · in ${path}`}`
-    case "grep":
-    case "search":
-      return `Search · ${query || pattern}${path === "" || path === "." ? "" : ` · in ${path}`}`
-    case "webfetch":
-      return url === "" ? "" : `URL · ${url}`
-    case "websearch":
-      return query === "" ? "" : `Search · ${query}`
-    case "spawn_agent":
-      return task === "" ? "" : `Task · ${singleLine(task, 180)}`
-    default: {
-      const summary = formatToolArguments(tool.args)
-      return summary === "" ? "" : `Details · ${summary}`
-    }
-  }
 }
 
 function bashCommand(tool: ToolProjection): string | null {
@@ -496,6 +452,14 @@ function boundedLines(value: string, maximum: number): string {
   return [...lines.slice(0, maximum - 1), `… ${lines.length - maximum + 1} more lines`].join("\n")
 }
 
+function boundedTailLines(value: string, maximum: number): string {
+  const lines = value.split("\n")
+  if (lines.length <= maximum) return value
+  if (maximum <= 1) return `… ${lines.length} lines`
+  const retained = lines.slice(-(maximum - 1))
+  return [`… ${lines.length - retained.length} earlier lines`, ...retained].join("\n")
+}
+
 function readToolDiff(tool: ToolProjection): { path: string; unifiedDiff: string } | null {
   if (!isRecord(tool.diff)) return null
   return typeof tool.diff.path === "string" && typeof tool.diff.unified_diff === "string"
@@ -514,61 +478,11 @@ function toolBlockExpanded(
 }
 
 function compactToolArguments(tool: ToolProjection): string {
-  if (!isRecord(tool.args)) return formatToolArguments(tool.args, 64)
-  const path = typeof tool.args.path === "string" ? tool.args.path : ""
-  switch (tool.name) {
-    case "ls":
-      return path === "" ? "." : path
-    case "glob": {
-      const pattern = typeof tool.args.pattern === "string" ? tool.args.pattern : ""
-      return `${pattern}${path === "" || path === "." ? "" : ` in ${path}`}`
-    }
-    case "read":
-      return path
-    case "bash":
-    case "shell":
-      return typeof tool.args.command === "string" ? singleLine(tool.args.command, 64) : ""
-    default:
-      return formatToolArguments(tool.args, 64)
-  }
+  return singleLine(presentTool(tool).subject, 80)
 }
 
 function compactToolResult(tool: ToolProjection): string {
-  const result = toolOutputText(tool.output).trim()
-  if (result === "") return tool.isError === true ? "Failed" : "Done"
-  const lines = result.split("\n").filter(Boolean)
-  if (tool.isError === true) return `Failed · ${singleLine(presentableToolText(result, true), 44)}`
-  switch (tool.name) {
-    case "read":
-      return `${lines.length} line${lines.length === 1 ? "" : "s"}`
-    case "glob":
-    case "ls":
-      return result === "No matching files." || result === "No entries."
-        ? result
-        : `${lines.length} item${lines.length === 1 ? "" : "s"}`
-    case "grep":
-    case "search":
-      return result === "No matches." ? result : `${lines.length} match${lines.length === 1 ? "" : "es"}`
-    case "write":
-      return "File written"
-    case "edit":
-    case "multi_edit":
-    case "apply_worktree_diff":
-      return "Changes applied"
-    case "todo":
-      return "Todos updated"
-    case "ask_user":
-      return "Answered"
-    case "submit_plan":
-      return "Plan submitted"
-    case "spawn_agent":
-      return "Child started"
-    case "background_kill":
-      return "Process stopped"
-    default:
-      if (lines.length > 1) return `${lines.length} lines · ${singleLine(lines[0] ?? "", 32)}`
-      return singleLine(result, 40)
-  }
+  return singleLine(presentTool(tool).summary, 56)
 }
 
 function toolDisplayName(name: string): string {

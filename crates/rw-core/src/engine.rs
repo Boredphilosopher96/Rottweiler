@@ -4861,6 +4861,18 @@ impl SessionHandle {
         receive.await.map_err(|_| AgentLoopError::Closed)
     }
 
+    /// Dispatches one protocol command and waits for its durable work to
+    /// finish after the immediate acknowledgement. Host-level projections
+    /// use this boundary when a command's committed state must be persisted
+    /// elsewhere before the command is reported complete.
+    pub(crate) async fn dispatch_durably(
+        &self,
+        command: ClientCommand,
+    ) -> Result<CommandOutcome, AgentLoopError> {
+        self.dispatch_wait(command).await?;
+        Ok(CommandOutcome::Accepted)
+    }
+
     /// Persists a parent-owned child invocation through the parent actor's
     /// single-writer journal.
     ///
@@ -7527,8 +7539,11 @@ async fn handle_actor_command(
                 ClientCommand::SwitchModel {
                     model, provider, ..
                 } => {
-                    if let Err(error) = config.model.prepare_model(&model.0).await {
-                        let outcome = protocol_rejection("unknown_model_alias", error.to_string());
+                    if !config.model.has_model_alias(&model.0) {
+                        let outcome = protocol_rejection(
+                            "unknown_model_alias",
+                            format!("model {:?} is unavailable", model.0),
+                        );
                         send_ack(state, events, &meta, session, outcome.clone());
                         let _ = respond.send(outcome);
                         return;
@@ -7536,7 +7551,6 @@ async fn handle_actor_command(
                     if let Some(provider) = provider
                         && !config.model.has_provider_for_alias(&model.0, provider)
                     {
-                        config.model.discard_prepared_model(&model.0);
                         let outcome = protocol_rejection(
                             "unknown_provider_route",
                             format!(
@@ -7544,6 +7558,21 @@ async fn handle_actor_command(
                                 model.0, provider
                             ),
                         );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
+                    let has_prior_context = state
+                        .conversation
+                        .iter()
+                        .any(|turn| turn.role != Role::System);
+                    let requires_context_choice = has_prior_context
+                        && (state.model_alias != model.0
+                            || state.provider.as_ref() != provider.as_ref());
+                    if !requires_context_choice
+                        && let Err(error) = config.model.prepare_model(&model.0).await
+                    {
+                        let outcome = protocol_rejection("unknown_model_alias", error.to_string());
                         send_ack(state, events, &meta, session, outcome.clone());
                         let _ = respond.send(outcome);
                         return;
@@ -7780,17 +7809,6 @@ async fn handle_actor_command(
                     send_ack(state, events, &meta, session, outcome.clone());
                     let _ = respond.send(outcome);
                     return;
-                }
-                ClientCommand::AnswerQuestion { question_id, .. }
-                    if state.pending_model_switches.contains_key(&question_id.0) =>
-                {
-                    let pending = &state.pending_model_switches[&question_id.0];
-                    if let Err(error) = config.model.prepare_model(&pending.model.0).await {
-                        let outcome = protocol_rejection("unknown_model_alias", error.to_string());
-                        send_ack(state, events, &meta, session, outcome.clone());
-                        let _ = respond.send(outcome);
-                        return;
-                    }
                 }
                 ClientCommand::Compact { .. } if state.running.is_some() => {
                     let outcome = protocol_rejection(
@@ -8378,8 +8396,6 @@ async fn handle_actor_command(
                                     provider,
                                 },
                             );
-                        } else {
-                            config.model.discard_prepared_model(&prepared.model.0);
                         }
                         result
                     } else {
@@ -8531,6 +8547,9 @@ async fn handle_actor_command(
                         match answer {
                             PrecommittedAnswer::Turn(pending, answer) => {
                                 let _ = pending.respond.send(answer);
+                                if let Some(complete) = completion.take() {
+                                    let _ = complete.send(Ok(ProtocolCompletion::Unit));
+                                }
                             }
                             PrecommittedAnswer::Model(pending, strategy) => {
                                 let prepared = PreparedModelSwitch {
@@ -8560,14 +8579,23 @@ async fn handle_actor_command(
                                     | ModelContextTransfer::StartWithoutContext => {
                                         let clear_context =
                                             strategy == ModelContextTransfer::StartWithoutContext;
-                                        let result = commit_prepared_model_switch(
-                                            state,
-                                            config,
-                                            events,
-                                            prepared,
-                                            clear_context,
-                                        )
-                                        .await;
+                                        let result = match config
+                                            .model
+                                            .prepare_model(&prepared.model.0)
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                commit_prepared_model_switch(
+                                                    state,
+                                                    config,
+                                                    events,
+                                                    prepared,
+                                                    clear_context,
+                                                )
+                                                .await
+                                            }
+                                            Err(error) => Err(error),
+                                        };
                                         if let Some(complete) = completion.take() {
                                             let _ = complete
                                                 .send(result.map(|()| ProtocolCompletion::Unit));
@@ -9998,20 +10026,21 @@ async fn handle_turn_signal(
                     state.conversation = conversation;
                     state.context_surgery = context_surgery;
                     if let Some(model_switch) = model_switch {
-                        result = commit_prepared_model_switch(
-                            state,
-                            config,
-                            events,
-                            model_switch,
-                            false,
-                        )
-                        .await;
+                        result = match config.model.prepare_model(&model_switch.model.0).await {
+                            Ok(()) => {
+                                commit_prepared_model_switch(
+                                    state,
+                                    config,
+                                    events,
+                                    model_switch,
+                                    false,
+                                )
+                                .await
+                            }
+                            Err(error) => Err(error),
+                        };
                     }
-                } else if let Some(model_switch) = model_switch {
-                    config.model.discard_prepared_model(&model_switch.model.0);
                 }
-            } else if let Some(model_switch) = model_switch {
-                config.model.discard_prepared_model(&model_switch.model.0);
             }
             if let Some(completion) = completion {
                 let _ = completion.send(result.map(|()| ProtocolCompletion::Unit));
@@ -14647,6 +14676,7 @@ mod tests {
     struct M3Model {
         scripts: Mutex<VecDeque<ProviderScript>>,
         requests: Mutex<Vec<ProviderRequest>>,
+        operations: Mutex<Vec<String>>,
         metadata: ModelContextMetadata,
         compaction: CompactionConfig,
         budget: BudgetConfig,
@@ -14658,6 +14688,7 @@ mod tests {
             Self {
                 scripts: Mutex::new(scripts.into_iter().collect()),
                 requests: Mutex::new(Vec::new()),
+                operations: Mutex::new(Vec::new()),
                 metadata: ModelContextMetadata::default(),
                 compaction: CompactionConfig::default(),
                 budget: BudgetConfig::default(),
@@ -14668,14 +14699,23 @@ mod tests {
         fn requests(&self) -> Vec<ProviderRequest> {
             self.requests.lock().expect("request lock").clone()
         }
+
+        fn operations(&self) -> Vec<String> {
+            self.operations.lock().expect("operation lock").clone()
+        }
     }
 
+    #[async_trait]
     impl ModelDriver for M3Model {
         fn stream(
             &self,
-            _alias: &str,
+            alias: &str,
             request: ProviderRequest,
         ) -> Result<BoxEventStream, AgentLoopError> {
+            self.operations
+                .lock()
+                .expect("operation lock")
+                .push(format!("stream:{alias}"));
             self.requests.lock().expect("request lock").push(request);
             let script = self
                 .scripts
@@ -14684,6 +14724,14 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| AgentLoopError::Provider("missing M3 script".to_owned()))?;
             Ok(Box::pin(stream::iter(script)))
+        }
+
+        async fn prepare_model(&self, alias: &str) -> Result<(), AgentLoopError> {
+            self.operations
+                .lock()
+                .expect("operation lock")
+                .push(format!("prepare:{alias}"));
+            Ok(())
         }
 
         fn context_metadata(&self, _alias: &str) -> ModelContextMetadata {
@@ -19408,7 +19456,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn unavailable_remembered_bash_scope_fails_closed_without_executing_tool() {
+    async fn unrememberable_project_approval_executes_the_displayed_bash_once() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let root = TempDir::new().expect("tempdir");
@@ -19435,7 +19483,7 @@ mod tests {
         let tool = Arc::new(StubTool::new(
             "bash",
             vec![ToolCapability::Execute],
-            StubOutcome::Success(ToolResult::new("should not execute", Value::Null)),
+            StubOutcome::Success(ToolResult::new("executed once", Value::Null)),
         ));
         let mut tools = ToolRegistry::new();
         tools.register(tool.clone()).expect("register bash fixture");
@@ -19469,13 +19517,12 @@ mod tests {
         assert!(matches!(
             finished.kind,
             PendingEvent::ToolCallFinished {
-                is_error: true,
+                is_error: false,
                 output: ToolOutput::Text { text },
                 ..
-            } if text.contains("remembered_permission_unavailable")
-                && text.contains("choose allow once")
+            } if text.contains("executed once")
         ));
-        assert_eq!(tool.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(tool.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -24990,6 +25037,7 @@ mod tests {
         let summary_handle = SessionActor::spawn(summary_config).expect("summary actor");
         attach(&summary_handle, "attach-summary").await;
         let summary_question = request_switch(&summary_handle, "switch-summary").await;
+        assert_eq!(summary_model.operations(), Vec::<String>::new());
         assert_eq!(
             summary_handle
                 .snapshot()
@@ -25005,6 +25053,10 @@ mod tests {
             "answer-summary",
         )
         .await;
+        assert_eq!(
+            summary_model.operations(),
+            ["prepare:fast", "stream:fast", "prepare:slow"]
+        );
         let summary_snapshot = summary_handle
             .snapshot()
             .await
@@ -25057,6 +25109,7 @@ mod tests {
         let full_handle = SessionActor::spawn(full_config).expect("full actor");
         attach(&full_handle, "attach-full").await;
         let full_question = request_switch(&full_handle, "switch-full").await;
+        assert_eq!(full_model.operations(), Vec::<String>::new());
         answer_switch(
             &full_handle,
             full_question,
@@ -25064,6 +25117,7 @@ mod tests {
             "answer-full",
         )
         .await;
+        assert_eq!(full_model.operations(), ["prepare:slow"]);
         assert_eq!(
             full_handle
                 .snapshot()
@@ -25104,6 +25158,7 @@ mod tests {
         let fresh_handle = SessionActor::spawn(fresh_config).expect("fresh actor");
         attach(&fresh_handle, "attach-fresh").await;
         let fresh_question = request_switch(&fresh_handle, "switch-fresh").await;
+        assert_eq!(fresh_model.operations(), Vec::<String>::new());
         answer_switch(
             &fresh_handle,
             fresh_question,
@@ -25111,6 +25166,7 @@ mod tests {
             "answer-fresh",
         )
         .await;
+        assert_eq!(fresh_model.operations(), ["prepare:slow"]);
         assert_eq!(
             fresh_handle
                 .snapshot()

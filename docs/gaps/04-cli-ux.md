@@ -22,7 +22,7 @@ No `models list` / `models show <id>`, so a user cannot see what context window,
 
 **Closed as stale after runtime verification (2026-07-12).** The current offline production command completes in roughly 30 ms on the original macOS host. Network/provider probes remain explicit behind `--network` and bounded.
 
-`time rw doctor` → **22.8 s** wall at ~0% CPU with reachability `[SKIP]`ped — it's sleeping on something (keychain or sandbox probe timeout). `rw config check` is ~10 ms. Doctor is what people run when something is already wrong; it must be fast, or say what it's waiting on.
+Historical evidence: `time rw doctor` took **22.8 s** wall at ~0% CPU while reachability was skipped. The production credential backend no longer calls the OS credential store, and the current offline doctor gate guards against this regression.
 
 ## GAP-04-05 — `rw replay <id>` argument contract is confusing — **P2 [verified]**
 

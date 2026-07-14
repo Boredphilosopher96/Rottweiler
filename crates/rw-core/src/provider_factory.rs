@@ -25,8 +25,8 @@ use rw_providers::{
     WireFrameSink, WireMode,
 };
 use rw_store::credentials::{
-    CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
-    CredentialReference, OsKeychain, Secret as StoredSecret, SystemEnvironment,
+    CredentialEnvironment, CredentialError, CredentialManager, CredentialReference,
+    CredentialStore, NoExternalCredentialStore, Secret as StoredSecret, SystemEnvironment,
 };
 use rw_tools::{
     CancellationToken, ToolError, WebSearchRequest, WebSearchResponse, WebSearchResult,
@@ -307,7 +307,7 @@ impl ProviderRuntime {
         self.redactor.clone()
     }
 
-    /// Credential fallback warnings that the active UI must surface.
+    /// Credential persistence warnings that the active UI must surface.
     #[must_use]
     pub fn warnings(&self) -> Vec<String> {
         self.warnings.snapshot()
@@ -1307,7 +1307,7 @@ impl WebSearcher for ProviderNativeWebSearcher {
 }
 
 /// Injectable production provider-composition boundary.
-pub struct ProviderFactory<E = SystemEnvironment, K = OsKeychain> {
+pub struct ProviderFactory<E = SystemEnvironment, K = NoExternalCredentialStore> {
     credentials: Arc<CredentialManager<E, K>>,
     proxy_environment: ProxyEnvironment,
     network_policy: NetworkPolicy,
@@ -1339,8 +1339,9 @@ struct GitHubCopilotTestOrigin {
     oauth_client_id: String,
 }
 
-impl ProviderFactory<SystemEnvironment, OsKeychain> {
-    /// Creates a production factory using process environment and OS keychain.
+impl ProviderFactory<SystemEnvironment, NoExternalCredentialStore> {
+    /// Creates a production factory using process environment and the
+    /// owner-private credential file. No operating-system credential store is used.
     #[must_use]
     pub fn system(credentials_path: impl Into<PathBuf>, pricing: PricingTable) -> Self {
         Self::with_backends(
@@ -1355,7 +1356,7 @@ impl ProviderFactory<SystemEnvironment, OsKeychain> {
 impl<E, K> ProviderFactory<E, K>
 where
     E: CredentialEnvironment + Send + Sync + 'static,
-    K: CredentialKeychain + Send + Sync + 'static,
+    K: CredentialStore + Send + Sync + 'static,
 {
     /// Creates a deterministic factory with injected credential/network boundaries.
     #[must_use]
@@ -2207,20 +2208,9 @@ where
             ));
         }
         let reference = CredentialReference::new(openai_subscription_credential_id(provider_name));
-        let resolved = match self.resolve_credential(&reference) {
-            Ok(resolved) => resolved,
-            Err(CredentialError::NotFound { .. } | CredentialError::KeychainUnavailable { .. })
-                if provider_name == "openai_codex" =>
-            {
-                self.resolve_credential(&CredentialReference::new(
-                    openai_subscription_credential_id("openai"),
-                ))
-                .map_err(|error| ProviderFactoryError::new(provider_name, error.to_string()))?
-            }
-            Err(error) => {
-                return Err(ProviderFactoryError::new(provider_name, error.to_string()));
-            }
-        };
+        let resolved = self
+            .resolve_credential(&reference)
+            .map_err(|error| ProviderFactoryError::new(provider_name, error.to_string()))?;
         warnings.extend(resolved.warnings().iter().map(ToString::to_string));
         let bundle =
             OpenAiSubscriptionCredentialBundle::parse(resolved.secret().expose_secret())
@@ -2328,9 +2318,10 @@ where
     ) -> Result<Option<rw_store::credentials::ResolvedCredential>, ProviderFactoryError> {
         match self.resolve_credential(reference) {
             Ok(value) => Ok(Some(value)),
-            Err(CredentialError::NotFound { .. } | CredentialError::KeychainUnavailable { .. }) => {
-                Ok(None)
-            }
+            Err(
+                CredentialError::NotFound { .. }
+                | CredentialError::CredentialStoreUnavailable { .. },
+            ) => Ok(None),
             Err(error) => Err(ProviderFactoryError::new(provider, error.to_string())),
         }
     }
@@ -2373,7 +2364,7 @@ impl<E, K> fmt::Debug for CredentialSubscriptionSink<E, K> {
 impl<E, K> OpenAiSubscriptionTokenSink for CredentialSubscriptionSink<E, K>
 where
     E: CredentialEnvironment + Send + Sync + 'static,
-    K: CredentialKeychain + Send + Sync + 'static,
+    K: CredentialStore + Send + Sync + 'static,
 {
     async fn persist(
         &self,
@@ -2436,7 +2427,7 @@ impl<E, K> fmt::Debug for CredentialRefreshSink<E, K> {
 impl<E, K> RefreshTokenSink for CredentialRefreshSink<E, K>
 where
     E: CredentialEnvironment + Send + Sync + 'static,
-    K: CredentialKeychain + Send + Sync + 'static,
+    K: CredentialStore + Send + Sync + 'static,
 {
     async fn persist(&self, refresh_token: &ProviderSecret) -> Result<(), ProviderError> {
         let stored = self
@@ -2517,7 +2508,7 @@ struct FactoryProviderActivator<E, K> {
 impl<E, K> ProviderActivator for FactoryProviderActivator<E, K>
 where
     E: CredentialEnvironment + Send + Sync + 'static,
-    K: CredentialKeychain + Send + Sync + 'static,
+    K: CredentialStore + Send + Sync + 'static,
 {
     fn activate(&self, provider: &str) -> Result<ActivatedProvider, ProviderFactoryError> {
         if !self.config.providers.contains_key(provider) {
@@ -3628,13 +3619,13 @@ mod native_search_tests {
     }
 
     #[derive(Clone, Default)]
-    struct CountingKeychain(Arc<Mutex<(usize, usize)>>);
+    struct CountingCredentialStore(Arc<Mutex<(usize, usize)>>);
 
-    impl CredentialKeychain for CountingKeychain {
+    impl CredentialStore for CountingCredentialStore {
         fn get(
             &self,
             _identifier: &str,
-        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::KeychainUnavailable>
+        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::CredentialStoreUnavailable>
         {
             self.0
                 .lock()
@@ -3648,7 +3639,7 @@ mod native_search_tests {
         fn get_authorized(
             &self,
             _identifier: &str,
-        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::KeychainUnavailable>
+        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::CredentialStoreUnavailable>
         {
             self.0
                 .lock()
@@ -3663,42 +3654,7 @@ mod native_search_tests {
             &self,
             _identifier: &str,
             _secret: &StoredSecret<String>,
-        ) -> Result<(), rw_store::credentials::KeychainUnavailable> {
-            Ok(())
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct LegacySubscriptionKeychain(Arc<Mutex<usize>>);
-
-    impl CredentialKeychain for LegacySubscriptionKeychain {
-        fn get(
-            &self,
-            _identifier: &str,
-        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::KeychainUnavailable>
-        {
-            Ok(None)
-        }
-
-        fn get_authorized(
-            &self,
-            _identifier: &str,
-        ) -> Result<Option<StoredSecret<String>>, rw_store::credentials::KeychainUnavailable>
-        {
-            *self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
-            Ok(Some(StoredSecret::new(
-                "version = 1\n[credentials]\n'providers.openai.openai_subscription' = '''{\"version\":1,\"access_token\":\"subscription-access\",\"refresh_token\":\"subscription-refresh\",\"account_id\":\"acct-fixture\"}'''\n".to_owned(),
-            )))
-        }
-
-        fn set(
-            &self,
-            _identifier: &str,
-            _secret: &StoredSecret<String>,
-        ) -> Result<(), rw_store::credentials::KeychainUnavailable> {
+        ) -> Result<(), rw_store::credentials::CredentialStoreUnavailable> {
             Ok(())
         }
     }
@@ -3973,10 +3929,10 @@ mod native_search_tests {
 
     #[tokio::test]
     async fn production_catalog_uses_one_authorized_vault_read() {
-        let keychain = CountingKeychain::default();
+        let credential_store = CountingCredentialStore::default();
         let manager = Arc::new(CredentialManager::with_backends(
             EmptyEnvironment,
-            keychain.clone(),
+            credential_store.clone(),
             std::path::PathBuf::from("/nonexistent/rottweiler-test-credentials.toml"),
         ));
         let factory = ProviderFactory::with_backends(
@@ -3991,7 +3947,7 @@ mod native_search_tests {
             .discover_model_catalog(&configured_work_provider())
             .await
             .expect("catalog failures remain visible rows");
-        let calls = *keychain
+        let calls = *credential_store
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4003,10 +3959,10 @@ mod native_search_tests {
 
     #[test]
     fn active_provider_build_uses_authorized_credentials() {
-        let keychain = CountingKeychain::default();
+        let credential_store = CountingCredentialStore::default();
         let manager = Arc::new(CredentialManager::with_backends(
             EmptyEnvironment,
-            keychain.clone(),
+            credential_store.clone(),
             std::path::PathBuf::from("/nonexistent/rottweiler-test-credentials.toml"),
         ));
         let factory = ProviderFactory::with_backends(
@@ -4019,51 +3975,11 @@ mod native_search_tests {
         factory
             .build(&configured_work_provider())
             .expect("active provider composition");
-        let calls = *keychain
+        let calls = *credential_store
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(calls, (0, 1));
-    }
-
-    #[test]
-    fn canonical_chatgpt_profile_resolves_legacy_logical_credential() {
-        let keychain = LegacySubscriptionKeychain::default();
-        let manager = Arc::new(CredentialManager::with_backends(
-            EmptyEnvironment,
-            keychain.clone(),
-            std::path::PathBuf::from("/nonexistent/rottweiler-test-credentials.toml"),
-        ));
-        let factory = ProviderFactory::with_backends(
-            manager,
-            ProxyEnvironment::default(),
-            NetworkPolicy::Allow,
-            PricingTable::default(),
-        );
-        let mut config = Config::default();
-        config.providers.insert(
-            "openai_codex".to_owned(),
-            ProviderConfig {
-                kind: "openai_codex".to_owned(),
-                ..ProviderConfig::default()
-            },
-        );
-        config.models.default = "fast".to_owned();
-        config.models.aliases.insert(
-            "fast".to_owned(),
-            vec!["openai_codex/gpt-5.4-mini".to_owned()],
-        );
-
-        factory
-            .build(&config)
-            .expect("legacy credential should compose canonical ChatGPT provider");
-        assert_eq!(
-            *keychain
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            1
-        );
     }
 
     #[test]

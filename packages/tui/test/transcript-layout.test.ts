@@ -294,42 +294,8 @@ describe("retained transcript layout", () => {
     expect(frame).not.toContain("**workspace**")
   })
 
-  test("keeps live Mermaid source honest when the terminal shrinks", async () => {
-    renderer = await createTestRenderer({ width: 100, height: 24, useThread: false })
-    const initial = createInitialState()
-    const source = [
-      "```mermaid",
-      "flowchart LR",
-      "A[Long provider catalog label] --> B[Tool execution engine] --> C[Transcript renderer]",
-      "```",
-    ].join("\n")
-    const app = createRottweilerApp(renderer.renderer, {
-      initialState: {
-        ...initial,
-        compaction: {
-          active: true,
-          reason: "automatic",
-          summaryTurnId: "8",
-          reclaimedTokens: null,
-          attempt: 0,
-          text: source,
-          thinking: "",
-        },
-      },
-    })
-    renderer.renderer.root.add(app)
-    await renderer.renderOnce()
-
-    renderer.resize(40, 24)
-    await renderer.renderOnce()
-    expect(app.transcript.compactionMarkdown.content).toContain("```text")
-    expect(app.transcript.compactionMarkdown.content).toContain("flowchart LR")
-    expect(app.transcript.compactionMarkdown.content).not.toContain("Mermaid diagram")
-    expect(app.transcript.compactionMarkdown.content).not.toContain("cannot render")
-  })
-
-  test("separates consecutive answers, preserves Mermaid source, and keeps prose on the primary foreground", async () => {
-    parserDataPath = mkdtempSync(join(tmpdir(), "rottweiler-consecutive-mermaid-"))
+  test("separates consecutive answers, preserves fenced source, and keeps prose on the primary foreground", async () => {
+    parserDataPath = mkdtempSync(join(tmpdir(), "rottweiler-consecutive-fence-"))
     treeSitter = new TreeSitterClient({
       dataPath: parserDataPath,
       workerPath: join(import.meta.dir, "../node_modules/@opentui/core/parser.worker.js"),
@@ -354,8 +320,8 @@ describe("retained transcript layout", () => {
                   "",
                   "Main prose stays readable.",
                   "",
-                  "```mermaid",
-                  "flowchart TB",
+                  "```text",
+                  "architecture sketch",
                   "  UI[OpenTUI] --> CORE[Rust core]",
                   "```",
                   "",
@@ -391,8 +357,7 @@ describe("retained transcript layout", () => {
     expect(frame).toContain("FOLLOW_UP_QUESTION_START")
     expect(frame).toContain("OpenTUI")
     expect(frame).toContain("Rust core")
-    expect(frame).toContain("flowchart TB")
-    expect(frame).not.toContain("Mermaid diagram")
+    expect(frame).toContain("architecture sketch")
 
     const prose = renderer.captureSpans().lines
       .flatMap((line) => line.spans)

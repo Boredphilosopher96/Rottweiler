@@ -1062,7 +1062,7 @@ pub struct OAuthRefreshConfig {
 /// Persistence boundary for provider-issued refresh-token rotations.
 ///
 /// Implementations may complete synchronously inside this async method (for
-/// example, an OS keychain API) or await an async secret store. Diagnostics
+/// example, an OS credential-store API) or await an async secret store. Diagnostics
 /// returned from this boundary must never contain the token value.
 #[async_trait]
 pub trait RefreshTokenSink: Send + Sync + fmt::Debug {

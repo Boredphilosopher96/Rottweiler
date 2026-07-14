@@ -1717,8 +1717,7 @@ fn base_command(workspace: &Path, home: &Path) -> Command {
         .env_clear()
         .current_dir(workspace)
         .env("HOME", &home)
-        .env("ROTTWEILER_HOME", &home)
-        .env("ROTTWEILER_CREDENTIAL_BACKEND", "file");
+        .env("ROTTWEILER_HOME", &home);
     command
 }
 

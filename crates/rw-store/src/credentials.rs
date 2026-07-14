@@ -6,10 +6,8 @@ use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-
-#[cfg(target_os = "macos")]
-use std::sync::Condvar;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
@@ -17,18 +15,12 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Service name of the single OS-keychain vault used by Rottweiler.
-pub const KEYCHAIN_VAULT_SERVICE: &str = "dev.rottweiler.credential-vault";
-/// Account/identifier of the single OS-keychain vault used by Rottweiler.
-pub const KEYCHAIN_VAULT_ID: &str = "credentials";
-/// Set to `file` to bypass OS-keychain APIs and use the warned 0600 fallback.
-pub const CREDENTIAL_BACKEND_ENV: &str = "ROTTWEILER_CREDENTIAL_BACKEND";
+/// Stable identifier of the injected credential vault used by tests and
+/// embedders. Production storage is always the owner-private credential file.
+pub const CREDENTIAL_VAULT_ID: &str = "credentials";
 
-const LEGACY_KEYCHAIN_SERVICE: &str = "dev.rottweiler.credentials";
-const KEYCHAIN_VAULT_VERSION: u8 = 1;
+const CREDENTIAL_VAULT_VERSION: u8 = 1;
 const CREDENTIAL_FILE_VERSION: u8 = 1;
-#[cfg(target_os = "macos")]
-const PASSIVE_KEYCHAIN_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// A value that must not appear in diagnostics or gain serialization by accident.
 ///
@@ -83,7 +75,7 @@ pub struct CredentialReference {
 }
 
 impl CredentialReference {
-    /// Creates a keychain/file reference without an environment override.
+    /// Creates a credential reference without an environment override.
     #[must_use]
     pub fn new(identifier: impl Into<String>) -> Self {
         Self {
@@ -99,7 +91,7 @@ impl CredentialReference {
         self
     }
 
-    /// Stable identifier used by the keychain and fallback file.
+    /// Stable identifier used by the credential store or credential file.
     #[must_use]
     pub fn identifier(&self) -> &str {
         &self.identifier
@@ -131,20 +123,18 @@ impl CredentialReference {
 pub enum CredentialSource {
     /// A process environment variable.
     Environment(String),
-    /// The operating system's secure credential store.
-    OsKeychain,
-    /// The explicitly warned plaintext fallback.
-    FallbackFile(PathBuf),
+    /// An injected credential store used by tests or embedders.
+    InjectedStore,
+    /// Rottweiler's owner-private credential file.
+    CredentialFile(PathBuf),
 }
 
 /// Security warnings that callers must surface to the user.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CredentialWarning {
-    /// The OS keychain was not used and a local plaintext file supplied the value.
-    #[error(
-        "credential is using plaintext fallback file {path}; access is restricted to mode 0600"
-    )]
-    PlaintextFileFallback {
+    /// An injected store fell back to the owner-private credential file.
+    #[error("credential is stored in owner-private file {path} (mode 0600)")]
+    OwnerPrivateCredentialFile {
         /// Path whose use must be shown to the user.
         path: PathBuf,
     },
@@ -165,7 +155,7 @@ pub enum CredentialInventoryItem {
     Present(ResolvedCredential),
     /// No configured source contains the reference.
     Missing,
-    /// The keychain was unavailable and no fallback value exists.
+    /// The injected credential store was unavailable and no file value exists.
     StoreUnavailable,
 }
 
@@ -213,7 +203,7 @@ impl ResolvedCredential {
         &self.secret
     }
 
-    /// Winning source after applying environment, keychain, then file precedence.
+    /// Winning source after applying environment, injected-store, then file precedence.
     #[must_use]
     pub const fn source(&self) -> &CredentialSource {
         &self.source
@@ -268,28 +258,28 @@ pub enum CredentialError {
         /// Non-secret reference identifier.
         identifier: String,
     },
-    /// The keychain could not be accessed and there was no file fallback.
-    #[error("OS keychain is unavailable for credential {identifier:?}")]
-    KeychainUnavailable {
+    /// An injected credential store could not be accessed and the file had no value.
+    #[error("credential store is unavailable for credential {identifier:?}")]
+    CredentialStoreUnavailable {
         /// Non-secret reference identifier.
         identifier: String,
     },
-    /// The single keychain vault could not be decoded safely.
-    #[error("OS keychain credential vault is malformed")]
-    MalformedKeychainVault,
-    /// The single keychain vault could not be encoded safely.
-    #[error("could not encode OS keychain credential vault")]
-    EncodeKeychainVault,
-    /// A fallback file had unsafe group/other permissions.
-    #[error("credential fallback file {path} has insecure permissions {mode:#o}; expected 0600")]
+    /// An injected credential store document could not be decoded safely.
+    #[error("credential store document is malformed")]
+    MalformedCredentialStore,
+    /// An injected credential store document could not be encoded safely.
+    #[error("could not encode credential store document")]
+    EncodeCredentialStore,
+    /// A credential file had unsafe group/other permissions.
+    #[error("credential file {path} has insecure permissions {mode:#o}; expected 0600")]
     InsecurePermissions {
         /// Insecure file.
         path: PathBuf,
         /// Observed Unix permission bits.
         mode: u32,
     },
-    /// A fallback file could not be read.
-    #[error("could not read credential fallback file {path}: {source}")]
+    /// A credential file could not be read.
+    #[error("could not read credential file {path}: {source}")]
     ReadFile {
         /// File path.
         path: PathBuf,
@@ -297,20 +287,20 @@ pub enum CredentialError {
         #[source]
         source: std::io::Error,
     },
-    /// A fallback file was malformed. The parser source is suppressed to prevent excerpts.
-    #[error("credential fallback file {path} is malformed")]
+    /// A credential file was malformed. The parser source is suppressed to prevent excerpts.
+    #[error("credential file {path} is malformed")]
     MalformedFile {
         /// File path.
         path: PathBuf,
     },
-    /// A fallback path was not a regular file (for example, it was a symlink).
-    #[error("credential fallback path {path} is not a regular file")]
+    /// A credential path was not a regular file (for example, it was a symlink).
+    #[error("credential file path {path} is not a regular file")]
     UnsafeFileType {
         /// Unsafe path.
         path: PathBuf,
     },
-    /// A fallback file could not be securely written.
-    #[error("could not write credential fallback file {path}: {source}")]
+    /// A credential file could not be securely written.
+    #[error("could not write credential file {path}: {source}")]
     WriteFile {
         /// File path.
         path: PathBuf,
@@ -318,8 +308,8 @@ pub enum CredentialError {
         #[source]
         source: std::io::Error,
     },
-    /// The in-memory fallback document could not be encoded.
-    #[error("could not encode credential fallback file {path}")]
+    /// The in-memory credential document could not be encoded.
+    #[error("could not encode credential file {path}")]
     EncodeFile {
         /// File path.
         path: PathBuf,
@@ -352,34 +342,32 @@ impl CredentialEnvironment for SystemEnvironment {
     }
 }
 
-/// Sanitized keychain outcome used by injected test backends.
+/// Sanitized credential-store outcome used by injected test backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("OS keychain is unavailable")]
-pub struct KeychainUnavailable;
+#[error("credential store is unavailable")]
+pub struct CredentialStoreUnavailable;
 
 /// Injectable secure-credential-store boundary.
-pub trait CredentialKeychain {
-    /// Reads one keychain item, returning `None` when no entry exists.
+pub trait CredentialStore {
+    /// Reads one credential-store item, returning `None` when no entry exists.
     ///
     /// # Errors
     ///
-    /// Returns [`KeychainUnavailable`] without exposing backend diagnostics.
-    fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable>;
+    /// Returns [`CredentialStoreUnavailable`] without exposing backend diagnostics.
+    fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, CredentialStoreUnavailable>;
 
-    /// Reads one keychain item for an explicit, user-initiated operation.
+    /// Reads one credential-store item for an explicit, user-initiated operation.
     ///
-    /// Passive inventory may impose a short deadline so that a status screen
-    /// never hangs on an authorization dialog. Active provider composition uses
-    /// this boundary instead and may wait for the user to authorize the vault.
-    /// Test backends that do not distinguish those modes may use the default.
+    /// Test backends that do not distinguish active and passive reads may use
+    /// the default implementation.
     ///
     /// # Errors
     ///
-    /// Returns [`KeychainUnavailable`] without exposing backend diagnostics.
+    /// Returns [`CredentialStoreUnavailable`] without exposing backend diagnostics.
     fn get_authorized(
         &self,
         identifier: &str,
-    ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+    ) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
         self.get(identifier)
     }
 
@@ -387,8 +375,12 @@ pub trait CredentialKeychain {
     ///
     /// # Errors
     ///
-    /// Returns [`KeychainUnavailable`] without exposing backend diagnostics.
-    fn set(&self, identifier: &str, secret: &Secret<String>) -> Result<(), KeychainUnavailable>;
+    /// Returns [`CredentialStoreUnavailable`] without exposing backend diagnostics.
+    fn set(
+        &self,
+        identifier: &str,
+        secret: &Secret<String>,
+    ) -> Result<(), CredentialStoreUnavailable>;
 
     /// Reads the current vault value without using a process cache.
     ///
@@ -398,362 +390,31 @@ pub trait CredentialKeychain {
     ///
     /// # Errors
     ///
-    /// Returns [`KeychainUnavailable`] without exposing backend diagnostics.
-    fn get_fresh(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-        self.get(identifier)
-    }
-
-    /// Reads a pre-vault credential for one-time migration.
-    ///
-    /// Backends that did not distinguish the legacy service may use the default
-    /// implementation. Production overrides it so new vault data and old entries
-    /// cannot collide.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KeychainUnavailable`] without exposing backend diagnostics.
-    fn get_legacy(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-        self.get(identifier)
-    }
-
-    /// Performs an explicitly user-authorized legacy read during one-time
-    /// migration. Backends without a passive/authorized distinction delegate
-    /// to [`Self::get_legacy`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KeychainUnavailable`] without exposing backend diagnostics.
-    fn get_legacy_authorized(
+    /// Returns [`CredentialStoreUnavailable`] without exposing backend diagnostics.
+    fn get_fresh(
         &self,
         identifier: &str,
-    ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-        self.get_legacy(identifier)
+    ) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
+        self.get(identifier)
     }
 }
 
-/// Operating-system keychain backed by the current `keyring` crate.
+/// Empty injected-store boundary used by production. Provider credentials are
+/// persisted only in the owner-private credential file.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct OsKeychain;
+pub struct NoExternalCredentialStore;
 
-enum ProcessVaultCache {
-    Unloaded,
-    #[cfg(target_os = "macos")]
-    Reading(Arc<ProcessVaultRead>),
-    Loaded(Option<String>),
-    Unavailable,
-}
-
-#[cfg(target_os = "macos")]
-struct ProcessVaultRead {
-    result: Mutex<Option<Result<Option<String>, KeychainUnavailable>>>,
-    ready: Condvar,
-}
-
-#[cfg(target_os = "macos")]
-impl ProcessVaultRead {
-    fn start<F>(read: F) -> Result<Arc<Self>, KeychainUnavailable>
-    where
-        F: FnOnce() -> Result<Option<Secret<String>>, KeychainUnavailable> + Send + 'static,
-    {
-        let operation = Arc::new(Self {
-            result: Mutex::new(None),
-            ready: Condvar::new(),
-        });
-        let background = Arc::clone(&operation);
-        std::thread::Builder::new()
-            .name("rottweiler-keychain-read".to_owned())
-            .spawn(move || {
-                let result = read().map(|value| value.map(Secret::into_inner));
-                if let Ok(mut slot) = background.result.lock() {
-                    *slot = Some(result);
-                    background.ready.notify_all();
-                }
-            })
-            .map_err(|_| KeychainUnavailable)?;
-        Ok(operation)
+impl CredentialStore for NoExternalCredentialStore {
+    fn get(&self, _identifier: &str) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
+        Ok(None)
     }
 
-    fn wait(
+    fn set(
         &self,
-        timeout: Option<std::time::Duration>,
-    ) -> Result<Option<String>, KeychainUnavailable> {
-        let guard = self.result.lock().map_err(|_| KeychainUnavailable)?;
-        let guard = if let Some(timeout) = timeout {
-            self.ready
-                .wait_timeout_while(guard, timeout, |result| result.is_none())
-                .map_err(|_| KeychainUnavailable)?
-                .0
-        } else {
-            self.ready
-                .wait_while(guard, |result| result.is_none())
-                .map_err(|_| KeychainUnavailable)?
-        };
-        guard.clone().unwrap_or(Err(KeychainUnavailable))
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn read_process_vault_explicit<F>(
-    cache: &Mutex<ProcessVaultCache>,
-    reuse_loaded: bool,
-    read: F,
-) -> Result<Option<Secret<String>>, KeychainUnavailable>
-where
-    F: FnOnce() -> Result<Option<Secret<String>>, KeychainUnavailable> + Send + 'static,
-{
-    let operation = {
-        let mut cache = cache.lock().map_err(|_| KeychainUnavailable)?;
-        match &*cache {
-            ProcessVaultCache::Loaded(value) if reuse_loaded => {
-                return Ok(value.clone().map(Secret::new));
-            }
-            ProcessVaultCache::Reading(operation) => Arc::clone(operation),
-            ProcessVaultCache::Unloaded
-            | ProcessVaultCache::Unavailable
-            | ProcessVaultCache::Loaded(_) => {
-                let operation = ProcessVaultRead::start(read)?;
-                *cache = ProcessVaultCache::Reading(Arc::clone(&operation));
-                operation
-            }
-        }
-    };
-    let result = operation.wait(None);
-    let mut cache = cache.lock().map_err(|_| KeychainUnavailable)?;
-    if matches!(&*cache, ProcessVaultCache::Reading(active) if Arc::ptr_eq(active, &operation)) {
-        *cache = match &result {
-            Ok(value) => ProcessVaultCache::Loaded(value.clone()),
-            Err(_) => ProcessVaultCache::Unavailable,
-        };
-    }
-    result.map(|value| value.map(Secret::new))
-}
-
-fn process_vault_cache() -> &'static Mutex<ProcessVaultCache> {
-    static CACHE: OnceLock<Mutex<ProcessVaultCache>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(ProcessVaultCache::Unloaded))
-}
-
-fn read_keychain_item(
-    service: &str,
-    identifier: &str,
-) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-    #[cfg(target_os = "macos")]
-    {
-        let service = service.to_owned();
-        let identifier = identifier.to_owned();
-        bounded_keychain_read(PASSIVE_KEYCHAIN_READ_TIMEOUT, move || {
-            read_keychain_item_blocking(&service, &identifier)
-        })
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    read_keychain_item_blocking(service, identifier)
-}
-
-fn read_keychain_item_blocking(
-    service: &str,
-    identifier: &str,
-) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-    let entry = keyring::Entry::new(service, identifier).map_err(|_| KeychainUnavailable)?;
-    match entry.get_password() {
-        Ok(value) => Ok(Some(Secret::new(value))),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(_) => Err(KeychainUnavailable),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn bounded_keychain_read<F>(
-    timeout: std::time::Duration,
-    read: F,
-) -> Result<Option<Secret<String>>, KeychainUnavailable>
-where
-    F: FnOnce() -> Result<Option<Secret<String>>, KeychainUnavailable> + Send + 'static,
-{
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    std::thread::Builder::new()
-        .name("rottweiler-keychain-read".to_owned())
-        .spawn(move || {
-            let _ = sender.send(read());
-        })
-        .map_err(|_| KeychainUnavailable)?;
-    receiver
-        .recv_timeout(timeout)
-        .unwrap_or(Err(KeychainUnavailable))
-}
-
-fn write_keychain_item(
-    service: &str,
-    identifier: &str,
-    secret: &Secret<String>,
-) -> Result<(), KeychainUnavailable> {
-    let entry = keyring::Entry::new(service, identifier).map_err(|_| KeychainUnavailable)?;
-    entry
-        .set_password(secret.expose_secret())
-        .map_err(|_| KeychainUnavailable)
-}
-
-fn os_keychain_disabled() -> bool {
-    keychain_backend_is_file(env::var_os(CREDENTIAL_BACKEND_ENV).as_deref())
-}
-
-fn keychain_backend_is_file(value: Option<&std::ffi::OsStr>) -> bool {
-    match value {
-        None => false,
-        Some(value) if value == "keychain" => false,
-        Some(value) if value == "file" => true,
-        // Invalid and non-Unicode values fail closed without touching OS APIs.
-        Some(_) => true,
-    }
-}
-
-impl CredentialKeychain for OsKeychain {
-    fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-        if identifier != KEYCHAIN_VAULT_ID || os_keychain_disabled() {
-            return Err(KeychainUnavailable);
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let operation = {
-                let mut cache = process_vault_cache()
-                    .lock()
-                    .map_err(|_| KeychainUnavailable)?;
-                match &*cache {
-                    ProcessVaultCache::Loaded(value) => {
-                        return Ok(value.clone().map(Secret::new));
-                    }
-                    ProcessVaultCache::Unavailable => return Err(KeychainUnavailable),
-                    ProcessVaultCache::Reading(operation) => Arc::clone(operation),
-                    ProcessVaultCache::Unloaded => {
-                        let operation = ProcessVaultRead::start(|| {
-                            read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, KEYCHAIN_VAULT_ID)
-                        })?;
-                        *cache = ProcessVaultCache::Reading(Arc::clone(&operation));
-                        operation
-                    }
-                }
-            };
-            let result = operation.wait(Some(PASSIVE_KEYCHAIN_READ_TIMEOUT));
-            if let Ok(mut cache) = process_vault_cache().lock()
-                && matches!(&*cache, ProcessVaultCache::Reading(active) if Arc::ptr_eq(active, &operation))
-                && let Ok(value) = &result
-            {
-                *cache = ProcessVaultCache::Loaded(value.clone());
-            }
-            result.map(|value| value.map(Secret::new))
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            let mut cache = process_vault_cache()
-                .lock()
-                .map_err(|_| KeychainUnavailable)?;
-            match &*cache {
-                ProcessVaultCache::Loaded(value) => {
-                    return Ok(value.clone().map(Secret::new));
-                }
-                ProcessVaultCache::Unavailable => return Err(KeychainUnavailable),
-                ProcessVaultCache::Unloaded => {}
-            }
-
-            match read_keychain_item(KEYCHAIN_VAULT_SERVICE, identifier) {
-                Ok(value) => {
-                    *cache = ProcessVaultCache::Loaded(
-                        value.as_ref().map(|secret| secret.expose_secret().clone()),
-                    );
-                    Ok(value)
-                }
-                Err(error) => {
-                    *cache = ProcessVaultCache::Unavailable;
-                    Err(error)
-                }
-            }
-        }
-    }
-
-    fn get_authorized(
-        &self,
-        identifier: &str,
-    ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-        if identifier != KEYCHAIN_VAULT_ID || os_keychain_disabled() {
-            return Err(KeychainUnavailable);
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            read_process_vault_explicit(process_vault_cache(), true, || {
-                read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, KEYCHAIN_VAULT_ID)
-            })
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            let mut cache = process_vault_cache()
-                .lock()
-                .map_err(|_| KeychainUnavailable)?;
-            if let ProcessVaultCache::Loaded(value) = &*cache {
-                return Ok(value.clone().map(Secret::new));
-            }
-            let value = read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, identifier)?;
-            *cache = ProcessVaultCache::Loaded(
-                value.as_ref().map(|secret| secret.expose_secret().clone()),
-            );
-            Ok(value)
-        }
-    }
-
-    fn set(&self, identifier: &str, secret: &Secret<String>) -> Result<(), KeychainUnavailable> {
-        if identifier != KEYCHAIN_VAULT_ID || os_keychain_disabled() {
-            return Err(KeychainUnavailable);
-        }
-
-        let mut cache = process_vault_cache()
-            .lock()
-            .map_err(|_| KeychainUnavailable)?;
-        match write_keychain_item(KEYCHAIN_VAULT_SERVICE, identifier, secret) {
-            Ok(()) => {
-                *cache = ProcessVaultCache::Loaded(Some(secret.expose_secret().clone()));
-                Ok(())
-            }
-            Err(error) => {
-                *cache = ProcessVaultCache::Unavailable;
-                Err(error)
-            }
-        }
-    }
-
-    fn get_fresh(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-        if identifier != KEYCHAIN_VAULT_ID || os_keychain_disabled() {
-            return Err(KeychainUnavailable);
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            read_process_vault_explicit(process_vault_cache(), false, || {
-                read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, KEYCHAIN_VAULT_ID)
-            })
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        read_keychain_item_blocking(KEYCHAIN_VAULT_SERVICE, identifier)
-    }
-
-    fn get_legacy(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-        if os_keychain_disabled() {
-            return Err(KeychainUnavailable);
-        }
-        read_keychain_item(LEGACY_KEYCHAIN_SERVICE, identifier)
-    }
-
-    fn get_legacy_authorized(
-        &self,
-        identifier: &str,
-    ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-        if os_keychain_disabled() {
-            return Err(KeychainUnavailable);
-        }
-        read_keychain_item_blocking(LEGACY_KEYCHAIN_SERVICE, identifier)
+        _identifier: &str,
+        _secret: &Secret<String>,
+    ) -> Result<(), CredentialStoreUnavailable> {
+        Err(CredentialStoreUnavailable)
     }
 }
 
@@ -767,7 +428,7 @@ struct CredentialVault {
 impl Default for CredentialVault {
     fn default() -> Self {
         Self {
-            version: KEYCHAIN_VAULT_VERSION,
+            version: CREDENTIAL_VAULT_VERSION,
             credentials: BTreeMap::new(),
         }
     }
@@ -782,7 +443,6 @@ enum CachedVault {
 
 struct CredentialVaultCache {
     vault: CachedVault,
-    legacy_bootstrap_pending: bool,
     writes_unavailable: bool,
 }
 
@@ -790,25 +450,26 @@ impl Default for CredentialVaultCache {
     fn default() -> Self {
         Self {
             vault: CachedVault::Unloaded,
-            legacy_bootstrap_pending: false,
             writes_unavailable: false,
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum VaultAccessError {
     Unavailable,
     Malformed,
     Encode,
 }
 
-/// Credential manager with injectable environment and keychain boundaries.
-pub struct CredentialManager<E = SystemEnvironment, K = OsKeychain> {
+/// Credential manager with injectable environment and credential-store boundaries.
+pub struct CredentialManager<E = SystemEnvironment, K = NoExternalCredentialStore> {
     environment: E,
-    keychain: K,
-    fallback_path: PathBuf,
+    store: K,
+    credential_file_path: PathBuf,
     vault_cache: Arc<Mutex<CredentialVaultCache>>,
+    warn_on_credential_file: bool,
+    use_injected_store: bool,
 }
 
 impl<E, K> Clone for CredentialManager<E, K>
@@ -819,9 +480,11 @@ where
     fn clone(&self) -> Self {
         Self {
             environment: self.environment.clone(),
-            keychain: self.keychain.clone(),
-            fallback_path: self.fallback_path.clone(),
+            store: self.store.clone(),
+            credential_file_path: self.credential_file_path.clone(),
             vault_cache: self.vault_cache.clone(),
+            warn_on_credential_file: self.warn_on_credential_file,
+            use_injected_store: self.use_injected_store,
         }
     }
 }
@@ -833,15 +496,18 @@ fn process_credential_vault_cache() -> Arc<Mutex<CredentialVaultCache>> {
         .clone()
 }
 
-impl CredentialManager<SystemEnvironment, OsKeychain> {
-    /// Creates the production manager using the process environment and OS keychain.
+impl CredentialManager<SystemEnvironment, NoExternalCredentialStore> {
+    /// Creates the production manager using the process environment and the
+    /// owner-private credential file. No operating-system credential store is used.
     #[must_use]
-    pub fn system(fallback_path: impl Into<PathBuf>) -> Self {
+    pub fn system(credential_file_path: impl Into<PathBuf>) -> Self {
         Self {
             environment: SystemEnvironment,
-            keychain: OsKeychain,
-            fallback_path: fallback_path.into(),
+            store: NoExternalCredentialStore,
+            credential_file_path: credential_file_path.into(),
             vault_cache: process_credential_vault_cache(),
+            warn_on_credential_file: false,
+            use_injected_store: false,
         }
     }
 }
@@ -849,10 +515,10 @@ impl CredentialManager<SystemEnvironment, OsKeychain> {
 impl<E, K> CredentialManager<E, K>
 where
     E: CredentialEnvironment,
-    K: CredentialKeychain,
+    K: CredentialStore,
 {
-    /// Inventories many references with one vault read and at most one fallback
-    /// document read. This path never performs legacy migration or any write.
+    /// Inventories many references with one injected-store read and at most one
+    /// credential-file read. This path never performs migration or any write.
     ///
     /// Returned entries align exactly with `references`; secret values remain
     /// inside [`ResolvedCredential`] and its redacted debug boundary.
@@ -860,7 +526,7 @@ where
     /// # Errors
     ///
     /// Returns a sanitized error for an invalid reference/environment value,
-    /// malformed vault/fallback document, or unsafe fallback file.
+    /// malformed vault/credential document, or unsafe credential file.
     pub fn resolve_inventory(
         &self,
         references: &[CredentialReference],
@@ -887,35 +553,35 @@ where
         if let Some(inventory) = environment_only_inventory(references, &environment_values) {
             return Ok(inventory);
         }
-        let (vault, keychain_unavailable) = {
-            let mut cache =
-                self.vault_cache
-                    .lock()
-                    .map_err(|_| CredentialError::KeychainUnavailable {
-                        identifier: "credential-vault".to_owned(),
-                    })?;
+        let (vault, store_unavailable) = {
+            let mut cache = self.vault_cache.lock().map_err(|_| {
+                CredentialError::CredentialStoreUnavailable {
+                    identifier: "credential-vault".to_owned(),
+                }
+            })?;
             let unavailable = match self.load_vault(&mut cache) {
                 Ok(()) => false,
                 Err(VaultAccessError::Unavailable) => true,
                 Err(VaultAccessError::Malformed) => {
-                    return Err(CredentialError::MalformedKeychainVault);
+                    return Err(CredentialError::MalformedCredentialStore);
                 }
                 Err(VaultAccessError::Encode) => {
-                    return Err(CredentialError::EncodeKeychainVault);
+                    return Err(CredentialError::EncodeCredentialStore);
                 }
             };
             let values = match &cache.vault {
                 CachedVault::Loaded(vault) => vault.credentials.clone(),
                 CachedVault::Unavailable | CachedVault::Unloaded => BTreeMap::new(),
-                CachedVault::Malformed => return Err(CredentialError::MalformedKeychainVault),
+                CachedVault::Malformed => return Err(CredentialError::MalformedCredentialStore),
             };
             (values, unavailable)
         };
-        let fallback = if fallback_metadata(&self.fallback_path)?.is_some() {
-            Some(read_document(&self.fallback_path)?)
-        } else {
-            None
-        };
+        let credential_file_document =
+            if credential_file_metadata(&self.credential_file_path)?.is_some() {
+                Some(read_document(&self.credential_file_path)?)
+            } else {
+                None
+            };
         Ok(references
             .iter()
             .zip(environment_values)
@@ -935,24 +601,21 @@ where
                 if let Some(value) = vault.get(reference.identifier()) {
                     return CredentialInventoryItem::Present(ResolvedCredential {
                         secret: Secret::new(value.clone()),
-                        source: CredentialSource::OsKeychain,
+                        source: CredentialSource::InjectedStore,
                         warnings: Vec::new(),
                     });
                 }
-                if let Some(value) = fallback
+                if let Some(value) = credential_file_document
                     .as_ref()
                     .and_then(|document| document.credentials.get(reference.identifier()))
                 {
                     return CredentialInventoryItem::Present(ResolvedCredential {
                         secret: Secret::new(value.clone()),
-                        source: CredentialSource::FallbackFile(self.fallback_path.clone()),
-                        warnings: vec![fallback_warning(
-                            &self.fallback_path,
-                            reference.identifier(),
-                        )],
+                        source: CredentialSource::CredentialFile(self.credential_file_path.clone()),
+                        warnings: self.file_warnings(reference.identifier()),
                     });
                 }
-                if keychain_unavailable {
+                if store_unavailable {
                     CredentialInventoryItem::StoreUnavailable
                 } else {
                     CredentialInventoryItem::Missing
@@ -963,21 +626,28 @@ where
 
     /// Creates a manager with deterministic/injectable external boundaries.
     #[must_use]
-    pub fn with_backends(environment: E, keychain: K, fallback_path: impl Into<PathBuf>) -> Self {
+    pub fn with_backends(
+        environment: E,
+        store: K,
+        credential_file_path: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             environment,
-            keychain,
-            fallback_path: fallback_path.into(),
+            store,
+            credential_file_path: credential_file_path.into(),
             vault_cache: Arc::new(Mutex::new(CredentialVaultCache::default())),
+            warn_on_credential_file: true,
+            use_injected_store: true,
         }
     }
 
-    /// Resolves environment first, OS keychain second, and the file fallback last.
+    /// Resolves environment first, then the injected credential store and
+    /// owner-private file. Production uses only environment and the file.
     ///
     /// # Errors
     ///
     /// Returns a sanitized [`CredentialError`] for invalid references, unavailable
-    /// sources, insecure fallback permissions, or unreadable fallback data.
+    /// sources, insecure credential-file permissions, or unreadable file data.
     pub fn resolve(
         &self,
         reference: &CredentialReference,
@@ -987,9 +657,8 @@ where
 
     /// Resolves a credential for an explicit active operation.
     ///
-    /// On macOS this path may wait for the user to authorize the single
-    /// Rottweiler vault. It also retries after a prior passive inventory timed
-    /// out, so a two-second status probe cannot poison the subsequent model run.
+    /// Production resolution never opens an operating-system authorization
+    /// dialog. Injected embedders may distinguish active and passive reads.
     ///
     /// # Errors
     ///
@@ -1019,40 +688,41 @@ where
             });
         }
 
-        let keychain = if authorized {
+        let store = if authorized {
             self.resolve_from_vault_authorized(reference.identifier())
         } else {
             self.resolve_from_vault(reference.identifier())
         };
-        let keychain_unavailable = match keychain {
+        let store_unavailable = match store {
             Ok(Some(secret)) => {
                 return Ok(ResolvedCredential {
                     secret,
-                    source: CredentialSource::OsKeychain,
+                    source: CredentialSource::InjectedStore,
                     warnings: Vec::new(),
                 });
             }
             Ok(None) => false,
             Err(VaultAccessError::Unavailable) => true,
             Err(VaultAccessError::Malformed) => {
-                return Err(CredentialError::MalformedKeychainVault);
+                return Err(CredentialError::MalformedCredentialStore);
             }
             Err(VaultAccessError::Encode) => {
-                return Err(CredentialError::EncodeKeychainVault);
+                return Err(CredentialError::EncodeCredentialStore);
             }
         };
 
-        if let Some(secret) = read_fallback(&self.fallback_path, reference.identifier())? {
-            let warning = fallback_warning(&self.fallback_path, reference.identifier());
+        if let Some(secret) =
+            read_credential_file_value(&self.credential_file_path, reference.identifier())?
+        {
             return Ok(ResolvedCredential {
                 secret: Secret::new(secret),
-                source: CredentialSource::FallbackFile(self.fallback_path.clone()),
-                warnings: vec![warning],
+                source: CredentialSource::CredentialFile(self.credential_file_path.clone()),
+                warnings: self.file_warnings(reference.identifier()),
             });
         }
 
-        if keychain_unavailable {
-            Err(CredentialError::KeychainUnavailable {
+        if store_unavailable {
+            Err(CredentialError::CredentialStoreUnavailable {
                 identifier: reference.identifier().to_owned(),
             })
         } else {
@@ -1072,44 +742,31 @@ where
             .map_err(|_| VaultAccessError::Unavailable)?;
         match &cache.vault {
             CachedVault::Loaded(vault) => {
-                let value = vault.credentials.get(identifier).cloned().map(Secret::new);
-                let legacy_bootstrap_pending = cache.legacy_bootstrap_pending;
-                drop(cache);
-                return if value.is_none() && legacy_bootstrap_pending {
-                    self.resolve_from_vault_with_legacy_mode(identifier, true)
-                } else {
-                    Ok(value)
-                };
+                return Ok(vault.credentials.get(identifier).cloned().map(Secret::new));
             }
             CachedVault::Malformed => return Err(VaultAccessError::Malformed),
             CachedVault::Unloaded | CachedVault::Unavailable => {}
         }
         let encoded = self
-            .keychain
-            .get_authorized(KEYCHAIN_VAULT_ID)
+            .store
+            .get_authorized(CREDENTIAL_VAULT_ID)
             .map_err(|_| VaultAccessError::Unavailable)?;
-        let vault_was_missing = encoded.is_none();
         let vault = match encoded {
             Some(encoded) => decode_vault(&encoded).map_err(|()| VaultAccessError::Malformed)?,
             None => CredentialVault::default(),
         };
         let value = vault.credentials.get(identifier).cloned().map(Secret::new);
         cache.vault = CachedVault::Loaded(vault);
-        cache.legacy_bootstrap_pending = vault_was_missing;
-        drop(cache);
-        if value.is_none() && vault_was_missing {
-            self.resolve_from_vault_with_legacy_mode(identifier, true)
-        } else {
-            Ok(value)
-        }
+        Ok(value)
     }
 
-    /// Stores in the OS keychain, falling back to a mode-0600 plaintext file.
+    /// Stores in the injected credential store or owner-private file.
+    /// Production always selects the file.
     ///
     /// # Errors
     ///
     /// Returns a sanitized [`CredentialError`] when the reference is invalid or the
-    /// secure fallback file cannot be read, encoded, or written.
+    /// secure credential file cannot be read, encoded, or written.
     pub fn store(
         &self,
         reference: &CredentialReference,
@@ -1117,45 +774,45 @@ where
     ) -> Result<StoredCredential, CredentialError> {
         reference.validate()?;
 
-        match self.store_in_vault(reference.identifier(), secret) {
-            Ok(()) => {
-                return Ok(StoredCredential {
-                    source: CredentialSource::OsKeychain,
-                    warnings: Vec::new(),
-                });
+        if self.use_injected_store {
+            match self.store_in_vault(reference.identifier(), secret) {
+                Ok(()) => {
+                    return Ok(StoredCredential {
+                        source: CredentialSource::InjectedStore,
+                        warnings: Vec::new(),
+                    });
+                }
+                Err(VaultAccessError::Malformed) => {
+                    return Err(CredentialError::MalformedCredentialStore);
+                }
+                Err(VaultAccessError::Encode) => {
+                    return Err(CredentialError::EncodeCredentialStore);
+                }
+                Err(VaultAccessError::Unavailable) => {}
             }
-            Err(VaultAccessError::Malformed) => {
-                return Err(CredentialError::MalformedKeychainVault);
-            }
-            Err(VaultAccessError::Encode) => {
-                return Err(CredentialError::EncodeKeychainVault);
-            }
-            Err(VaultAccessError::Unavailable) => {}
         }
 
-        write_fallback(
-            &self.fallback_path,
+        write_credential_file_value(
+            &self.credential_file_path,
             reference.identifier(),
             secret.expose_secret(),
         )?;
-        let warning = fallback_warning(&self.fallback_path, reference.identifier());
         Ok(StoredCredential {
-            source: CredentialSource::FallbackFile(self.fallback_path.clone()),
-            warnings: vec![warning],
+            source: CredentialSource::CredentialFile(self.credential_file_path.clone()),
+            warnings: self.file_warnings(reference.identifier()),
         })
+    }
+
+    fn file_warnings(&self, identifier: &str) -> Vec<CredentialWarning> {
+        self.warn_on_credential_file
+            .then(|| credential_file_warning(&self.credential_file_path, identifier))
+            .into_iter()
+            .collect()
     }
 
     fn resolve_from_vault(
         &self,
         identifier: &str,
-    ) -> Result<Option<Secret<String>>, VaultAccessError> {
-        self.resolve_from_vault_with_legacy_mode(identifier, false)
-    }
-
-    fn resolve_from_vault_with_legacy_mode(
-        &self,
-        identifier: &str,
-        authorized_legacy: bool,
     ) -> Result<Option<Secret<String>>, VaultAccessError> {
         let mut cache = self
             .vault_cache
@@ -1175,71 +832,7 @@ where
         if let Some(value) = vault.credentials.get(identifier) {
             return Ok(Some(Secret::new(value.clone())));
         }
-
-        if cache.writes_unavailable {
-            return Err(VaultAccessError::Unavailable);
-        }
-        if !cache.legacy_bootstrap_pending {
-            return Ok(None);
-        }
-        // Exactly one legacy identifier may be probed, and only when the new
-        // vault did not exist. This bounds first-run migration to one old
-        // keychain access instead of recreating a prompt per logical credential.
-        cache.legacy_bootstrap_pending = false;
-
-        let _write_lock = match acquire_vault_write_lock() {
-            Ok(lock) => lock,
-            Err(error) => {
-                cache.writes_unavailable = true;
-                return Err(error);
-            }
-        };
-        let fresh = match self.read_fresh_vault() {
-            Ok(vault) => vault,
-            Err(VaultAccessError::Malformed) => {
-                cache.vault = CachedVault::Malformed;
-                return Err(VaultAccessError::Malformed);
-            }
-            Err(error) => {
-                cache.writes_unavailable = true;
-                return Err(error);
-            }
-        };
-        if let Some(fresh) = fresh {
-            let resolved = fresh.credentials.get(identifier).cloned().map(Secret::new);
-            cache.vault = CachedVault::Loaded(fresh);
-            return Ok(resolved);
-        }
-
-        let migrated_value = if authorized_legacy {
-            self.keychain.get_legacy_authorized(identifier)
-        } else {
-            self.keychain.get_legacy(identifier)
-        }
-        .ok()
-        .flatten()
-        .map(Secret::into_inner);
-        let mut migrated = CredentialVault::default();
-        if let Some(value) = &migrated_value {
-            migrated
-                .credentials
-                .insert(identifier.to_owned(), value.clone());
-        }
-        let encoded = encode_vault(&migrated)?;
-        if self
-            .keychain
-            .set(KEYCHAIN_VAULT_ID, &Secret::new(encoded))
-            .is_err()
-        {
-            cache.writes_unavailable = true;
-            return Err(VaultAccessError::Unavailable);
-        }
-
-        // The cache changes only after the complete vault is durably accepted by
-        // the keychain. A failed migration therefore cannot expose a transient
-        // legacy value as though it had been safely migrated.
-        cache.vault = CachedVault::Loaded(migrated);
-        Ok(migrated_value.map(Secret::new))
+        Ok(None)
     }
 
     fn store_in_vault(
@@ -1280,14 +873,13 @@ where
         };
         let mut updated = fresh.unwrap_or_default();
         cache.vault = CachedVault::Loaded(updated.clone());
-        cache.legacy_bootstrap_pending = false;
         updated
             .credentials
             .insert(identifier.to_owned(), secret.expose_secret().clone());
         let encoded = encode_vault(&updated)?;
         if self
-            .keychain
-            .set(KEYCHAIN_VAULT_ID, &Secret::new(encoded))
+            .store
+            .set(CREDENTIAL_VAULT_ID, &Secret::new(encoded))
             .is_err()
         {
             cache.writes_unavailable = true;
@@ -1295,12 +887,11 @@ where
         }
 
         cache.vault = CachedVault::Loaded(updated);
-        cache.legacy_bootstrap_pending = false;
         Ok(())
     }
 
     fn read_fresh_vault(&self) -> Result<Option<CredentialVault>, VaultAccessError> {
-        match self.keychain.get_fresh(KEYCHAIN_VAULT_ID) {
+        match self.store.get_fresh(CREDENTIAL_VAULT_ID) {
             Ok(Some(encoded)) => decode_vault(&encoded)
                 .map(Some)
                 .map_err(|()| VaultAccessError::Malformed),
@@ -1317,18 +908,16 @@ where
             CachedVault::Unloaded => {}
         }
 
-        match self.keychain.get(KEYCHAIN_VAULT_ID) {
+        match self.store.get(CREDENTIAL_VAULT_ID) {
             Ok(Some(encoded)) => {
                 let Ok(vault) = decode_vault(&encoded) else {
                     cache.vault = CachedVault::Malformed;
                     return Err(VaultAccessError::Malformed);
                 };
                 cache.vault = CachedVault::Loaded(vault);
-                cache.legacy_bootstrap_pending = false;
             }
             Ok(None) => {
                 cache.vault = CachedVault::Loaded(CredentialVault::default());
-                cache.legacy_bootstrap_pending = true;
             }
             Err(_) => {
                 cache.vault = CachedVault::Unavailable;
@@ -1341,7 +930,7 @@ where
 
 fn decode_vault(encoded: &Secret<String>) -> Result<CredentialVault, ()> {
     let vault = toml::from_str::<CredentialVault>(encoded.expose_secret()).map_err(|_| ())?;
-    if vault.version != KEYCHAIN_VAULT_VERSION
+    if vault.version != CREDENTIAL_VAULT_VERSION
         || vault
             .credentials
             .keys()
@@ -1463,19 +1052,22 @@ struct CredentialFile {
     credentials: BTreeMap<String, String>,
 }
 
-fn fallback_warning(path: &Path, identifier: &str) -> CredentialWarning {
+fn credential_file_warning(path: &Path, identifier: &str) -> CredentialWarning {
     tracing::warn!(
-        fallback_path = %path.display(),
+        credential_file_path = %path.display(),
         credential_reference = identifier,
-        "using plaintext credential fallback; OS keychain storage is preferred"
+        "injected credential store was unavailable; using the owner-private credential file"
     );
-    CredentialWarning::PlaintextFileFallback {
+    CredentialWarning::OwnerPrivateCredentialFile {
         path: path.to_owned(),
     }
 }
 
-fn read_fallback(path: &Path, identifier: &str) -> Result<Option<String>, CredentialError> {
-    let Some(metadata) = fallback_metadata(path)? else {
+fn read_credential_file_value(
+    path: &Path,
+    identifier: &str,
+) -> Result<Option<String>, CredentialError> {
+    let Some(metadata) = credential_file_metadata(path)? else {
         return Ok(None);
     };
     validate_file_permissions(path, &metadata)?;
@@ -1497,8 +1089,23 @@ fn read_fallback(path: &Path, identifier: &str) -> Result<Option<String>, Creden
     Ok(file.credentials.get(identifier).cloned())
 }
 
-fn write_fallback(path: &Path, identifier: &str, secret: &str) -> Result<(), CredentialError> {
-    let mut file = if fallback_metadata(path)?.is_some() {
+fn write_credential_file_value(
+    path: &Path,
+    identifier: &str,
+    secret: &str,
+) -> Result<(), CredentialError> {
+    let parent = credential_file_parent(path);
+    fs::create_dir_all(parent).map_err(|source| CredentialError::WriteFile {
+        path: path.to_owned(),
+        source,
+    })?;
+
+    // The lock must cover the fresh read, merge, temporary write, rename, and
+    // directory sync. Otherwise two Rottweiler processes can each read the same
+    // old document and silently discard the other's credential.
+    let _write_lock = acquire_credential_file_write_lock(path)?;
+    remove_stale_credential_temporary_files(path);
+    let mut file = if credential_file_metadata(path)?.is_some() {
         read_document(path)?
     } else {
         CredentialFile {
@@ -1512,51 +1119,34 @@ fn write_fallback(path: &Path, identifier: &str, secret: &str) -> Result<(), Cre
         path: path.to_owned(),
     })?;
 
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent).map_err(|source| CredentialError::WriteFile {
-            path: path.to_owned(),
-            source,
-        })?;
-    }
-
-    let temporary_path = fallback_temporary_path(path);
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+    let mut temporary_file = create_unique_credential_temporary_file(path)?;
+    let temporary_path = temporary_file.path().to_owned();
     #[cfg(unix)]
-    options.mode(0o600);
-    let mut output =
-        options
-            .open(&temporary_path)
-            .map_err(|source| CredentialError::WriteFile {
-                path: temporary_path.clone(),
-                source,
-            })?;
-    #[cfg(unix)]
-    output
+    temporary_file
+        .file_mut()
         .set_permissions(fs::Permissions::from_mode(0o600))
         .map_err(|source| CredentialError::WriteFile {
             path: temporary_path.clone(),
             source,
         })?;
-    output
+    temporary_file
+        .file_mut()
         .write_all(contents.as_bytes())
-        .and_then(|()| output.sync_all())
+        .and_then(|()| temporary_file.file_mut().sync_all())
         .map_err(|source| CredentialError::WriteFile {
             path: temporary_path.clone(),
             source,
         })?;
-    drop(output);
+    temporary_file.close();
     fs::rename(&temporary_path, path).map_err(|source| CredentialError::WriteFile {
         path: path.to_owned(),
         source,
-    })
+    })?;
+    sync_credential_parent_directory(parent, path)
 }
 
 fn read_document(path: &Path) -> Result<CredentialFile, CredentialError> {
-    let metadata = fallback_metadata(path)?.ok_or_else(|| CredentialError::ReadFile {
+    let metadata = credential_file_metadata(path)?.ok_or_else(|| CredentialError::ReadFile {
         path: path.to_owned(),
         source: std::io::Error::new(std::io::ErrorKind::NotFound, "file no longer exists"),
     })?;
@@ -1578,7 +1168,7 @@ fn read_document(path: &Path) -> Result<CredentialFile, CredentialError> {
     Ok(file)
 }
 
-fn fallback_metadata(path: &Path) -> Result<Option<fs::Metadata>, CredentialError> {
+fn credential_file_metadata(path: &Path) -> Result<Option<fs::Metadata>, CredentialError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1597,12 +1187,243 @@ fn fallback_metadata(path: &Path) -> Result<Option<fs::Metadata>, CredentialErro
     Ok(Some(metadata))
 }
 
-fn fallback_temporary_path(path: &Path) -> PathBuf {
+fn credential_file_parent(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn credential_file_lock_path(path: &Path) -> PathBuf {
     let mut file_name = path
         .file_name()
         .map_or_else(|| "credentials".into(), std::ffi::OsString::from);
-    file_name.push(".tmp");
+    file_name.push(".lock");
     path.with_file_name(file_name)
+}
+
+fn remove_stale_credential_temporary_files(path: &Path) {
+    let parent = credential_file_parent(path);
+    let mut legacy_name = path
+        .file_name()
+        .map_or_else(|| "credentials".into(), std::ffi::OsString::from);
+    legacy_name.push(".tmp");
+    let mut unique_prefix = legacy_name.clone();
+    unique_prefix.push(".");
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if name != legacy_name
+            && !name
+                .as_encoded_bytes()
+                .starts_with(unique_prefix.as_encoded_bytes())
+        {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_file() || file_type.is_symlink() {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn acquire_credential_file_write_lock(path: &Path) -> Result<fs::File, CredentialError> {
+    use rustix::fs::{Mode, OFlags};
+
+    let lock_path = credential_file_lock_path(path);
+    let owner = rustix::process::geteuid().as_raw();
+    loop {
+        match fs::symlink_metadata(&lock_path) {
+            Ok(metadata) => validate_credential_lock_file(&lock_path, &metadata, owner)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match rustix::fs::open(
+                    &lock_path,
+                    OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW,
+                    Mode::RUSR | Mode::WUSR,
+                ) {
+                    Ok(descriptor) => {
+                        let file = fs::File::from(descriptor);
+                        file.set_permissions(fs::Permissions::from_mode(0o600))
+                            .map_err(|source| CredentialError::WriteFile {
+                                path: lock_path.clone(),
+                                source,
+                            })?;
+                        validate_credential_lock_file(
+                            &lock_path,
+                            &file
+                                .metadata()
+                                .map_err(|source| CredentialError::WriteFile {
+                                    path: lock_path.clone(),
+                                    source,
+                                })?,
+                            owner,
+                        )?;
+                        file.lock().map_err(|source| CredentialError::WriteFile {
+                            path: lock_path,
+                            source,
+                        })?;
+                        return Ok(file);
+                    }
+                    Err(rustix::io::Errno::EXIST) => continue,
+                    Err(source) => {
+                        return Err(CredentialError::WriteFile {
+                            path: lock_path,
+                            source: std::io::Error::from(source),
+                        });
+                    }
+                }
+            }
+            Err(source) => {
+                return Err(CredentialError::WriteFile {
+                    path: lock_path,
+                    source,
+                });
+            }
+        }
+
+        let descriptor =
+            rustix::fs::open(&lock_path, OFlags::RDWR | OFlags::NOFOLLOW, Mode::empty()).map_err(
+                |source| CredentialError::WriteFile {
+                    path: lock_path.clone(),
+                    source: std::io::Error::from(source),
+                },
+            )?;
+        let file = fs::File::from(descriptor);
+        validate_credential_lock_file(
+            &lock_path,
+            &file
+                .metadata()
+                .map_err(|source| CredentialError::WriteFile {
+                    path: lock_path.clone(),
+                    source,
+                })?,
+            owner,
+        )?;
+        file.lock().map_err(|source| CredentialError::WriteFile {
+            path: lock_path,
+            source,
+        })?;
+        return Ok(file);
+    }
+}
+
+#[cfg(unix)]
+fn validate_credential_lock_file(
+    path: &Path,
+    metadata: &fs::Metadata,
+    owner: u32,
+) -> Result<(), CredentialError> {
+    if !metadata.file_type().is_file() || metadata.uid() != owner {
+        return Err(CredentialError::UnsafeFileType {
+            path: path.to_owned(),
+        });
+    }
+    validate_file_permissions(path, metadata)
+}
+
+#[cfg(not(unix))]
+fn acquire_credential_file_write_lock(path: &Path) -> Result<fs::File, CredentialError> {
+    let lock_path = credential_file_lock_path(path);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&lock_path)
+        .map_err(|source| CredentialError::WriteFile {
+            path: lock_path.clone(),
+            source,
+        })?;
+    file.lock().map_err(|source| CredentialError::WriteFile {
+        path: lock_path,
+        source,
+    })?;
+    Ok(file)
+}
+
+struct CredentialTemporaryFile {
+    path: PathBuf,
+    file: Option<fs::File>,
+}
+
+impl CredentialTemporaryFile {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn file_mut(&mut self) -> &mut fs::File {
+        match self.file.as_mut() {
+            Some(file) => file,
+            None => unreachable!("temporary credential file must be open"),
+        }
+    }
+
+    fn close(&mut self) {
+        drop(self.file.take());
+    }
+}
+
+impl Drop for CredentialTemporaryFile {
+    fn drop(&mut self) {
+        // After a successful rename this is a harmless NotFound. After any
+        // earlier failure it prevents this process from leaving sensitive data
+        // behind. Cleanup errors cannot hide the original sanitized failure.
+        drop(self.file.take());
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn create_unique_credential_temporary_file(
+    path: &Path,
+) -> Result<CredentialTemporaryFile, CredentialError> {
+    static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(1);
+
+    let base_name = path
+        .file_name()
+        .map_or_else(|| "credentials".into(), std::ffi::OsString::from);
+    loop {
+        let id = NEXT_TEMPORARY_ID.fetch_add(1, Ordering::Relaxed);
+        let mut file_name = base_name.clone();
+        file_name.push(format!(".tmp.{}.{id}", std::process::id()));
+        let temporary_path = path.with_file_name(file_name);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&temporary_path) {
+            Ok(file) => {
+                return Ok(CredentialTemporaryFile {
+                    path: temporary_path,
+                    file: Some(file),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(source) => {
+                return Err(CredentialError::WriteFile {
+                    path: temporary_path,
+                    source,
+                });
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn sync_credential_parent_directory(parent: &Path, path: &Path) -> Result<(), CredentialError> {
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| CredentialError::WriteFile {
+            path: path.to_owned(),
+            source,
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_credential_parent_directory(_parent: &Path, _path: &Path) -> Result<(), CredentialError> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1630,7 +1451,10 @@ fn validate_file_permissions(
 mod tests {
     use std::collections::BTreeMap;
     use std::fs;
+    use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
@@ -1638,16 +1462,15 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CredentialEnvironment, CredentialError, CredentialInventoryItem, CredentialKeychain,
-        CredentialManager, CredentialReference, CredentialSource, CredentialVault,
-        KEYCHAIN_VAULT_ID, KeychainUnavailable, Secret, decode_vault, encode_vault,
-        keychain_backend_is_file,
+        CREDENTIAL_VAULT_ID, CredentialEnvironment, CredentialError, CredentialInventoryItem,
+        CredentialManager, CredentialReference, CredentialSource, CredentialStore,
+        CredentialStoreUnavailable, CredentialVault, NoExternalCredentialStore, Secret,
+        decode_vault, encode_vault, read_document,
     };
 
-    #[cfg(target_os = "macos")]
-    use super::{
-        ProcessVaultCache, ProcessVaultRead, bounded_keychain_read, read_process_vault_explicit,
-    };
+    const SUBPROCESS_CREDENTIAL_PATH: &str = "RW_TEST_SUBPROCESS_CREDENTIAL_PATH";
+    const SUBPROCESS_CREDENTIAL_IDENTIFIER: &str = "RW_TEST_SUBPROCESS_CREDENTIAL_IDENTIFIER";
+    const SUBPROCESS_CREDENTIAL_START: &str = "RW_TEST_SUBPROCESS_CREDENTIAL_START";
 
     #[derive(Debug, Default, Clone)]
     struct TestEnvironment(BTreeMap<String, String>);
@@ -1659,12 +1482,12 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct TestKeychain {
+    struct TestCredentialStore {
         values: Mutex<BTreeMap<String, String>>,
         unavailable: bool,
     }
 
-    impl TestKeychain {
+    impl TestCredentialStore {
         fn unavailable() -> Self {
             Self {
                 values: Mutex::new(BTreeMap::new()),
@@ -1673,12 +1496,15 @@ mod tests {
         }
     }
 
-    impl CredentialKeychain for TestKeychain {
-        fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+    impl CredentialStore for TestCredentialStore {
+        fn get(
+            &self,
+            identifier: &str,
+        ) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
             if self.unavailable {
-                return Err(KeychainUnavailable);
+                return Err(CredentialStoreUnavailable);
             }
-            let values = self.values.lock().map_err(|_| KeychainUnavailable)?;
+            let values = self.values.lock().map_err(|_| CredentialStoreUnavailable)?;
             Ok(values.get(identifier).cloned().map(Secret::new))
         }
 
@@ -1686,165 +1512,40 @@ mod tests {
             &self,
             identifier: &str,
             secret: &Secret<String>,
-        ) -> Result<(), KeychainUnavailable> {
+        ) -> Result<(), CredentialStoreUnavailable> {
             if self.unavailable {
-                return Err(KeychainUnavailable);
+                return Err(CredentialStoreUnavailable);
             }
-            let mut values = self.values.lock().map_err(|_| KeychainUnavailable)?;
+            let mut values = self.values.lock().map_err(|_| CredentialStoreUnavailable)?;
             values.insert(identifier.to_owned(), secret.expose_secret().clone());
             Ok(())
         }
     }
 
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn passive_keychain_reads_are_bounded_when_authorization_blocks() {
-        let started = std::time::Instant::now();
-        let result = bounded_keychain_read(std::time::Duration::from_millis(10), || {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            Ok(Some(Secret::new("late-secret".to_owned())))
-        });
-
-        assert!(result.is_err());
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn authorized_wait_joins_the_in_flight_passive_keychain_read() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let calls = Arc::new(AtomicUsize::new(0));
-        let background_calls = Arc::clone(&calls);
-        let (release, released) = std::sync::mpsc::sync_channel(1);
-        let operation = ProcessVaultRead::start(move || {
-            background_calls.fetch_add(1, Ordering::AcqRel);
-            released.recv().map_err(|_| KeychainUnavailable)?;
-            Ok(Some(Secret::new("shared-result".to_owned())))
-        })
-        .expect("start shared read");
-
-        assert!(
-            operation
-                .wait(Some(std::time::Duration::from_millis(5)))
-                .is_err(),
-            "passive inventory should remain bounded"
-        );
-        let authorized = Arc::clone(&operation);
-        let waiter = std::thread::spawn(move || authorized.wait(None));
-        release.send(()).expect("release keychain fixture");
-        assert_eq!(
-            waiter
-                .join()
-                .expect("authorized waiter")
-                .expect("shared keychain result"),
-            Some("shared-result".to_owned())
-        );
-        assert_eq!(calls.load(Ordering::Acquire), 1);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn fresh_store_read_joins_a_blocked_passive_read_without_a_second_prompt() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        let passive_calls = Arc::new(AtomicUsize::new(0));
-        let background_calls = Arc::clone(&passive_calls);
-        let (release, released) = std::sync::mpsc::sync_channel(1);
-        let passive = ProcessVaultRead::start(move || {
-            background_calls.fetch_add(1, Ordering::AcqRel);
-            released.recv().map_err(|_| KeychainUnavailable)?;
-            Ok(Some(Secret::new("vault-before-store".to_owned())))
-        })
-        .expect("start blocked passive read");
-        assert!(
-            passive
-                .wait(Some(std::time::Duration::from_millis(5)))
-                .is_err(),
-            "the passive read should still be blocked when storage starts"
-        );
-
-        let cache = Arc::new(Mutex::new(ProcessVaultCache::Reading(passive)));
-        let fresh_starts = Arc::new(AtomicUsize::new(0));
-        let waiter_cache = Arc::clone(&cache);
-        let waiter_starts = Arc::clone(&fresh_starts);
-        let store_read = std::thread::spawn(move || {
-            read_process_vault_explicit(&waiter_cache, false, move || {
-                waiter_starts.fetch_add(1, Ordering::AcqRel);
-                Ok(Some(Secret::new("unexpected-second-read".to_owned())))
-            })
-        });
-
-        release.send(()).expect("release passive keychain fixture");
-        let value = store_read
-            .join()
-            .expect("fresh store waiter")
-            .expect("shared keychain result")
-            .expect("vault should exist");
-        assert_eq!(value.expose_secret(), "vault-before-store");
-        assert_eq!(passive_calls.load(Ordering::Acquire), 1);
-        assert_eq!(fresh_starts.load(Ordering::Acquire), 0);
-
-        let refresh_starts = Arc::clone(&fresh_starts);
-        let refreshed = read_process_vault_explicit(&cache, false, move || {
-            refresh_starts.fetch_add(1, Ordering::AcqRel);
-            Ok(Some(Secret::new("vault-after-other-writer".to_owned())))
-        })
-        .expect("loaded state must still receive a fresh store read")
-        .expect("refreshed vault should exist");
-        assert_eq!(refreshed.expose_secret(), "vault-after-other-writer");
-        assert_eq!(fresh_starts.load(Ordering::Acquire), 1);
-
-        *cache.lock().expect("test process cache should lock") = ProcessVaultCache::Unavailable;
-        let retry_starts = Arc::clone(&fresh_starts);
-        let retried = read_process_vault_explicit(&cache, false, move || {
-            retry_starts.fetch_add(1, Ordering::AcqRel);
-            Ok(Some(Secret::new("vault-after-retry".to_owned())))
-        })
-        .expect("a failed explicit read must remain retryable")
-        .expect("retried vault should exist");
-        assert_eq!(retried.expose_secret(), "vault-after-retry");
-        assert_eq!(fresh_starts.load(Ordering::Acquire), 2);
-    }
-
     #[derive(Clone, Default)]
-    struct RecordingKeychain(Arc<Mutex<RecordingKeychainState>>);
+    struct RecordingCredentialStore(Arc<Mutex<RecordingCredentialStoreState>>);
 
     #[derive(Default)]
-    struct RecordingKeychainState {
+    struct RecordingCredentialStoreState {
         vault: Option<String>,
-        legacy: BTreeMap<String, String>,
         calls: Vec<String>,
         vault_get_unavailable: bool,
         vault_set_unavailable: bool,
-        legacy_get_unavailable: bool,
     }
 
-    impl RecordingKeychain {
+    impl RecordingCredentialStore {
         fn with_vault(vault: &CredentialVault) -> Self {
             let encoded =
                 encode_vault(vault).unwrap_or_else(|_| panic!("test vault should encode"));
-            let keychain = Self::default();
-            keychain
-                .0
-                .lock()
-                .expect("recording keychain should lock")
-                .vault = Some(encoded);
-            keychain
-        }
-
-        fn insert_legacy(&self, identifier: &str, value: &str) {
-            self.0
-                .lock()
-                .expect("recording keychain should lock")
-                .legacy
-                .insert(identifier.to_owned(), value.to_owned());
+            let store = Self::default();
+            store.0.lock().expect("recording store should lock").vault = Some(encoded);
+            store
         }
 
         fn calls(&self) -> Vec<String> {
             self.0
                 .lock()
-                .expect("recording keychain should lock")
+                .expect("recording store should lock")
                 .calls
                 .clone()
         }
@@ -1852,7 +1553,7 @@ mod tests {
         fn decoded_vault(&self) -> Option<CredentialVault> {
             self.0
                 .lock()
-                .expect("recording keychain should lock")
+                .expect("recording store should lock")
                 .vault
                 .as_ref()
                 .map(|encoded| {
@@ -1862,12 +1563,15 @@ mod tests {
         }
     }
 
-    impl CredentialKeychain for RecordingKeychain {
-        fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-            let mut state = self.0.lock().map_err(|_| KeychainUnavailable)?;
+    impl CredentialStore for RecordingCredentialStore {
+        fn get(
+            &self,
+            identifier: &str,
+        ) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
+            let mut state = self.0.lock().map_err(|_| CredentialStoreUnavailable)?;
             state.calls.push(format!("get:{identifier}"));
             if state.vault_get_unavailable {
-                return Err(KeychainUnavailable);
+                return Err(CredentialStoreUnavailable);
             }
             Ok(state.vault.clone().map(Secret::new))
         }
@@ -1876,11 +1580,11 @@ mod tests {
             &self,
             identifier: &str,
             secret: &Secret<String>,
-        ) -> Result<(), KeychainUnavailable> {
-            let mut state = self.0.lock().map_err(|_| KeychainUnavailable)?;
+        ) -> Result<(), CredentialStoreUnavailable> {
+            let mut state = self.0.lock().map_err(|_| CredentialStoreUnavailable)?;
             state.calls.push(format!("set:{identifier}"));
             if state.vault_set_unavailable {
-                return Err(KeychainUnavailable);
+                return Err(CredentialStoreUnavailable);
             }
             state.vault = Some(secret.expose_secret().clone());
             Ok(())
@@ -1889,8 +1593,8 @@ mod tests {
         fn get_authorized(
             &self,
             identifier: &str,
-        ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-            let mut state = self.0.lock().map_err(|_| KeychainUnavailable)?;
+        ) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
+            let mut state = self.0.lock().map_err(|_| CredentialStoreUnavailable)?;
             state.calls.push(format!("get-authorized:{identifier}"));
             Ok(state.vault.clone().map(Secret::new))
         }
@@ -1898,71 +1602,45 @@ mod tests {
         fn get_fresh(
             &self,
             identifier: &str,
-        ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-            let mut state = self.0.lock().map_err(|_| KeychainUnavailable)?;
+        ) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
+            let mut state = self.0.lock().map_err(|_| CredentialStoreUnavailable)?;
             state.calls.push(format!("get-fresh:{identifier}"));
             if state.vault_get_unavailable {
-                return Err(KeychainUnavailable);
+                return Err(CredentialStoreUnavailable);
             }
             Ok(state.vault.clone().map(Secret::new))
-        }
-
-        fn get_legacy(
-            &self,
-            identifier: &str,
-        ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-            let mut state = self.0.lock().map_err(|_| KeychainUnavailable)?;
-            state.calls.push(format!("get-legacy:{identifier}"));
-            if state.legacy_get_unavailable {
-                return Err(KeychainUnavailable);
-            }
-            Ok(state.legacy.get(identifier).cloned().map(Secret::new))
-        }
-
-        fn get_legacy_authorized(
-            &self,
-            identifier: &str,
-        ) -> Result<Option<Secret<String>>, KeychainUnavailable> {
-            let mut state = self.0.lock().map_err(|_| KeychainUnavailable)?;
-            state
-                .calls
-                .push(format!("get-legacy-authorized:{identifier}"));
-            if state.legacy_get_unavailable {
-                return Err(KeychainUnavailable);
-            }
-            Ok(state.legacy.get(identifier).cloned().map(Secret::new))
         }
     }
 
     #[test]
-    fn empty_inventory_skips_keychain_legacy_and_fallback_access() {
+    fn empty_inventory_skips_store_and_file_access() {
         let root = tempdir().expect("temporary root should be created");
-        let keychain = RecordingKeychain::default();
+        let store = RecordingCredentialStore::default();
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
-            // A directory is intentionally unsafe as a fallback file. Success
-            // therefore proves the fallback metadata/document path was skipped.
+            store.clone(),
+            // A directory is intentionally unsafe as a credential file. Success
+            // therefore proves the credential-file metadata/document path was skipped.
             root.path(),
         );
         let inventory = manager
             .resolve_inventory(&[])
             .expect("empty inventory should be side-effect free");
         assert!(inventory.is_empty());
-        assert!(keychain.calls().is_empty());
+        assert!(store.calls().is_empty());
     }
 
     #[test]
-    fn environment_satisfied_inventory_skips_keychain_legacy_and_fallback_access() {
+    fn environment_satisfied_inventory_skips_store_and_file_access() {
         let root = tempdir().expect("temporary root should be created");
-        let keychain = RecordingKeychain::default();
+        let store = RecordingCredentialStore::default();
         let manager = CredentialManager::with_backends(
             TestEnvironment(BTreeMap::from([(
                 "RW_INVENTORY_TOKEN".to_owned(),
                 "environment-token".to_owned(),
             )])),
-            keychain.clone(),
-            // As above, touching this directory as a fallback file would fail.
+            store.clone(),
+            // As above, touching this directory as a credential file would fail.
             root.path(),
         );
         let references = [
@@ -1978,16 +1656,16 @@ mod tests {
             CredentialInventoryItem::Present(resolved)
                 if matches!(resolved.source(), CredentialSource::Environment(_))
         )));
-        assert!(keychain.calls().is_empty());
+        assert!(store.calls().is_empty());
     }
 
     #[test]
-    fn missing_inventory_reads_one_vault_without_writes_or_legacy_migration() {
+    fn missing_inventory_reads_one_store_document_without_writes() {
         let root = tempdir().expect("temporary root should be created");
-        let keychain = RecordingKeychain::default();
+        let store = RecordingCredentialStore::default();
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            store.clone(),
             root.path().join("missing-credentials.toml"),
         );
         let inventory = manager
@@ -2001,11 +1679,11 @@ mod tests {
                 .iter()
                 .all(|item| matches!(item, CredentialInventoryItem::Missing))
         );
-        assert_eq!(keychain.calls(), vec![format!("get:{KEYCHAIN_VAULT_ID}")]);
+        assert_eq!(store.calls(), vec![format!("get:{CREDENTIAL_VAULT_ID}")]);
     }
 
     #[test]
-    fn authorized_resolution_retries_once_after_passive_vault_failure() {
+    fn authorized_resolution_retries_once_after_passive_store_failure() {
         let root = tempdir().expect("temporary root should be created");
         let mut vault = CredentialVault::default();
         vault
@@ -2014,21 +1692,21 @@ mod tests {
         vault
             .credentials
             .insert("second".to_owned(), "secret-two".to_owned());
-        let keychain = RecordingKeychain::with_vault(&vault);
-        keychain
+        let store = RecordingCredentialStore::with_vault(&vault);
+        store
             .0
             .lock()
-            .expect("recording keychain should lock")
+            .expect("recording store should lock")
             .vault_get_unavailable = true;
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            store.clone(),
             root.path().join("credentials.toml"),
         );
 
         assert!(matches!(
             manager.resolve(&CredentialReference::new("first")),
-            Err(CredentialError::KeychainUnavailable { .. })
+            Err(CredentialError::CredentialStoreUnavailable { .. })
         ));
         let first = manager
             .resolve_authorized(&CredentialReference::new("first"))
@@ -2040,67 +1718,193 @@ mod tests {
         assert_eq!(first.secret().expose_secret(), "secret-one");
         assert_eq!(second.secret().expose_secret(), "secret-two");
         assert_eq!(
-            keychain.calls(),
+            store.calls(),
             vec![
-                format!("get:{KEYCHAIN_VAULT_ID}"),
-                format!("get-authorized:{KEYCHAIN_VAULT_ID}"),
+                format!("get:{CREDENTIAL_VAULT_ID}"),
+                format!("get-authorized:{CREDENTIAL_VAULT_ID}"),
             ]
         );
     }
 
     #[test]
-    fn authorized_resolution_preserves_one_time_legacy_vault_migration() {
+    fn authorized_resolution_reports_missing_without_migration() {
         let root = tempdir().expect("temporary root should be created");
-        let keychain = RecordingKeychain::default();
-        keychain.insert_legacy("provider-token", "legacy-provider-secret");
+        let store = RecordingCredentialStore::default();
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            store.clone(),
             root.path().join("credentials.toml"),
         );
 
-        let resolved = manager
+        let error = manager
             .resolve_authorized(&CredentialReference::new("provider-token"))
-            .expect("authorized active resolution should migrate a legacy credential");
+            .expect_err("missing credentials are not synthesized");
 
-        assert_eq!(resolved.secret().expose_secret(), "legacy-provider-secret");
-        assert_eq!(resolved.source(), &CredentialSource::OsKeychain);
+        assert!(matches!(error, CredentialError::NotFound { .. }));
         assert_eq!(
-            keychain.calls(),
-            vec![
-                format!("get-authorized:{KEYCHAIN_VAULT_ID}"),
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                "get-legacy-authorized:provider-token".to_owned(),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
-            ]
+            store.calls(),
+            vec![format!("get-authorized:{CREDENTIAL_VAULT_ID}")]
         );
     }
 
     #[test]
-    fn credential_backend_environment_is_explicit_and_fails_closed() {
-        assert!(!keychain_backend_is_file(None));
-        assert!(!keychain_backend_is_file(Some(std::ffi::OsStr::new(
-            "keychain"
-        ))));
-        assert!(keychain_backend_is_file(Some(std::ffi::OsStr::new("file"))));
-        assert!(keychain_backend_is_file(Some(std::ffi::OsStr::new(
-            "invalid"
-        ))));
+    fn production_manager_always_persists_to_the_owner_private_file() {
+        let root = tempdir().expect("temporary directory should be created");
+        let path = root.path().join("private").join("credentials.toml");
+        let reference = CredentialReference::new("provider-token");
+        let manager = CredentialManager::system(path.clone());
+
+        let stored = manager
+            .store(&reference, &Secret::new("persisted-secret".to_owned()))
+            .expect("production credential should store");
+        assert_eq!(
+            stored.source(),
+            &CredentialSource::CredentialFile(path.clone())
+        );
+        assert!(stored.warnings().is_empty());
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("credential file metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let reloaded = CredentialManager::system(path)
+            .resolve_authorized(&reference)
+            .expect("production credential should survive restart");
+        assert_eq!(reloaded.secret().expose_secret(), "persisted-secret");
+        assert!(reloaded.warnings().is_empty());
+        assert!(NoExternalCredentialStore.get(CREDENTIAL_VAULT_ID).is_ok());
+        assert!(
+            NoExternalCredentialStore
+                .set(
+                    CREDENTIAL_VAULT_ID,
+                    &Secret::new("never-written".to_owned())
+                )
+                .is_err()
+        );
     }
 
     #[test]
-    fn environment_wins_over_keychain_and_file() {
+    fn credential_file_subprocess_writer() {
+        let Some(path) = std::env::var_os(SUBPROCESS_CREDENTIAL_PATH) else {
+            return;
+        };
+        let identifier = std::env::var(SUBPROCESS_CREDENTIAL_IDENTIFIER)
+            .expect("subprocess credential identifier should be configured");
+        let start = std::env::var_os(SUBPROCESS_CREDENTIAL_START)
+            .expect("subprocess start marker should be configured");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::path::Path::new(&start).exists() {
+            assert!(
+                Instant::now() < deadline,
+                "subprocess start marker should appear"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        CredentialManager::system(path)
+            .store(
+                &CredentialReference::new(&identifier),
+                &Secret::new(format!("secret-{identifier}")),
+            )
+            .expect("subprocess credential writer should succeed");
+    }
+
+    #[test]
+    fn concurrent_process_credential_file_writers_preserve_every_value() {
+        const WRITERS: usize = 8;
+
+        let root = tempdir().expect("temporary directory should be created");
+        let path = root.path().join("private/credentials.toml");
+        let start = root.path().join("start");
+        let executable = std::env::current_exe().expect("test executable should be available");
+        let mut children = (0..WRITERS)
+            .map(|writer| {
+                Command::new(&executable)
+                    .arg("--exact")
+                    .arg("credentials::tests::credential_file_subprocess_writer")
+                    .arg("--nocapture")
+                    .env(SUBPROCESS_CREDENTIAL_PATH, &path)
+                    .env(
+                        SUBPROCESS_CREDENTIAL_IDENTIFIER,
+                        format!("provider-{writer}"),
+                    )
+                    .env(SUBPROCESS_CREDENTIAL_START, &start)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .expect("credential writer subprocess should start")
+            })
+            .collect::<Vec<_>>();
+        fs::write(&start, b"go").expect("start marker should be written");
+
+        for child in children.drain(..) {
+            let output = child
+                .wait_with_output()
+                .expect("credential writer subprocess should finish");
+            assert!(
+                output.status.success(),
+                "credential writer failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let document = read_document(&path).expect("merged credential document should decode");
+        assert_eq!(document.credentials.len(), WRITERS);
+        for writer in 0..WRITERS {
+            let identifier = format!("provider-{writer}");
+            assert_eq!(
+                document.credentials.get(&identifier),
+                Some(&format!("secret-{identifier}"))
+            );
+        }
+    }
+
+    #[test]
+    fn stale_credential_temporary_files_do_not_block_a_later_write() {
+        let root = tempdir().expect("temporary directory should be created");
+        let path = root.path().join("credentials.toml");
+        let legacy_stale = root.path().join("credentials.toml.tmp");
+        let unique_stale = root.path().join("credentials.toml.tmp.1234.9");
+        fs::write(&legacy_stale, b"stale-secret-data")
+            .expect("legacy stale temporary file should be written");
+        fs::write(&unique_stale, b"stale-secret-data")
+            .expect("unique stale temporary file should be written");
+
+        CredentialManager::system(path.clone())
+            .store(
+                &CredentialReference::new("provider-token"),
+                &Secret::new("fresh-secret".to_owned()),
+            )
+            .expect("stale temporary files must not block credential storage");
+
+        assert!(!legacy_stale.exists());
+        assert!(!unique_stale.exists());
+        let document = read_document(&path).expect("credential document should decode");
+        assert_eq!(
+            document.credentials.get("provider-token"),
+            Some(&"fresh-secret".to_owned())
+        );
+    }
+
+    #[test]
+    fn environment_wins_over_store_and_file() {
         let root = tempdir().expect("temporary directory should be created");
         let path = root.path().join("credentials.toml");
         let environment = TestEnvironment(BTreeMap::from([(
             "RW_TEST_TOKEN".to_owned(),
             "from-environment".to_owned(),
         )]));
-        let keychain = TestKeychain::default();
-        keychain
-            .set("primary", &Secret::new("from-keychain".to_owned()))
-            .expect("test keychain should accept a value");
-        let manager = CredentialManager::with_backends(environment, keychain, path);
+        let store = TestCredentialStore::default();
+        store
+            .set("primary", &Secret::new("from-store".to_owned()))
+            .expect("test store should accept a value");
+        let manager = CredentialManager::with_backends(environment, store, path);
         let reference = CredentialReference::new("primary").with_environment("RW_TEST_TOKEN");
 
         let resolved = manager
@@ -2116,34 +1920,41 @@ mod tests {
     }
 
     #[test]
-    fn keychain_wins_when_environment_is_absent() {
+    fn store_wins_when_environment_is_absent() {
         let root = tempdir().expect("temporary directory should be created");
-        let keychain = TestKeychain::default();
-        keychain
-            .set("primary", &Secret::new("from-keychain".to_owned()))
-            .expect("test keychain should accept a value");
+        let store = TestCredentialStore::default();
+        let mut vault = CredentialVault::default();
+        vault
+            .credentials
+            .insert("primary".to_owned(), "from-store".to_owned());
+        store
+            .set(
+                CREDENTIAL_VAULT_ID,
+                &Secret::new(encode_vault(&vault).expect("vault encoding")),
+            )
+            .expect("test store should accept a value");
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain,
+            store,
             root.path().join("credentials.toml"),
         );
 
         let resolved = manager
             .resolve(&CredentialReference::new("primary"))
-            .expect("keychain credential should resolve");
+            .expect("store credential should resolve");
 
-        assert_eq!(resolved.secret().expose_secret(), "from-keychain");
-        assert_eq!(resolved.source(), &CredentialSource::OsKeychain);
+        assert_eq!(resolved.secret().expose_secret(), "from-store");
+        assert_eq!(resolved.source(), &CredentialSource::InjectedStore);
         assert!(resolved.warnings().is_empty());
     }
 
     #[test]
     fn all_logical_credentials_share_one_cached_vault_item() {
         let root = tempdir().expect("temporary directory should be created");
-        let keychain = RecordingKeychain::default();
+        let store = RecordingCredentialStore::default();
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            store.clone(),
             root.path().join("credentials.toml"),
         );
 
@@ -2154,7 +1965,7 @@ mod tests {
                     &Secret::new(value.to_owned()),
                 )
                 .expect("vault credential should store");
-            assert_eq!(stored.source(), &CredentialSource::OsKeychain);
+            assert_eq!(stored.source(), &CredentialSource::InjectedStore);
         }
 
         for (identifier, value) in [("provider-a", "secret-a"), ("proxy-b", "secret-b")] {
@@ -2165,15 +1976,15 @@ mod tests {
         }
 
         assert_eq!(
-            keychain.calls(),
+            store.calls(),
             vec![
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
+                format!("get-fresh:{CREDENTIAL_VAULT_ID}"),
+                format!("set:{CREDENTIAL_VAULT_ID}"),
+                format!("get-fresh:{CREDENTIAL_VAULT_ID}"),
+                format!("set:{CREDENTIAL_VAULT_ID}"),
             ]
         );
-        let vault = keychain
+        let vault = store
             .decoded_vault()
             .expect("single vault item should exist");
         assert_eq!(vault.credentials.len(), 2);
@@ -2191,16 +2002,16 @@ mod tests {
             credentials: BTreeMap::from([("base".to_owned(), "base-secret".to_owned())]),
             ..CredentialVault::default()
         };
-        let keychain = RecordingKeychain::with_vault(&initial);
+        let store = RecordingCredentialStore::with_vault(&initial);
         let first = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            store.clone(),
             root.path().join("first/credentials.toml"),
         );
         let second = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
-            root.path().join("second/other-fallback.toml"),
+            store.clone(),
+            root.path().join("second/other-credentials.toml"),
         );
 
         first
@@ -2223,7 +2034,7 @@ mod tests {
             )
             .expect("second manager should merge into the shared vault");
 
-        let vault = keychain
+        let vault = store
             .decoded_vault()
             .expect("shared vault should remain available");
         assert_eq!(vault.credentials.get("base"), Some(&"base-secret".into()));
@@ -2236,20 +2047,20 @@ mod tests {
             Some(&"secret-b".into())
         );
         assert_eq!(
-            keychain.calls(),
+            store.calls(),
             vec![
-                format!("get:{KEYCHAIN_VAULT_ID}"),
-                format!("get:{KEYCHAIN_VAULT_ID}"),
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
+                format!("get:{CREDENTIAL_VAULT_ID}"),
+                format!("get:{CREDENTIAL_VAULT_ID}"),
+                format!("get-fresh:{CREDENTIAL_VAULT_ID}"),
+                format!("set:{CREDENTIAL_VAULT_ID}"),
+                format!("get-fresh:{CREDENTIAL_VAULT_ID}"),
+                format!("set:{CREDENTIAL_VAULT_ID}"),
             ]
         );
     }
 
     #[test]
-    fn existing_vault_is_read_once_and_missing_ids_never_probe_legacy_entries() {
+    fn existing_store_is_read_once_for_missing_ids() {
         let root = tempdir().expect("temporary directory should be created");
         let vault = CredentialVault {
             credentials: BTreeMap::from([
@@ -2258,11 +2069,10 @@ mod tests {
             ]),
             ..CredentialVault::default()
         };
-        let keychain = RecordingKeychain::with_vault(&vault);
-        keychain.insert_legacy("missing-a", "must-not-be-read");
+        let store = RecordingCredentialStore::with_vault(&vault);
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            store.clone(),
             root.path().join("credentials.toml"),
         );
 
@@ -2278,191 +2088,55 @@ mod tests {
             ));
         }
 
-        assert_eq!(keychain.calls(), vec![format!("get:{KEYCHAIN_VAULT_ID}")]);
+        assert_eq!(store.calls(), vec![format!("get:{CREDENTIAL_VAULT_ID}")]);
     }
 
     #[test]
-    fn virgin_vault_migrates_only_the_first_requested_legacy_identifier() {
+    fn missing_store_never_triggers_writes() {
         let root = tempdir().expect("temporary directory should be created");
-        let keychain = RecordingKeychain::default();
-        keychain.insert_legacy("first", "legacy-first");
-        keychain.insert_legacy("second", "legacy-second-must-not-be-read");
+        let store = RecordingCredentialStore::default();
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            store.clone(),
             root.path().join("credentials.toml"),
         );
 
-        let migrated = manager
-            .resolve(&CredentialReference::new("first"))
-            .expect("first legacy credential should migrate");
-        assert_eq!(migrated.secret().expose_secret(), "legacy-first");
-        assert_eq!(migrated.source(), &CredentialSource::OsKeychain);
-        assert!(matches!(
-            manager.resolve(&CredentialReference::new("second")),
-            Err(CredentialError::NotFound { .. })
-        ));
-
-        assert_eq!(
-            keychain.calls(),
-            vec![
-                format!("get:{KEYCHAIN_VAULT_ID}"),
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                "get-legacy:first".to_owned(),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
-            ]
-        );
-        let vault = keychain
-            .decoded_vault()
-            .expect("migrated vault should be durable");
-        assert_eq!(vault.credentials.get("first"), Some(&"legacy-first".into()));
-        assert!(!vault.credentials.contains_key("second"));
-    }
-
-    #[test]
-    fn empty_legacy_bootstrap_is_persisted_and_never_repeated() {
-        let root = tempdir().expect("temporary directory should be created");
-        let keychain = RecordingKeychain::default();
-        let manager = CredentialManager::with_backends(
-            TestEnvironment::default(),
-            keychain.clone(),
-            root.path().join("credentials.toml"),
-        );
-
-        for identifier in ["first-missing", "second-missing", "third-missing"] {
+        for identifier in ["first", "second"] {
             assert!(matches!(
                 manager.resolve(&CredentialReference::new(identifier)),
                 Err(CredentialError::NotFound { .. })
             ));
         }
-
-        assert_eq!(
-            keychain.calls(),
-            vec![
-                format!("get:{KEYCHAIN_VAULT_ID}"),
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                "get-legacy:first-missing".to_owned(),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
-            ]
-        );
-        assert!(
-            keychain
-                .decoded_vault()
-                .expect("empty bootstrap vault should be durable")
-                .credentials
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn denied_legacy_lookup_persists_empty_marker_without_poisoning_new_vault() {
-        let root = tempdir().expect("temporary directory should be created");
-        let path = root.path().join("credentials.toml");
-        let keychain = RecordingKeychain::default();
-        keychain
-            .0
-            .lock()
-            .expect("recording keychain should lock")
-            .legacy_get_unavailable = true;
-        let first = CredentialManager::with_backends(
-            TestEnvironment::default(),
-            keychain.clone(),
-            path.clone(),
-        );
-
-        assert!(matches!(
-            first.resolve(&CredentialReference::new("first-missing")),
-            Err(CredentialError::NotFound { .. })
-        ));
-        assert!(
-            keychain
-                .decoded_vault()
-                .expect("denied migration should still persist an empty marker")
-                .credentials
-                .is_empty()
-        );
-
-        let second =
-            CredentialManager::with_backends(TestEnvironment::default(), keychain.clone(), path);
-        assert!(matches!(
-            second.resolve(&CredentialReference::new("second-missing")),
-            Err(CredentialError::NotFound { .. })
-        ));
-        assert_eq!(
-            keychain.calls(),
-            vec![
-                format!("get:{KEYCHAIN_VAULT_ID}"),
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                "get-legacy:first-missing".to_owned(),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
-                format!("get:{KEYCHAIN_VAULT_ID}"),
-            ]
-        );
-    }
-
-    #[test]
-    fn failed_legacy_migration_never_exposes_an_undurable_secret() {
-        const CANARY: &str = "rw-legacy-migration-canary";
-        let root = tempdir().expect("temporary directory should be created");
-        let keychain = RecordingKeychain::default();
-        keychain.insert_legacy("first", CANARY);
-        keychain
-            .0
-            .lock()
-            .expect("recording keychain should lock")
-            .vault_set_unavailable = true;
-        let manager = CredentialManager::with_backends(
-            TestEnvironment::default(),
-            keychain.clone(),
-            root.path().join("credentials.toml"),
-        );
-
-        for _ in 0..2 {
-            let error = manager
-                .resolve(&CredentialReference::new("first"))
-                .expect_err("undurable migration must fail closed");
-            assert!(matches!(error, CredentialError::KeychainUnavailable { .. }));
-            assert!(!error.to_string().contains(CANARY));
-            assert!(!format!("{error:?}").contains(CANARY));
-        }
-
-        assert_eq!(
-            keychain.calls(),
-            vec![
-                format!("get:{KEYCHAIN_VAULT_ID}"),
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                "get-legacy:first".to_owned(),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
-            ]
-        );
-        assert!(keychain.decoded_vault().is_none());
+        assert_eq!(store.calls(), vec![format!("get:{CREDENTIAL_VAULT_ID}")]);
+        assert!(store.decoded_vault().is_none());
     }
 
     #[test]
     fn malformed_vault_is_sanitized_and_never_overwritten_or_bypassed() {
         const CANARY: &str = "rw-malformed-vault-canary";
         let root = tempdir().expect("temporary directory should be created");
-        let fallback_path = root.path().join("credentials.toml");
-        super::write_fallback(&fallback_path, "primary", "fallback-must-not-win")
-            .expect("fallback fixture should be written");
-        let keychain = RecordingKeychain::default();
-        keychain
-            .0
-            .lock()
-            .expect("recording keychain should lock")
-            .vault = Some(format!("malformed {CANARY}"));
+        let credential_file_path = root.path().join("credentials.toml");
+        super::write_credential_file_value(
+            &credential_file_path,
+            "primary",
+            "credential-file-must-not-win",
+        )
+        .expect("credential-file fixture should be written");
+        let store = RecordingCredentialStore::default();
+        store.0.lock().expect("recording store should lock").vault =
+            Some(format!("malformed {CANARY}"));
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
-            fallback_path,
+            store.clone(),
+            credential_file_path,
         );
 
         let resolve_error = manager
             .resolve(&CredentialReference::new("primary"))
-            .expect_err("malformed vault must fail closed before fallback");
+            .expect_err("malformed vault must fail closed before credential-file access");
         assert!(matches!(
             resolve_error,
-            CredentialError::MalformedKeychainVault
+            CredentialError::MalformedCredentialStore
         ));
         assert!(!resolve_error.to_string().contains(CANARY));
 
@@ -2474,59 +2148,59 @@ mod tests {
             .expect_err("malformed vault must not be overwritten");
         assert!(matches!(
             store_error,
-            CredentialError::MalformedKeychainVault
+            CredentialError::MalformedCredentialStore
         ));
-        assert_eq!(keychain.calls(), vec![format!("get:{KEYCHAIN_VAULT_ID}")]);
+        assert_eq!(store.calls(), vec![format!("get:{CREDENTIAL_VAULT_ID}")]);
     }
 
     #[test]
-    fn unavailable_vault_access_is_cached_for_the_manager_lifetime() {
+    fn unavailable_store_access_is_cached_for_the_manager_lifetime() {
         let root = tempdir().expect("temporary directory should be created");
-        let keychain = RecordingKeychain::default();
-        keychain
+        let store = RecordingCredentialStore::default();
+        store
             .0
             .lock()
-            .expect("recording keychain should lock")
+            .expect("recording store should lock")
             .vault_get_unavailable = true;
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            store.clone(),
             root.path().join("credentials.toml"),
         );
 
         for identifier in ["provider-a", "proxy-b", "provider-c"] {
             assert!(matches!(
                 manager.resolve(&CredentialReference::new(identifier)),
-                Err(CredentialError::KeychainUnavailable { .. })
+                Err(CredentialError::CredentialStoreUnavailable { .. })
             ));
         }
 
-        assert_eq!(keychain.calls(), vec![format!("get:{KEYCHAIN_VAULT_ID}")]);
+        assert_eq!(store.calls(), vec![format!("get:{CREDENTIAL_VAULT_ID}")]);
     }
 
     #[test]
-    fn explicit_store_retries_after_a_passive_vault_read_was_unavailable() {
+    fn explicit_store_retries_after_a_passive_store_read_was_unavailable() {
         let root = tempdir().expect("temporary directory should be created");
-        let keychain = RecordingKeychain::default();
-        keychain
+        let store = RecordingCredentialStore::default();
+        store
             .0
             .lock()
-            .expect("recording keychain should lock")
+            .expect("recording store should lock")
             .vault_get_unavailable = true;
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            store.clone(),
             root.path().join("credentials.toml"),
         );
 
         assert!(matches!(
             manager.resolve(&CredentialReference::new("provider-a")),
-            Err(CredentialError::KeychainUnavailable { .. })
+            Err(CredentialError::CredentialStoreUnavailable { .. })
         ));
-        keychain
+        store
             .0
             .lock()
-            .expect("recording keychain should lock")
+            .expect("recording store should lock")
             .vault_get_unavailable = false;
 
         let stored = manager
@@ -2536,34 +2210,34 @@ mod tests {
             )
             .expect("an explicit store should retry the secure vault");
 
-        assert_eq!(stored.source(), &CredentialSource::OsKeychain);
+        assert_eq!(stored.source(), &CredentialSource::InjectedStore);
         assert_eq!(
-            keychain.calls(),
+            store.calls(),
             vec![
-                format!("get:{KEYCHAIN_VAULT_ID}"),
-                format!("get-fresh:{KEYCHAIN_VAULT_ID}"),
-                format!("set:{KEYCHAIN_VAULT_ID}"),
+                format!("get:{CREDENTIAL_VAULT_ID}"),
+                format!("get-fresh:{CREDENTIAL_VAULT_ID}"),
+                format!("set:{CREDENTIAL_VAULT_ID}"),
             ]
         );
     }
 
     #[test]
-    fn unavailable_keychain_uses_mode_0600_file_with_typed_warning() {
+    fn unavailable_injected_store_uses_mode_0600_file() {
         let root = tempdir().expect("temporary directory should be created");
         let path = root.path().join("private").join("credentials.toml");
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            TestKeychain::unavailable(),
+            TestCredentialStore::unavailable(),
             path.clone(),
         );
         let reference = CredentialReference::new("primary");
 
         let stored = manager
             .store(&reference, &Secret::new("file-secret".to_owned()))
-            .expect("fallback credential should be stored");
+            .expect("credential-file value should be stored");
         assert_eq!(
             stored.source(),
-            &CredentialSource::FallbackFile(path.clone())
+            &CredentialSource::CredentialFile(path.clone())
         );
         assert_eq!(stored.warnings().len(), 1);
 
@@ -2579,14 +2253,14 @@ mod tests {
 
         let resolved = manager
             .resolve(&reference)
-            .expect("fallback credential should resolve");
+            .expect("credential-file value should resolve");
         assert_eq!(resolved.secret().expose_secret(), "file-secret");
         assert_eq!(resolved.warnings().len(), 1);
     }
 
     #[cfg(unix)]
     #[test]
-    fn insecure_fallback_permissions_fail_closed() {
+    fn insecure_credential_file_permissions_fail_closed() {
         let root = tempdir().expect("temporary directory should be created");
         let path = root.path().join("credentials.toml");
         fs::write(
@@ -2598,7 +2272,7 @@ mod tests {
             .expect("credential fixture permissions should change");
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            TestKeychain::unavailable(),
+            TestCredentialStore::unavailable(),
             path,
         );
 
@@ -2626,7 +2300,7 @@ mod tests {
             .expect("credential fixture should be private");
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            TestKeychain::unavailable(),
+            TestCredentialStore::unavailable(),
             path,
         );
         let error = manager

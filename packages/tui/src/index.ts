@@ -42,14 +42,10 @@ async function main(): Promise<void> {
     targetFps: 60,
     // Extended keyboard events keep macOS Command+Arrow distinct from Ctrl+E,
     // so terminal navigation can never masquerade as the external-editor key.
-    useKittyKeyboard: {
-      disambiguate: true,
-      alternateKeys: true,
-      // iTerm2/Kitty-compatible terminals otherwise collapse Command+Arrow
-      // into legacy line-edit sequences. Request explicit escape reports so
-      // Super/Meta arrows reach the app as navigation, never as Ctrl+E.
-      allKeysAsEscapes: true,
-    },
+    // Use OpenTUI's proven Kitty negotiation unchanged. Extra flag combinations
+    // caused some macOS terminals to fall back to legacy Ctrl-A/Ctrl-E bytes,
+    // making Command+Right indistinguishable from the editor shortcut.
+    useKittyKeyboard: {},
     onDestroy: () => {
       // Closing the renderer must release the SSE/runtime handles so a normal
       // Ctrl+C can let the process end naturally. Never force exit 0 here:

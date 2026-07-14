@@ -17,7 +17,7 @@ use rw_providers::{
 use rw_store::{
     config::ConfigLoader,
     credentials::{
-        CredentialEnvironment, CredentialKeychain, CredentialManager, CredentialReference,
+        CredentialEnvironment, CredentialManager, CredentialReference, CredentialStore,
         Secret as StoredSecret,
     },
 };
@@ -130,7 +130,7 @@ impl ResolvedProviderApiKey {
     }
 }
 
-/// Returns the stable keychain identifier used when a provider does not set
+/// Returns the stable credential identifier used when a provider does not set
 /// `api_key_credential` explicitly.
 ///
 /// # Errors
@@ -206,8 +206,7 @@ pub fn store_provider_api_key(
     Ok(warnings)
 }
 
-/// Resolves a provider API key using environment, keychain, then the warned
-/// mode-0600 fallback.
+/// Resolves a provider API key using the environment and owner-private file.
 ///
 /// # Errors
 ///
@@ -1104,7 +1103,7 @@ fn store_provider_api_key_with_manager<E, K>(
 ) -> Result<Vec<String>, AdminError>
 where
     E: CredentialEnvironment,
-    K: CredentialKeychain,
+    K: CredentialStore,
 {
     let reference = provider_api_key_credential_reference(provider_name, provider)?;
     let stored = manager
@@ -1121,7 +1120,7 @@ fn store_github_copilot_token_with_manager<E, K>(
 ) -> Result<Vec<String>, AdminError>
 where
     E: CredentialEnvironment,
-    K: CredentialKeychain,
+    K: CredentialStore,
 {
     let credential = GitHubCopilotCredential::from_secret(access_token, oauth_client_id)?;
     let encoded = credential.encode()?;
@@ -1141,7 +1140,7 @@ fn resolve_provider_api_key_with_manager<E, K>(
 ) -> Result<ResolvedProviderApiKey, AdminError>
 where
     E: CredentialEnvironment,
-    K: CredentialKeychain,
+    K: CredentialStore,
 {
     let reference = provider_api_key_credential_reference(provider_name, provider)?;
     let resolved = manager
@@ -1209,8 +1208,8 @@ mod tests {
 
     use rw_providers::Secret as ProviderSecret;
     use rw_store::credentials::{
-        CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
-        CredentialReference, KEYCHAIN_VAULT_ID, KeychainUnavailable, Secret,
+        CREDENTIAL_VAULT_ID, CredentialEnvironment, CredentialError, CredentialManager,
+        CredentialReference, CredentialStore, CredentialStoreUnavailable, Secret,
     };
     use rw_types::config::ProviderConfig;
 
@@ -1231,13 +1230,16 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct TestKeychain(Arc<Mutex<BTreeMap<String, String>>>);
+    struct TestCredentialStore(Arc<Mutex<BTreeMap<String, String>>>);
 
-    impl CredentialKeychain for TestKeychain {
-        fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+    impl CredentialStore for TestCredentialStore {
+        fn get(
+            &self,
+            identifier: &str,
+        ) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
             self.0
                 .lock()
-                .map_err(|_| KeychainUnavailable)
+                .map_err(|_| CredentialStoreUnavailable)
                 .map(|values| values.get(identifier).cloned().map(Secret::new))
         }
 
@@ -1245,10 +1247,10 @@ mod tests {
             &self,
             identifier: &str,
             secret: &Secret<String>,
-        ) -> Result<(), KeychainUnavailable> {
+        ) -> Result<(), CredentialStoreUnavailable> {
             self.0
                 .lock()
-                .map_err(|_| KeychainUnavailable)?
+                .map_err(|_| CredentialStoreUnavailable)?
                 .insert(identifier.to_owned(), secret.expose_secret().clone());
             Ok(())
         }
@@ -1285,13 +1287,13 @@ mod tests {
 
     #[test]
     fn injected_backends_store_configured_id_and_resolve_environment_first() {
-        let keychain = TestKeychain::default();
+        let credential_store = TestCredentialStore::default();
         let manager = CredentialManager::with_backends(
             TestEnvironment(BTreeMap::from([(
                 "FIXTURE_API_KEY".to_owned(),
                 "environment-key".to_owned(),
             )])),
-            keychain.clone(),
+            credential_store.clone(),
             PathBuf::from("unused-test-credentials.toml"),
         );
         let provider = ProviderConfig {
@@ -1303,7 +1305,7 @@ mod tests {
         let key = ProviderApiKey::from_terminal_input("stored-key".to_owned())
             .unwrap_or_else(|error| panic!("stored key must parse: {error}"));
         let warnings = store_provider_api_key_with_manager(&manager, "fixture", &provider, &key.0)
-            .unwrap_or_else(|error| panic!("injected keychain store must work: {error}"));
+            .unwrap_or_else(|error| panic!("injected credential store must work: {error}"));
         assert!(warnings.is_empty());
         let stored = manager
             .resolve(&CredentialReference::new("fixture-stored-key"))
@@ -1318,10 +1320,10 @@ mod tests {
 
     #[test]
     fn copilot_token_is_one_rottweiler_owned_logical_vault_entry() {
-        let keychain = TestKeychain::default();
+        let credential_store = TestCredentialStore::default();
         let manager = CredentialManager::with_backends(
             TestEnvironment::default(),
-            keychain.clone(),
+            credential_store.clone(),
             PathBuf::from("unused-test-credentials.toml"),
         );
         let token = ProviderSecret::new("copilot-token-canary".to_owned());
@@ -1341,11 +1343,11 @@ mod tests {
             .unwrap_or_else(|error| panic!("stored Copilot credential must parse: {error}"));
         assert_eq!(credential.access_token(), "copilot-token-canary");
         assert_eq!(credential.oauth_client_id(), "rottweiler-test-client");
-        let entries = keychain
+        let entries = credential_store
             .0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(entries.len(), 1);
-        assert!(entries.contains_key(KEYCHAIN_VAULT_ID));
+        assert!(entries.contains_key(CREDENTIAL_VAULT_ID));
     }
 }

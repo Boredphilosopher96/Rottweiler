@@ -1216,7 +1216,9 @@ function formatCommandMessage(name: string, source: string, state: RottweilerSta
     const lines = humanResultLines(parsed, 0)
     return lines.length === 0 ? "Command completed." : boundedCommandRows(lines)
   } catch {
-    return boundedCommandText(trimmed)
+    // A structured-looking result that cannot be decoded is not safe UI text.
+    // It may be a truncated wire payload, so fail closed instead of dumping it.
+    return "_Command returned structured details that could not be displayed safely._"
   }
 }
 
@@ -1513,8 +1515,17 @@ function humanResultLines(value: unknown, depth: number, label?: string): string
   const lines =
     unwrapped !== null && typeof unwrapped === "object"
       ? humanResultLines(unwrapped, depth + 1)
-      : entries.flatMap(([key, item]) => humanResultLines(item, depth + 1, humanLabel(key)))
+      : entries.flatMap(([key, item]) => {
+          const label = humanLabel(key)
+          return sensitiveCommandResultField(key)
+            ? [`${label}: [redacted]`]
+            : humanResultLines(item, depth + 1, label)
+        })
   return label === undefined || lines.length === 0 ? lines : [`${label}:`, ...lines.map((line) => `  ${line}`)]
+}
+
+function sensitiveCommandResultField(key: string): boolean {
+  return /token|secret|password|authorization|api[_-]?key|credential/i.test(key)
 }
 
 function humanLabel(value: string): string {

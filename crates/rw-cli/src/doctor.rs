@@ -11,8 +11,8 @@ use rw_core::{Config, ProviderConfig, default_provider_api_key_credential_id};
 use rw_store::{
     config::ConfigLoader,
     credentials::{
-        CredentialEnvironment, CredentialInventoryItem, CredentialKeychain, CredentialManager,
-        CredentialReference, CredentialSource,
+        CredentialEnvironment, CredentialInventoryItem, CredentialManager, CredentialReference,
+        CredentialSource, CredentialStore,
     },
 };
 use serde::Serialize;
@@ -203,7 +203,7 @@ pub(crate) async fn collect(options: DoctorOptions) -> DoctorReport {
         })
         .collect::<BTreeSet<_>>();
     // One manager and one inventory function are used for the entire command.
-    // The manager's process cache guarantees at most one vault read/keychain prompt.
+    // The manager's process cache guarantees at most one injected-store read.
     let inventory = inventory_credentials(&credentials_path, references);
     append_provider_checks(&mut checks, &plans, &inventory, options.network, timeout_ms).await;
     finish_report(options.network, checks)
@@ -700,7 +700,7 @@ fn inventory_credentials_with_manager<E, K>(
 ) -> BTreeMap<ReferenceKey, InventoryValue>
 where
     E: CredentialEnvironment,
-    K: CredentialKeychain,
+    K: CredentialStore,
 {
     let keys = references.into_iter().collect::<Vec<_>>();
     let resolved =
@@ -731,8 +731,8 @@ where
 fn credential_source_name(source: &CredentialSource) -> &'static str {
     match source {
         CredentialSource::Environment(_) => "environment",
-        CredentialSource::OsKeychain => "os_keychain",
-        CredentialSource::FallbackFile(_) => "fallback_file",
+        CredentialSource::InjectedStore => "credential_store",
+        CredentialSource::CredentialFile(_) => "credential_file",
     }
 }
 
@@ -1055,7 +1055,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use rw_store::credentials::{CredentialError, KeychainUnavailable, Secret};
+    use rw_store::credentials::{CredentialError, CredentialStoreUnavailable, Secret};
     use tempfile::tempdir;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -1087,13 +1087,13 @@ mod tests {
         reads: Arc<AtomicUsize>,
     }
 
-    impl CredentialKeychain for CountingVault {
+    impl CredentialStore for CountingVault {
         fn get(
             &self,
             identifier: &str,
-        ) -> std::result::Result<Option<Secret<String>>, KeychainUnavailable> {
+        ) -> std::result::Result<Option<Secret<String>>, CredentialStoreUnavailable> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(identifier, rw_store::credentials::KEYCHAIN_VAULT_ID);
+            assert_eq!(identifier, rw_store::credentials::CREDENTIAL_VAULT_ID);
             Ok(Some(Secret::new(
                 "version = 1\n[credentials]\nfirst = 'one'\nsecond = 'two'\n".to_owned(),
             )))
@@ -1103,8 +1103,8 @@ mod tests {
             &self,
             _identifier: &str,
             _secret: &Secret<String>,
-        ) -> std::result::Result<(), KeychainUnavailable> {
-            Err(KeychainUnavailable)
+        ) -> std::result::Result<(), CredentialStoreUnavailable> {
+            Err(CredentialStoreUnavailable)
         }
     }
 
@@ -1113,16 +1113,15 @@ mod tests {
         reads: Arc<AtomicUsize>,
         writes: Arc<AtomicUsize>,
         fresh_reads: Arc<AtomicUsize>,
-        legacy_reads: Arc<AtomicUsize>,
     }
 
-    impl CredentialKeychain for EmptyCountingVault {
+    impl CredentialStore for EmptyCountingVault {
         fn get(
             &self,
             identifier: &str,
-        ) -> std::result::Result<Option<Secret<String>>, KeychainUnavailable> {
+        ) -> std::result::Result<Option<Secret<String>>, CredentialStoreUnavailable> {
             self.reads.fetch_add(1, Ordering::SeqCst);
-            assert_eq!(identifier, rw_store::credentials::KEYCHAIN_VAULT_ID);
+            assert_eq!(identifier, rw_store::credentials::CREDENTIAL_VAULT_ID);
             Ok(None)
         }
 
@@ -1130,7 +1129,7 @@ mod tests {
             &self,
             _identifier: &str,
             _secret: &Secret<String>,
-        ) -> std::result::Result<(), KeychainUnavailable> {
+        ) -> std::result::Result<(), CredentialStoreUnavailable> {
             self.writes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -1138,16 +1137,8 @@ mod tests {
         fn get_fresh(
             &self,
             _identifier: &str,
-        ) -> std::result::Result<Option<Secret<String>>, KeychainUnavailable> {
+        ) -> std::result::Result<Option<Secret<String>>, CredentialStoreUnavailable> {
             self.fresh_reads.fetch_add(1, Ordering::SeqCst);
-            Ok(None)
-        }
-
-        fn get_legacy(
-            &self,
-            _identifier: &str,
-        ) -> std::result::Result<Option<Secret<String>>, KeychainUnavailable> {
-            self.legacy_reads.fetch_add(1, Ordering::SeqCst);
             Ok(None)
         }
     }
@@ -1420,19 +1411,17 @@ mod tests {
     }
 
     #[test]
-    fn empty_vault_inventory_never_writes_or_reads_legacy_items() {
+    fn empty_vault_inventory_never_writes() {
         let root = tempdir().expect("credential root");
         let reads = Arc::new(AtomicUsize::new(0));
         let writes = Arc::new(AtomicUsize::new(0));
         let fresh_reads = Arc::new(AtomicUsize::new(0));
-        let legacy_reads = Arc::new(AtomicUsize::new(0));
         let manager = CredentialManager::with_backends(
             EmptyEnvironment,
             EmptyCountingVault {
                 reads: Arc::clone(&reads),
                 writes: Arc::clone(&writes),
                 fresh_reads: Arc::clone(&fresh_reads),
-                legacy_reads: Arc::clone(&legacy_reads),
             },
             root.path().join("credentials.toml"),
         );
@@ -1451,7 +1440,6 @@ mod tests {
         assert_eq!(reads.load(Ordering::SeqCst), 1);
         assert_eq!(writes.load(Ordering::SeqCst), 0);
         assert_eq!(fresh_reads.load(Ordering::SeqCst), 0);
-        assert_eq!(legacy_reads.load(Ordering::SeqCst), 0);
     }
 
     #[test]

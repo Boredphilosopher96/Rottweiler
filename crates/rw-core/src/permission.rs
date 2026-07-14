@@ -513,6 +513,24 @@ impl PermissionGate {
             .await
     }
 
+    fn accept_for_generation(
+        &self,
+        generation: u64,
+        approval: Option<RememberedApproval>,
+    ) -> PermissionOutcome {
+        let mut memory = lock_write(&self.memory);
+        if memory.generation != generation {
+            return PermissionOutcome::Denied;
+        }
+        // The displayed invocation was approved. Failure to allocate the
+        // opaque id used only for remembering future invocations must not
+        // retroactively deny this one; degrade to allow-once instead.
+        if let Some(approval) = approval {
+            replace_approval(&mut memory.session_allows, approval);
+        }
+        PermissionOutcome::Allowed
+    }
+
     /// Applies the mode overlay before configured policy. Discuss and Plan can
     /// never authorize an invocation with mutating or ambient capabilities,
     /// even under yolo or an auto-approval hook.
@@ -584,35 +602,33 @@ impl PermissionGate {
                     }
                     ApprovalDecision::AllowSession => {
                         if !rememberable {
-                            return PermissionOutcome::RememberedApprovalUnavailable;
+                            // The user approved the invocation currently on
+                            // screen. Some compound or mutable commands cannot
+                            // be represented by a safe reusable authority, but
+                            // that must not turn the accepted selection into a
+                            // failed tool call. Execute this invocation once
+                            // and intentionally retain no remembered grant.
+                            return self.accept_for_generation(generation, None);
                         }
-                        let mut memory = lock_write(&self.memory);
-                        if memory.generation != generation {
-                            return PermissionOutcome::Denied;
-                        }
-                        let Some(approval) = RememberedApproval::new("session", key) else {
-                            return PermissionOutcome::Denied;
-                        };
-                        replace_approval(&mut memory.session_allows, approval);
-                        PermissionOutcome::Allowed
+                        let approval = RememberedApproval::new("session", key);
+                        self.accept_for_generation(generation, approval)
                     }
                     ApprovalDecision::AllowProject => {
                         if !rememberable {
-                            return PermissionOutcome::RememberedApprovalUnavailable;
+                            return self.accept_for_generation(generation, None);
                         }
                         let memory = lock_write(&self.memory);
                         if memory.generation != generation {
                             return PermissionOutcome::Denied;
                         }
-                        if self
-                            .project_store
-                            .as_ref()
-                            .is_some_and(|store| store.grant(key).is_ok())
-                        {
-                            PermissionOutcome::Allowed
-                        } else {
-                            PermissionOutcome::Denied
+                        if let Some(store) = &self.project_store {
+                            // Project persistence only widens the approval to
+                            // future invocations. If it is unavailable or the
+                            // private write fails, the accepted invocation on
+                            // screen still executes once.
+                            let _ = store.grant(key);
                         }
+                        PermissionOutcome::Allowed
                     }
                     ApprovalDecision::Deny => PermissionOutcome::Denied,
                 }
@@ -1929,6 +1945,22 @@ mod tests {
         }
     }
 
+    struct ChangeWorkspaceThenApprove {
+        gate: Arc<PermissionGate>,
+        replacement: PathBuf,
+        decision: ApprovalDecision,
+    }
+
+    #[async_trait]
+    impl PermissionApprover for ChangeWorkspaceThenApprove {
+        async fn decide(&self, _request: PermissionRequest) -> ApprovalDecision {
+            self.gate
+                .replace_workspace_roots([&self.replacement])
+                .expect("workspace replacement");
+            self.decision.clone()
+        }
+    }
+
     fn request(command: &str, capabilities: Vec<ToolCapability>) -> PermissionRequest {
         PermissionRequest {
             id: "call".to_owned(),
@@ -2071,7 +2103,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn complex_or_mutable_bash_authority_degrades_to_allow_once_and_is_never_remembered() {
+    async fn complex_or_mutable_bash_approval_executes_once_and_is_never_remembered() {
         use std::os::unix::fs::PermissionsExt as _;
 
         let root = tempfile::tempdir().expect("tempdir");
@@ -2107,8 +2139,8 @@ mod tests {
                     &Decision(ApprovalDecision::AllowProject),
                 )
                 .await,
-                PermissionOutcome::RememberedApprovalUnavailable,
-                "remembered scope should be unavailable for {command}"
+                PermissionOutcome::Allowed,
+                "an accepted approval must execute the displayed invocation for {command}"
             );
             assert_eq!(gate.snapshot().project_approvals, 0);
             assert_eq!(gate.snapshot().session_approvals, 0);
@@ -2125,6 +2157,101 @@ mod tests {
                 "non-rememberable command was recalled: {command}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn nonrememberable_approval_is_denied_when_workspace_changes_while_prompting() {
+        let roots = tempfile::tempdir().expect("roots");
+        let initial = roots.path().join("initial");
+        let replacement = roots.path().join("replacement");
+        fs::create_dir(&initial).expect("initial root");
+        fs::create_dir(&replacement).expect("replacement root");
+
+        for decision in [
+            ApprovalDecision::AllowSession,
+            ApprovalDecision::AllowProject,
+        ] {
+            let gate = Arc::new(
+                PermissionGate::new(PermissionDecision::Ask).with_workspace_roots([&initial]),
+            );
+            let approver = ChangeWorkspaceThenApprove {
+                gate: Arc::clone(&gate),
+                replacement: replacement.clone(),
+                decision,
+            };
+            assert_eq!(
+                gate.authorize(
+                    bash_request("/bin/echo approved > output", &initial),
+                    &approver,
+                )
+                .await,
+                PermissionOutcome::Denied,
+                "an approval from the old workspace generation must never execute"
+            );
+        }
+    }
+
+    #[test]
+    fn session_approval_id_failure_degrades_to_allow_once() {
+        let gate = PermissionGate::new(PermissionDecision::Ask);
+        assert_eq!(
+            gate.accept_for_generation(0, None),
+            PermissionOutcome::Allowed,
+            "failure to allocate remember-only metadata must not reject the accepted invocation"
+        );
+        assert_eq!(gate.snapshot().session_approvals, 0);
+    }
+
+    #[tokio::test]
+    async fn unavailable_project_approval_persistence_degrades_to_allow_once() {
+        let invocation = PermissionRequest {
+            id: "write".to_owned(),
+            tool_name: "write".to_owned(),
+            arguments: json!({"path": "file.txt", "content": "content"}),
+            capabilities: vec![ToolCapability::WriteFilesystem],
+            approval_diff: None,
+        };
+
+        let without_store = PermissionGate::new(PermissionDecision::Ask);
+        assert_eq!(
+            without_store
+                .authorize(
+                    invocation.clone(),
+                    &Decision(ApprovalDecision::AllowProject),
+                )
+                .await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(without_store.snapshot().project_approvals, 0);
+        assert_eq!(
+            without_store
+                .authorize(invocation.clone(), &Decision(ApprovalDecision::Deny))
+                .await,
+            PermissionOutcome::Denied,
+            "the fallback must not accidentally become a remembered approval"
+        );
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let blocked_parent = root.path().join("not-a-directory");
+        fs::write(&blocked_parent, "file").expect("blocking file");
+        let failing_store = PermissionGate::new(PermissionDecision::Ask)
+            .with_project_approval_file(blocked_parent.join("approvals.json"));
+        assert_eq!(
+            failing_store
+                .authorize(
+                    invocation.clone(),
+                    &Decision(ApprovalDecision::AllowProject)
+                )
+                .await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(failing_store.snapshot().project_approvals, 0);
+        assert_eq!(
+            failing_store
+                .authorize(invocation, &Decision(ApprovalDecision::Deny))
+                .await,
+            PermissionOutcome::Denied
+        );
     }
 
     #[cfg(unix)]
@@ -2154,7 +2281,7 @@ mod tests {
 
     #[cfg(windows)]
     #[tokio::test]
-    async fn durable_project_approvals_fail_closed_without_portable_file_lock() {
+    async fn project_approval_without_portable_file_lock_degrades_to_allow_once() {
         let root = tempfile::tempdir().expect("tempdir");
         let gate = PermissionGate::new(PermissionDecision::Ask)
             .with_workspace_roots([root.path()])
@@ -2169,7 +2296,7 @@ mod tests {
         assert_eq!(
             gate.authorize(request, &Decision(ApprovalDecision::AllowProject))
                 .await,
-            PermissionOutcome::Denied
+            PermissionOutcome::Allowed
         );
         assert_eq!(gate.snapshot().project_approvals, 0);
     }

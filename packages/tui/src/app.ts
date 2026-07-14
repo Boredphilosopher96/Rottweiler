@@ -367,12 +367,23 @@ export class RottweilerApp extends BoxRenderable {
     if (selectedText.trim().length === 0) return
     void this.#options.textClipboard.writeText(selectedText).then(() => {
       if (this.#destroyed) return
+      // Match OpenCode's copy-on-select contract: a completed drag copies once,
+      // then releases the terminal selection so stale highlights cannot steal
+      // later keyboard input. Re-evaluate the normal focus owner because the
+      // selection may have crossed transcript, composer, or an interaction dock.
+      // Clipboard writes are asynchronous. Only release the selection that
+      // initiated this write; a newer drag must survive an older write
+      // completing out of order.
+      if (this.ctx.getSelection() === selection) {
+        this.ctx.clearSelection()
+        if (!this.#state.replay.active) this.#focusForInputMode()
+      }
       this.#showClipboardNotice()
     }).catch(() => {
       if (this.#destroyed) return
       this.#projectClientError(
         "selection_copy_failed",
-        "Couldn't copy the selected transcript text to the clipboard.",
+        "Couldn't copy the selected text to the clipboard.",
         true,
       )
     })
@@ -425,23 +436,6 @@ export class RottweilerApp extends BoxRenderable {
       focusOwner === "composer" &&
       !this.picker.visible &&
       !this.#reviewOpen &&
-      (key.super || key.meta) &&
-      !key.ctrl &&
-      !key.option &&
-      !key.hyper &&
-      !key.shift &&
-      (key.name === "left" || key.name === "right")
-    ) {
-      if (key.name === "left") this.composer.editor.gotoLineStart()
-      else this.composer.editor.gotoLineTextEnd()
-      key.preventDefault()
-      key.stopPropagation()
-      return
-    }
-    if (
-      focusOwner === "composer" &&
-      !this.picker.visible &&
-      !this.#reviewOpen &&
       !key.ctrl &&
       !key.meta &&
       !key.super &&
@@ -451,6 +445,7 @@ export class RottweilerApp extends BoxRenderable {
       (key.name === "up" || key.name === "down") &&
       this.composer.navigateHistory(key.name === "up" ? "previous" : "next")
     ) {
+      if (this.#pickerAnchored) this.closePicker()
       key.preventDefault()
       key.stopPropagation()
       return
@@ -1442,7 +1437,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#positionPicker(false)
     this.#pickerKind = "models"
     if (!this.#modelsRequested) {
-      this.#requestModels()
+      this.#requestModels(true)
     }
     this.#command({ type: "list_settings" })
     this.#refreshPicker()
@@ -1455,7 +1450,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#positionPicker(false)
     this.#pickerKind = "providers"
     if (!this.#modelsRequested) {
-      this.#requestModels()
+      this.#requestModels(true)
     }
     this.#refreshPicker()
   }

@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     fs,
     io::{Read, Write},
     net::TcpListener,
@@ -20,8 +21,8 @@ use rw_providers::{
     ToolDefinition, UsageAccounting, WireMode,
 };
 use rw_store::credentials::{
-    CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
-    CredentialReference, KEYCHAIN_VAULT_ID, KeychainUnavailable, Secret,
+    CREDENTIAL_VAULT_ID, CredentialEnvironment, CredentialError, CredentialManager,
+    CredentialReference, CredentialStore, CredentialStoreUnavailable, Secret,
 };
 use rw_types::{
     Block, Cost, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta,
@@ -202,7 +203,7 @@ fn opaque_router_route_prices_the_actual_failover_candidate() {
         .unwrap_or_else(|| panic!("expensive pricing"))
         .output_per_million_micros_usd = 100;
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
         table,
@@ -247,7 +248,7 @@ async fn live_catalog_excludes_stale_alias_candidate_before_inference() {
         vec!["live/retired".to_owned(), "live/current".to_owned()],
     )]);
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
         PricingTable::default(),
@@ -285,7 +286,7 @@ async fn provider_reactivation_revalidates_cached_alias_and_concrete_catalog_aut
     );
     let config = config(&server.endpoint, &["fixture/model-a"]);
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("fixture/model-a", false)]),
@@ -329,44 +330,60 @@ async fn provider_reactivation_revalidates_cached_alias_and_concrete_catalog_aut
 }
 
 #[derive(Clone, Default)]
-struct TestKeychain(Arc<Mutex<BTreeMap<String, String>>>);
+struct TestCredentialStore(Arc<Mutex<BTreeMap<String, String>>>);
 
-impl TestKeychain {
+impl TestCredentialStore {
     fn insert(&self, identifier: &str, value: &str) {
-        self.0
+        let mut values = self
+            .0
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(identifier.to_owned(), value.to_owned());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if identifier == CREDENTIAL_VAULT_ID {
+            values.insert(identifier.to_owned(), value.to_owned());
+            return;
+        }
+        let vault = values
+            .entry(CREDENTIAL_VAULT_ID.to_owned())
+            .or_insert_with(|| "version = 1\n[credentials]\n".to_owned());
+        let _ = writeln!(vault, "{identifier:?} = {value:?}");
     }
 }
 
-impl CredentialKeychain for TestKeychain {
-    fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+impl CredentialStore for TestCredentialStore {
+    fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
         self.0
             .lock()
-            .map_err(|_| KeychainUnavailable)
+            .map_err(|_| CredentialStoreUnavailable)
             .map(|values| values.get(identifier).cloned().map(Secret::new))
     }
 
-    fn set(&self, identifier: &str, secret: &Secret<String>) -> Result<(), KeychainUnavailable> {
+    fn set(
+        &self,
+        identifier: &str,
+        secret: &Secret<String>,
+    ) -> Result<(), CredentialStoreUnavailable> {
         self.0
             .lock()
-            .map_err(|_| KeychainUnavailable)?
+            .map_err(|_| CredentialStoreUnavailable)?
             .insert(identifier.to_owned(), secret.expose_secret().clone());
         Ok(())
     }
 }
 
 #[derive(Clone)]
-struct FallbackOnSetKeychain(TestKeychain);
+struct UnavailableOnSetCredentialStore(TestCredentialStore);
 
-impl CredentialKeychain for FallbackOnSetKeychain {
-    fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, KeychainUnavailable> {
+impl CredentialStore for UnavailableOnSetCredentialStore {
+    fn get(&self, identifier: &str) -> Result<Option<Secret<String>>, CredentialStoreUnavailable> {
         self.0.get(identifier)
     }
 
-    fn set(&self, _identifier: &str, _secret: &Secret<String>) -> Result<(), KeychainUnavailable> {
-        Err(KeychainUnavailable)
+    fn set(
+        &self,
+        _identifier: &str,
+        _secret: &Secret<String>,
+    ) -> Result<(), CredentialStoreUnavailable> {
+        Err(CredentialStoreUnavailable)
     }
 }
 
@@ -563,7 +580,7 @@ async fn configured_unaliased_concrete_model_rebinds_after_runtime_restart_and_d
         },
     );
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("fixture/model-a", false), ("extra/new-model", false)]),
@@ -578,7 +595,7 @@ async fn configured_unaliased_concrete_model_rebinds_after_runtime_restart_and_d
     drop(runtime);
 
     let resumed = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("fixture/model-a", false), ("extra/new-model", false)]),
@@ -623,7 +640,7 @@ async fn newly_stored_provider_credential_activates_catalog_selection_and_dispat
             ..ProviderConfig::default()
         },
     );
-    let credentials = manager(TestEnvironment::default(), TestKeychain::default());
+    let credentials = manager(TestEnvironment::default(), TestCredentialStore::default());
     let runtime = ProviderFactory::with_backends(
         Arc::clone(&credentials),
         ProxyEnvironment::default(),
@@ -704,7 +721,7 @@ async fn stalled_concrete_discovery_is_bounded_and_existing_alias_remains_usable
         },
     );
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("fixture/model-a", false)]),
@@ -739,13 +756,13 @@ fn subscription_config(model: &str) -> rw_types::config::Config {
     config
 }
 
-fn subscription_keychain() -> TestKeychain {
-    let keychain = TestKeychain::default();
-    keychain.insert(
+fn subscription_credential_store() -> TestCredentialStore {
+    let credential_store = TestCredentialStore::default();
+    credential_store.insert(
         "providers.fixture.openai_subscription",
         r#"{"version":1,"access_token":"subscription-access-canary","refresh_token":"subscription-refresh-canary","account_id":"acct-fixture"}"#,
     );
-    keychain
+    credential_store
 }
 
 fn copilot_config(model: &str) -> rw_types::config::Config {
@@ -765,13 +782,13 @@ fn copilot_config(model: &str) -> rw_types::config::Config {
     config
 }
 
-fn copilot_keychain() -> TestKeychain {
-    let keychain = TestKeychain::default();
-    keychain.insert(
+fn copilot_credential_store() -> TestCredentialStore {
+    let credential_store = TestCredentialStore::default();
+    credential_store.insert(
         "providers.github-copilot.github_copilot",
         r#"{"version":1,"oauth_client_id":"rottweiler-test-client","access_token":"copilot-token-canary"}"#,
     );
-    keychain
+    credential_store
 }
 
 fn unused_copilot_test_origin() -> url::Url {
@@ -818,11 +835,11 @@ fn copilot_catalog(supports_vision: bool, reasoning_efforts: &[&str]) -> String 
 
 fn manager(
     environment: TestEnvironment,
-    keychain: TestKeychain,
-) -> Arc<CredentialManager<TestEnvironment, TestKeychain>> {
+    credential_store: TestCredentialStore,
+) -> Arc<CredentialManager<TestEnvironment, TestCredentialStore>> {
     Arc::new(CredentialManager::with_backends(
         environment,
-        keychain,
+        credential_store,
         PathBuf::from("unused-provider-factory-credentials.toml"),
     ))
 }
@@ -880,7 +897,7 @@ async fn configured_route_without_live_catalog_defers_unknown_tool_capability_to
     );
     let config = config(&server.endpoint, &["fixture/model-a"]);
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         PricingTable::default(),
@@ -922,9 +939,9 @@ fn extension_config(candidate: &str) -> rw_types::config::Config {
     config
 }
 
-fn extension_factory() -> ProviderFactory<TestEnvironment, TestKeychain> {
+fn extension_factory() -> ProviderFactory<TestEnvironment, TestCredentialStore> {
     ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
         pricing([("unrelated/catalog-model", false)]),
@@ -1294,7 +1311,7 @@ async fn mixed_automatic_to_explicit_fallback_preserves_anthropic_cache_control(
                     "anthropic-fixture".to_owned(),
                 ),
             ])),
-            TestKeychain::default(),
+            TestCredentialStore::default(),
         ),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
@@ -1405,14 +1422,14 @@ async fn environment_api_key_wins_and_recorder_redacts_known_secret() {
         .unwrap_or_else(|| panic!("fixture provider must exist"));
     provider.api_key_env = Some("FIXTURE_API_KEY".to_owned());
     provider.api_key_credential = Some("fixture-api-key".to_owned());
-    let keychain = TestKeychain::default();
-    keychain.insert("fixture-api-key", "keychain-must-lose");
+    let credential_store = TestCredentialStore::default();
+    credential_store.insert("fixture-api-key", "credential_store-must-lose");
     let environment = TestEnvironment(BTreeMap::from([(
         "FIXTURE_API_KEY".to_owned(),
         API_CANARY.to_owned(),
     )]));
     let runtime = ProviderFactory::with_backends(
-        manager(environment, keychain),
+        manager(environment, credential_store),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("fixture/model-a", false)]),
@@ -1443,7 +1460,7 @@ async fn environment_api_key_wins_and_recorder_redacts_known_secret() {
         .join()
         .unwrap_or_else(|_| panic!("fixture server must join"));
     assert!(captured[0].contains(&format!("Bearer {API_CANARY}")));
-    assert!(!captured[0].contains("keychain-must-lose"));
+    assert!(!captured[0].contains("credential_store-must-lose"));
     let fixture_text = fs::read_dir(directory.path())
         .unwrap_or_else(|error| panic!("fixture directory must read: {error}"))
         .filter_map(Result::ok)
@@ -1473,7 +1490,7 @@ async fn static_oauth_and_refresh_rotation_use_shared_credential_boundary() {
                 "FIXTURE_OAUTH_TOKEN".to_owned(),
                 OAUTH_CANARY.to_owned(),
             )])),
-            TestKeychain::default(),
+            TestCredentialStore::default(),
         ),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
@@ -1517,17 +1534,18 @@ async fn static_oauth_and_refresh_rotation_use_shared_credential_boundary() {
     provider.oauth_token_endpoint = Some(token_server.endpoint.clone());
     provider.oauth_client_id = Some("public-client".to_owned());
     provider.oauth_refresh_token_credential = Some("fixture-refresh".to_owned());
-    let keychain = TestKeychain::default();
-    keychain.insert(
-        KEYCHAIN_VAULT_ID,
+    let credential_store = TestCredentialStore::default();
+    credential_store.insert(
+        CREDENTIAL_VAULT_ID,
         &format!("version = 1\n[credentials]\nfixture-refresh = {REFRESH_CANARY:?}\n"),
     );
-    let fallback = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
-    let credentials_path = fallback.path().join("credentials.toml");
+    let credential_directory =
+        tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+    let credentials_path = credential_directory.path().join("credentials.toml");
     let runtime = ProviderFactory::with_backends(
         Arc::new(CredentialManager::with_backends(
             TestEnvironment::default(),
-            FallbackOnSetKeychain(keychain),
+            UnavailableOnSetCredentialStore(credential_store),
             credentials_path.clone(),
         )),
         ProxyEnvironment::default(),
@@ -1563,14 +1581,14 @@ async fn static_oauth_and_refresh_rotation_use_shared_credential_boundary() {
         .unwrap_or_else(|error| panic!("second refresh stream must start: {error}"))
         .collect::<Vec<_>>()
         .await;
-    let fallback_text = fs::read_to_string(&credentials_path)
-        .unwrap_or_else(|error| panic!("rotated fallback credential must read: {error}"));
-    assert!(fallback_text.contains(ROTATED_CANARY));
+    let credential_file_text = fs::read_to_string(&credentials_path)
+        .unwrap_or_else(|error| panic!("rotated credential file must read: {error}"));
+    assert!(credential_file_text.contains(ROTATED_CANARY));
     assert!(
         runtime
             .warnings()
             .iter()
-            .any(|warning| warning.contains("plaintext fallback file"))
+            .any(|warning| warning.contains("owner-private file"))
     );
     let token_request = token_server
         .task
@@ -1606,7 +1624,7 @@ async fn static_oauth_and_refresh_rotation_use_shared_credential_boundary() {
 }
 
 #[tokio::test]
-async fn keychain_api_key_and_stored_oauth_access_are_real_request_paths() {
+async fn credential_store_api_key_and_stored_oauth_access_are_real_request_paths() {
     let api_server = spawn_server("/v1/chat/completions", vec![sse_response("api-key")]);
     let mut api_config = config(&api_server.endpoint, &["fixture/model-a"]);
     api_config
@@ -1614,10 +1632,10 @@ async fn keychain_api_key_and_stored_oauth_access_are_real_request_paths() {
         .get_mut("fixture")
         .unwrap_or_else(|| panic!("fixture provider must exist"))
         .api_key_credential = Some("stored-api-key".to_owned());
-    let keychain = TestKeychain::default();
-    keychain.insert("stored-api-key", API_CANARY);
+    let credential_store = TestCredentialStore::default();
+    credential_store.insert("stored-api-key", API_CANARY);
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), keychain),
+        manager(TestEnvironment::default(), credential_store),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("fixture/model-a", false)]),
@@ -1645,10 +1663,10 @@ async fn keychain_api_key_and_stored_oauth_access_are_real_request_paths() {
         .get_mut("fixture")
         .unwrap_or_else(|| panic!("fixture provider must exist"))
         .oauth_access_token_credential = Some("stored-oauth-access".to_owned());
-    let keychain = TestKeychain::default();
-    keychain.insert("stored-oauth-access", OAUTH_CANARY);
+    let credential_store = TestCredentialStore::default();
+    credential_store.insert("stored-oauth-access", OAUTH_CANARY);
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), keychain),
+        manager(TestEnvironment::default(), credential_store),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("fixture/model-a", false)]),
@@ -1676,7 +1694,7 @@ async fn model_caps_binding_conflicts_and_alias_invariants_fail_closed() {
     let endpoint = "http://127.0.0.1:9/v1/chat/completions";
     let mut runtime_config = config(endpoint, &["fixture/model-a", "fixture/model-b"]);
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
         pricing([("fixture/model-a", true), ("fixture/model-b", false)]),
@@ -1755,7 +1773,7 @@ async fn model_caps_binding_conflicts_and_alias_invariants_fail_closed() {
                 ("SECRET_ENV".to_owned(), API_CANARY.to_owned()),
                 ("OAUTH_ENV".to_owned(), OAUTH_CANARY.to_owned()),
             ])),
-            TestKeychain::default(),
+            TestCredentialStore::default(),
         ),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
@@ -1772,7 +1790,7 @@ async fn model_caps_binding_conflicts_and_alias_invariants_fail_closed() {
     "missing".clone_into(&mut invalid.models.default);
     assert!(
         ProviderFactory::with_backends(
-            manager(TestEnvironment::default(), TestKeychain::default()),
+            manager(TestEnvironment::default(), TestCredentialStore::default()),
             ProxyEnvironment::default(),
             NetworkPolicy::Deny,
             pricing([("fixture/model-a", false)]),
@@ -1783,7 +1801,7 @@ async fn model_caps_binding_conflicts_and_alias_invariants_fail_closed() {
 
     let unknown = config(endpoint, &["fixture/unknown-model"]);
     let unknown_runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
         pricing([("unrelated/catalog-entry", true)]),
@@ -1818,15 +1836,15 @@ async fn provider_proxy_credentials_win_and_are_redactor_registered() {
     provider.proxy = Some(proxy.endpoint.clone());
     provider.proxy_username = Some("proxy-user".to_owned());
     provider.proxy_password_credential = Some("proxy-password".to_owned());
-    let keychain = TestKeychain::default();
-    keychain.insert("proxy-password", "proxy-secret");
+    let credential_store = TestCredentialStore::default();
+    credential_store.insert("proxy-password", "proxy-secret");
     let runtime = ProviderFactory::with_backends(
         manager(
             TestEnvironment(BTreeMap::from([(
                 "FIXTURE_API_KEY".to_owned(),
                 API_CANARY.to_owned(),
             )])),
-            keychain,
+            credential_store,
         ),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
@@ -1871,7 +1889,7 @@ fn official_kind_uses_canonical_catalog_namespace_while_compatible_is_explicit()
         .insert("fast".to_owned(), vec!["misleading/model-a".to_owned()]);
     let table = pricing([("misleading/model-a", true), ("openai/model-a", false)]);
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
         table.clone(),
@@ -1890,7 +1908,7 @@ fn official_kind_uses_canonical_catalog_namespace_while_compatible_is_explicit()
         .unwrap_or_else(|| panic!("misleading provider must exist"))
         .kind = "openai_compatible".to_owned();
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), TestKeychain::default()),
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
         table,
@@ -1908,7 +1926,7 @@ fn official_kind_uses_canonical_catalog_namespace_while_compatible_is_explicit()
 fn subscription_kind_has_independent_capabilities_and_no_dollar_pricing() {
     let config = subscription_config("gpt-5.4-mini");
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), subscription_keychain()),
+        manager(TestEnvironment::default(), subscription_credential_store()),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
         pricing([("openai/gpt-5.4-mini", false)]),
@@ -1940,7 +1958,7 @@ fn subscription_kind_has_independent_capabilities_and_no_dollar_pricing() {
 fn subscription_kind_rejects_auth_endpoint_conflicts_without_static_model_allowlist() {
     let build = |config: &rw_types::config::Config| {
         ProviderFactory::with_backends(
-            manager(TestEnvironment::default(), subscription_keychain()),
+            manager(TestEnvironment::default(), subscription_credential_store()),
             ProxyEnvironment::default(),
             NetworkPolicy::Deny,
             pricing([("openai/gpt-5.4-mini", false)]),
@@ -1971,7 +1989,7 @@ fn subscription_kind_rejects_auth_endpoint_conflicts_without_static_model_allowl
 fn copilot_kind_is_credit_accounted_redacted_and_conflict_closed() {
     let build = |config: &rw_types::config::Config| {
         ProviderFactory::with_backends(
-            manager(TestEnvironment::default(), copilot_keychain()),
+            manager(TestEnvironment::default(), copilot_credential_store()),
             ProxyEnvironment::default(),
             NetworkPolicy::Deny,
             pricing([("unrelated/model", false)]),
@@ -2025,7 +2043,7 @@ fn copilot_kind_is_credit_accounted_redacted_and_conflict_closed() {
     assert!(build(&endpoint).is_err());
 
     let identity_mismatch = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), copilot_keychain()),
+        manager(TestEnvironment::default(), copilot_credential_store()),
         ProxyEnvironment::default(),
         NetworkPolicy::Deny,
         pricing([("unrelated/model", false)]),
@@ -2057,7 +2075,7 @@ async fn copilot_invalid_tool_choices_fail_before_model_discovery_socket() {
     .unwrap_or_else(|error| panic!("Copilot canary origin must parse: {error}"));
     let config = copilot_config("fixture-model");
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), copilot_keychain()),
+        manager(TestEnvironment::default(), copilot_credential_store()),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("unrelated/model", false)]),
@@ -2110,7 +2128,7 @@ async fn copilot_factory_discovers_records_and_replays_without_another_socket() 
         .unwrap_or_else(|error| panic!("loopback Copilot origin must parse: {error}"));
     let config = copilot_config("fixture-model");
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), copilot_keychain()),
+        manager(TestEnvironment::default(), copilot_credential_store()),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("unrelated/model", false)]),
@@ -2199,7 +2217,7 @@ async fn copilot_discovery_fails_closed_on_auth_and_policy_denials() {
             .unwrap_or_else(|error| panic!("loopback Copilot origin must parse: {error}"));
         let config = copilot_config("fixture-model");
         let runtime = ProviderFactory::with_backends(
-            manager(TestEnvironment::default(), copilot_keychain()),
+            manager(TestEnvironment::default(), copilot_credential_store()),
             ProxyEnvironment::default(),
             NetworkPolicy::Allow,
             pricing([("unrelated/model", false)]),
@@ -2238,7 +2256,7 @@ async fn copilot_discovered_vision_and_thinking_bypass_only_static_capability_gu
         .unwrap_or_else(|error| panic!("accepting Copilot origin must parse: {error}"));
     let config = copilot_config("fixture-model");
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), copilot_keychain()),
+        manager(TestEnvironment::default(), copilot_credential_store()),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("unrelated/model", false)]),
@@ -2299,7 +2317,7 @@ async fn copilot_discovered_vision_and_thinking_bypass_only_static_capability_gu
         let origin = url::Url::parse(&denying.endpoint)
             .unwrap_or_else(|error| panic!("denying Copilot origin must parse: {error}"));
         let runtime = ProviderFactory::with_backends(
-            manager(TestEnvironment::default(), copilot_keychain()),
+            manager(TestEnvironment::default(), copilot_credential_store()),
             ProxyEnvironment::default(),
             NetworkPolicy::Allow,
             pricing([("unrelated/model", false)]),
@@ -2332,7 +2350,7 @@ async fn copilot_dynamic_metadata_exposes_caps_and_nominal_credit_rates() {
         .unwrap_or_else(|error| panic!("metadata Copilot origin must parse: {error}"));
     let config = copilot_config("fixture-model");
     let runtime = ProviderFactory::with_backends(
-        manager(TestEnvironment::default(), copilot_keychain()),
+        manager(TestEnvironment::default(), copilot_credential_store()),
         ProxyEnvironment::default(),
         NetworkPolicy::Allow,
         pricing([("unrelated/model", false)]),
