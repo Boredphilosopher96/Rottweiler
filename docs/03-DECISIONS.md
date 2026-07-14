@@ -220,3 +220,19 @@ The TUI may initiate provider-neutral OAuth or device-flow interactions through 
 **Rationale.** Alias-derived menus cannot show newly released subscription models, configured providers with no current alias, authentication state, or a truthful concrete selection. Keeping only sanitized operational state in the protocol preserves provider-blind execution while making the default UI usable. Live discovery also avoids treating a periodically refreshed pricing dataset as an availability registry.
 
 **Revisit if:** a provider cannot return a bounded catalog, the protocol cannot prevent endpoint/error leakage, or a future signed offline catalog can prove availability with equivalent freshness and account entitlement semantics.
+
+---
+
+## ADR-020: Routine prompts are mutation prompts; isolation remains capability-driven
+
+**Status:** accepted 2026-07-13; supersedes the prompt defaults in ADR-007 and ADR-011 without weakening sandbox, trust, fingerprint, or explicit-deny gates.
+
+**Decision.** In a normal local interactive Execute session, the default `ask` policy prompts only for tools that may write the filesystem and shell invocations outside the audited read-only safe-list. Reads, search/glob/list operations, todo bookkeeping, web fetch/search, and non-writing network or execution tools run without a routine permission dialog. MCP tools use the same rule: declared filesystem mutations prompt; other calls remain constrained by the server sandbox and first-use server approval. Explicit deny rules, malformed-request rejection, Discuss/Plan mode restrictions, permission hooks, native sandbox grants, SSRF policy, and plugin/MCP fingerprint approval remain independent fail-closed gates.
+
+`/permissions mode default|strict|auto-safe|yolo` applies a session-local overlay for an ordinary local interactive driver. `yolo` suppresses `ask` outcomes but does not override explicit denies, mode restrictions, malformed-input checks, or sandbox boundaries. A launch-fixed headless or remote-strict policy cannot be weakened by a client command.
+
+The built-in no-prompt shell list is intentionally narrow and implemented as hardened execution plans, not string matching: audited absolute binaries, sanitized environments, read-only sandboxing, and command-specific argument validation for `cat`, `ls`, an installed audited `bat`, `git status`, and `git diff`. Compound or ambiguous shell syntax falls back to the ordinary prompt path.
+
+**Rationale.** Repeated prompts for observation and bookkeeping train users to approve dialogs without reading them and make agent loops unusable. Mutation-focused prompts preserve a meaningful decision point while capability-derived isolation and explicit policy continue to provide the actual security boundary.
+
+**Revisit if:** a supposedly non-writing built-in gains durable external side effects, or a platform cannot enforce the declared isolation strongly enough to keep the streamlined local policy honest.

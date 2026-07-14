@@ -61,6 +61,29 @@ function childResult(
 }
 
 describe("pure TUI state reducer", () => {
+  test("projects only the live runtime services returned by the host", () => {
+    const state = reduce(createInitialState(), {
+      type: "runtime_services_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client-services",
+        request_id: "request-services",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-state",
+      services: [
+        { kind: "lsp", name: "rust-analyzer" },
+        { kind: "linter", name: "clippy-driver" },
+      ],
+    })
+
+    expect(state.runtimeServices).toEqual([
+      { kind: "lsp", name: "rust-analyzer" },
+      { kind: "linter", name: "clippy-driver" },
+    ])
+    expect(state.commandAcks["request-services"]?.responseType).toBe("runtime_services_listed")
+  })
+
   test("drops connection-scoped provider auth challenges on disconnect", () => {
     const pending = reduce(createInitialState(), {
       type: "provider_auth_started",
@@ -346,6 +369,47 @@ describe("pure TUI state reducer", () => {
       { stream: "stdout", chunk: "src/lib.rs" },
     ])
     expect(state.tools["late-glob"]?.status).toBe("finished")
+  })
+
+  test("retains an inline mutation diff without requiring an approval event", () => {
+    let state = reduce(createInitialState(), {
+      type: "tool_call_started",
+      meta: meta("1"),
+      turn_id: "9",
+      tool_call_id: "yolo-write",
+      name: "write",
+      args: { path: "src/main.rs", content: "new" },
+      call_index: 0,
+    })
+    state = reduce(state, {
+      type: "tool_diff_ready",
+      meta: meta("2"),
+      turn_id: "9",
+      tool_call_id: "yolo-write",
+      diff: {
+        proposal_id: "proposal-yolo",
+        path: "src/main.rs",
+        unified_diff: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        arguments_hash: "args",
+        base_hash: "base",
+        diff_hash: "diff",
+        truncated: false,
+      },
+    })
+    state = reduce(state, {
+      type: "tool_call_finished",
+      meta: meta("3"),
+      turn_id: "9",
+      tool_call_id: "yolo-write",
+      output: { type: "text", text: "updated src/main.rs" },
+      is_error: false,
+      call_index: 0,
+    })
+
+    expect(state.tools["yolo-write"]?.status).toBe("finished")
+    expect(state.tools["yolo-write"]?.diff?.path).toBe("src/main.rs")
+    expect(state.tools["yolo-write"]?.diff?.unified_diff).toContain("+new")
+    expect(state.streamingTail?.toolCallIds).toEqual(["yolo-write"])
   })
 
   test("rederives the latest valid todo snapshot at a rewind boundary", () => {

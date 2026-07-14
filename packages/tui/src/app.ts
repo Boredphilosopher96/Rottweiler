@@ -138,7 +138,7 @@ type PickerKind =
   | "permissionInput"
   | "sessions" | "settings"
   | "themes"
-type ProjectionKind = "commands" | "models" | "sessions" | "files" | "settings" | "permissions" | "mcp"
+type ProjectionKind = "commands" | "models" | "sessions" | "files" | "settings" | "permissions" | "mcp" | "runtime_services"
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 
 type CommandChoice = RottweilerState["commands"][number]
@@ -148,6 +148,7 @@ type ModelPickerChoice = { readonly kind: "model"; readonly model: RottweilerSta
 
 type PermissionPickerAction =
   | { readonly kind: "refresh" }
+  | { readonly kind: "mode"; readonly mode: "default" | "yolo" }
   | { readonly kind: "add"; readonly action: PermissionAction }
   | { readonly kind: "remove"; readonly ruleId: string }
   | { readonly kind: "revoke"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
@@ -161,7 +162,7 @@ const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
   { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
   { name: "theme", description: "Preview and change the interface theme", usage: "/theme" },
   { name: "settings", description: "Change safe user settings", usage: "/settings" },
-  { name: "permissions", description: "Show or edit session permission rules", usage: "/permissions [list|approvals|add|remove|clear-session|revoke-session|revoke-project]" },
+  { name: "permissions", description: "Show or edit session permission rules", usage: "/permissions [list|mode|approvals|add|remove|clear-session|revoke-session|revoke-project]" },
   { name: "plan", description: "Show the pending or approved plan", usage: "/plan" },
   { name: "rewind", description: "Restore a completed turn checkpoint", usage: "/rewind <turn>" },
   { name: "fork", description: "Fork this session at a completed turn", usage: "/fork [turn]" },
@@ -252,6 +253,7 @@ export class RottweilerApp extends BoxRenderable {
   #latestSettingsRequest: string | null = null
   #latestPermissionsRequest: string | null = null
   #latestMcpRequest: string | null = null
+  #latestRuntimeServicesRequest: string | null = null
   #commandsRequested = false
   #modelsRequested = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
@@ -273,6 +275,7 @@ export class RottweilerApp extends BoxRenderable {
   #pendingShellTimer: ReturnType<typeof setTimeout> | null = null
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
   #sessionSearchTimer: ReturnType<typeof setTimeout> | null = null
+  #runtimeServicesTimer: ReturnType<typeof setTimeout> | null = null
   #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
   #pendingModelSwitchRequests = new Set<string>()
@@ -594,6 +597,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#latestSettingsRequest = null
       this.#latestPermissionsRequest = null
       this.#latestMcpRequest = null
+      this.#latestRuntimeServicesRequest = null
       this.#commandsRequested = false
       this.#modelsRequested = false
       this.#projectionErrors = {}
@@ -643,6 +647,11 @@ export class RottweilerApp extends BoxRenderable {
     ) {
       return
     }
+    if (
+      event.type === "runtime_services_listed" &&
+      this.#latestRuntimeServicesRequest !== null &&
+      commandRequestId !== this.#latestRuntimeServicesRequest
+    ) return
     if (event.type === "workspace_diff_ready") {
       const diffPath =
         isRecord(eventRecord.diff) && typeof eventRecord.diff.path === "string"
@@ -723,6 +732,10 @@ export class RottweilerApp extends BoxRenderable {
     if (event.type === "mcp_servers_listed") {
       this.#clearProjectionError("mcp")
       this.#latestMcpRequest = null
+    }
+    if (event.type === "runtime_services_listed") {
+      this.#clearProjectionError("runtime_services")
+      this.#latestRuntimeServicesRequest = null
     }
     if (event.type === "workspace_files_found") this.#clearProjectionError("files")
     const previous = this.#state
@@ -943,6 +956,12 @@ export class RottweilerApp extends BoxRenderable {
       (event.type === "user_shell_state_changed" && !event.active)
     ) {
       this.#command({ type: "get_workspace_status" })
+    }
+    if (
+      event.type === "tool_call_started" ||
+      event.type === "tool_call_finished"
+    ) {
+      this.#refreshRuntimeServicesWhileToolsRun()
     }
     if (
       event.type === "turn_finished" ||
@@ -1291,7 +1310,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   protected override onResize(width: number, height: number): void {
-    this.contextPanel.visible = !this.#state.replay.active && width >= 100
+    this.contextPanel.visible = !this.#state.replay.active && width >= 100 && height >= 12
     this.composer.resizeForTerminal(height)
     this.interactionPanel.resizeForTerminal(
       height,
@@ -1309,6 +1328,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearPendingShellTimer()
     this.#clearPluginNotificationTimer()
     this.#clearSessionSearchTimer()
+    this.#clearRuntimeServicesTimer()
     this.ctx.off(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     this.ctx.off(CliRenderEvents.BLUR, this.#onTerminalBlur)
     this.ctx.off(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
@@ -2121,6 +2141,18 @@ export class RottweilerApp extends BoxRenderable {
           }
           const items: PickerItem<PermissionPickerAction>[] = [
             {
+              id: "permissions.mode.yolo",
+              label: "YOLO mode",
+              description: "Run without prompts; explicit denies and mode safety still apply",
+              value: { kind: "mode", mode: "yolo" },
+            },
+            {
+              id: "permissions.mode.default",
+              label: "Standard permissions",
+              description: "Prompt only for file changes and unsafe shell commands",
+              value: { kind: "mode", mode: "default" },
+            },
+            {
               id: "permissions.refresh",
               label: `Default behavior · ${permissionActionLabel(permissions.default)}`,
               description: permissions.truncated === true
@@ -2169,6 +2201,10 @@ export class RottweilerApp extends BoxRenderable {
           (item) => {
             const action = item.value
             if (action.kind === "refresh") this.#command({ type: "list_permissions" })
+            else if (action.kind === "mode") {
+              this.closePicker()
+              void this.#sendMessage(`/permissions mode ${action.mode}`, [])
+            }
             else if (action.kind === "add") this.#openPermissionPatternPrompt(action.action)
             else if (action.kind === "remove") {
               this.#command({ type: "remove_session_permission_rule", ruleId: action.ruleId })
@@ -2364,7 +2400,12 @@ export class RottweilerApp extends BoxRenderable {
         this.#positionPicker(true)
         this.composer.focus()
       } else {
-        this.picker.refresh(title, items as readonly PickerItem<unknown>[], select)
+        this.picker.refresh(
+          title,
+          items as readonly PickerItem<unknown>[],
+          select,
+          this.#pickerKind === "palette",
+        )
       }
     } finally {
       this.#rethemeInProgress = rethemeWasInProgress
@@ -2424,11 +2465,8 @@ export class RottweilerApp extends BoxRenderable {
       { id: "mode.list", title: "Switch mode", category: "Agent", description: "Choose discuss, plan, or execute", run: open(() => this.openModePicker()) },
       { id: "review.open", title: "Review changes", category: "Session", description: "Open the cumulative session diff", run: open(() => this.openReview()) },
       { id: "permissions.manage", title: "Permission settings", category: "Settings", description: "Inspect, add, and remove session rules", run: open(() => this.openPermissionPicker()) },
-      { id: "permissions.list", title: "List permission rules", category: "Settings", description: "Show effective session permission rules", run: open(() => this.openPermissionPicker()) },
-      { id: "permissions.approvals", title: "List remembered approvals", category: "Settings", description: "Show remembered approval bindings", run: open(() => this.openPermissionPicker()) },
-      { id: "permissions.add", title: "Add permission rule", category: "Settings", description: "Add a session-scoped rule", run: open(() => this.openPermissionPicker()) },
-      { id: "permissions.remove", title: "Remove permission rule", category: "Settings", description: "Remove a session-scoped rule", run: open(() => this.openPermissionPicker()) },
-      { id: "permissions.clear", title: "Clear session permissions", category: "Settings", description: "Clear this session's remembered rules", run: prefill("/permissions clear-session") },
+      { id: "permissions.yolo", title: "Enable YOLO mode", category: "Settings", description: "Run without permission prompts", run: submit("/permissions mode yolo") },
+      { id: "permissions.default", title: "Use standard permissions", category: "Settings", description: "Prompt only for file changes and unsafe shell", run: submit("/permissions mode default") },
       { id: "trust.manage", title: "Folder trust settings", category: "Settings", description: "Inspect, grant, or revoke workspace trust", run: prefill("/trust") },
       { id: "trust.status", title: "Show folder trust", category: "Settings", description: "Inspect the current workspace trust state", run: submit("/trust status") },
       { id: "trust.grant", title: "Trust this folder", category: "Settings", description: "Grant executable project configuration trust", run: prefill("/trust grant") },
@@ -2451,10 +2489,6 @@ export class RottweilerApp extends BoxRenderable {
         mcpIndex,
         0,
         { id: "mcp.manage", title: "MCP connections", category: "Settings", description: "Inspect, add, enable, disable, or approve MCP servers", run: open(() => this.openMcpPicker()) },
-        { id: "mcp.status", title: "Show MCP status", category: "Settings", description: "List every MCP connection and its state", run: submit("/mcp status") },
-        { id: "mcp.enable", title: "Enable MCP server", category: "Settings", description: "Enable a configured MCP connection", run: prefill("/mcp enable") },
-        { id: "mcp.disable", title: "Disable MCP server", category: "Settings", description: "Disable a configured MCP connection", run: prefill("/mcp disable") },
-        { id: "mcp.approve", title: "Approve MCP server", category: "Settings", description: "Approve a displayed MCP fingerprint", run: prefill("/mcp approve") },
       )
     } else {
       actions.splice(mcpIndex, 0, {
@@ -2592,6 +2626,24 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#sessionSearchTimer !== null) {
       clearTimeout(this.#sessionSearchTimer)
       this.#sessionSearchTimer = null
+    }
+  }
+
+  #refreshRuntimeServicesWhileToolsRun(): void {
+    this.#latestRuntimeServicesRequest = this.#command({ type: "list_runtime_services" })
+    this.#clearRuntimeServicesTimer()
+    if (!Object.values(this.#state.tools).some((tool) => tool.status === "running")) return
+    this.#runtimeServicesTimer = setTimeout(() => {
+      this.#runtimeServicesTimer = null
+      if (this.#destroyed) return
+      this.#refreshRuntimeServicesWhileToolsRun()
+    }, 250)
+  }
+
+  #clearRuntimeServicesTimer(): void {
+    if (this.#runtimeServicesTimer !== null) {
+      clearTimeout(this.#runtimeServicesTimer)
+      this.#runtimeServicesTimer = null
     }
   }
 
@@ -2993,6 +3045,7 @@ export class RottweilerApp extends BoxRenderable {
       | { readonly type: "list_settings" }
       | { readonly type: "set_setting"; readonly key: string; readonly value: string }
       | { readonly type: "list_mcp_servers" }
+      | { readonly type: "list_runtime_services" }
       | { readonly type: "add_mcp_http_server"; readonly name: string; readonly endpoint: string }
       | { readonly type: "review_mcp_server"; readonly name: string }
       | { readonly type: "approve_mcp_server"; readonly name: string; readonly fingerprint: string }
@@ -3038,6 +3091,8 @@ export class RottweilerApp extends BoxRenderable {
       this.#latestPermissionsRequest = meta.request_id
     } else if (command.type === "list_mcp_servers") {
       this.#latestMcpRequest = meta.request_id
+    } else if (command.type === "list_runtime_services") {
+      this.#latestRuntimeServicesRequest = meta.request_id
     }
     let dispatched: ClientCommand
     switch (command.type) {
@@ -3050,6 +3105,7 @@ export class RottweilerApp extends BoxRenderable {
       case "list_commands":
       case "list_settings":
       case "list_mcp_servers":
+      case "list_runtime_services":
       case "list_permissions":
         dispatched = { type: command.type, meta, session_id: this.#sessionId }
         break
@@ -3185,9 +3241,15 @@ export class RottweilerApp extends BoxRenderable {
       this.#latestPermissionsRequest = null
     } else if (kind === "mcp") {
       this.#latestMcpRequest = null
+    } else if (kind === "runtime_services") {
+      this.#latestRuntimeServicesRequest = null
+      if (this.#state.runtimeServices.length > 0) {
+        this.setState({ ...this.#state, runtimeServices: [] })
+      }
     }
     this.#projectionErrors = { ...this.#projectionErrors, [kind]: message }
-    this.#projectClientError(`${kind}_projection_failed`, `couldn't load ${kind}: ${message}`, true)
+    const label = kind === "runtime_services" ? "active services" : kind
+    this.#projectClientError(`${kind}_projection_failed`, `couldn't load ${label}: ${message}`, true)
   }
 
   #isCurrentProjectionRequest(kind: ProjectionKind, requestId: string): boolean {
@@ -3198,6 +3260,7 @@ export class RottweilerApp extends BoxRenderable {
     if (kind === "settings") return this.#latestSettingsRequest === requestId
     if (kind === "permissions") return this.#latestPermissionsRequest === requestId
     if (kind === "mcp") return this.#latestMcpRequest === requestId
+    if (kind === "runtime_services") return this.#latestRuntimeServicesRequest === requestId
     return true
   }
 
@@ -3440,6 +3503,8 @@ function projectionKind(type: ClientCommand["type"]): ProjectionKind | null {
       return "permissions"
     case "list_mcp_servers":
       return "mcp"
+    case "list_runtime_services":
+      return "runtime_services"
     default:
       return null
   }

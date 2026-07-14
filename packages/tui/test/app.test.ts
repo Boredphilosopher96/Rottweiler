@@ -83,6 +83,111 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer = undefined
   })
 
+  test("refreshes live runtime services around tool execution", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 18, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      sessionId: "session-services",
+      requestId: () => `request-${commands.length + 1}`,
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.handleEvent({
+      type: "tool_call_started",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-services",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      turn_id: "turn-services",
+      tool_call_id: "tool-services",
+      name: "edit",
+      args: { path: "src/lib.rs" },
+      call_index: 0,
+    })
+    expect(commands.at(-1)).toMatchObject({ type: "list_runtime_services" })
+
+    app.handleEvent({
+      type: "tool_call_finished",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-services",
+        sequence_id: "2",
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      turn_id: "turn-services",
+      tool_call_id: "tool-services",
+      output: { type: "text", text: "done" },
+      is_error: false,
+      call_index: 0,
+    })
+    expect(commands.filter((command) => command.type === "list_runtime_services")).toHaveLength(2)
+  })
+
+  test("clears stale runtime services when the final activity refresh fails", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      sessionId: "session-services",
+      initialState: {
+        ...createInitialState(),
+        runtimeServices: [{ kind: "formatter", name: "rustfmt" }],
+      },
+      onCommand(command) {
+        if (command.type !== "list_runtime_services") return { type: "accepted" }
+        return {
+          type: "rejected",
+          error: {
+            category: "protocol",
+            code: "services_unavailable",
+            message: "service probe failed",
+            retryable: true,
+          },
+        }
+      },
+    })
+    renderer.root.add(app)
+
+    app.handleEvent({
+      type: "tool_call_started",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-services",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      turn_id: "turn-services",
+      tool_call_id: "tool-services",
+      name: "edit",
+      args: { path: "src/lib.rs" },
+      call_index: 0,
+    })
+    app.handleEvent({
+      type: "tool_call_finished",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-services",
+        sequence_id: "2",
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      turn_id: "turn-services",
+      tool_call_id: "tool-services",
+      output: { type: "text", text: "done" },
+      is_error: false,
+      call_index: 0,
+    })
+    await Bun.sleep(0)
+
+    expect(app.state.runtimeServices).toEqual([])
+    expect(app.state.errors.at(-1)?.message).toContain("service probe failed")
+  })
+
   test("renders into OpenTUI's inspectable in-memory cell buffer", async () => {
     const setup = await createTestRenderer({
       width: 72,
@@ -1151,7 +1256,7 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
     app.openCommandPicker()
     await setup.mockInput.typeText("mcp")
-    expect(app.picker.select.options.map((option) => option.value)).toContain("mcp.status")
+    expect(app.picker.select.options.map((option) => option.value)).toContain("mcp.manage")
 
     app.picker.input.value = "trust this folder"
     const trustIndex = app.picker.select.options.findIndex(
@@ -1434,7 +1539,8 @@ describe("Rottweiler OpenTUI shell", () => {
 
     const offset = () =>
       (app.picker.select as unknown as { scrollOffset: number }).scrollOffset
-    const visible = Math.max(1, Math.floor(app.picker.select.height / 2))
+    expect(app.picker.select.showDescription).toBeFalse()
+    const visible = Math.max(1, Math.floor(app.picker.select.height))
     const maximum = app.picker.select.options.length - visible
     for (let index = 1; index <= visible + 2; index += 1) {
       setup.mockInput.pressArrow("down")

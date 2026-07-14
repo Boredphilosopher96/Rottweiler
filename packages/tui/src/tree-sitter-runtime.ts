@@ -1,13 +1,47 @@
 import parserWorker from "../node_modules/@opentui/core/parser.worker.js" with { type: "file" }
+import bashHighlights from "../node_modules/tree-sitter-bash/queries/highlights.scm" with { type: "file" }
+import bashWasm from "../node_modules/tree-sitter-bash/tree-sitter-bash.wasm" with { type: "file" }
+import cHighlights from "../node_modules/tree-sitter-c/queries/highlights.scm" with { type: "file" }
+import cWasm from "../node_modules/tree-sitter-c/tree-sitter-c.wasm" with { type: "file" }
+import cppHighlights from "../node_modules/tree-sitter-cpp/queries/highlights.scm" with { type: "file" }
+import cppWasm from "../node_modules/tree-sitter-cpp/tree-sitter-cpp.wasm" with { type: "file" }
+import csharpHighlights from "../node_modules/tree-sitter-c-sharp/queries/highlights.scm" with { type: "file" }
+import csharpWasm from "../node_modules/tree-sitter-c-sharp/tree-sitter-c_sharp.wasm" with { type: "file" }
+import cssHighlights from "../node_modules/tree-sitter-css/queries/highlights.scm" with { type: "file" }
+import cssWasm from "../node_modules/tree-sitter-css/tree-sitter-css.wasm" with { type: "file" }
+import goHighlights from "../node_modules/tree-sitter-go/queries/highlights.scm" with { type: "file" }
+import goWasm from "../node_modules/tree-sitter-go/tree-sitter-go.wasm" with { type: "file" }
+import htmlHighlights from "../node_modules/tree-sitter-html/queries/highlights.scm" with { type: "file" }
+import htmlWasm from "../node_modules/tree-sitter-html/tree-sitter-html.wasm" with { type: "file" }
+import javaHighlights from "../node_modules/tree-sitter-java/queries/highlights.scm" with { type: "file" }
+import javaWasm from "../node_modules/tree-sitter-java/tree-sitter-java.wasm" with { type: "file" }
+import luaHighlights from "../node_modules/@tree-sitter-grammars/tree-sitter-lua/queries/highlights.scm" with { type: "file" }
+import luaWasm from "../node_modules/@tree-sitter-grammars/tree-sitter-lua/tree-sitter-lua.wasm" with { type: "file" }
+import makeHighlights from "../node_modules/tree-sitter-make/queries/highlights.scm" with { type: "file" }
+import makeWasm from "../node_modules/tree-sitter-make/tree-sitter-make.wasm" with { type: "file" }
 import javascriptHighlights from "../node_modules/@opentui/core/assets/javascript/highlights.scm" with { type: "file" }
 import javascriptWasm from "../node_modules/@opentui/core/assets/javascript/tree-sitter-javascript.wasm" with { type: "file" }
+import jsonHighlights from "../node_modules/tree-sitter-json/queries/highlights.scm" with { type: "file" }
+import jsonWasm from "../node_modules/tree-sitter-json/tree-sitter-json.wasm" with { type: "file" }
 import markdownHighlights from "../node_modules/@opentui/core/assets/markdown/highlights.scm" with { type: "file" }
 import markdownInjections from "../node_modules/@opentui/core/assets/markdown/injections.scm" with { type: "file" }
 import markdownWasm from "../node_modules/@opentui/core/assets/markdown/tree-sitter-markdown.wasm" with { type: "file" }
 import markdownInlineHighlights from "../node_modules/@opentui/core/assets/markdown_inline/highlights.scm" with { type: "file" }
 import markdownInlineWasm from "../node_modules/@opentui/core/assets/markdown_inline/tree-sitter-markdown_inline.wasm" with { type: "file" }
+import phpHighlights from "../node_modules/tree-sitter-php/queries/highlights.scm" with { type: "file" }
+import phpWasm from "../node_modules/tree-sitter-php/tree-sitter-php.wasm" with { type: "file" }
+import pythonHighlights from "../node_modules/tree-sitter-python/queries/highlights.scm" with { type: "file" }
+import pythonWasm from "../node_modules/tree-sitter-python/tree-sitter-python.wasm" with { type: "file" }
+import rubyHighlights from "../node_modules/tree-sitter-ruby/queries/highlights.scm" with { type: "file" }
+import rubyWasm from "../node_modules/tree-sitter-ruby/tree-sitter-ruby.wasm" with { type: "file" }
+import rustHighlights from "../node_modules/tree-sitter-rust/queries/highlights.scm" with { type: "file" }
+import rustWasm from "../node_modules/tree-sitter-rust/tree-sitter-rust.wasm" with { type: "file" }
+import tomlHighlights from "../node_modules/@tree-sitter-grammars/tree-sitter-toml/queries/highlights.scm" with { type: "file" }
+import tomlWasm from "../node_modules/@tree-sitter-grammars/tree-sitter-toml/tree-sitter-toml.wasm" with { type: "file" }
 import typescriptHighlights from "../node_modules/@opentui/core/assets/typescript/highlights.scm" with { type: "file" }
 import typescriptWasm from "../node_modules/@opentui/core/assets/typescript/tree-sitter-typescript.wasm" with { type: "file" }
+import yamlHighlights from "../node_modules/@tree-sitter-grammars/tree-sitter-yaml/queries/highlights.scm" with { type: "file" }
+import yamlWasm from "../node_modules/@tree-sitter-grammars/tree-sitter-yaml/tree-sitter-yaml.wasm" with { type: "file" }
 import zigHighlights from "../node_modules/@opentui/core/assets/zig/highlights.scm" with { type: "file" }
 import zigWasm from "../node_modules/@opentui/core/assets/zig/tree-sitter-zig.wasm" with { type: "file" }
 import webTreeSitterModule from "../node_modules/web-tree-sitter/tree-sitter.js" with { type: "file" }
@@ -23,15 +57,49 @@ const MAX_RUNTIME_BYTES = 32 * 1024 * 1024
 
 const embeddedAssets = [
   ["parser.worker.js", parserWorker],
+  ["assets/bash/highlights.scm", bashHighlights],
+  ["assets/bash/tree-sitter-bash.wasm", bashWasm],
+  ["assets/c/highlights.scm", cHighlights],
+  ["assets/c/tree-sitter-c.wasm", cWasm],
+  ["assets/cpp/highlights.scm", cppHighlights],
+  ["assets/cpp/tree-sitter-cpp.wasm", cppWasm],
+  ["assets/csharp/highlights.scm", csharpHighlights],
+  ["assets/csharp/tree-sitter-csharp.wasm", csharpWasm],
+  ["assets/css/highlights.scm", cssHighlights],
+  ["assets/css/tree-sitter-css.wasm", cssWasm],
+  ["assets/go/highlights.scm", goHighlights],
+  ["assets/go/tree-sitter-go.wasm", goWasm],
+  ["assets/html/highlights.scm", htmlHighlights],
+  ["assets/html/tree-sitter-html.wasm", htmlWasm],
+  ["assets/java/highlights.scm", javaHighlights],
+  ["assets/java/tree-sitter-java.wasm", javaWasm],
+  ["assets/lua/highlights.scm", luaHighlights],
+  ["assets/lua/tree-sitter-lua.wasm", luaWasm],
+  ["assets/make/highlights.scm", makeHighlights],
+  ["assets/make/tree-sitter-make.wasm", makeWasm],
   ["assets/javascript/highlights.scm", javascriptHighlights],
   ["assets/javascript/tree-sitter-javascript.wasm", javascriptWasm],
+  ["assets/json/highlights.scm", jsonHighlights],
+  ["assets/json/tree-sitter-json.wasm", jsonWasm],
   ["assets/markdown/highlights.scm", markdownHighlights],
   ["assets/markdown/injections.scm", markdownInjections],
   ["assets/markdown/tree-sitter-markdown.wasm", markdownWasm],
   ["assets/markdown_inline/highlights.scm", markdownInlineHighlights],
   ["assets/markdown_inline/tree-sitter-markdown_inline.wasm", markdownInlineWasm],
+  ["assets/php/highlights.scm", phpHighlights],
+  ["assets/php/tree-sitter-php.wasm", phpWasm],
+  ["assets/python/highlights.scm", pythonHighlights],
+  ["assets/python/tree-sitter-python.wasm", pythonWasm],
+  ["assets/ruby/highlights.scm", rubyHighlights],
+  ["assets/ruby/tree-sitter-ruby.wasm", rubyWasm],
+  ["assets/rust/highlights.scm", rustHighlights],
+  ["assets/rust/tree-sitter-rust.wasm", rustWasm],
+  ["assets/toml/highlights.scm", tomlHighlights],
+  ["assets/toml/tree-sitter-toml.wasm", tomlWasm],
   ["assets/typescript/highlights.scm", typescriptHighlights],
   ["assets/typescript/tree-sitter-typescript.wasm", typescriptWasm],
+  ["assets/yaml/highlights.scm", yamlHighlights],
+  ["assets/yaml/tree-sitter-yaml.wasm", yamlWasm],
   ["assets/zig/highlights.scm", zigHighlights],
   ["assets/zig/tree-sitter-zig.wasm", zigWasm],
   ["node_modules/web-tree-sitter/tree-sitter.js", webTreeSitterModule],
@@ -48,6 +116,16 @@ export interface MaterializedTreeSitterRuntime {
 
 export function embeddedParserConfigurations(assets: string) {
   return [
+    parserConfiguration(assets, "bash"),
+    parserConfiguration(assets, "c"),
+    parserConfiguration(assets, "cpp"),
+    parserConfiguration(assets, "csharp"),
+    parserConfiguration(assets, "css"),
+    parserConfiguration(assets, "go"),
+    parserConfiguration(assets, "html"),
+    parserConfiguration(assets, "java"),
+    parserConfiguration(assets, "lua"),
+    parserConfiguration(assets, "make"),
     {
       filetype: "javascript",
       aliases: ["javascriptreact"],
@@ -75,6 +153,13 @@ export function embeddedParserConfigurations(assets: string) {
       injectionMapping: {
         nodeTypes: { inline: "markdown_inline", pipe_table_cell: "markdown_inline" },
         infoStringMap: {
+          bash: "bash", sh: "bash", shell: "bash", zsh: "bash",
+          c: "c", h: "c", cpp: "cpp", cc: "cpp", cxx: "cpp",
+          csharp: "csharp", cs: "csharp", css: "css", go: "go", html: "html",
+          java: "java", json: "json", lua: "lua", make: "make", makefile: "make",
+          php: "php", python: "python", py: "python",
+          ruby: "ruby", rb: "ruby", rust: "rust", rs: "rust", toml: "toml",
+          yaml: "yaml", yml: "yaml",
           javascript: "javascript", js: "javascript", jsx: "javascriptreact",
           javascriptreact: "javascriptreact", typescript: "typescript", ts: "typescript",
           tsx: "typescriptreact", typescriptreact: "typescriptreact",
@@ -87,7 +172,22 @@ export function embeddedParserConfigurations(assets: string) {
       queries: { highlights: [join(assets, "zig/highlights.scm")] },
       wasm: join(assets, "zig/tree-sitter-zig.wasm"),
     },
+    parserConfiguration(assets, "json"),
+    parserConfiguration(assets, "php"),
+    parserConfiguration(assets, "python"),
+    parserConfiguration(assets, "ruby"),
+    parserConfiguration(assets, "rust"),
+    parserConfiguration(assets, "toml"),
+    parserConfiguration(assets, "yaml"),
   ]
+}
+
+function parserConfiguration(assets: string, filetype: string) {
+  return {
+    filetype,
+    queries: { highlights: [join(assets, filetype, "highlights.scm")] },
+    wasm: join(assets, filetype, `tree-sitter-${filetype}.wasm`),
+  }
 }
 
 /** Materialize Bun-embedded parser assets for OpenTUI's path-based worker API. */

@@ -10,7 +10,7 @@ export async function runCompiledTreeSitterSmoke(reportPath: string): Promise<vo
   process.env.OTUI_TREE_SITTER_WORKER_PATH = runtime.workerPath
   addDefaultParsers(embeddedParserConfigurations(runtime.assetsPath))
   const client = getTreeSitterClient()
-  const setup = await createTestRenderer({ width: 64, height: 12, useThread: false })
+  const setup = await createTestRenderer({ width: 64, height: 30, useThread: false })
   const syntax = SyntaxStyle.fromStyles({
     default: { fg: "#D8DEE9" },
     "markup.heading": { fg: "#EBCB8B", bold: true },
@@ -21,13 +21,38 @@ export async function runCompiledTreeSitterSmoke(reportPath: string): Promise<vo
   try {
     await client.initialize()
     const markdown = new MarkdownRenderable(setup.renderer, {
-      content: "## Embedded result\n\n**complete**\n\n```typescript\nconst answer = 42\n```",
+      content: [
+        "## Embedded result",
+        "",
+        "**complete**",
+        "",
+        "```typescript",
+        "const answer = 42",
+        "```",
+        "",
+        "```bash",
+        "printf '%s\\n' \"$HOME\"",
+        "```",
+        "",
+        "```rust",
+        "fn answer() -> u32 { 42 }",
+        "```",
+        "",
+        "```lua",
+        "local answer = 42",
+        "```",
+        "",
+        "```make",
+        "all:",
+        "\t@echo ready",
+        "```",
+      ].join("\n"),
       syntaxStyle: syntax,
       treeSitterClient: client,
       conceal: true,
       concealCode: false,
       width: "100%",
-      height: 10,
+      height: 26,
     })
     setup.renderer.root.add(markdown)
     for (let attempt = 0; attempt < 30; attempt += 1) {
@@ -43,9 +68,17 @@ export async function runCompiledTreeSitterSmoke(reportPath: string): Promise<vo
       !frame.includes("Embedded result") ||
       !frame.includes("complete") ||
       !frame.includes("const answer = 42") ||
+      !frame.includes("printf") ||
+      !frame.includes("fn answer") ||
+      !frame.includes("local answer = 42") ||
+      !frame.includes("@echo ready") ||
       frame.includes("## Embedded result") ||
       frame.includes("**complete**") ||
       frame.includes("```typescript") ||
+      frame.includes("```bash") ||
+      frame.includes("```rust") ||
+      frame.includes("```lua") ||
+      frame.includes("```make") ||
       new Set(codeColors).size < 2
     ) {
       throw new Error("embedded Tree-sitter runtime did not render concealed highlighted Markdown")

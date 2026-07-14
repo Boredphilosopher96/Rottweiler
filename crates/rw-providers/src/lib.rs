@@ -46,7 +46,9 @@ pub use models_dev::{
     DEFAULT_MODELS_DEV_URL, ModelsRefreshReport, default_models_path, refresh_models_dev,
     refresh_models_dev_with_proxy_auth,
 };
-pub use openai::{OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode};
+pub use openai::{
+    OpenAiChatRequestProfile, OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode,
+};
 pub use openai_subscription::{
     OPENAI_SUBSCRIPTION_AUTHORIZATION_ENDPOINT, OPENAI_SUBSCRIPTION_CLIENT_ID,
     OPENAI_SUBSCRIPTION_MODELS_COMPATIBILITY_VERSION, OPENAI_SUBSCRIPTION_MODELS_ENDPOINT,

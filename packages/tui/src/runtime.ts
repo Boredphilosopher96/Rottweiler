@@ -636,6 +636,8 @@ export class TuiEngineRuntime {
         session_id: sessionId,
       },
       { type: "list_settings", meta: this.#meta(), session_id: sessionId },
+      { type: "list_mcp_servers", meta: this.#meta(), session_id: sessionId },
+      { type: "list_runtime_services", meta: this.#meta(), session_id: sessionId },
       { type: "list_commands", meta: this.#meta(), session_id: sessionId },
     ]
     for (const command of commands) {

@@ -2,9 +2,9 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AuthMaterial, CacheBreakpointSupport, NetworkPolicy,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode, Provider, ProviderErrorKind,
-    ProviderRequest, ProxyEnvironment, ProxySettings, StaticAuth, ThinkingLevel, ToolChoice,
-    deny_outbound_network_for_process, refresh_models_dev,
+    OpenAiChatRequestProfile, OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode,
+    Provider, ProviderErrorKind, ProviderRequest, ProxyEnvironment, ProxySettings, StaticAuth,
+    ThinkingLevel, ToolChoice, deny_outbound_network_for_process, refresh_models_dev,
 };
 use tokio::{net::TcpListener, time::timeout};
 use url::Url;
@@ -37,6 +37,7 @@ async fn reasoning_only_openai_model_rejects_off_before_opening_a_socket() {
         proxy_authentication: None,
         network_policy: NetworkPolicy::Allow,
         wire_mode: OpenAiWireMode::Responses,
+        chat_request_profile: OpenAiChatRequestProfile::OpenAi,
         tool_calling: false,
         cache_breakpoints: CacheBreakpointSupport::None,
         supported_reasoning_efforts: vec![ThinkingLevel::Low, ThinkingLevel::High],
@@ -125,6 +126,7 @@ async fn network_denied_prevents_both_live_adapters_from_opening_a_socket() {
         proxy_authentication: None,
         network_policy: NetworkPolicy::Allow,
         wire_mode: OpenAiWireMode::Responses,
+        chat_request_profile: OpenAiChatRequestProfile::OpenAi,
         tool_calling: false,
         cache_breakpoints: CacheBreakpointSupport::None,
         supported_reasoning_efforts: Vec::new(),

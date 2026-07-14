@@ -676,6 +676,11 @@ enum PendingEvent {
         turn: u64,
         request: PermissionRequest,
     },
+    ToolDiffReady {
+        turn: u64,
+        id: String,
+        diff: UnifiedDiff,
+    },
     ToolOutput {
         turn: u64,
         id: String,
@@ -818,6 +823,7 @@ impl PendingEvent {
             | Self::CitationDelta { turn, .. }
             | Self::ToolCallStarted { turn, .. }
             | Self::PermissionRequested { turn, .. }
+            | Self::ToolDiffReady { turn, .. }
             | Self::ToolOutput { turn, .. }
             | Self::ToolCallFinished { turn, .. }
             | Self::GuardTriggered { turn, .. }
@@ -1091,6 +1097,12 @@ impl PendingEvent {
                 args: request.arguments,
                 capabilities: request.capabilities,
                 diff: request.approval_diff,
+            },
+            Self::ToolDiffReady { turn, id, diff } => EngineEvent::ToolDiffReady {
+                meta,
+                turn_id: wire_turn_id(turn),
+                tool_call_id: ToolCallId(id),
+                diff,
             },
             Self::ToolOutput {
                 turn,
@@ -1585,6 +1597,7 @@ fn recovered_pending_event(
         | EngineEvent::ModelsListed { .. }
         | EngineEvent::SettingsListed { .. }
         | EngineEvent::McpServersListed { .. }
+        | EngineEvent::RuntimeServicesListed { .. }
         | EngineEvent::McpServerApprovalReviewed { .. }
         | EngineEvent::PermissionsListed { .. }
         | EngineEvent::ProviderAuthStarted { .. }
@@ -1729,6 +1742,16 @@ fn recovered_pending_event(
             }
             .to_owned(),
             chunk: chunk.clone(),
+        },
+        EngineEvent::ToolDiffReady {
+            turn_id,
+            tool_call_id,
+            diff,
+            ..
+        } => PendingEvent::ToolDiffReady {
+            turn: parse_turn_id(turn_id)?,
+            id: tool_call_id.0.clone(),
+            diff: diff.clone(),
         },
         EngineEvent::ToolCallFinished {
             turn_id,
@@ -2246,6 +2269,7 @@ pub fn project_session_events(
             | PendingEvent::CitationDelta { .. }
             | PendingEvent::ToolCallStarted { .. }
             | PendingEvent::PermissionRequested { .. }
+            | PendingEvent::ToolDiffReady { .. }
             | PendingEvent::ToolOutput { .. }
             | PendingEvent::ToolCallFinished { .. }
             | PendingEvent::SubagentSpawned { .. }
@@ -3038,6 +3062,9 @@ pub enum SessionCommandAction {
     SwitchMode {
         mode: SessionMode,
     },
+    SetPermissionMode {
+        mode: Option<crate::HeadlessPermissionMode>,
+    },
     AddPermissionRule {
         rule: PermissionRule,
     },
@@ -3190,10 +3217,18 @@ fn permission_decision_label(decision: PermissionDecision) -> &'static str {
 }
 
 fn render_permission_snapshot(snapshot: &crate::permission::PermissionSnapshot) -> String {
-    let mut lines = vec![format!(
-        "Default permission: {}",
-        permission_decision_label(snapshot.default)
-    )];
+    let mode = snapshot.runtime_mode.map_or("standard", |mode| match mode {
+        crate::HeadlessPermissionMode::Strict => "strict",
+        crate::HeadlessPermissionMode::AutoSafe => "auto-safe",
+        crate::HeadlessPermissionMode::Yolo => "yolo",
+    });
+    let mut lines = vec![
+        format!("Permission mode: {mode}"),
+        format!(
+            "Default permission: {}",
+            permission_decision_label(snapshot.default)
+        ),
+    ];
     if snapshot.rules.is_empty() {
         lines.push("Configured rules: none".to_owned());
     } else {
@@ -3539,6 +3574,19 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for Permissions
                 action: SessionCommandAction::ListPermissionApprovals,
             });
         }
+        if let Some(value) = arguments.strip_prefix("mode ").map(str::trim) {
+            let mode = match value {
+                "default" | "standard" => None,
+                "strict" => Some(crate::HeadlessPermissionMode::Strict),
+                "auto-safe" => Some(crate::HeadlessPermissionMode::AutoSafe),
+                "yolo" => Some(crate::HeadlessPermissionMode::Yolo),
+                _ => return Err(invalid_permissions_command()),
+            };
+            return Ok(SessionCommandOutput {
+                message: String::new(),
+                action: SessionCommandAction::SetPermissionMode { mode },
+            });
+        }
         for (prefix, project) in [("revoke-session ", false), ("revoke-project ", true)] {
             if let Some(value) = arguments.strip_prefix(prefix).map(str::trim) {
                 if value.is_empty() {
@@ -3597,7 +3645,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for Permissions
 fn invalid_permissions_command() -> CommandExecutionError {
     CommandExecutionError::new(
         "invalid_permissions_command",
-        "usage: /permissions [list | approvals | add <allow|ask|deny> <tool(glob)> | remove <tool(glob)> | clear-session | revoke-session <id|all> | revoke-project <id|all>]",
+        "usage: /permissions [list | mode <default|strict|auto-safe|yolo> | approvals | add <allow|ask|deny> <tool(glob)> | remove <tool(glob)> | clear-session | revoke-session <id|all> | revoke-project <id|all>]",
     )
 }
 
@@ -3906,7 +3954,7 @@ pub fn builtin_command_registry()
                 "Show or edit session-scoped permission rules",
             )
             .with_argument_hint(
-                "[list|approvals|add|remove|clear-session|revoke-session|revoke-project]",
+                "[list|mode|approvals|add|remove|clear-session|revoke-session|revoke-project]",
             ),
             PermissionsCommand,
         )
@@ -5550,6 +5598,7 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::ListSettings { meta, .. }
         | ClientCommand::SetSetting { meta, .. }
         | ClientCommand::ListMcpServers { meta, .. }
+        | ClientCommand::ListRuntimeServices { meta, .. }
         | ClientCommand::AddMcpHttpServer { meta, .. }
         | ClientCommand::ReviewMcpServer { meta, .. }
         | ClientCommand::ApproveMcpServer { meta, .. }
@@ -5607,6 +5656,7 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::ListSettings { session_id, .. }
         | ClientCommand::SetSetting { session_id, .. }
         | ClientCommand::ListMcpServers { session_id, .. }
+        | ClientCommand::ListRuntimeServices { session_id, .. }
         | ClientCommand::AddMcpHttpServer { session_id, .. }
         | ClientCommand::ReviewMcpServer { session_id, .. }
         | ClientCommand::ApproveMcpServer { session_id, .. }
@@ -7708,6 +7758,7 @@ async fn handle_actor_command(
                 | ClientCommand::RemoveSessionPermissionRule { .. }
                 | ClientCommand::RevokePermissionApproval { .. }
                 | ClientCommand::ListMcpServers { .. }
+                | ClientCommand::ListRuntimeServices { .. }
                 | ClientCommand::AddMcpHttpServer { .. }
                 | ClientCommand::ReviewMcpServer { .. }
                 | ClientCommand::ApproveMcpServer { .. }
@@ -8467,6 +8518,15 @@ async fn handle_actor_command(
                                     let _ = respond.send(Err(error));
                                     return;
                                 }
+                            }
+                            SessionCommandAction::SetPermissionMode { mode } => {
+                                if let Err(message) = config.permissions.set_runtime_mode(mode) {
+                                    let _ = respond
+                                        .send(Err(AgentLoopError::InvalidConfiguration(message)));
+                                    return;
+                                }
+                                output.message =
+                                    render_permission_snapshot(&config.permissions.snapshot());
                             }
                             SessionCommandAction::AddPermissionRule { rule } => {
                                 if let Err(message) =
@@ -10962,6 +11022,7 @@ fn background_control_call(name: &str, arguments: &Value) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 async fn authorize_tool_call(
+    turn: u64,
     call: &PendingToolCall,
     arguments: &Value,
     capabilities: Vec<rw_types::ToolCapability>,
@@ -10987,6 +11048,16 @@ async fn authorize_tool_call(
         capabilities: request.capabilities.clone(),
     };
     let displayed = redacted_permission_request(request.clone(), config.secret_redactor.as_ref());
+    if let Some(diff) = displayed.approval_diff.clone() {
+        send_event(
+            signals,
+            PendingEvent::ToolDiffReady {
+                turn,
+                id: call.id.clone(),
+                diff,
+            },
+        );
+    }
     let permission_hook = dispatch_hook(
         &config.hooks,
         HookEvent::PermissionCheck,
@@ -11098,6 +11169,7 @@ async fn prepare_tool_call(
         ));
     }
     let mut authorization = match authorize_tool_call(
+        turn,
         &call,
         &arguments,
         initial_security.capabilities.clone(),
@@ -11200,6 +11272,7 @@ async fn prepare_tool_call(
     }
     if call.name != original_name || arguments != original_arguments {
         authorization = match authorize_tool_call(
+            turn,
             &call,
             &arguments,
             security.capabilities.clone(),
@@ -13620,6 +13693,17 @@ mod tests {
             .expect("permission command");
         assert!(permissions.message.contains("Default permission: ask"));
         assert!(!permissions.message.contains(['{', '}']));
+
+        let yolo = registry
+            .dispatch_line(&mut context, "/permissions mode yolo")
+            .await
+            .expect("permission mode command");
+        assert_eq!(
+            yolo.action,
+            SessionCommandAction::SetPermissionMode {
+                mode: Some(crate::HeadlessPermissionMode::Yolo),
+            }
+        );
 
         let snapshot = ContextSnapshot {
             turn_id: Some(TurnId("private-turn".to_owned())),
@@ -18244,21 +18328,6 @@ mod tests {
                 .await
                 .expect("message");
 
-            let fetch_approval = next_matching(&mut events, |kind| {
-                matches!(kind, PendingEvent::PermissionRequested { .. })
-            })
-            .await;
-            let PendingEvent::PermissionRequested { request, .. } = fetch_approval.kind else {
-                unreachable!("matching event")
-            };
-            assert_eq!(request.tool_name, "webfetch");
-            assert!(
-                handle
-                    .approve(request.id, ApprovalDecision::AllowSession)
-                    .await
-                    .expect("fetch approval")
-            );
-
             let bash_approval = next_matching(&mut events, |kind| {
                 matches!(kind, PendingEvent::PermissionRequested { .. })
             })
@@ -18286,7 +18355,12 @@ mod tests {
                     .await
                     .expect("bash denial")
             );
-            collect_turn(&mut events).await;
+            let remaining = collect_turn(&mut events).await;
+            assert!(
+                remaining
+                    .iter()
+                    .all(|event| !matches!(event.kind, PendingEvent::PermissionRequested { .. }))
+            );
             assert_eq!(bash.calls.load(Ordering::SeqCst), 0);
         }
     }
@@ -18793,6 +18867,57 @@ mod tests {
         .await;
         assert_eq!(
             std::fs::read_to_string(root.path().join("bound.txt")).expect("written"),
+            "after"
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_diff_is_retained_when_policy_does_not_open_an_approval_dialog() {
+        let root = TempDir::new().expect("tempdir");
+        std::fs::write(root.path().join("inline.txt"), "before").expect("fixture");
+        let model = Arc::new(ScriptedModel::new([
+            tool_script(
+                &[(
+                    "call",
+                    "write",
+                    json!({"path": "inline.txt", "content": "after"}),
+                )],
+                &[],
+            ),
+            stop_script("done", &[]),
+        ]));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(WriteTool::new(ToolLimits::default())))
+            .expect("register write");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model,
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("write").await.expect("message");
+        let turn = collect_turn(&mut events).await;
+        assert!(
+            turn.iter()
+                .all(|event| !matches!(event.kind, PendingEvent::PermissionRequested { .. }))
+        );
+        let diff = turn
+            .iter()
+            .find(|event| matches!(event.kind, PendingEvent::ToolDiffReady { .. }))
+            .expect("retained diff");
+        assert!(matches!(
+            &diff.wire,
+            EngineEvent::ToolDiffReady { diff, .. }
+                if diff.path == "inline.txt"
+                    && diff.unified_diff.contains("-before")
+                    && diff.unified_diff.contains("+after")
+        ));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("inline.txt")).expect("written"),
             "after"
         );
     }
@@ -20351,9 +20476,15 @@ mod tests {
                 .authorize(
                     PermissionRequest {
                         id: "remember-session".to_owned(),
-                        tool_name: "read".to_owned(),
-                        arguments: json!({"path":"secret-never-listed"}),
-                        capabilities: vec![ToolCapability::ReadFilesystem],
+                        tool_name: "write".to_owned(),
+                        arguments: json!({
+                            "path":"secret-never-listed",
+                            "content":"private approval payload"
+                        }),
+                        capabilities: vec![
+                            ToolCapability::ReadFilesystem,
+                            ToolCapability::WriteFilesystem,
+                        ],
                         approval_diff: None,
                     },
                     &StaticApprover(ApprovalDecision::AllowSession),

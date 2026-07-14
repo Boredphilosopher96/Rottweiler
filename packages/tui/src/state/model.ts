@@ -19,6 +19,7 @@ import type {
   ProviderAuthChallenge,
   ProviderNextAction,
   Question,
+  RuntimeServiceDescriptor,
   SubagentStatus as SubagentTerminalStatus,
   ToolCapability,
   ToolOutput,
@@ -163,6 +164,7 @@ export interface CommandAcknowledgement {
     | "models_listed"
     | "settings_listed"
     | "mcp_servers_listed"
+    | "runtime_services_listed"
     | "mcp_server_approval_reviewed"
     | "permissions_listed"
     | "provider_auth_started"
@@ -397,6 +399,7 @@ export interface RottweilerState {
   readonly modelCatalogCached: boolean
   readonly settings: readonly UserSettingChoice[]
   readonly mcpServers: readonly McpServerDescriptor[]
+  readonly runtimeServices: readonly RuntimeServiceDescriptor[]
   readonly mcpApprovalReview: McpApprovalReview | null
   readonly permissions: PermissionStateDescriptor | null
   readonly workspaceFiles: readonly WorkspaceFileChoice[]
@@ -465,6 +468,7 @@ export function createInitialState(): RottweilerState {
     modelCatalogCached: false,
     settings: [],
     mcpServers: [],
+    runtimeServices: [],
     mcpApprovalReview: null,
     permissions: null,
     workspaceFiles: [],

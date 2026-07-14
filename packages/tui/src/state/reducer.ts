@@ -32,6 +32,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "models_listed",
   "settings_listed",
   "mcp_servers_listed",
+  "runtime_services_listed",
   "mcp_server_approval_reviewed",
   "permissions_listed",
   "provider_auth_started",
@@ -60,6 +61,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "citation_delta",
   "tool_call_started",
   "tool_approval_needed",
+  "tool_diff_ready",
   "tool_output_delta",
   "tool_call_finished",
   "question_asked",
@@ -101,6 +103,7 @@ const ACK_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "models_listed",
   "settings_listed",
   "mcp_servers_listed",
+  "runtime_services_listed",
   "mcp_server_approval_reviewed",
   "permissions_listed",
   "provider_auth_started",
@@ -438,6 +441,12 @@ function applyKnownEvent(
       return {
         ...state,
         mcpApprovalReview: event.review,
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    case "runtime_services_listed":
+      return {
+        ...state,
+        runtimeServices: event.services.slice(0, 64),
         commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
       }
     case "permissions_listed":
@@ -816,6 +825,30 @@ function applyKnownEvent(
       return {
         ...state,
         tools: { ...state.tools, [event.tool_call_id]: tool },
+        streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
+      }
+    }
+    case "tool_diff_ready": {
+      const existing: ToolProjection = state.tools[event.tool_call_id] ?? {
+        toolCallId: event.tool_call_id,
+        turnId: event.turn_id,
+        name: "tool",
+        args: null,
+        status: "running",
+        capabilities: [],
+        rationale: null,
+        diff: null,
+        chunks: [],
+        output: null,
+        isError: null,
+        callIndex: 0,
+      }
+      return {
+        ...state,
+        tools: {
+          ...state.tools,
+          [event.tool_call_id]: { ...existing, diff: event.diff },
+        },
         streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
       }
     }
@@ -1372,6 +1405,8 @@ function subagentActivity(event: unknown): string {
       return typeof event.name === "string"
         ? `awaiting approval · ${event.name}`
         : "awaiting approval"
+    case "tool_diff_ready":
+      return "prepared diff"
     case "tool_output_delta":
       return "receiving tool output"
     case "tool_call_finished":
@@ -1404,6 +1439,7 @@ function responseAck(
     | "models_listed"
     | "settings_listed"
     | "mcp_servers_listed"
+    | "runtime_services_listed"
     | "mcp_server_approval_reviewed"
     | "permissions_listed"
     | "provider_auth_started"

@@ -66,6 +66,10 @@ export function terminalMarkdown(
     const fenceCharacter = fence[0] ?? "`"
     const source: string[] = []
     let collectedBytes = 0
+    let totalSourceLines = 0
+    let totalStatements = 0
+    let totalEdges = 0
+    let totalGroupSeparators = 0
     let sourceTooLarge = false
     let closing = -1
     let containerEnded = -1
@@ -86,6 +90,11 @@ export function terminalMarkdown(
         break
       }
       collectedBytes += new TextEncoder().encode(sourceLine).length + 1
+      totalSourceLines += 1
+      const lineMetrics = diagramLineMetrics(sourceLine)
+      totalStatements += lineMetrics.statements
+      totalEdges += lineMetrics.edges
+      totalGroupSeparators += lineMetrics.groupSeparators
       if (source.length >= MAX_DIAGRAM_LINES || collectedBytes > MAX_DIAGRAM_BYTES) {
         sourceTooLarge = true
       } else {
@@ -96,7 +105,7 @@ export function terminalMarkdown(
     if (closing < 0) {
       const quote = opening.prefix.includes(">") ? opening.prefix : `${opening.prefix}> `
       const message = sourceTooLarge
-        ? `${quote}◇ Diagram preview unavailable — definition exceeds the terminal preview limit.`
+        ? `${quote}◌ Preparing compact diagram…`
         : phase === "streaming"
           ? `${quote}◌ Rendering diagram…`
           : `${quote}Diagram is incomplete because its closing fence is missing.`
@@ -107,10 +116,18 @@ export function terminalMarkdown(
     }
 
     const sourceText = source.join("\n")
-    const metrics = diagramMetrics(sourceText)
+    const metrics = sourceTooLarge
+      ? {
+          bytes: Math.max(0, collectedBytes - 1),
+          lines: totalSourceLines,
+          statements: totalStatements,
+          edges: totalEdges,
+          groupSeparators: totalGroupSeparators,
+        }
+      : diagramMetrics(sourceText)
     const prefixWidth = Bun.stringWidth(opening.prefix)
     if (prefixWidth + Bun.stringWidth("```text") > width) {
-      output.push(clipTerminalLine(`${opening.prefix}Diagram omitted`, Math.max(1, width)))
+      output.push(clipTerminalLine(`${opening.prefix}◇ Diagram`, Math.max(1, width)))
       index = closing
       continue
     }
@@ -122,12 +139,9 @@ export function terminalMarkdown(
       responseDiagramStatements + metrics.statements > MAX_RESPONSE_DIAGRAM_STATEMENTS
     const diagramWidth = Math.max(1, width - prefixWidth)
     const rendered = sourceTooLarge || exceedsDiagramBudget
-      ? diagramFallback(
-        "Diagram preview unavailable — definition exceeds the terminal preview limit.",
-        diagramWidth,
-      )
+      ? compactDiagramPreview(sourceText, diagramWidth, metrics, sourceTooLarge)
       : exceedsResponseBudget
-        ? diagramFallback("Additional diagrams were omitted to keep the interface responsive.", diagramWidth)
+        ? compactDiagramPreview(sourceText, diagramWidth, metrics)
         : renderDiagram(sourceText, diagramWidth, metrics)
     if (!sourceTooLarge && !exceedsDiagramBudget && !exceedsResponseBudget) {
       renderedDiagrams += 1
@@ -146,10 +160,7 @@ export function terminalMarkdown(
 
 function renderDiagram(source: string, width: number, metrics: DiagramMetrics): string {
   if (diagramExceedsLimits(metrics)) {
-    return diagramFallback(
-      "Diagram preview unavailable — definition exceeds the terminal preview limit.",
-      width,
-    )
+    return compactDiagramPreview(source, width, metrics)
   }
 
   const requestedWidth = Math.max(1, Math.floor(width))
@@ -173,12 +184,9 @@ function renderDiagram(source: string, width: number, metrics: DiagramMetrics): 
     }).trimEnd()
     if (rendered.trim().length === 0) rendered = "Diagram has no visible nodes."
     const fitted = fitRenderedDiagram(rendered, requestedWidth)
-    rendered = fitted ?? diagramFallback(
-      "Diagram preview unavailable — rendered layout does not fit this terminal.",
-      requestedWidth,
-    )
+    rendered = fitted ?? compactDiagramPreview(source, requestedWidth, metrics)
   } catch {
-    rendered = "Diagram could not be rendered from this Mermaid definition."
+    rendered = compactDiagramPreview(source, requestedWidth, metrics)
   }
 
   const renderedBytes = new TextEncoder().encode(rendered).length
@@ -213,8 +221,52 @@ function fitRenderedDiagram(rendered: string, width: number): string | null {
   return rendered
 }
 
-function diagramFallback(message: string, width: number): string {
-  return `◇ ${clipTerminalLine(message, Math.max(1, Math.floor(width) - 2))}`
+function compactDiagramPreview(
+  source: string,
+  width: number,
+  metrics: DiagramMetrics,
+  sourceTruncated = false,
+): string {
+  const columns = Math.max(1, Math.floor(width))
+  const header = metrics.edges > 0
+    ? `◇ Compact diagram · ${metrics.edges} connection${metrics.edges === 1 ? "" : "s"}${sourceTruncated ? " · partial preview" : ""}`
+    : `◇ Compact diagram${sourceTruncated ? " · partial preview" : ""}`
+  const statements = source
+    .split(/\n|;/)
+    .map(compactDiagramStatement)
+    .filter((line): line is string => line !== null)
+  const unique = [...new Set(statements)]
+  const bodyLimit = Math.max(1, MAX_RENDERED_LINES - 1)
+  const visible = unique.slice(0, bodyLimit)
+  if (sourceTruncated && visible.length > 0) {
+    visible[visible.length - 1] = "… diagram preview truncated"
+  } else if (unique.length > visible.length) {
+    visible[visible.length - 1] = `… ${unique.length - visible.length + 1} more connections`
+  }
+  const body = visible.length === 0 ? ["No visible connections"] : visible
+  return [header, ...body]
+    .slice(0, MAX_RENDERED_LINES)
+    .map((line) => clipTerminalLine(line, columns))
+    .join("\n")
+}
+
+function compactDiagramStatement(statement: string): string | null {
+  const trimmed = statement.trim()
+  if (
+    trimmed === "" ||
+    /^(?:%%|flowchart\b|graph\b|subgraph\b|end$|direction\b|style\b|classDef\b|class\b|click\b|linkStyle\b)/i.test(trimmed)
+  ) return null
+  const compact = trimmed
+    .replace(/<br\s*\/?\s*>/gi, " ")
+    .replace(/\|[^|]*\|/g, " ")
+    .replace(/([A-Za-z_][\w.-]*)\s*\[([^\]]+)]/g, "$2")
+    .replace(/([A-Za-z_][\w.-]*)\s*\(([^)]+)\)/g, "$2")
+    .replace(/([A-Za-z_][\w.-]*)\s*\{([^}]+)}/g, "$2")
+    .replace(/(?:--+>|--{2,}|==+>|-\.->|<--?>|->>|-->>|\.{2,}>)/g, " → ")
+    .replace(/["'`]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+  return compact === "" ? null : compact
 }
 
 function clipTerminalLine(line: string, width: number): string {
@@ -261,25 +313,33 @@ function stripContainerPrefix(line: string, prefix: string): string | null {
 
 function diagramMetrics(source: string): DiagramMetrics {
   const lines = source.split("\n")
-  const statements = lines.reduce(
-    (count, line) => count + line.split(";").filter((part) => part.trim() !== "").length,
-    0,
-  )
   let edges = 0
+  let statements = 0
+  let groupSeparators = 0
   for (const line of lines) {
-    const segments = line.split(/(?:--+>|--{2,}|==+>|-\.->|<--?>|->>|-->>|\.{2,}>)/)
-    if (segments.length < 2) continue
-    for (let index = 0; index < segments.length - 1; index += 1) {
-      const leftGroups = (segments[index]?.match(/&/g)?.length ?? 0) + 1
-      const rightGroups = (segments[index + 1]?.match(/&/g)?.length ?? 0) + 1
-      edges += leftGroups * rightGroups
-    }
+    const metrics = diagramLineMetrics(line)
+    statements += metrics.statements
+    edges += metrics.edges
+    groupSeparators += metrics.groupSeparators
   }
   return {
     bytes: new TextEncoder().encode(source).length,
     lines: lines.length,
     statements,
     edges,
-    groupSeparators: source.match(/&/g)?.length ?? 0,
+    groupSeparators,
   }
+}
+
+function diagramLineMetrics(line: string): Pick<DiagramMetrics, "statements" | "edges" | "groupSeparators"> {
+  const statements = line.split(";").filter((part) => part.trim() !== "").length
+  const groupSeparators = line.match(/&/g)?.length ?? 0
+  const segments = line.split(/(?:--+>|--{2,}|==+>|-\.->|<--?>|->>|-->>|\.{2,}>)/)
+  let edges = 0
+  for (let index = 0; index < segments.length - 1; index += 1) {
+    const leftGroups = (segments[index]?.match(/&/g)?.length ?? 0) + 1
+    const rightGroups = (segments[index + 1]?.match(/&/g)?.length ?? 0) + 1
+    edges += leftGroups * rightGroups
+  }
+  return { statements, edges, groupSeparators }
 }

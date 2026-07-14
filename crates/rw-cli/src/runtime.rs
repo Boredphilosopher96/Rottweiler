@@ -48,17 +48,18 @@ use rw_core::runtime_support::{
 use rw_core::{
     AccountingAttribution, ActorSubagentSessionFactory, AgentLoopError, BudgetLedgerQuery,
     BudgetLedgerTotals, CachedModelCatalog, ClientId, Config, EngineEvent, EventClock, EventMeta,
-    FolderTrustController, FolderTrustOperation, MessageDisposition, ModelCatalogError,
-    ModelCatalogSnapshot, ModelCatalogSource, ModelDriver, MutationCheckpoint,
+    FolderTrustController, FolderTrustOperation, HostError, HostRuntimeService, MessageDisposition,
+    ModelCatalogError, ModelCatalogSnapshot, ModelCatalogSource, ModelDriver, MutationCheckpoint,
     MutationCheckpointCoordinator, MutationCheckpointOutcome, PermissionGate, ProviderFactory,
     ProviderModelCatalogSource, ProviderNativeWebSearcher, QuestionId, ReviewFileDecision,
-    RewindCheckpoint, SESSION_EVENT_VERSION, SequenceId, SessionActor, SessionActorConfig,
-    SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,
-    SessionReview, SpawnAgentTool, SubagentLimits, SubagentMetadataStore, SubagentOrchestrator,
-    SubagentSessionFactory, SystemEventClock, ThinkingLevel as ConfigThinkingLevel,
-    ToolOutputStream, TurnStatus, UnrestorablePath, Usage, WorktreeSubagentSessionFactory,
-    base_agent_system_turn, builtin_command_registry, builtin_hook_dispatcher,
-    load_instruction_stack, load_nested_instruction_stack, project_session_events,
+    RewindCheckpoint, RuntimeServiceDescriptor, RuntimeServiceKind, SESSION_EVENT_VERSION,
+    SequenceId, SessionActor, SessionActorConfig, SessionCommandAction, SessionCommandContext,
+    SessionCommandOutput, SessionEventSink, SessionReview, SpawnAgentTool, SubagentLimits,
+    SubagentMetadataStore, SubagentOrchestrator, SubagentSessionFactory, SystemEventClock,
+    ThinkingLevel as ConfigThinkingLevel, ToolOutputStream, TurnStatus, UnrestorablePath, Usage,
+    WorktreeSubagentSessionFactory, base_agent_system_turn, builtin_command_registry,
+    builtin_hook_dispatcher, load_instruction_stack, load_nested_instruction_stack,
+    project_session_events,
 };
 use rw_store::{
     checkpoint::{CheckpointStore, OpaqueMutation, RewindHandle},
@@ -931,6 +932,7 @@ pub(crate) struct HostedActorRuntime {
     pub handle: rw_core::SessionHandle,
     pub model_catalog: Option<Arc<CachedModelCatalog>>,
     pub mcp: Option<Arc<dyn rw_core::HostMcpService>>,
+    pub runtime_services: Arc<dyn HostRuntimeService>,
     pub model_alias: String,
     pub driver_client_id: Option<rw_core::ClientId>,
     pub shell_active: bool,
@@ -2483,7 +2485,7 @@ pub(crate) async fn compose_hosted_actor(
             .and_then(|searcher| searcher.native_resolver()),
         trust_store_path: options.storage_root.join("trust.json"),
         toolchain_config: options.config.toolchain.clone(),
-        toolchain_runtime,
+        toolchain_runtime: Arc::clone(&toolchain_runtime),
         extension_user_home,
         extension_user_rottweiler,
         dangerously_trust: options.dangerously_trust,
@@ -2711,6 +2713,10 @@ pub(crate) async fn compose_hosted_actor(
         handle,
         model_catalog,
         mcp: mcp_admin,
+        runtime_services: Arc::new(RuntimeServiceView {
+            intelligence: Arc::clone(&built_tools.code_intelligence),
+            toolchain: Arc::clone(&toolchain_runtime),
+        }),
         model_alias: descriptor_model,
         driver_client_id,
         shell_active,
@@ -7242,6 +7248,7 @@ struct ToolchainExecutionBoundary {
 struct ToolchainRuntime {
     current: RwLock<ToolchainExecutionBoundary>,
     pending: Mutex<BTreeMap<u64, ToolchainExecutionBoundary>>,
+    active: Mutex<BTreeMap<(RuntimeServiceKind, String), usize>>,
 }
 
 impl ToolchainRuntime {
@@ -7265,7 +7272,33 @@ impl ToolchainRuntime {
                 workspace_roots: canonical_toolchain_roots(workspace_roots),
             }),
             pending: Mutex::new(BTreeMap::new()),
+            active: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn enter(self: &Arc<Self>, kind: RuntimeServiceKind, name: String) -> ToolchainActivityGuard {
+        let key = (kind, name);
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active.entry(key.clone()).or_default() += 1;
+        ToolchainActivityGuard {
+            runtime: Arc::clone(self),
+            key,
+        }
+    }
+
+    fn active_services(&self) -> Vec<RuntimeServiceDescriptor> {
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .keys()
+            .map(|(kind, name)| RuntimeServiceDescriptor {
+                kind: *kind,
+                name: name.clone(),
+            })
+            .collect()
     }
 
     fn current(&self) -> ToolchainExecutionBoundary {
@@ -7317,6 +7350,90 @@ impl ToolchainRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&generation);
     }
+}
+
+struct ToolchainActivityGuard {
+    runtime: Arc<ToolchainRuntime>,
+    key: (RuntimeServiceKind, String),
+}
+
+impl Drop for ToolchainActivityGuard {
+    fn drop(&mut self) {
+        let mut active = self
+            .runtime
+            .active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove = active.get_mut(&self.key).is_some_and(|count| {
+            *count = count.saturating_sub(1);
+            *count == 0
+        });
+        if remove {
+            active.remove(&self.key);
+        }
+    }
+}
+
+struct RuntimeServiceView {
+    intelligence: Arc<dyn CodeIntelligenceProvider>,
+    toolchain: Arc<ToolchainRuntime>,
+}
+
+#[async_trait]
+impl HostRuntimeService for RuntimeServiceView {
+    async fn list(&self) -> std::result::Result<Vec<RuntimeServiceDescriptor>, HostError> {
+        let mut services = self.toolchain.active_services();
+        services.extend(
+            self.intelligence
+                .active_lsp_servers()
+                .await
+                .into_iter()
+                .map(|name| RuntimeServiceDescriptor {
+                    kind: RuntimeServiceKind::Lsp,
+                    name,
+                }),
+        );
+        services.sort_by(|left, right| {
+            runtime_service_order(left.kind)
+                .cmp(&runtime_service_order(right.kind))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        services.dedup();
+        Ok(services)
+    }
+}
+
+const fn runtime_service_order(kind: RuntimeServiceKind) -> u8 {
+    match kind {
+        RuntimeServiceKind::Lsp => 0,
+        RuntimeServiceKind::Formatter => 1,
+        RuntimeServiceKind::Linter => 2,
+    }
+}
+
+fn toolchain_command_identity(kind: RuntimeServiceKind, command: &str) -> String {
+    let fallback = || match kind {
+        RuntimeServiceKind::Formatter => "formatter".to_owned(),
+        RuntimeServiceKind::Linter => "linter".to_owned(),
+        RuntimeServiceKind::Lsp => "language server".to_owned(),
+    };
+    shell_words::split(command)
+        .ok()
+        .and_then(|parts| parts.into_iter().next())
+        .filter(|program| !program.contains('='))
+        .and_then(|program| {
+            Path::new(&program)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_owned)
+        })
+        .filter(|name| {
+            !name.is_empty()
+                && name.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || "._+-".contains(character)
+                })
+        })
+        .unwrap_or_else(fallback)
 }
 
 fn canonical_toolchain_roots(workspace_roots: &[PathBuf]) -> Vec<PathBuf> {
@@ -7382,6 +7499,7 @@ impl ToolchainHook {
 
     async fn run_command(
         &self,
+        kind: RuntimeServiceKind,
         command: &str,
         file: &Path,
         cwd: &Path,
@@ -7390,6 +7508,9 @@ impl ToolchainHook {
         let file_text = file.to_string_lossy();
         let quoted_file = shell_words::quote(&file_text);
         let command = command.replace("{file}", &quoted_file);
+        let _activity = self
+            .runtime
+            .enter(kind, toolchain_command_identity(kind, &command));
         let capture = Arc::new(HookCommandCapture::default());
         let boundary = self.runtime.current();
         let outcome = boundary
@@ -7452,7 +7573,13 @@ impl HookHandler for ToolchainHook {
         let mut failed = false;
         if let Some(formatter) = formatter {
             let result = self
-                .run_command(formatter, &file, &cwd, invocation.cancellation().clone())
+                .run_command(
+                    RuntimeServiceKind::Formatter,
+                    formatter,
+                    &file,
+                    &cwd,
+                    invocation.cancellation().clone(),
+                )
                 .await?;
             failed |= result.exit_code != 0;
             if result.exit_code != 0 || !result.stdout.is_empty() || !result.stderr.is_empty() {
@@ -7461,7 +7588,13 @@ impl HookHandler for ToolchainHook {
         }
         for linter in linters {
             let result = self
-                .run_command(linter, &file, &cwd, invocation.cancellation().clone())
+                .run_command(
+                    RuntimeServiceKind::Linter,
+                    linter,
+                    &file,
+                    &cwd,
+                    invocation.cancellation().clone(),
+                )
                 .await?;
             failed |= result.exit_code != 0;
             if result.exit_code != 0 || !result.stdout.is_empty() || !result.stderr.is_empty() {
@@ -9681,6 +9814,16 @@ impl CodeIntelligenceProvider for MultiRootCodeIntelligence {
         }
         result
     }
+
+    async fn active_lsp_servers(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for provider in &self.providers {
+            names.extend(provider.active_server_names().await);
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
 }
 
 impl MultiRootCodeIntelligence {
@@ -10081,7 +10224,7 @@ fn validate_egress_decision(
     match policy.evaluate(host, addresses) {
         EgressDecision::Allowed => Ok(()),
         EgressDecision::ApprovalRequired => Err(ToolError::Network(format!(
-            "network domain {host:?} requires a separate approval"
+            "network domain {host:?} was not declared for this request"
         ))),
         EgressDecision::HardDenied => Err(ToolError::Network(
             "local, private, reserved, and non-routable targets are blocked".to_owned(),
@@ -13246,6 +13389,62 @@ mod tests {
         }
     }
 
+    #[test]
+    fn runtime_service_view_reports_only_live_toolchain_commands() {
+        let executor: Arc<dyn CommandExecutor> = Arc::new(FixtureToolchainExecutor::default());
+        let runtime = Arc::new(ToolchainRuntime::new(executor, &[]));
+        assert!(runtime.active_services().is_empty());
+
+        let formatter = runtime.enter(RuntimeServiceKind::Formatter, "rustfmt".to_owned());
+        let duplicate = runtime.enter(RuntimeServiceKind::Formatter, "rustfmt".to_owned());
+        let linter = runtime.enter(RuntimeServiceKind::Linter, "clippy-driver".to_owned());
+        assert_eq!(
+            runtime.active_services(),
+            vec![
+                RuntimeServiceDescriptor {
+                    kind: RuntimeServiceKind::Linter,
+                    name: "clippy-driver".to_owned(),
+                },
+                RuntimeServiceDescriptor {
+                    kind: RuntimeServiceKind::Formatter,
+                    name: "rustfmt".to_owned(),
+                },
+            ]
+        );
+
+        drop(duplicate);
+        assert_eq!(runtime.active_services().len(), 2);
+        drop(formatter);
+        drop(linter);
+        assert!(runtime.active_services().is_empty());
+    }
+
+    #[test]
+    fn toolchain_service_identity_never_exposes_arguments_or_parent_paths() {
+        assert_eq!(
+            toolchain_command_identity(
+                RuntimeServiceKind::Formatter,
+                "/opt/tools/bin/rustfmt --edition 2024 src/lib.rs",
+            ),
+            "rustfmt"
+        );
+        assert_eq!(
+            toolchain_command_identity(RuntimeServiceKind::Linter, "'cargo clippy' --fix"),
+            "linter"
+        );
+        assert_eq!(
+            toolchain_command_identity(
+                RuntimeServiceKind::Formatter,
+                "TOKEN=secret-canary rustfmt src/lib.rs",
+            ),
+            "formatter"
+        );
+        assert_eq!(
+            toolchain_command_identity(RuntimeServiceKind::Linter, ""),
+            "linter"
+        );
+    }
+
     #[tokio::test]
     async fn custom_command_shadow_expansion_and_skill_selection_are_live() {
         let fixture = tempdir().expect("fixture");
@@ -14019,7 +14218,7 @@ mod tests {
     }
 
     #[test]
-    fn webfetch_egress_requires_new_domain_approval_and_keeps_ssrf_hard_denied() {
+    fn webfetch_egress_requires_declared_domain_and_keeps_ssrf_hard_denied() {
         let public = "1.1.1.1".parse().expect("public address");
         let private = "169.254.169.254".parse().expect("metadata address");
         let mut policy = EgressPolicy::default();
@@ -14027,7 +14226,7 @@ mod tests {
         assert!(validate_egress_decision(&policy, "example.com", &[public]).is_ok());
         assert!(matches!(
             validate_egress_decision(&policy, "other.example", &[public]),
-            Err(ToolError::Network(message)) if message.contains("separate approval")
+            Err(ToolError::Network(message)) if message.contains("not declared")
         ));
         assert!(matches!(
             validate_egress_decision(&policy, "example.com", &[private]),

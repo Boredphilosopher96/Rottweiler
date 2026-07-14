@@ -376,6 +376,15 @@ export const contractFixture = {
       },
       "session_id": "session-fixture",
       "turn_id": "turn-fixture"
+    },
+    {
+      "type": "list_runtime_services",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "request-fixture"
+      },
+      "session_id": "session-fixture"
     }
   ],
   "engine_events": [
@@ -391,6 +400,22 @@ export const contractFixture = {
       "outcome": {
         "type": "accepted"
       }
+    },
+    {
+      "type": "runtime_services_listed",
+      "meta": {
+        "protocol_version": 1,
+        "client_id": "client-fixture",
+        "request_id": "runtime-services-fixture",
+        "emitted_at": "2026-01-01T00:00:00Z"
+      },
+      "session_id": "session-fixture",
+      "services": [
+        {
+          "kind": "lsp",
+          "name": "rust-analyzer"
+        }
+      ]
     },
     {
       "type": "command_acknowledged",

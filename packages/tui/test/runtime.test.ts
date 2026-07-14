@@ -756,6 +756,8 @@ describe("OpenTUI engine runtime", () => {
       "get_cost",
       "get_workspace_status",
       "list_settings",
+      "list_mcp_servers",
+      "list_runtime_services",
       "list_commands",
     ])
     expect(client.subscription?.attach.role).toBe("driver")
@@ -805,6 +807,8 @@ describe("OpenTUI engine runtime", () => {
       "get_cost",
       "get_workspace_status",
       "list_settings",
+      "list_mcp_servers",
+      "list_runtime_services",
       "list_commands",
     ])
   })
@@ -923,6 +927,8 @@ describe("OpenTUI engine runtime", () => {
       "get_cost",
       "get_workspace_status",
       "list_settings",
+      "list_mcp_servers",
+      "list_runtime_services",
       "list_commands",
       "send_message",
     ] satisfies ClientCommand["type"][]) expect(commandTypes).toContain(expected)
@@ -1002,6 +1008,8 @@ describe("OpenTUI engine runtime", () => {
       "get_cost",
       "get_workspace_status",
       "list_settings",
+      "list_mcp_servers",
+      "list_runtime_services",
       "list_commands",
     ])
     await runtime.stop()

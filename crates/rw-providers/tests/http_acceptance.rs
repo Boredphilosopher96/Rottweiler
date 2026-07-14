@@ -11,11 +11,11 @@ use std::{
 use futures_util::StreamExt;
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AuthMaterial, CacheBreakpointSupport, FinishReason,
-    FixtureRedactor, NetworkPolicy, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    OpenAiWireMode, PricingTable, Provider, ProviderError, ProviderErrorKind, ProviderEvent,
-    ProviderRequest, ProviderRouter, ProxyAuthentication, ProxyEnvironment, ProxySettings,
-    Recorder, ReplayProvider, RetryPolicy, Secret, StaticAuth, ThinkingLevel, TokenUsage,
-    ToolChoice, ToolDefinition,
+    FixtureRedactor, NetworkPolicy, OpenAiChatRequestProfile, OpenAiCompatibleConfig,
+    OpenAiCompatibleProvider, OpenAiWireMode, PricingTable, Provider, ProviderError,
+    ProviderErrorKind, ProviderEvent, ProviderRequest, ProviderRouter, ProxyAuthentication,
+    ProxyEnvironment, ProxySettings, Recorder, ReplayProvider, RetryPolicy, Secret, StaticAuth,
+    ThinkingLevel, TokenUsage, ToolChoice, ToolDefinition,
 };
 use rw_types::{Block, Role, Turn, TurnMeta};
 use serde_json::json;
@@ -157,6 +157,7 @@ fn openai_provider_with_options(
             proxy_authentication,
             network_policy: NetworkPolicy::Allow,
             wire_mode,
+            chat_request_profile: OpenAiChatRequestProfile::OpenAi,
             tool_calling: true,
             cache_breakpoints: CacheBreakpointSupport::Automatic,
             supported_reasoning_efforts: vec![
@@ -456,6 +457,7 @@ async fn authenticated_proxy_receives_basic_header_without_secret_leakage() {
         proxy_authentication: Some(authentication),
         network_policy: NetworkPolicy::Deny,
         wire_mode: OpenAiWireMode::Responses,
+        chat_request_profile: OpenAiChatRequestProfile::OpenAi,
         tool_calling: true,
         cache_breakpoints: CacheBreakpointSupport::Automatic,
         supported_reasoning_efforts: vec![ThinkingLevel::Off, ThinkingLevel::Low],
@@ -481,6 +483,7 @@ async fn openai_capabilities_reject_unsupported_requests_before_network() {
         proxy_authentication: None,
         network_policy: NetworkPolicy::Allow,
         wire_mode: OpenAiWireMode::Responses,
+        chat_request_profile: OpenAiChatRequestProfile::OpenAi,
         tool_calling: false,
         cache_breakpoints: CacheBreakpointSupport::Explicit,
         supported_reasoning_efforts: vec![ThinkingLevel::Off, ThinkingLevel::Low],

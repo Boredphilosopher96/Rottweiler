@@ -263,6 +263,28 @@ pub struct McpApprovalReview {
     pub previously_approved: bool,
 }
 
+/// One credential-free process identity currently serving the active session.
+///
+/// Configured-but-idle integrations are deliberately absent. Names are short
+/// executable identities, never command lines, arguments, paths, or output.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct RuntimeServiceDescriptor {
+    pub kind: RuntimeServiceKind,
+    pub name: String,
+}
+
+/// Live service categories projected to clients.
+#[derive(
+    Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, Ord, PartialEq, PartialOrd, Serialize, TS,
+)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum RuntimeServiceKind {
+    Lsp,
+    Linter,
+    Formatter,
+}
+
 /// Permission decision exposed on the interactive protocol without coupling
 /// clients to configuration-file types.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
@@ -1015,6 +1037,10 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
+    ListRuntimeServices {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
     AddMcpHttpServer {
         meta: CommandMeta,
         session_id: SessionId,
@@ -1145,6 +1171,7 @@ impl ClientCommand {
             | Self::ListSettings { meta, .. }
             | Self::SetSetting { meta, .. }
             | Self::ListMcpServers { meta, .. }
+            | Self::ListRuntimeServices { meta, .. }
             | Self::AddMcpHttpServer { meta, .. }
             | Self::ReviewMcpServer { meta, .. }
             | Self::ApproveMcpServer { meta, .. }
@@ -1200,6 +1227,7 @@ impl ClientCommand {
             | Self::ListSettings { meta, .. }
             | Self::SetSetting { meta, .. }
             | Self::ListMcpServers { meta, .. }
+            | Self::ListRuntimeServices { meta, .. }
             | Self::AddMcpHttpServer { meta, .. }
             | Self::ReviewMcpServer { meta, .. }
             | Self::ApproveMcpServer { meta, .. }
@@ -1568,6 +1596,11 @@ pub enum EngineEvent {
         session_id: SessionId,
         servers: Vec<McpServerDescriptor>,
     },
+    RuntimeServicesListed {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        services: Vec<RuntimeServiceDescriptor>,
+    },
     McpServerApprovalReviewed {
         meta: CommandAckMeta,
         session_id: SessionId,
@@ -1759,6 +1792,16 @@ pub enum EngineEvent {
         capabilities: Vec<ToolCapability>,
         rationale: String,
         diff: Option<UnifiedDiff>,
+    },
+    /// Redacted mutation preview retained independently of whether the active
+    /// permission mode needed to ask the user. This keeps inline review
+    /// available under remembered approvals and YOLO without coupling display
+    /// state to a permission dialog.
+    ToolDiffReady {
+        meta: EventMeta,
+        turn_id: TurnId,
+        tool_call_id: ToolCallId,
+        diff: UnifiedDiff,
     },
     ToolOutputDelta {
         meta: EventMeta,
@@ -1993,6 +2036,7 @@ impl EngineEvent {
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
             | Self::McpServersListed { .. }
+            | Self::RuntimeServicesListed { .. }
             | Self::McpServerApprovalReviewed { .. }
             | Self::PermissionsListed { .. }
             | Self::ProviderAuthStarted { .. }
@@ -2022,6 +2066,7 @@ impl EngineEvent {
             | Self::CitationDelta { meta, .. }
             | Self::ToolCallStarted { meta, .. }
             | Self::ToolApprovalNeeded { meta, .. }
+            | Self::ToolDiffReady { meta, .. }
             | Self::ToolOutputDelta { meta, .. }
             | Self::ToolCallFinished { meta, .. }
             | Self::QuestionAsked { meta, .. }
@@ -2068,6 +2113,7 @@ impl EngineEvent {
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
             | Self::McpServersListed { .. }
+            | Self::RuntimeServicesListed { .. }
             | Self::McpServerApprovalReviewed { .. }
             | Self::PermissionsListed { .. }
             | Self::ProviderAuthStarted { .. }
@@ -2097,6 +2143,7 @@ impl EngineEvent {
             | Self::CitationDelta { meta, .. }
             | Self::ToolCallStarted { meta, .. }
             | Self::ToolApprovalNeeded { meta, .. }
+            | Self::ToolDiffReady { meta, .. }
             | Self::ToolOutputDelta { meta, .. }
             | Self::ToolCallFinished { meta, .. }
             | Self::QuestionAsked { meta, .. }

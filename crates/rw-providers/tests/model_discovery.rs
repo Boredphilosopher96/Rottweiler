@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AuthMaterial, CacheBreakpointSupport, NetworkPolicy,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode, Provider, Secret, StaticAuth,
+    OpenAiChatRequestProfile, OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode,
+    Provider, Secret, StaticAuth,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -105,6 +106,7 @@ fn openai_provider(endpoint: Url, auth: AuthMaterial) -> OpenAiCompatibleProvide
         proxy_authentication: None,
         network_policy: NetworkPolicy::Allow,
         wire_mode: OpenAiWireMode::Responses,
+        chat_request_profile: OpenAiChatRequestProfile::OpenAi,
         tool_calling: true,
         cache_breakpoints: CacheBreakpointSupport::Automatic,
         supported_reasoning_efforts: Vec::new(),

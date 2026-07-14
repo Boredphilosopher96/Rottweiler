@@ -9,7 +9,7 @@ import {
   type TreeSitterClient,
 } from "@opentui/core"
 
-import { formatPercent, formatSessionCost, formatTokenCount, formatToolArguments } from "../render"
+import { filetypeForPath, formatPercent, formatSessionCost, formatTokenCount, formatToolArguments } from "../render"
 import type {
   ApprovalDecision,
   PlanArtifact,
@@ -287,7 +287,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
   #showSelected(): void {
     const file = this.#review?.files[this.files.getSelectedIndex()]
     this.diff.diff = file?.unifiedDiff ?? ""
-    this.diff.filetype = file === undefined ? undefined : extension(file.path)
+    this.diff.filetype = file === undefined ? undefined : filetypeForPath(file.path)
     const revertUnavailable = file !== undefined && file.unrestorableReason !== null
     this.hint.content =
       file === undefined
@@ -468,7 +468,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.select.setSelectedIndex(0)
     if (diff !== null) {
       if (this.#diff === null) {
-        const filetype = extension(diff.path)
+        const filetype = filetypeForPath(diff.path)
         this.#diff = new DiffRenderable(this.ctx, {
           id: "approval-diff",
           width: "100%",
@@ -489,7 +489,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
         this.insertBefore(this.#diff, this.select)
       } else {
         this.#diff.diff = diff.unifiedDiff
-        this.#diff.filetype = extension(diff.path)
+        this.#diff.filetype = filetypeForPath(diff.path)
       }
     } else {
       this.#removeDiff()
@@ -648,10 +648,16 @@ const MAX_SIDEBAR_CHANGED_FILES = 128
 export class ContextPanelRenderable extends BoxRenderable {
   readonly todoTitle: TextRenderable
   readonly todos: SelectRenderable
+  readonly mcpTitle: TextRenderable
+  readonly mcps: SelectRenderable
+  readonly runtimeTitle: TextRenderable
+  readonly runtimeServices: SelectRenderable
   readonly changedTitle: TextRenderable
   readonly changedFiles: SelectRenderable
   #callbacks: ContextPanelCallbacks
   #changedPaths: readonly string[] = []
+  #activeMcpCount = 0
+  #activeServiceCount = 0
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, callbacks: ContextPanelCallbacks) {
     super(ctx, {
@@ -665,7 +671,7 @@ export class ContextPanelRenderable extends BoxRenderable {
       borderColor: theme.border,
       backgroundColor: theme.panel,
       padding: 1,
-      gap: 1,
+      gap: 0,
       title: " Session ",
       titleColor: theme.info,
     })
@@ -689,6 +695,52 @@ export class ContextPanelRenderable extends BoxRenderable {
       showScrollIndicator: true,
       showSelectionIndicator: false,
       showDescription: false,
+    })
+    this.mcpTitle = new TextRenderable(ctx, {
+      content: "MCP",
+      fg: theme.info,
+      height: 0,
+      flexShrink: 0,
+      visible: false,
+    })
+    this.mcps = new SelectRenderable(ctx, {
+      id: "session-mcp-servers",
+      width: "100%",
+      height: 0,
+      flexShrink: 0,
+      options: [],
+      backgroundColor: theme.panel,
+      textColor: theme.foreground,
+      selectedBackgroundColor: theme.selection,
+      selectedTextColor: theme.accentStrong,
+      descriptionColor: theme.muted,
+      showScrollIndicator: true,
+      showDescription: false,
+      showSelectionIndicator: false,
+      visible: false,
+    })
+    this.runtimeTitle = new TextRenderable(ctx, {
+      content: "Services",
+      fg: theme.info,
+      height: 0,
+      flexShrink: 0,
+      visible: false,
+    })
+    this.runtimeServices = new SelectRenderable(ctx, {
+      id: "session-runtime-services",
+      width: "100%",
+      height: 0,
+      flexShrink: 0,
+      options: [],
+      backgroundColor: theme.panel,
+      textColor: theme.foreground,
+      selectedBackgroundColor: theme.selection,
+      selectedTextColor: theme.accentStrong,
+      descriptionColor: theme.muted,
+      showScrollIndicator: true,
+      showDescription: false,
+      showSelectionIndicator: false,
+      visible: false,
     })
     this.changedTitle = new TextRenderable(ctx, {
       content: "Changed files",
@@ -728,6 +780,10 @@ export class ContextPanelRenderable extends BoxRenderable {
     }
     this.add(this.todoTitle)
     this.add(this.todos)
+    this.add(this.mcpTitle)
+    this.add(this.mcps)
+    this.add(this.runtimeTitle)
+    this.add(this.runtimeServices)
     this.add(this.changedTitle)
     this.add(this.changedFiles)
   }
@@ -741,6 +797,35 @@ export class ContextPanelRenderable extends BoxRenderable {
             description: todo.id,
             value: todo.id,
           }))
+
+    const activeMcps = state.mcpServers.filter((server): server is typeof server & {
+      state: { type: "connecting" | "ready" | "stopping" }
+    } => server.state.type === "connecting" ||
+        server.state.type === "ready" ||
+        server.state.type === "stopping")
+    this.mcpTitle.visible = activeMcps.length > 0
+    this.mcpTitle.height = activeMcps.length > 0 ? 1 : 0
+    this.mcps.visible = activeMcps.length > 0
+    this.mcps.height = activeMcps.length === 0 ? 0 : Math.min(4, activeMcps.length)
+    this.mcps.options = activeMcps.map((server) => ({
+      name: `${mcpGlyph(server.state.type)} ${server.name}${server.state.type === "ready" ? ` · ${server.tool_count} tools` : ""}`,
+      description: "",
+      value: server.name,
+    }))
+
+    const activeServices = state.runtimeServices.filter((service) => service.name.length > 0)
+    this.runtimeTitle.visible = activeServices.length > 0
+    this.runtimeTitle.height = activeServices.length > 0 ? 1 : 0
+    this.runtimeServices.visible = activeServices.length > 0
+    this.runtimeServices.height = activeServices.length === 0 ? 0 : Math.min(5, activeServices.length)
+    this.runtimeServices.options = activeServices.map((service) => ({
+      name: `${runtimeServiceGlyph(service.kind)} ${runtimeServiceLabel(service.kind)} · ${service.name}`,
+      description: "",
+      value: `${service.kind}:${service.name}`,
+    }))
+    this.#activeMcpCount = activeMcps.length
+    this.#activeServiceCount = activeServices.length
+    this.#layoutSectionHeights()
 
     const reviewPaths = state.review?.files.map((file) => file.path) ?? []
     const statusPaths = state.workspaceStatus?.changedPaths
@@ -763,10 +848,96 @@ export class ContextPanelRenderable extends BoxRenderable {
         : this.#changedPaths.map((path) => ({ name: path, description: "", value: path }))
   }
 
+  protected override onResize(_width: number, _height: number): void {
+    this.#layoutSectionHeights()
+  }
+
+  #layoutSectionHeights(): void {
+    const rows = Math.max(1, this.height || this.ctx.height)
+    const gap = rows >= 26 ? 1 : 0
+    this.gap = gap
+    // Rounded border and vertical padding consume four rows. Every visible
+    // section reserves one title and at least one data row; service rows then
+    // share only the remaining budget so they can never displace changed files.
+    const innerRows = Math.max(1, rows - 4)
+    let showMcp = this.#activeMcpCount > 0
+    let showServices = this.#activeServiceCount > 0
+    const minimumRows = () => {
+      const sections = 2 + Number(showMcp) + Number(showServices)
+      return sections * 2 + gap * Math.max(0, sections * 2 - 1)
+    }
+    // At unusually short heights, keep the mandatory todo/changed-file sections
+    // intact and suppress optional service sections rather than corrupting the
+    // border. Prefer the newly requested runtime activity when only one fits.
+    if (minimumRows() > innerRows) showMcp = false
+    if (minimumRows() > innerRows) showServices = false
+    const sectionCount = 2 + Number(showMcp) + Number(showServices)
+    const visibleChildren = sectionCount * 2
+    this.mcpTitle.visible = showMcp
+    this.mcpTitle.height = showMcp ? 1 : 0
+    this.mcps.visible = showMcp
+    this.runtimeTitle.visible = showServices
+    this.runtimeTitle.height = showServices ? 1 : 0
+    this.runtimeServices.visible = showServices
+    const listBudget = Math.max(
+      2,
+      innerRows - sectionCount - gap * Math.max(0, visibleChildren - 1),
+    )
+    const todoRows = Math.max(1, Math.min(4, Math.floor(listBudget / 4)))
+    const desiredMcpRows = showMcp ? Math.min(4, this.#activeMcpCount) : 0
+    const desiredServiceRows = showServices ? Math.min(5, this.#activeServiceCount) : 0
+    const serviceBudget = Math.max(0, listBudget - todoRows - 1)
+    let mcpRows = 0
+    let serviceRows = 0
+    if (showMcp && showServices && serviceBudget >= 2) {
+      mcpRows = Math.min(desiredMcpRows, Math.max(1, Math.floor(serviceBudget / 2)))
+      serviceRows = Math.min(desiredServiceRows, Math.max(1, serviceBudget - mcpRows))
+      const spare = serviceBudget - mcpRows - serviceRows
+      if (spare > 0) {
+        const addMcp = Math.min(spare, desiredMcpRows - mcpRows)
+        mcpRows += addMcp
+        serviceRows += Math.min(spare - addMcp, desiredServiceRows - serviceRows)
+      }
+    } else if (showMcp) {
+      mcpRows = Math.min(desiredMcpRows, serviceBudget)
+    } else if (showServices) {
+      serviceRows = Math.min(desiredServiceRows, serviceBudget)
+    }
+    const changedRows = Math.max(1, listBudget - todoRows - mcpRows - serviceRows)
+    this.todos.height = todoRows
+    this.mcps.height = mcpRows
+    this.runtimeServices.height = serviceRows
+    this.changedFiles.flexGrow = 0
+    this.changedFiles.height = changedRows
+  }
+
   #activateChangedFile(index: number): void {
     const path = this.#changedPaths[index]
     if (path !== undefined) this.#callbacks.onOpenDiff?.(path)
   }
+}
+
+function mcpGlyph(state: "connecting" | "ready" | "stopping"): string {
+  switch (state) {
+    case "connecting":
+      return "◌"
+    case "ready":
+      return "✓"
+    case "stopping":
+      return "◷"
+  }
+}
+
+function runtimeServiceGlyph(kind: "lsp" | "linter" | "formatter"): string {
+  if (kind === "lsp") return "◆"
+  if (kind === "formatter") return "↯"
+  return "✓"
+}
+
+function runtimeServiceLabel(kind: "lsp" | "linter" | "formatter"): string {
+  if (kind === "lsp") return "LSP"
+  if (kind === "formatter") return "Format"
+  return "Lint"
 }
 
 function todoGlyph(status: RottweilerState["todos"][number]["status"]): string {
@@ -1030,10 +1201,4 @@ function readUnifiedDiff(
     typeof record.truncated === "boolean"
     ? { path: record.path, unifiedDiff: record.unified_diff, truncated: record.truncated }
     : null
-}
-
-function extension(path: string): string | undefined {
-  const name = path.split("/").at(-1) ?? path
-  const dot = name.lastIndexOf(".")
-  return dot < 0 ? undefined : name.slice(dot + 1)
 }

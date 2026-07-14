@@ -25,9 +25,10 @@ pub use rw_types::{
     ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, PermissionAction,
     PermissionApprovalDescriptor, PermissionApprovalScope, PermissionRuleDescriptor,
     PermissionStateDescriptor, PlanDecision, PromptDump, ProviderAuthChallenge, ProviderAuthKind,
-    ProviderDescriptor, ProviderNextAction, ReviewFileDecision, ReviewFileStatus, SessionReview,
-    SessionReviewFile, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    ProviderDescriptor, ProviderNextAction, ReviewFileDecision, ReviewFileStatus,
+    RuntimeServiceDescriptor, RuntimeServiceKind, SessionReview, SessionReviewFile,
+    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceRootDescriptor, WorkspaceStatus,
 };
 
 pub use admin::{
@@ -56,8 +57,8 @@ pub use engine::{
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
     ForkOperationKey, ForkOperationState, ForkSessionRequest, HostError, HostMcpService,
-    HostQueryService, HostedSession, PreparedForkOperation, ProviderApiKeySubmission,
-    ProviderAuthAttempt, ProviderAuthCompletion, SessionFactory,
+    HostQueryService, HostRuntimeService, HostedSession, PreparedForkOperation,
+    ProviderApiKeySubmission, ProviderAuthAttempt, ProviderAuthCompletion, SessionFactory,
 };
 pub use init::{
     DEFAULT_INIT_FILE_BUDGET_BYTES, InitDepth, InitError, InitPlan, MAX_INIT_SCAN_ENTRIES,

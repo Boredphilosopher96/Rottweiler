@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
-import { CustomSpeedScroll, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, terminalMarkdown, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { CustomSpeedScroll, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, terminalMarkdown, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { embeddedParserConfigurations } from "../src/tree-sitter-runtime"
 
 describe("bounded retained rendering", () => {
   test("renders completed Mermaid and flowchart fences as terminal diagrams without flashing source", () => {
@@ -37,8 +38,8 @@ describe("bounded retained rendering", () => {
     expect(streaming).not.toContain("A -->")
 
     const invalid = terminalMarkdown("```mermaid\nnot a diagram\n```", 80)
-    expect(invalid).toContain("Diagram could not be rendered")
-    expect(invalid).not.toContain("not a diagram")
+    expect(invalid).toContain("Compact diagram")
+    expect(invalid).toContain("not a diagram")
 
     const committed = terminalMarkdown("```mermaid\nflowchart TB\n A -->", 80)
     expect(committed).toContain("closing fence is missing")
@@ -72,12 +73,14 @@ describe("bounded retained rendering", () => {
     expect(outsideClose).not.toContain("```text")
   })
 
-  test("rejects adversarial graph complexity quickly and bounds output width", () => {
+  test("compacts adversarial graph complexity quickly and bounds output width", () => {
     const source = `\`\`\`mermaid\nflowchart LR\n${Array.from({ length: 50 }, (_, index) => `N${index} --> N${index + 1}`).join("\n")}\n\`\`\``
     const started = performance.now()
     const rejected = terminalMarkdown(source, 80)
     expect(performance.now() - started).toBeLessThan(16)
-    expect(rejected).toContain("Diagram preview unavailable")
+    expect(rejected).toContain("Compact diagram · 50 connections")
+    expect(rejected).toContain("N0 → N1")
+    expect(rejected).not.toContain("unavailable")
 
     const wide = terminalMarkdown("```mermaid\nflowchart LR\n A --> B --> C --> D --> E --> F\n```", 40)
     const body = wide.split("\n").slice(1, -1)
@@ -89,16 +92,46 @@ describe("bounded retained rendering", () => {
     }
   })
 
-  test("falls back atomically instead of clipping oversized terminal diagrams", () => {
+  test("uses a compact viewport-safe preview for oversized terminal diagrams", () => {
     const oversized = terminalMarkdown(
       "```mermaid\nflowchart LR\n A[This node label is intentionally far wider than the terminal viewport] --> B[Destination]\n```",
       32,
     )
 
-    expect(oversized).toContain("◇ Diagram preview unavailable")
-    expect(oversized).not.toContain("Diagram clipped")
-    expect(oversized).not.toMatch(/[┌┐└┘]/)
+    expect(oversized).toContain("◇ Compact diagram · 1 connection")
+    expect(oversized).toContain("This node label")
+    expect(oversized).not.toContain("unavailable")
     expect(Math.max(...oversized.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(32)
+  })
+
+  test("counts the complete oversized Mermaid source and labels its partial preview", () => {
+    const source = `\`\`\`mermaid\nflowchart LR\n${Array.from({ length: 200 }, (_, index) => `N${index} --> N${index + 1}`).join("\n")}\n\`\`\``
+    const rendered = terminalMarkdown(source, 80)
+
+    expect(rendered).toContain("Compact diagram · 200 connections · partial preview")
+    expect(rendered).toContain("diagram preview truncated")
+    expect(rendered).not.toContain("79 connections")
+  })
+
+  test("only exposes filetypes backed by the embedded parser catalog", () => {
+    const configured = new Set(
+      embeddedParserConfigurations("/tmp/parser-assets")
+        .flatMap((parser) => [parser.filetype, ...("aliases" in parser ? parser.aliases : [])]),
+    )
+    for (const path of [
+      "src/main.rs",
+      "src/main.cs",
+      "src/init.lua",
+      "Makefile",
+      "src/app.tsx",
+    ]) {
+      const filetype = filetypeForPath(path)
+      expect(filetype).toBeDefined()
+      expect(configured.has(filetype!)).toBeTrue()
+    }
+    for (const path of ["src/Main.kt", "src/query.sql", "src/App.swift", "Dockerfile"]) {
+      expect(filetypeForPath(path)).toBeUndefined()
+    }
   })
 
   test("uses OpenCode-compatible fixed scroll speed when configured", () => {
@@ -107,11 +140,11 @@ describe("bounded retained rendering", () => {
     expect(fixed.tick()).toBe(4)
   })
 
-  test("rejects grouped-node expansion and bounds aggregate diagram work", () => {
+  test("compacts grouped-node expansion and bounds aggregate diagram work", () => {
     const group = Array.from({ length: 80 }, (_, index) => `N${index}`).join(" & ")
     const grouped = `\`\`\`mermaid\nflowchart LR\n${group} --> ${group}\n\`\`\``
     const groupedStart = performance.now()
-    expect(terminalMarkdown(grouped, 80)).toContain("Diagram preview unavailable")
+    expect(terminalMarkdown(grouped, 80)).toContain("Compact diagram · 6400 connections")
     expect(performance.now() - groupedStart).toBeLessThan(16)
 
     const diagram = "```mermaid\nflowchart LR\n A --> B --> C\n```"
@@ -119,7 +152,8 @@ describe("bounded retained rendering", () => {
     const responseStart = performance.now()
     const rendered = terminalMarkdown(response, 80)
     expect(performance.now() - responseStart).toBeLessThan(33)
-    expect(rendered).toContain("Additional diagrams were omitted")
+    expect(rendered).toContain("Compact diagram")
+    expect(rendered).not.toContain("omitted")
 
     const narrowOmissions = terminalMarkdown(response, 20)
     expect(Math.max(...narrowOmissions.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(20)
@@ -130,7 +164,8 @@ describe("bounded retained rendering", () => {
     const deepPrefix = "> ".repeat(8)
     const deep = terminalMarkdown(`${deepPrefix}\`\`\`mermaid\n${deepPrefix}flowchart LR\n${deepPrefix}A --> B\n${deepPrefix}\`\`\``, 20)
     expect(Math.max(...deep.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(20)
-    expect(deep).toContain("Dia")
+    expect(deep).toContain("◇")
+    expect(deep).not.toContain("unavailable")
   })
 
   test("formats compact context counters without confusing them with percentages", () => {

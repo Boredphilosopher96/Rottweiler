@@ -330,6 +330,23 @@ impl CodeIntelligence {
         self.servers.keys().copied().collect()
     }
 
+    /// Return short executable identities for language servers with a live
+    /// initialized client. Configured lazy slots are intentionally omitted.
+    pub async fn active_server_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for slot in self.servers.values() {
+            let slot = slot.lock().await;
+            if slot.client.is_some()
+                && let Some(name) = slot.spec.command.file_name().and_then(|name| name.to_str())
+            {
+                names.push(name.to_owned());
+            }
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
     /// Notify a server of current source and return diagnostics available for
     /// that document. Failure returns an empty syntax-tier result.
     pub async fn diagnostics(

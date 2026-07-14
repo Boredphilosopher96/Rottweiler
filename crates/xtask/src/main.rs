@@ -20,12 +20,12 @@ use rw_types::{
     PlanDecision, PlanStep, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
     ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget, Role,
-    SequenceId, SessionDescriptor, SessionId, SessionReview, SessionReviewFile, ShellId,
-    StoredAttachment, SubagentId, SubagentIsolation, SubagentResult, SubagentStatus, ToolCallId,
-    ToolCapability, ToolOutput, ToolOutputPart, ToolOutputStream, TouchedFile, TouchedFileStatus,
-    Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
-    UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
-    WorkspaceRootDescriptor, WorkspaceStatus,
+    RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
+    SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentId, SubagentIsolation,
+    SubagentResult, SubagentStatus, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
+    ToolOutputStream, TouchedFile, TouchedFileStatus, Turn, TurnAccounting, TurnId, TurnMeta,
+    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff,
+    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use semver::Version;
@@ -1726,6 +1726,8 @@ fn generate_typescript() -> String {
     declaration!(McpServerState);
     declaration!(McpServerDescriptor);
     declaration!(McpApprovalReview);
+    declaration!(RuntimeServiceKind);
+    declaration!(RuntimeServiceDescriptor);
     declaration!(WorkspaceFileMatch);
     declaration!(WorkspaceFilePreview);
     declaration!(WorkspaceStatus);
@@ -2103,6 +2105,10 @@ fn contract_fixture() -> ContractFixture {
                 session_id: SessionId("session-fixture".to_owned()),
                 turn_id: Some(TurnId("turn-fixture".to_owned())),
             },
+            ClientCommand::ListRuntimeServices {
+                meta: command_meta.clone(),
+                session_id: SessionId("session-fixture".to_owned()),
+            },
         ],
         engine_events: vec![
             EngineEvent::CommandAcknowledged {
@@ -2114,6 +2120,19 @@ fn contract_fixture() -> ContractFixture {
                 },
                 session_id: Some(SessionId("session-fixture".to_owned())),
                 outcome: CommandOutcome::Accepted,
+            },
+            EngineEvent::RuntimeServicesListed {
+                meta: CommandAckMeta {
+                    protocol_version: rw_types::PROTOCOL_VERSION,
+                    client_id: ClientId("client-fixture".to_owned()),
+                    request_id: RequestId("runtime-services-fixture".to_owned()),
+                    emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                },
+                session_id: SessionId("session-fixture".to_owned()),
+                services: vec![RuntimeServiceDescriptor {
+                    kind: RuntimeServiceKind::Lsp,
+                    name: "rust-analyzer".to_owned(),
+                }],
             },
             EngineEvent::CommandAcknowledged {
                 meta: CommandAckMeta {

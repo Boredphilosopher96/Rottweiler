@@ -15,9 +15,10 @@ use crate::types::RawSseFrame;
 use crate::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, BoxEventStream,
     CacheBreakpointSupport, Capabilities, DiscoveredModel, DiscoveredProviderCatalog,
-    NetworkPolicy, OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiWireMode, Provider,
-    ProviderError, ProviderErrorKind, ProviderEvent, ProviderModelMetadata, ProviderRequest,
-    ProxyAuthentication, Secret, StaticAuth, UsageAccounting, WireFrameSink, WireMode,
+    NetworkPolicy, OpenAiChatRequestProfile, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+    OpenAiWireMode, Provider, ProviderError, ProviderErrorKind, ProviderEvent,
+    ProviderModelMetadata, ProviderRequest, ProxyAuthentication, Secret, StaticAuth,
+    UsageAccounting, WireFrameSink, WireMode,
     http::{build_client_with_proxy_auth, require_network, response_error, transport_error},
 };
 
@@ -465,6 +466,7 @@ fn build_delegate(
                 } else {
                     OpenAiWireMode::ChatCompletions
                 },
+                chat_request_profile: OpenAiChatRequestProfile::OpenAi,
                 tool_calling: model.supports_tools,
                 cache_breakpoints: CacheBreakpointSupport::None,
                 supported_reasoning_efforts: model.reasoning_efforts.clone(),

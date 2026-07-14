@@ -1,5 +1,7 @@
 import {
   BoxRenderable,
+  CodeRenderable,
+  DiffRenderable,
   MarkdownRenderable,
   ScrollBoxRenderable,
   TextRenderable,
@@ -10,6 +12,7 @@ import {
 
 import {
   formatCost,
+  filetypeForPath,
   formatToolArguments,
   getScrollAcceleration,
   terminalMarkdown,
@@ -169,10 +172,17 @@ function colorWithOpacity(color: string, opacity: number): string {
 export class ToolBlockRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly body: TextRenderable
+  command: CodeRenderable | TextRenderable | null = null
+  diff: DiffRenderable | TextRenderable | null = null
+  commandPrompt: TextRenderable | null = null
+  #commandContainer: BoxRenderable | null = null
+  #commandSignature = ""
+  #diffSignature = ""
   #collapsed: boolean
   #tool: ToolProjection
   #theme: RottweilerTheme
   #onExpansionChange: ((expanded: boolean) => void) | undefined
+  #rendering: TranscriptRenderableOptions | undefined
 
   constructor(
     ctx: RenderContext,
@@ -180,6 +190,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     tool: ToolProjection,
     expanded?: boolean,
     onExpansionChange?: (expanded: boolean) => void,
+    rendering?: TranscriptRenderableOptions,
   ) {
     super(ctx, {
       id: `tool-${tool.toolCallId}`,
@@ -198,6 +209,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#tool = tool
     this.#collapsed = expanded === undefined ? tool.status !== "awaiting_approval" : !expanded
     this.#onExpansionChange = onExpansionChange
+    this.#rendering = rendering
     this.header = new TextRenderable(ctx, { content: "", fg: theme.foreground, height: 1 })
     this.body = new TextRenderable(ctx, {
       content: "",
@@ -218,10 +230,17 @@ export class ToolBlockRenderable extends BoxRenderable {
   }
 
   update(tool: ToolProjection): void {
+    const previousStatus = this.#tool.status
     this.#tool = tool
+    if (tool.status === "awaiting_approval" && previousStatus !== "awaiting_approval") {
+      this.#collapsed = false
+      this.body.visible = true
+    }
+    this.#syncCommand(tool)
+    this.#syncDiff(tool)
     const glyph = tool.status === "awaiting_approval" ? "?" : tool.status === "running" ? "◌" : tool.isError === true ? "✕" : "✓"
     const approval = tool.status === "awaiting_approval" ? " · approval needed" : ""
-    const args = compactToolArguments(tool)
+    const args = this.command === null ? compactToolArguments(tool) : ""
     const result =
       tool.status === "finished" && this.#collapsed
         ? compactToolResult(tool)
@@ -238,13 +257,110 @@ export class ToolBlockRenderable extends BoxRenderable {
     if (this.#collapsed) {
       this.body.content = ""
       this.body.height = 0
-      this.height = 1
+      this.height = 1 + (this.#commandContainer?.height ?? 0) + (this.diff?.height ?? 0)
       return
     }
-    this.body.content = toolBodyContent(tool)
+    this.body.content = boundedLines(toolBodyContent(tool), 8)
     const bodyRows = Math.min(8, Math.max(1, this.body.plainText.split("\n").length))
     this.body.height = bodyRows
-    this.height = bodyRows + 1
+    this.height = bodyRows + 1 + (this.#commandContainer?.height ?? 0) + (this.diff?.height ?? 0)
+  }
+
+  #syncCommand(tool: ToolProjection): void {
+    const command = bashCommand(tool)
+    const signature = command ?? ""
+    if (signature === this.#commandSignature) return
+    this.#commandSignature = signature
+    if (this.#commandContainer !== null) {
+      this.remove(this.#commandContainer)
+      this.#commandContainer.destroyRecursively()
+      this.#commandContainer = null
+      this.command = null
+      this.commandPrompt = null
+    }
+    if (command === null) return
+    const content = visibleBashCommand(command)
+    const rows = Math.max(1, content.split("\n").length)
+    const container = new BoxRenderable(this.ctx, {
+      id: `tool-command-row-${tool.toolCallId}`,
+      width: "100%",
+      height: rows,
+      flexDirection: "row",
+      flexShrink: 0,
+    })
+    this.commandPrompt = new TextRenderable(this.ctx, {
+      content: bashPrompt(command),
+      fg: this.#theme.muted,
+      width: 2,
+      height: rows,
+      wrapMode: "none",
+    })
+    this.command = this.#rendering === undefined
+      ? new TextRenderable(this.ctx, {
+          content,
+          fg: this.#theme.foreground,
+          flexGrow: 1,
+          height: rows,
+          wrapMode: "none",
+        })
+      : new CodeRenderable(this.ctx, {
+          id: `tool-command-${tool.toolCallId}`,
+          flexGrow: 1,
+          height: rows,
+          content,
+          filetype: "bash",
+          syntaxStyle: this.#rendering.syntaxStyle,
+          ...(this.#rendering.treeSitterClient === undefined
+            ? {}
+            : { treeSitterClient: this.#rendering.treeSitterClient }),
+          drawUnstyledText: true,
+          wrapMode: "none",
+          streaming: false,
+        })
+    container.add(this.commandPrompt)
+    container.add(this.command)
+    this.#commandContainer = container
+    this.insertBefore(container, this.diff ?? this.body)
+  }
+
+  #syncDiff(tool: ToolProjection): void {
+    const proposal = readToolDiff(tool)
+    const signature = proposal === null ? "" : `${proposal.path}\u0000${proposal.unifiedDiff}`
+    if (signature === this.#diffSignature) return
+    this.#diffSignature = signature
+    if (this.diff !== null) {
+      this.remove(this.diff)
+      this.diff.destroyRecursively()
+      this.diff = null
+    }
+    if (proposal === null) return
+    const rows = Math.min(12, Math.max(4, proposal.unifiedDiff.split("\n").length))
+    const filetype = filetypeForPath(proposal.path)
+    this.diff = this.#rendering === undefined
+      ? new TextRenderable(this.ctx, {
+          content: boundedLines(proposal.unifiedDiff, rows),
+          fg: this.#theme.foreground,
+          height: rows,
+          wrapMode: "none",
+        })
+      : new DiffRenderable(this.ctx, {
+          id: `tool-diff-${tool.toolCallId}`,
+          width: "100%",
+          height: rows,
+          diff: proposal.unifiedDiff,
+          ...(filetype === undefined ? {} : { filetype }),
+          syntaxStyle: this.#rendering.syntaxStyle,
+          ...(this.#rendering.treeSitterClient === undefined
+            ? {}
+            : { treeSitterClient: this.#rendering.treeSitterClient }),
+          view: "unified",
+          wrapMode: "none",
+          showLineNumbers: true,
+          addedBg: this.#theme.added,
+          removedBg: this.#theme.removed,
+          contextBg: this.#theme.panel,
+        })
+    this.insertBefore(this.diff, this.body)
   }
 
   toggle(): void {
@@ -266,9 +382,43 @@ function toolBodyContent(tool: ToolProjection): string {
       : final === "" && live === ""
         ? "Completed with no output."
         : ""
-  return [`Arguments · ${formatToolArguments(tool.args)}`, tool.rationale, output, activity]
+  const argumentsLine = bashCommand(tool) === null ? `Arguments · ${formatToolArguments(tool.args)}` : ""
+  return [argumentsLine, tool.rationale, output, activity]
     .filter(Boolean)
     .join("\n")
+}
+
+function bashCommand(tool: ToolProjection): string | null {
+  if ((tool.name !== "bash" && tool.name !== "shell") || !isRecord(tool.args)) return null
+  return typeof tool.args.command === "string" ? tool.args.command : null
+}
+
+function visibleBashCommand(command: string): string {
+  const lines = command.split("\n")
+  const visible = lines.slice(0, 7)
+  if (lines.length > visible.length) visible.push(`# … ${lines.length - visible.length} more lines`)
+  return visible.join("\n")
+}
+
+function bashPrompt(command: string): string {
+  const visibleRows = Math.min(7, command.split("\n").length)
+  const prompts: string[] = Array.from({ length: visibleRows }, (_, index) => index === 0 ? "$" : ">")
+  if (command.split("\n").length > visibleRows) prompts.push("·")
+  return prompts.join("\n")
+}
+
+function boundedLines(value: string, maximum: number): string {
+  const lines = value.split("\n")
+  if (lines.length <= maximum) return value
+  if (maximum <= 1) return `… ${lines.length} lines`
+  return [...lines.slice(0, maximum - 1), `… ${lines.length - maximum + 1} more lines`].join("\n")
+}
+
+function readToolDiff(tool: ToolProjection): { path: string; unifiedDiff: string } | null {
+  if (!isRecord(tool.diff)) return null
+  return typeof tool.diff.path === "string" && typeof tool.diff.unified_diff === "string"
+    ? { path: tool.diff.path, unifiedDiff: tool.diff.unified_diff }
+    : null
 }
 
 function toolBlockExpanded(
@@ -520,6 +670,10 @@ class TurnCardRenderable extends BoxRenderable {
         tool,
         toolExpansion.get(tool.toolCallId),
         (expanded) => onToolExpansionChange(tool.toolCallId, expanded),
+        {
+          syntaxStyle,
+          ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
+        },
       ))
     }
     if (subagents.length > 0) {
@@ -545,6 +699,7 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #treeSitterClient: TreeSitterClient | undefined
   readonly #onInteraction: (() => void) | undefined
   readonly #toolExpansion = new Map<string, boolean>()
+  readonly #tailToolCards = new Map<string, ToolBlockRenderable>()
   readonly #reasoningExpansion = new Map<string, boolean>()
   readonly #cardSignatures = new Map<string, string>()
   #state: RottweilerState | null = null
@@ -553,7 +708,6 @@ export class TranscriptRenderable extends BoxRenderable {
   #tools: RottweilerState["tools"] | null = null
   #turns: RottweilerState["turns"] | null = null
   #subagents: RottweilerState["subagents"] | null = null
-  #tailToolsSignature = ""
   #tailReasoningTurnId: string | null = null
 
   constructor(
@@ -666,7 +820,13 @@ export class TranscriptRenderable extends BoxRenderable {
   update(state: RottweilerState): void {
     this.#state = state
     const transcriptChanged = this.#transcript !== state.transcript
-    const cardProjectionChanged = this.#tools !== state.tools || this.#subagents !== state.subagents
+    const historicalToolsChanged = this.#tools !== state.tools && toolProjectionChangedForHistory(
+      this.#tools,
+      state.tools,
+      state.transcript,
+      state.streamingTail?.turnId ?? null,
+    )
+    const cardProjectionChanged = historicalToolsChanged || this.#subagents !== state.subagents
     const turnProjectionChanged = this.#turns !== state.turns
     this.#transcript = state.transcript
     this.#tools = state.tools
@@ -846,30 +1006,34 @@ export class TranscriptRenderable extends BoxRenderable {
   }
 
   #replaceTailTools(tools: readonly ToolProjection[]): void {
-    const signature = tools.map((tool) => [
-      tool.toolCallId,
-      tool.status,
-      tool.name,
-      JSON.stringify(tool.args),
-      tool.chunks.map((chunk) => `${chunk.stream}:${chunk.chunk}`).join(""),
-      JSON.stringify(tool.output),
-      tool.isError,
-      this.#toolExpansion.get(tool.toolCallId) === true,
-    ].join("\u0000")).join("\u0001")
-    if (signature === this.#tailToolsSignature) return
-    this.#tailToolsSignature = signature
-    for (const child of this.#tailTools.getChildren()) {
-      this.#tailTools.remove(child)
-      child.destroyRecursively()
+    const retained = new Set(tools.map((tool) => tool.toolCallId))
+    for (const [toolCallId, card] of this.#tailToolCards) {
+      if (retained.has(toolCallId)) continue
+      this.#tailTools.remove(card)
+      card.destroyRecursively()
+      this.#tailToolCards.delete(toolCallId)
     }
     for (const tool of tools) {
-      this.#tailTools.add(new ToolBlockRenderable(
-        this.ctx,
-        this.#theme,
-        tool,
-        this.#toolExpansion.get(tool.toolCallId),
-        (expanded) => this.#rememberToolExpansion(tool.toolCallId, expanded),
-      ))
+      let card = this.#tailToolCards.get(tool.toolCallId)
+      if (card === undefined) {
+        card = new ToolBlockRenderable(
+          this.ctx,
+          this.#theme,
+          tool,
+          this.#toolExpansion.get(tool.toolCallId),
+          (expanded) => this.#rememberToolExpansion(tool.toolCallId, expanded),
+          {
+            syntaxStyle: this.#syntaxStyle,
+            ...(this.#treeSitterClient === undefined
+              ? {}
+              : { treeSitterClient: this.#treeSitterClient }),
+          },
+        )
+        this.#tailToolCards.set(tool.toolCallId, card)
+        this.#tailTools.add(card)
+      } else {
+        card.update(tool)
+      }
     }
   }
 
@@ -885,6 +1049,31 @@ export class TranscriptRenderable extends BoxRenderable {
     if ((this.#reasoningExpansion.get(key) ?? false) === expanded) return
     this.#reasoningExpansion.set(key, expanded)
   }
+}
+
+function toolProjectionChangedForHistory(
+  previous: RottweilerState["tools"] | null,
+  next: RottweilerState["tools"],
+  transcript: readonly TranscriptEntry[],
+  streamingTurnId: string | null,
+): boolean {
+  if (previous === null) return true
+  const historicalTurns = new Set(
+    transcript
+      .map((entry) => entry.agentTurn)
+      .filter((turnId) => turnId !== streamingTurnId),
+  )
+  const ids = new Set([...Object.keys(previous), ...Object.keys(next)])
+  for (const id of ids) {
+    const before = previous[id]
+    const after = next[id]
+    if (before === after) continue
+    if (
+      (before !== undefined && historicalTurns.has(before.turnId)) ||
+      (after !== undefined && historicalTurns.has(after.turnId))
+    ) return true
+  }
+  return false
 }
 
 function turnDetail(

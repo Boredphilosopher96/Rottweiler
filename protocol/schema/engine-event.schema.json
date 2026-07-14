@@ -422,6 +422,33 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "services": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuntimeServiceDescriptor"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "runtime_services_listed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "services"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "review": {
           "$ref": "#/$defs/McpApprovalReview"
         },
@@ -1223,6 +1250,35 @@
         "args",
         "capabilities",
         "rationale"
+      ]
+    },
+    {
+      "description": "Redacted mutation preview retained independently of whether the active\npermission mode needed to ask the user. This keeps inline review\navailable under remembered approvals and YOLO without coupling display\nstate to a permission dialog.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "diff": {
+          "$ref": "#/$defs/UnifiedDiff"
+        },
+        "type": {
+          "type": "string",
+          "const": "tool_diff_ready"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "turn_id",
+        "tool_call_id",
+        "diff"
       ]
     },
     {
@@ -3498,6 +3554,31 @@
             "type"
           ]
         }
+      ]
+    },
+    "RuntimeServiceDescriptor": {
+      "description": "One credential-free process identity currently serving the active session.\n\nConfigured-but-idle integrations are deliberately absent. Names are short\nexecutable identities, never command lines, arguments, paths, or output.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/RuntimeServiceKind"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "name"
+      ]
+    },
+    "RuntimeServiceKind": {
+      "description": "Live service categories projected to clients.",
+      "type": "string",
+      "enum": [
+        "lsp",
+        "linter",
+        "formatter"
       ]
     },
     "McpApprovalReview": {

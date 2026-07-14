@@ -14,8 +14,9 @@ use rw_types::{
     ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta,
     CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, McpApprovalReview,
     McpServerDescriptor, ModelAlias, ModelCatalogSnapshot, ProviderAuthAttemptId,
-    ProviderAuthChallenge, RequestId, SequenceId, SessionDescriptor, SessionId, ShellId, TurnId,
-    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    ProviderAuthChallenge, RequestId, RuntimeServiceDescriptor, SequenceId, SessionDescriptor,
+    SessionId, ShellId, TurnId, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceStatus,
 };
 use thiserror::Error;
 use tokio::sync::{Notify, broadcast, mpsc, watch};
@@ -134,6 +135,7 @@ pub struct HostedSession {
     lifecycle: Arc<tokio::sync::Mutex<()>>,
     model_catalog: Option<Arc<CachedModelCatalog>>,
     mcp: Option<Arc<dyn HostMcpService>>,
+    runtime_services: Option<Arc<dyn HostRuntimeService>>,
 }
 
 impl fmt::Debug for HostedSession {
@@ -154,6 +156,7 @@ impl HostedSession {
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             model_catalog: None,
             mcp: None,
+            runtime_services: None,
         }
     }
 
@@ -179,6 +182,19 @@ impl HostedSession {
     #[must_use]
     pub fn mcp(&self) -> Option<Arc<dyn HostMcpService>> {
         self.mcp.clone()
+    }
+
+    /// Attaches a credential-free view of processes currently serving this
+    /// exact actor session.
+    #[must_use]
+    pub fn with_runtime_services(mut self, services: Arc<dyn HostRuntimeService>) -> Self {
+        self.runtime_services = Some(services);
+        self
+    }
+
+    #[must_use]
+    pub fn runtime_services(&self) -> Option<Arc<dyn HostRuntimeService>> {
+        self.runtime_services.clone()
     }
 
     #[must_use]
@@ -415,6 +431,14 @@ pub trait HostMcpService: Send + Sync + 'static {
         name: &str,
         enabled: bool,
     ) -> Result<Vec<McpServerDescriptor>, HostError>;
+}
+
+/// Remote-safe observation boundary for session-local supporting processes.
+/// Implementations must return identities only: no arguments, paths, output,
+/// environment, endpoints, or credentials.
+#[async_trait]
+pub trait HostRuntimeService: Send + Sync + 'static {
+    async fn list(&self) -> Result<Vec<RuntimeServiceDescriptor>, HostError>;
 }
 
 type ProviderAuthPersistence = Box<dyn FnOnce() -> Result<Vec<String>, HostError> + Send + 'static>;
@@ -1747,6 +1771,22 @@ impl EngineHost {
                         meta: ack_meta(&meta, &*self.clock),
                         session_id,
                         servers,
+                    }],
+                ))
+            }
+            ClientCommand::ListRuntimeServices { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let services = match session.runtime_services() {
+                    Some(services) => services.list().await?,
+                    None => Vec::new(),
+                };
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::RuntimeServicesListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        services,
                     }],
                 ))
             }
@@ -3124,6 +3164,7 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::ListSettings { session_id, .. }
         | ClientCommand::SetSetting { session_id, .. }
         | ClientCommand::ListMcpServers { session_id, .. }
+        | ClientCommand::ListRuntimeServices { session_id, .. }
         | ClientCommand::AddMcpHttpServer { session_id, .. }
         | ClientCommand::ReviewMcpServer { session_id, .. }
         | ClientCommand::ApproveMcpServer { session_id, .. }

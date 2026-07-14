@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { CliRenderEvents } from "@opentui/core"
+import { CliRenderEvents, CodeRenderable, DiffRenderable } from "@opentui/core"
 import {
   createTestRenderer,
   MockTreeSitterClient,
@@ -551,6 +551,101 @@ describe("M4 retained components", () => {
     expect(setup.captureCharFrame()).toContain("**/*.rs")
   })
 
+  test("renders bash commands and existing mutation diffs inline with syntax-aware renderables", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 30, useThread: false })
+    renderer = setup.renderer
+    treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
+    treeSitter.setMockResult({ highlights: [] })
+    const bash = {
+      toolCallId: "bash-inline",
+      turnId: "1",
+      name: "bash",
+      args: { command: "cargo test --workspace" },
+      status: "finished" as const,
+      capabilities: ["execute" as const],
+      rationale: null,
+      diff: null,
+      chunks: [],
+      output: { type: "text" as const, text: "all tests passed" },
+      isError: false,
+      callIndex: 0,
+    }
+    const edit = {
+      toolCallId: "edit-inline",
+      turnId: "1",
+      name: "edit",
+      args: { path: "src/main.rs" },
+      status: "finished" as const,
+      capabilities: ["write_filesystem" as const],
+      rationale: null,
+      diff: {
+        proposal_id: "proposal-inline",
+        path: "src/main.rs",
+        unified_diff: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
+        arguments_hash: "args",
+        base_hash: "base",
+        diff_hash: "diff",
+        truncated: false,
+      },
+      chunks: [],
+      output: { type: "text" as const, text: "updated src/main.rs" },
+      isError: false,
+      callIndex: 1,
+    }
+    const initial: RottweilerState = {
+      ...createInitialState(),
+      tools: { [bash.toolCallId]: bash, [edit.toolCallId]: edit },
+      streamingTail: {
+        turnId: "1",
+        text: "",
+        thinking: "",
+        citations: [],
+        toolCallIds: [bash.toolCallId, edit.toolCallId],
+        finished: null,
+      },
+    }
+    const app = createRottweilerApp(renderer, {
+      initialState: initial,
+      treeSitterClient: treeSitter,
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    const cards = app.transcript.streamingCard
+      .getChildren()
+      .flatMap((child) => child.getChildren())
+      .filter((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    const bashCard = cards.find((card) => card.id === "tool-bash-inline")
+    const editCard = cards.find((card) => card.id === "tool-edit-inline")
+    expect(bashCard?.command).toBeInstanceOf(CodeRenderable)
+    expect((bashCard?.command as CodeRenderable).filetype).toBe("bash")
+    expect((bashCard?.command as CodeRenderable).content).toBe("cargo test --workspace")
+    expect(bashCard?.commandPrompt?.plainText).toBe("$")
+    expect(setup.captureCharFrame()).toContain("$ cargo test --workspace")
+    expect(editCard?.diff).toBeInstanceOf(DiffRenderable)
+    expect((editCard?.diff as DiffRenderable).filetype).toBe("rust")
+    expect((editCard?.diff as DiffRenderable).diff).toContain("+new")
+
+    const retainedCommand = bashCard?.command
+    app.setState({
+      ...initial,
+      tools: {
+        ...initial.tools,
+        [bash.toolCallId]: {
+          ...bash,
+          chunks: [{ stream: "stdout" as const, chunk: "checking\n" }],
+        },
+      },
+    })
+    await setup.renderOnce()
+    const updatedBashCard = app.transcript.streamingCard
+      .getChildren()
+      .flatMap((child) => child.getChildren())
+      .find((child): child is ToolBlockRenderable => child.id === "tool-bash-inline")
+    expect(updatedBashCard).toBe(bashCard)
+    expect(updatedBashCard?.command).toBe(retainedCommand)
+  })
+
   test("routes diff approval through generated commands", async () => {
     const setup = await createTestRenderer({ width: 112, height: 30, useThread: false })
     renderer = setup.renderer
@@ -1053,8 +1148,8 @@ describe("M4 retained components", () => {
     expect(app.reviewPanel.hint.plainText).not.toContain("pending")
   })
 
-  test("shows only todos and changed files in the sidebar and opens exact paths", async () => {
-    const setup = await createTestRenderer({ width: 52, height: 24, useThread: false })
+  test("shows active MCPs with todos and changed files in the sidebar and opens exact paths", async () => {
+    const setup = await createTestRenderer({ width: 52, height: 30, useThread: false })
     renderer = setup.renderer
     const opened: string[] = []
     const panel = new ContextPanelRenderable(renderer, kennelTheme, {
@@ -1066,6 +1161,17 @@ describe("M4 retained components", () => {
       todos: [
         { id: "audit", content: "Audit interactions", status: "in_progress" },
         { id: "tests", content: "Add regression tests", status: "pending" },
+      ],
+      mcpServers: [
+        { name: "docs", enabled: true, approved: true, state: { type: "ready" }, tool_count: 4, resource_count: 0, prompt_count: 0 },
+        { name: "search", enabled: true, approved: true, state: { type: "connecting" }, tool_count: 0, resource_count: 0, prompt_count: 0 },
+        { name: "disabled", enabled: false, approved: false, state: { type: "disabled" }, tool_count: 0, resource_count: 0, prompt_count: 0 },
+        { name: "failed", enabled: true, approved: true, state: { type: "failed", message: "offline" }, tool_count: 0, resource_count: 0, prompt_count: 0 },
+      ],
+      runtimeServices: [
+        { kind: "lsp", name: "rust-analyzer" },
+        { kind: "formatter", name: "rustfmt" },
+        { kind: "linter", name: "clippy-driver" },
       ],
       workspaceStatus: {
         workspaceName: "Rottweiler",
@@ -1104,8 +1210,20 @@ describe("M4 retained components", () => {
       "src/shared.rs",
       "src/from-status.rs",
     ])
+    expect(panel.mcps.options.map((option) => option.value)).toEqual(["docs", "search"])
+    expect(panel.runtimeServices.options.map((option) => option.value)).toEqual([
+      "lsp:rust-analyzer",
+      "formatter:rustfmt",
+      "linter:clippy-driver",
+    ])
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Todos")
+    expect(frame).toContain("MCP")
+    expect(frame).toContain("docs · 4 tools")
+    expect(frame).not.toContain("disabled")
+    expect(frame).not.toContain("failed")
+    expect(frame).toContain("Services")
+    expect(frame).toContain("LSP · rust-analyzer")
     expect(frame).toContain("Changed files")
     expect(frame).not.toContain("context")
 
@@ -1116,6 +1234,44 @@ describe("M4 retained components", () => {
 
     await setup.mockMouse.click(panel.changedFiles.x + 2, panel.changedFiles.y + 1)
     expect(opened).toEqual(["src/shared.rs", "src/from-status.rs"])
+  })
+
+  test("keeps changed files visible when MCP and runtime sections fill a short sidebar", async () => {
+    const setup = await createTestRenderer({ width: 52, height: 18, useThread: false })
+    renderer = setup.renderer
+    const panel = new ContextPanelRenderable(renderer, kennelTheme, {})
+    renderer.root.add(panel)
+    panel.update({
+      ...createInitialState(),
+      todos: [{ id: "todo", content: "Keep the viewport bounded", status: "pending" }],
+      mcpServers: Array.from({ length: 4 }, (_, index) => ({
+        name: `mcp-${index}`,
+        enabled: true,
+        approved: true,
+        state: { type: "ready" as const },
+        tool_count: 1,
+        resource_count: 0,
+        prompt_count: 0,
+      })),
+      runtimeServices: Array.from({ length: 5 }, (_, index) => ({
+        kind: index === 0 ? "lsp" as const : "linter" as const,
+        name: `service-${index}`,
+      })),
+      workspaceStatus: {
+        workspaceName: "Rottweiler",
+        branch: "main",
+        changedPaths: ["src/changed.rs"],
+        truncated: false,
+      },
+    })
+    await setup.renderOnce()
+
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Changed files")
+    expect(frame).toContain("src/changed.rs")
+    const lastRow = frame.split("\n").filter((line) => line.length > 0).at(-1) ?? ""
+    expect(lastRow).toContain("╰")
+    expect(lastRow).not.toContain("service")
   })
 
   test("opens the exact retained diff from the default changed-files sidebar", async () => {

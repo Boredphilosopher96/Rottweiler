@@ -16,12 +16,13 @@ use rw_providers::{
     GitHubCopilotRuntime, ModelCandidate, ModelPricing, NativeWebSearchCapability,
     NativeWebSearchRequest, NetworkPolicy, OAuthRefreshConfig, OPENAI_SUBSCRIPTION_CLIENT_ID,
     OPENAI_SUBSCRIPTION_RESPONSES_ENDPOINT, OPENAI_SUBSCRIPTION_TOKEN_ENDPOINT,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiSubscriptionAuth,
-    OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink, OpenAiWireMode, PricingTable,
-    Provider, ProviderError, ProviderErrorKind, ProviderModelMetadata, ProviderRequest,
-    ProviderRouter, ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource,
-    RefreshTokenSink, RefreshingOAuth, RetryPolicy, RouterError, Secret as ProviderSecret,
-    StaticAuth, ThinkingLevel, ToolChoice, UsageAccounting, WireFrameSink, WireMode,
+    OpenAiChatRequestProfile, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+    OpenAiSubscriptionAuth, OpenAiSubscriptionAuthConfig, OpenAiSubscriptionTokenSink,
+    OpenAiWireMode, PricingTable, Provider, ProviderError, ProviderErrorKind,
+    ProviderModelMetadata, ProviderRequest, ProviderRouter, ProxyAuthentication, ProxyEnvironment,
+    ProxySettings, ProxySource, RefreshTokenSink, RefreshingOAuth, RetryPolicy, RouterError,
+    Secret as ProviderSecret, StaticAuth, ThinkingLevel, ToolChoice, UsageAccounting,
+    WireFrameSink, WireMode,
 };
 use rw_store::credentials::{
     CredentialEnvironment, CredentialError, CredentialKeychain, CredentialManager,
@@ -2926,47 +2927,6 @@ fn project_model_catalog(
         };
         providers.push(provider);
     }
-    for candidate in config.models.aliases.values().flatten() {
-        let Some((provider_name, model)) = candidate.split_once('/') else {
-            continue;
-        };
-        if config.providers.contains_key(provider_name) {
-            continue;
-        }
-        let status = "extension provider catalog is available only inside its assembled session";
-        models
-            .entry(candidate.clone())
-            .or_insert_with(|| ModelDescriptor {
-                alias: ModelAlias(candidate.clone()),
-                id: candidate.clone(),
-                display_name: model.to_owned(),
-                provider: provider_name.to_owned(),
-                providers: vec![provider_name.to_owned()],
-                aliases: reverse_aliases.get(candidate).cloned().unwrap_or_default(),
-                current: current_candidate == Some(candidate),
-                available: false,
-                status: Some(status.to_owned()),
-                capabilities: protocol_capabilities(&model_capabilities(
-                    AdapterKind::OpenAiCompatibleChat,
-                    None,
-                )),
-            });
-        if !providers
-            .iter()
-            .any(|provider| provider.name == provider_name)
-        {
-            providers.push(ProviderDescriptor {
-                name: provider_name.to_owned(),
-                auth_kind: ProviderAuthKind::None,
-                next_action: ProviderNextAction::None,
-                configured: true,
-                authenticated: false,
-                reachable: false,
-                model_count: 0,
-                status: Some(status.to_owned()),
-            });
-        }
-    }
     for name in ["anthropic", "openai", "openai_codex", "github_copilot"] {
         if !providers.iter().any(|provider| provider.name == name) {
             providers.push(ProviderDescriptor {
@@ -3538,6 +3498,11 @@ fn construct_adapter(
                 proxy_authentication,
                 network_policy,
                 wire_mode,
+                chat_request_profile: if matches!(kind, AdapterKind::OpenAiCompatibleChat) {
+                    OpenAiChatRequestProfile::Compatible
+                } else {
+                    OpenAiChatRequestProfile::OpenAi
+                },
                 // Unknown model capabilities must not become a local denial.
                 // This only enables the standard wire representation; an
                 // endpoint that does not support it still returns its own
@@ -3825,6 +3790,26 @@ mod native_search_tests {
                 && provider.auth_kind == ProviderAuthKind::DeviceFlow
                 && provider.next_action == ProviderNextAction::Configure
         }));
+    }
+
+    #[test]
+    fn file_configured_extension_alias_never_seeds_the_live_catalog() {
+        let mut config = Config::default();
+        config.providers.clear();
+        config.models.default = "fast".to_owned();
+        config.models.aliases =
+            BTreeMap::from([("fast".to_owned(), vec!["my_plugin/file_model".to_owned()])]);
+
+        let catalog = project_model_catalog(&config, &PricingTable::default(), Vec::new());
+
+        assert!(catalog.models.is_empty());
+        assert!(
+            catalog
+                .providers
+                .iter()
+                .all(|provider| provider.name != "my_plugin"),
+            "an alias file cannot invent a provider or concrete model row"
+        );
     }
 
     #[test]

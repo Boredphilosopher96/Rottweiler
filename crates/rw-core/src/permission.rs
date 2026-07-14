@@ -53,6 +53,7 @@ pub trait PermissionApprover: Send + Sync {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct PermissionSnapshot {
     pub default: PermissionDecision,
+    pub runtime_mode: Option<HeadlessPermissionMode>,
     pub rules: Vec<PermissionRule>,
     pub session_rules: Vec<PermissionRule>,
     pub session_approvals: usize,
@@ -102,6 +103,7 @@ struct PermissionMemory {
 /// and exact invocation approvals remembered at session or project scope.
 pub struct PermissionGate {
     policy: PermissionPolicy,
+    runtime_mode: RwLock<Option<HeadlessPermissionMode>>,
     restrictive_rules: Option<Vec<PermissionRule>>,
     memory: RwLock<PermissionMemory>,
     session_rules: RwLock<Vec<PermissionRule>>,
@@ -133,6 +135,7 @@ impl PermissionGate {
     pub fn from_config(config: PermissionConfig) -> Self {
         Self {
             policy: PermissionPolicy::Configured(config),
+            runtime_mode: RwLock::new(None),
             restrictive_rules: None,
             memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
@@ -154,6 +157,7 @@ impl PermissionGate {
     pub fn for_headless_mode(mode: HeadlessPermissionMode) -> Self {
         Self {
             policy: PermissionPolicy::Headless(mode),
+            runtime_mode: RwLock::new(None),
             restrictive_rules: None,
             memory: RwLock::new(PermissionMemory::default()),
             session_rules: RwLock::new(Vec::new()),
@@ -189,7 +193,8 @@ impl PermissionGate {
 
     #[must_use]
     pub fn snapshot(&self) -> PermissionSnapshot {
-        let (default, rules) = match &self.policy {
+        let runtime_mode = *lock_read(&self.runtime_mode);
+        let (base_default, rules) = match &self.policy {
             PermissionPolicy::Configured(config) => (config.default, config.rules.clone()),
             PermissionPolicy::Headless(HeadlessPermissionMode::Strict) => {
                 (PermissionDecision::Ask, Vec::new())
@@ -201,6 +206,7 @@ impl PermissionGate {
                 (PermissionDecision::Allow, Vec::new())
             }
         };
+        let default = runtime_mode.map_or(base_default, permission_mode_default);
         let session_rules = lock_read(&self.session_rules).clone();
         let memory = lock_read(&self.memory);
         let project_approvals = self
@@ -217,11 +223,43 @@ impl PermissionGate {
             });
         PermissionSnapshot {
             default,
+            runtime_mode,
             rules,
             session_rules,
             session_approvals: memory.session_allows.len(),
             project_approvals,
         }
+    }
+
+    /// Applies a session-local interactive permission policy override.
+    ///
+    /// Explicit headless policies (including the remote strict guard) are not
+    /// switchable from a client command. The override never weakens mode
+    /// overlays, explicit deny rules, sandbox validation, or malformed-input
+    /// rejection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for launch-fixed policies or the root-at-`/` yolo
+    /// footgun.
+    pub fn set_runtime_mode(&self, mode: Option<HeadlessPermissionMode>) -> Result<(), String> {
+        if matches!(self.policy, PermissionPolicy::Headless(_)) {
+            return Err(
+                "permission mode is fixed by the process launch policy and cannot be changed in this session"
+                    .to_owned(),
+            );
+        }
+        if mode == Some(HeadlessPermissionMode::Yolo) {
+            let memory = lock_read(&self.memory);
+            if root_yolo_footgun(
+                rustix::process::geteuid().is_root(),
+                &memory.workspace_roots,
+            ) {
+                return Err("yolo mode is refused for root while a workspace root is /".to_owned());
+            }
+        }
+        *lock_write(&self.runtime_mode) = mode;
+        Ok(())
     }
 
     /// Binds remembered approvals to the complete ordered root identity.
@@ -250,6 +288,12 @@ impl PermissionGate {
         roots: impl IntoIterator<Item = impl AsRef<Path>>,
     ) -> Result<PermissionGenerationUpdate, std::io::Error> {
         let roots = canonical_workspace_roots(roots);
+        if self.yolo_active() && root_yolo_footgun(rustix::process::geteuid().is_root(), &roots) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "yolo mode is refused for root while a workspace root is /",
+            ));
+        }
         let namespace = workspace_namespace(&roots);
         let mut memory = lock_write(&self.memory);
         if memory.workspace_namespace == namespace {
@@ -295,9 +339,16 @@ impl PermissionGate {
         roots: impl IntoIterator<Item = impl AsRef<Path>>,
     ) -> Result<Self, std::io::Error> {
         let roots = canonical_workspace_roots(roots);
+        if self.yolo_active() && root_yolo_footgun(rustix::process::geteuid().is_root(), &roots) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "yolo mode is refused for root while a workspace root is /",
+            ));
+        }
         let generation = lock_read(&self.memory).generation.saturating_add(1);
         Ok(Self {
             policy: self.policy.clone(),
+            runtime_mode: RwLock::new(*lock_read(&self.runtime_mode)),
             restrictive_rules: self.restrictive_rules.clone(),
             memory: RwLock::new(PermissionMemory {
                 workspace_namespace: workspace_namespace(&roots),
@@ -338,6 +389,7 @@ impl PermissionGate {
         let memory = lock_read(&self.memory);
         Ok(Self {
             policy: self.policy.clone(),
+            runtime_mode: RwLock::new(*lock_read(&self.runtime_mode)),
             restrictive_rules: Some(restrictive_rules),
             memory: RwLock::new(PermissionMemory {
                 workspace_roots: memory.workspace_roots.clone(),
@@ -568,7 +620,16 @@ impl PermissionGate {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn decision_for(&self, request: &PermissionRequest) -> PermissionDecision {
+        if self.yolo_active()
+            && root_yolo_footgun(
+                rustix::process::geteuid().is_root(),
+                &lock_read(&self.memory).workspace_roots,
+            )
+        {
+            return PermissionDecision::Deny;
+        }
         if self.restrictive_rules.as_ref().is_some_and(|rules| {
             rule_decision(
                 &PermissionConfig {
@@ -587,12 +648,16 @@ impl PermissionGate {
         }
         let unsandboxed = bash_sandbox_mode(request) == Some(BashSandboxMode::Unsandboxed);
         let safe_listed = self.is_safe_listed_bash(request);
+        let runtime_mode = *lock_read(&self.runtime_mode);
         match &self.policy {
             PermissionPolicy::Configured(config) => {
                 let mut effective = config.clone();
                 effective
                     .rules
                     .extend(lock_read(&self.session_rules).iter().cloned());
+                if let Some(mode) = runtime_mode {
+                    effective.default = permission_mode_default(mode);
+                }
                 let configured = rule_decision(&effective, request);
                 if unsandboxed {
                     let explicit = unsandboxed_rule_decision(&effective, request);
@@ -600,20 +665,18 @@ impl PermissionGate {
                         || explicit == Some(PermissionDecision::Deny)
                     {
                         PermissionDecision::Deny
-                    } else if explicit == Some(PermissionDecision::Allow) {
+                    } else if explicit == Some(PermissionDecision::Allow)
+                        || runtime_mode == Some(HeadlessPermissionMode::Yolo)
+                    {
                         PermissionDecision::Allow
                     } else {
                         PermissionDecision::Ask
                     }
+                } else if runtime_mode == Some(HeadlessPermissionMode::AutoSafe) {
+                    self.auto_safe_decision(request, effective.rules, safe_listed)
                 } else if configured == PermissionDecision::Ask
-                    && (safe_listed || {
-                        let memory = lock_read(&self.memory);
-                        is_trusted_read_only_request(
-                            request,
-                            &memory.workspace_roots,
-                            &memory.trusted_read_roots,
-                        )
-                    })
+                    && (runtime_mode == Some(HeadlessPermissionMode::Yolo)
+                        || !requires_interactive_approval(request, safe_listed))
                 {
                     PermissionDecision::Allow
                 } else {
@@ -652,7 +715,11 @@ impl PermissionGate {
                 }
                 if rules.is_empty() {
                     match mode {
-                        HeadlessPermissionMode::Strict if safe_listed => PermissionDecision::Allow,
+                        HeadlessPermissionMode::Strict
+                            if !requires_interactive_approval(request, safe_listed) =>
+                        {
+                            PermissionDecision::Allow
+                        }
                         HeadlessPermissionMode::AutoSafe
                             if safe_listed || is_read_only(request) =>
                         {
@@ -661,10 +728,27 @@ impl PermissionGate {
                         _ => default,
                     }
                 } else {
-                    rule_decision(&PermissionConfig { default, rules }, request)
+                    let configured = rule_decision(&PermissionConfig { default, rules }, request);
+                    if configured == PermissionDecision::Ask
+                        && (*mode == HeadlessPermissionMode::Yolo
+                            || (*mode == HeadlessPermissionMode::Strict
+                                && !requires_interactive_approval(request, safe_listed)))
+                    {
+                        PermissionDecision::Allow
+                    } else {
+                        configured
+                    }
                 }
             }
         }
+    }
+
+    fn yolo_active(&self) -> bool {
+        *lock_read(&self.runtime_mode) == Some(HeadlessPermissionMode::Yolo)
+            || matches!(
+                &self.policy,
+                PermissionPolicy::Headless(HeadlessPermissionMode::Yolo)
+            )
     }
 
     fn is_safe_listed_bash(&self, request: &PermissionRequest) -> bool {
@@ -717,6 +801,27 @@ impl PermissionGate {
 enum PermissionPolicy {
     Configured(PermissionConfig),
     Headless(HeadlessPermissionMode),
+}
+
+fn root_yolo_footgun(is_root: bool, roots: &[PathBuf]) -> bool {
+    is_root && roots.iter().any(|root| root == Path::new("/"))
+}
+
+const fn permission_mode_default(mode: HeadlessPermissionMode) -> PermissionDecision {
+    match mode {
+        HeadlessPermissionMode::Strict => PermissionDecision::Ask,
+        HeadlessPermissionMode::AutoSafe => PermissionDecision::Deny,
+        HeadlessPermissionMode::Yolo => PermissionDecision::Allow,
+    }
+}
+
+fn requires_interactive_approval(request: &PermissionRequest, safe_listed_bash: bool) -> bool {
+    if request.tool_name == "bash" {
+        return !safe_listed_bash;
+    }
+    request
+        .capabilities
+        .contains(&ToolCapability::WriteFilesystem)
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -1230,85 +1335,6 @@ fn is_read_only(request: &PermissionRequest) -> bool {
                 .capabilities
                 .iter()
                 .all(|capability| matches!(capability, ToolCapability::ReadFilesystem)))
-}
-
-fn is_trusted_read_only_request(
-    request: &PermissionRequest,
-    workspace_roots: &[PathBuf],
-    trusted_read_roots: &[PathBuf],
-) -> bool {
-    if !is_read_only(request)
-        || !matches!(
-            request.tool_name.as_str(),
-            "read" | "grep" | "glob" | "ls" | "symbols"
-        )
-        || workspace_roots.is_empty()
-        || trusted_read_roots.is_empty()
-        || request
-            .arguments
-            .get("network_domains")
-            .is_some_and(|domains| {
-                normalize_network_domains(domains).is_none_or(|domains| !domains.is_empty())
-            })
-    {
-        return false;
-    }
-    if request.tool_name == "symbols" {
-        return workspace_roots
-            .iter()
-            .all(|root| trusted_read_roots.contains(root));
-    }
-    let path = request
-        .arguments
-        .get("path")
-        .and_then(Value::as_str)
-        .or_else(|| matches!(request.tool_name.as_str(), "glob" | "grep" | "ls").then_some("."));
-    let Some(path) = path else { return false };
-    let supplied = Path::new(path);
-    let candidates = if supplied == Path::new(".")
-        && matches!(request.tool_name.as_str(), "glob" | "grep" | "ls")
-        && workspace_roots.len() > 1
-    {
-        workspace_roots.to_vec()
-    } else {
-        let Some(candidate) = resolve_workspace_read_path(workspace_roots, supplied) else {
-            return false;
-        };
-        vec![candidate]
-    };
-    candidates.iter().all(|candidate| {
-        workspace_roots
-            .iter()
-            .filter(|root| candidate == *root || candidate.starts_with(root))
-            .max_by_key(|root| root.components().count())
-            .is_some_and(|owning_root| trusted_read_roots.contains(owning_root))
-    })
-}
-
-fn resolve_workspace_read_path(roots: &[PathBuf], supplied: &Path) -> Option<PathBuf> {
-    let candidate = if supplied.is_absolute() {
-        supplied.to_path_buf()
-    } else {
-        let mut components = supplied.components();
-        if components.next().is_some_and(
-            |component| matches!(component, std::path::Component::Normal(name) if name == "@root"),
-        ) {
-            let std::path::Component::Normal(index) = components.next()? else {
-                return None;
-            };
-            let index = index.to_str()?.parse::<usize>().ok()?;
-            components.fold(roots.get(index)?.clone(), |joined, component| {
-                joined.join(component.as_os_str())
-            })
-        } else {
-            roots.first()?.join(supplied)
-        }
-    };
-    let canonical = fs::canonicalize(candidate).ok()?;
-    roots
-        .iter()
-        .any(|root| canonical == *root || canonical.starts_with(root))
-        .then_some(canonical)
 }
 
 fn bash_sandbox_mode(request: &PermissionRequest) -> Option<BashSandboxMode> {
@@ -2168,7 +2194,7 @@ mod tests {
         );
         assert_eq!(
             gate.authorize(
-                request("git status && cat README", read),
+                request("git status && /bin/echo README", read),
                 &Decision(ApprovalDecision::Deny)
             )
             .await,
@@ -2310,9 +2336,9 @@ mod tests {
             .with_trusted_read_roots([primary.path()]);
         assert_eq!(
             partially_trusted.authorize(symbols(), &no_prompt).await,
-            PermissionOutcome::Denied
+            PermissionOutcome::Allowed
         );
-        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 1);
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -2331,7 +2357,7 @@ mod tests {
         };
         assert_eq!(
             trusted.authorize(extension, &no_prompt).await,
-            PermissionOutcome::Denied
+            PermissionOutcome::Allowed
         );
 
         let network = PermissionRequest {
@@ -2346,9 +2372,9 @@ mod tests {
         };
         assert_eq!(
             trusted.authorize(network, &no_prompt).await,
-            PermissionOutcome::Denied
+            PermissionOutcome::Allowed
         );
-        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 2);
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
 
         let denied = PermissionGate::from_config(PermissionConfig {
             default: PermissionDecision::Ask,
@@ -2370,7 +2396,7 @@ mod tests {
             denied.authorize(symbols, &no_prompt).await,
             PermissionOutcome::Denied
         );
-        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 2);
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -2406,7 +2432,7 @@ mod tests {
         };
         assert_eq!(
             gate.authorize(secondary_read, &no_prompt).await,
-            PermissionOutcome::Denied
+            PermissionOutcome::Allowed
         );
 
         let all_roots_glob = PermissionRequest {
@@ -2418,7 +2444,7 @@ mod tests {
         };
         assert_eq!(
             gate.authorize(all_roots_glob, &no_prompt).await,
-            PermissionOutcome::Denied
+            PermissionOutcome::Allowed
         );
         let default_all_roots_ls = PermissionRequest {
             id: "default-all-roots-ls".to_owned(),
@@ -2429,9 +2455,9 @@ mod tests {
         };
         assert_eq!(
             gate.authorize(default_all_roots_ls, &no_prompt).await,
-            PermissionOutcome::Denied
+            PermissionOutcome::Allowed
         );
-        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 3);
+        assert_eq!(no_prompt.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -2478,9 +2504,9 @@ mod tests {
         };
         assert_eq!(
             gate.authorize(request, &prompt).await,
-            PermissionOutcome::Denied
+            PermissionOutcome::Allowed
         );
-        assert_eq!(prompt.0.load(Ordering::SeqCst), 1);
+        assert_eq!(prompt.0.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -3461,6 +3487,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_policy_prompts_only_for_file_writes_and_unsafe_bash() {
+        let gate = PermissionGate::new(PermissionDecision::Ask);
+        let approver = CountingDeny(AtomicUsize::new(0));
+        for request in [
+            PermissionRequest {
+                id: "read".to_owned(),
+                tool_name: "read".to_owned(),
+                arguments: json!({"path": "README.md"}),
+                capabilities: vec![ToolCapability::ReadFilesystem],
+                approval_diff: None,
+            },
+            PermissionRequest {
+                id: "todo".to_owned(),
+                tool_name: "todo".to_owned(),
+                arguments: json!({"action": "clear"}),
+                capabilities: Vec::new(),
+                approval_diff: None,
+            },
+            PermissionRequest {
+                id: "webfetch".to_owned(),
+                tool_name: "webfetch".to_owned(),
+                arguments: json!({"url": "https://example.com/"}),
+                capabilities: vec![ToolCapability::Network],
+                approval_diff: None,
+            },
+            PermissionRequest {
+                id: "mcp".to_owned(),
+                tool_name: "mcp__fixture__inspect".to_owned(),
+                arguments: json!({}),
+                capabilities: vec![ToolCapability::Network, ToolCapability::Execute],
+                approval_diff: None,
+            },
+        ] {
+            assert_eq!(
+                gate.authorize(request, &approver).await,
+                PermissionOutcome::Allowed
+            );
+        }
+        assert_eq!(approver.0.load(Ordering::SeqCst), 0);
+
+        let write = PermissionRequest {
+            id: "write".to_owned(),
+            tool_name: "write".to_owned(),
+            arguments: json!({"path": "README.md", "content": "changed"}),
+            capabilities: vec![
+                ToolCapability::ReadFilesystem,
+                ToolCapability::WriteFilesystem,
+            ],
+            approval_diff: None,
+        };
+        assert_eq!(
+            gate.authorize(write, &approver).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            gate.authorize(
+                request(
+                    "/bin/echo unsafe",
+                    vec![ToolCapability::Execute, ToolCapability::WriteFilesystem],
+                ),
+                &approver,
+            )
+            .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(approver.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn runtime_yolo_is_session_local_reversible_and_never_weakens_explicit_denies() {
+        let gate = PermissionGate::from_config(PermissionConfig {
+            default: PermissionDecision::Ask,
+            rules: vec![
+                PermissionRule {
+                    pattern: "write(denied.txt)".to_owned(),
+                    action: PermissionDecision::Deny,
+                },
+                PermissionRule {
+                    pattern: "write(asked.txt)".to_owned(),
+                    action: PermissionDecision::Ask,
+                },
+            ],
+        });
+        let deny = CountingDeny(AtomicUsize::new(0));
+        let write = |path: &str| PermissionRequest {
+            id: format!("write-{path}"),
+            tool_name: "write".to_owned(),
+            arguments: json!({"path": path, "content": "fixture"}),
+            capabilities: vec![ToolCapability::WriteFilesystem],
+            approval_diff: None,
+        };
+
+        assert_eq!(
+            gate.authorize(write("allowed.txt"), &deny).await,
+            PermissionOutcome::Denied
+        );
+        gate.set_runtime_mode(Some(HeadlessPermissionMode::Yolo))
+            .expect("interactive yolo");
+        assert_eq!(
+            gate.authorize(write("allowed.txt"), &deny).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            gate.authorize(write("asked.txt"), &deny).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            gate.authorize(write("denied.txt"), &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(
+            gate.snapshot().runtime_mode,
+            Some(HeadlessPermissionMode::Yolo)
+        );
+        gate.set_runtime_mode(None)
+            .expect("restore configured policy");
+        assert_eq!(
+            gate.authorize(write("allowed.txt"), &deny).await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(deny.0.load(Ordering::SeqCst), 2);
+
+        let fixed = PermissionGate::for_headless_mode(HeadlessPermissionMode::Strict);
+        assert!(
+            fixed
+                .set_runtime_mode(Some(HeadlessPermissionMode::Yolo))
+                .is_err(),
+            "remote/headless strict policy must not be client-switchable"
+        );
+        assert!(root_yolo_footgun(true, &[PathBuf::from("/")]));
+        assert!(!root_yolo_footgun(false, &[PathBuf::from("/")]));
+        assert!(!root_yolo_footgun(true, &[PathBuf::from("/tmp/project")]));
+    }
+
+    #[tokio::test]
     async fn project_approval_round_trips_privately() {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("approvals.json");
@@ -3654,7 +3815,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webfetch_remembrance_is_same_origin_not_exact_path() {
+    async fn webfetch_is_no_prompt_for_every_valid_public_origin() {
         let gate = PermissionGate::new(PermissionDecision::Ask);
         let request = |url: &str| PermissionRequest {
             id: "webfetch".to_owned(),
@@ -3684,9 +3845,14 @@ mod tests {
         ] {
             assert_eq!(
                 gate.authorize(request(url), &deny).await,
-                PermissionOutcome::Denied
+                PermissionOutcome::Allowed
             );
         }
-        assert_eq!(deny.0.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            gate.authorize(request("file:///private/etc/passwd"), &deny)
+                .await,
+            PermissionOutcome::Denied
+        );
+        assert_eq!(deny.0.load(Ordering::SeqCst), 0);
     }
 }

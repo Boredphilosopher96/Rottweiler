@@ -152,11 +152,28 @@ fn built_in_safe_segment(command: &str) -> bool {
     let Ok(argv) = shell_words::split(command) else {
         return false;
     };
-    if audited_system_git().is_none() || argv.first().map(String::as_str) != Some("git") {
-        return false;
+    match argv.first().map(String::as_str) {
+        Some("git") if audited_system_git().is_some() => match argv.get(1).map(String::as_str) {
+            Some("status") => safe_git_status_arguments(&argv[2..]),
+            Some("diff") => safe_git_diff_arguments(&argv[2..]),
+            _ => false,
+        },
+        Some("cat") => audited_system_read_command("cat").is_some(),
+        Some("ls") => audited_system_read_command("ls").is_some(),
+        Some("bat") => audited_bat().is_some() && safe_bat_arguments(&argv[1..]),
+        _ => false,
     }
-    argv.get(1).is_some_and(|argument| argument == "status")
-        && safe_git_status_arguments(&argv[2..])
+}
+
+fn safe_bat_arguments(arguments: &[String]) -> bool {
+    !arguments.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "--pager" | "-P" | "--paging" | "--diff" | "-d" | "--config-file"
+        ) || argument.starts_with("--pager=")
+            || argument.starts_with("--paging=")
+            || argument.starts_with("--config-file=")
+    })
 }
 
 fn safe_command_segments(command: &str) -> Option<Vec<(String, Option<String>)>> {
@@ -266,18 +283,77 @@ fn safe_git_status_arguments(arguments: &[String]) -> bool {
     true
 }
 
-pub(crate) fn audited_system_git() -> Option<&'static PathBuf> {
-    static SYSTEM_GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
-    SYSTEM_GIT.get_or_init(resolve_audited_system_git).as_ref()
+fn safe_git_diff_arguments(arguments: &[String]) -> bool {
+    !arguments.iter().any(|argument| {
+        matches!(
+            argument.as_str(),
+            "--ext-diff" | "--textconv" | "--no-index" | "--output"
+        ) || argument.starts_with("--output=")
+    })
 }
 
-fn resolve_audited_system_git() -> Option<PathBuf> {
+fn audited_system_read_command(name: &str) -> Option<&'static PathBuf> {
+    static CAT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    static LS: OnceLock<Option<PathBuf>> = OnceLock::new();
+    let (slot, candidates): (&OnceLock<Option<PathBuf>>, &[&str]) = match name {
+        "cat" => (&CAT, &["/bin/cat", "/usr/bin/cat"]),
+        "ls" => (&LS, &["/bin/ls", "/usr/bin/ls"]),
+        _ => return None,
+    };
+    slot.get_or_init(|| resolve_audited_system_binary(candidates))
+        .as_ref()
+}
+
+fn audited_bat() -> Option<&'static PathBuf> {
+    static BAT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    BAT.get_or_init(|| {
+        resolve_audited_local_binary(&[
+            "/opt/homebrew/bin/bat",
+            "/usr/local/bin/bat",
+            "/usr/bin/bat",
+            "/bin/bat",
+        ])
+    })
+    .as_ref()
+}
+
+fn resolve_audited_local_binary(candidates: &[&str]) -> Option<PathBuf> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
 
-        for candidate in [Path::new("/usr/bin/git"), Path::new("/bin/git")] {
-            let Ok(canonical) = candidate.canonicalize() else {
+        let effective_user = rustix::process::geteuid().as_raw();
+        for candidate in candidates {
+            let Ok(canonical) = Path::new(candidate).canonicalize() else {
+                continue;
+            };
+            let trusted_prefix = canonical.starts_with("/usr/bin")
+                || canonical.starts_with("/bin")
+                || canonical.starts_with("/opt/homebrew/Cellar/bat/")
+                || canonical.starts_with("/usr/local/Cellar/bat/");
+            let Ok(metadata) = canonical.metadata() else {
+                continue;
+            };
+            if trusted_prefix
+                && metadata.is_file()
+                && (metadata.uid() == 0 || metadata.uid() == effective_user)
+                && metadata.mode() & 0o022 == 0
+                && metadata.mode() & 0o111 != 0
+            {
+                return Some(canonical);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_audited_system_binary(candidates: &[&str]) -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        for candidate in candidates {
+            let Ok(canonical) = Path::new(candidate).canonicalize() else {
                 continue;
             };
             if !canonical.starts_with("/usr/bin") && !canonical.starts_with("/bin") {
@@ -292,6 +368,15 @@ fn resolve_audited_system_git() -> Option<PathBuf> {
         }
     }
     None
+}
+
+pub(crate) fn audited_system_git() -> Option<&'static PathBuf> {
+    static SYSTEM_GIT: OnceLock<Option<PathBuf>> = OnceLock::new();
+    SYSTEM_GIT.get_or_init(resolve_audited_system_git).as_ref()
+}
+
+fn resolve_audited_system_git() -> Option<PathBuf> {
+    resolve_audited_system_binary(&["/usr/bin/git", "/bin/git"])
 }
 
 /// Injected process boundary. Core must approve the bash manifest before this is called.
@@ -1309,6 +1394,9 @@ impl CommandExecutor for TokioCommandExecutor {
         let safe = request.sandbox != BashSandboxMode::Unsandboxed
             && request.network_domains.is_empty()
             && self.safety.classify(&request.command) == CommandSafety::SafeListed;
+        let built_in_read_only = request.sandbox != BashSandboxMode::Unsandboxed
+            && request.network_domains.is_empty()
+            && classify_safe_command(&request.command) == CommandSafety::SafeListed;
         let egress_proxy = command_egress_proxy(
             &request,
             safe,
@@ -1324,10 +1412,10 @@ impl CommandExecutor for TokioCommandExecutor {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(proxy.lifecycle());
         }
-        let read_only_policy = (request.sandbox == BashSandboxMode::ReadOnly)
+        let read_only_policy = (request.sandbox == BashSandboxMode::ReadOnly || built_in_read_only)
             .then(|| self.sandbox.as_deref().map(SandboxPolicy::read_only))
             .flatten();
-        let sandbox = if request.sandbox == BashSandboxMode::ReadOnly {
+        let sandbox = if request.sandbox == BashSandboxMode::ReadOnly || built_in_read_only {
             read_only_policy.as_ref()
         } else if request.sandbox == BashSandboxMode::Sandboxed {
             self.sandbox.as_deref()
@@ -1482,11 +1570,14 @@ fn guarded_process(
                 .to_owned(),
         ));
     }
-    let safe_git = safe_git_invocation(&request.command);
-    let hardened_git_compound = hardened_git_compound(&request.command);
-    let network = egress_proxy.is_some() && safe_git.is_none() && hardened_git_compound.is_none();
-    let shell_command = hardened_git_compound.as_deref().unwrap_or(&request.command);
-    let shell_args = safe_git.as_ref().map_or_else(
+    let safe_invocation = safe_builtin_invocation(&request.command);
+    let hardened_safe_compound = hardened_safe_compound(&request.command);
+    let network =
+        egress_proxy.is_some() && safe_invocation.is_none() && hardened_safe_compound.is_none();
+    let shell_command = hardened_safe_compound
+        .as_deref()
+        .unwrap_or(&request.command);
+    let shell_args = safe_invocation.as_ref().map_or_else(
         || {
             vec![
                 OsString::from("-c"),
@@ -1499,7 +1590,7 @@ fn guarded_process(
             let mut shell_args = vec![
                 OsString::from("-c"),
                 OsString::from("IFS= read -r _ || exit 125; exec \"$@\""),
-                OsString::from("rottweiler-safe-git-launcher"),
+                OsString::from("rottweiler-safe-command-launcher"),
             ];
             shell_args.extend(argv.iter().map(OsString::from));
             shell_args
@@ -1547,8 +1638,8 @@ fn guarded_process(
         .kill_on_drop(true);
     sanitize_shell_control_environment(&mut command);
     configure_proxy_environment(&mut command, network.then_some(egress_proxy).flatten());
-    if safe_git.is_some() || hardened_git_compound.is_some() {
-        sanitize_git_environment(&mut command, request);
+    if safe_invocation.is_some() || hardened_safe_compound.is_some() {
+        sanitize_safe_command_environment(&mut command, request);
     }
     #[cfg(unix)]
     command.process_group(0);
@@ -1584,15 +1675,15 @@ fn sanitize_shell_control_environment(command: &mut Command) {
     }
 }
 
-fn safe_git_invocation(command: &str) -> Option<Vec<String>> {
+fn safe_builtin_invocation(command: &str) -> Option<Vec<String>> {
     let segments = safe_command_segments(command)?;
     if segments.len() != 1 || !built_in_safe_segment(&segments[0].0) {
         return None;
     }
-    hardened_git_argv(&segments[0].0)
+    hardened_safe_argv(&segments[0].0)
 }
 
-fn hardened_git_compound(command: &str) -> Option<String> {
+fn hardened_safe_compound(command: &str) -> Option<String> {
     let segments = safe_command_segments(command)?;
     if segments.len() < 2
         || !segments
@@ -1603,7 +1694,7 @@ fn hardened_git_compound(command: &str) -> Option<String> {
     }
     let mut hardened = String::new();
     for (segment, operator) in segments {
-        let argv = hardened_git_argv(&segment)?;
+        let argv = hardened_safe_argv(&segment)?;
         if !hardened.is_empty() {
             hardened.push(' ');
         }
@@ -1622,11 +1713,38 @@ fn hardened_git_compound(command: &str) -> Option<String> {
     Some(hardened)
 }
 
+fn hardened_safe_argv(command: &str) -> Option<Vec<String>> {
+    let supplied = shell_words::split(command).ok()?;
+    match supplied.first().map(String::as_str) {
+        Some("git") => hardened_git_argv(command),
+        Some(name @ ("cat" | "ls")) => {
+            let executable = audited_system_read_command(name)?;
+            let mut argv = vec![executable.to_string_lossy().into_owned()];
+            argv.extend(supplied.into_iter().skip(1));
+            Some(argv)
+        }
+        Some("bat") if safe_bat_arguments(&supplied[1..]) => {
+            let executable = audited_bat()?;
+            let mut argv = vec![executable.to_string_lossy().into_owned()];
+            argv.extend(supplied.into_iter().skip(1));
+            Some(argv)
+        }
+        _ => None,
+    }
+}
+
 fn hardened_git_argv(command: &str) -> Option<Vec<String>> {
     let mut supplied = shell_words::split(command).ok()?;
     let git = audited_system_git()?;
     supplied.remove(0);
-    let status_arguments = supplied.split_off(1);
+    let subcommand = supplied.first()?.clone();
+    let arguments = supplied.split_off(1);
+    if (subcommand == "status" && !safe_git_status_arguments(&arguments))
+        || (subcommand == "diff" && !safe_git_diff_arguments(&arguments))
+        || !matches!(subcommand.as_str(), "status" | "diff")
+    {
+        return None;
+    }
     let mut argv = vec![
         git.to_string_lossy().into_owned(),
         "-c".to_owned(),
@@ -1636,44 +1754,28 @@ fn hardened_git_argv(command: &str) -> Option<Vec<String>> {
         "-c".to_owned(),
         "core.hooksPath=/dev/null".to_owned(),
         "-c".to_owned(),
+        "core.attributesFile=/dev/null".to_owned(),
+        "-c".to_owned(),
+        "diff.external=".to_owned(),
+        "-c".to_owned(),
         "pager.status=false".to_owned(),
-        "status".to_owned(),
+        "-c".to_owned(),
+        "pager.diff=false".to_owned(),
+        subcommand.clone(),
     ];
-    argv.extend(status_arguments);
+    if subcommand == "diff" {
+        argv.extend(["--no-ext-diff".to_owned(), "--no-textconv".to_owned()]);
+    }
+    argv.extend(arguments);
     Some(argv)
 }
 
-fn sanitize_git_environment(command: &mut Command, request: &CommandRequest) {
-    for key in std::env::vars_os()
-        .map(|(key, _)| key)
-        .chain(request.env.keys().map(OsString::from))
-    {
-        if key
-            .to_string_lossy()
-            .to_ascii_uppercase()
-            .starts_with("GIT_")
-        {
-            command.env_remove(key);
-        }
-    }
-    for key in [
-        "BASH_ENV",
-        "ENV",
-        "SHELLOPTS",
-        "CDPATH",
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "DYLD_FRAMEWORK_PATH",
-        "DYLD_FALLBACK_LIBRARY_PATH",
-        "XDG_CONFIG_HOME",
-    ] {
-        command.env_remove(key);
-    }
+fn sanitize_safe_command_environment(command: &mut Command, _request: &CommandRequest) {
     command
+        .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", "/dev/null")
+        .env("LC_ALL", "C")
         .env("XDG_CONFIG_HOME", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -2524,17 +2626,33 @@ mod tests {
     }
 
     #[test]
-    fn built_in_safe_list_accepts_only_plain_git_status() {
+    fn built_in_safe_list_accepts_hardened_read_only_commands() {
         for command in [
             "git status",
             "git status --short",
             "git status --porcelain=v1 -- .",
+            "git diff",
+            "git diff --stat -- .",
+            "cat Cargo.toml",
+            "cat -- Cargo.toml",
+            "ls",
+            "ls -la crates",
+            "cat Cargo.toml && git diff --stat; ls crates",
         ] {
             assert_eq!(
                 classify_safe_command(command),
                 CommandSafety::SafeListed,
                 "expected safe-list classification for {command}"
             );
+        }
+        if audited_bat().is_some() {
+            for command in ["bat README.md", "bat -n --color=always src/lib.rs"] {
+                assert_eq!(
+                    classify_safe_command(command),
+                    CommandSafety::SafeListed,
+                    "expected installed bat to use the read-only safe path"
+                );
+            }
         }
         for command in [
             "git clean -fd",
@@ -2549,6 +2667,18 @@ mod tests {
             "PATH=. git status",
             "env PATH=. git status",
             "git status --help",
+            "git diff --output=leak.patch",
+            "git diff --ext-diff",
+            "git diff --textconv",
+            "git diff --no-index first second",
+            "cat Cargo.toml > copy",
+            "ls | tee listing",
+            "/bin/cat Cargo.toml",
+            "PATH=. cat Cargo.toml",
+            "bat --pager='sh -c touch${IFS}escaped' README.md",
+            "bat --paging=always README.md",
+            "bat --diff README.md",
+            "bat --config-file=project.conf README.md",
             "sh -c 'git status'",
             "",
         ] {
@@ -2558,6 +2688,65 @@ mod tests {
                 "expected approval classification for {command}"
             );
         }
+        assert!(!safe_bat_arguments(&["--pager=less".to_owned()]));
+        assert!(safe_bat_arguments(&[
+            "--color=always".to_owned(),
+            "README.md".to_owned(),
+        ]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn safe_cat_uses_the_audited_binary_and_ignores_caller_environment() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
+        let root = tempdir().expect("temporary directory");
+        let malicious = root.path().join("malicious");
+        std::fs::create_dir(&malicious).expect("malicious directory");
+        let marker = root.path().join("workspace-cat-ran");
+        let fake_cat = malicious.join("cat");
+        std::fs::write(
+            &fake_cat,
+            format!(
+                "#!/bin/sh\ntouch '{}'\nprintf MALICIOUS\n",
+                marker.display()
+            ),
+        )
+        .expect("fake cat");
+        std::fs::set_permissions(&fake_cat, std::fs::Permissions::from_mode(0o755))
+            .expect("fake cat mode");
+        std::fs::write(root.path().join("input.txt"), "expected output\n").expect("input");
+
+        let sink = Arc::new(RecordingSink::default());
+        let result = TokioCommandExecutor::default()
+            .run(
+                CommandRequest {
+                    command: "cat input.txt".to_owned(),
+                    cwd: root.path().to_path_buf(),
+                    env: BTreeMap::from([
+                        ("PATH".to_owned(), malicious.display().to_string()),
+                        ("BASH_ENV".to_owned(), fake_cat.display().to_string()),
+                        ("GIT_CONFIG_COUNT".to_owned(), "999".to_owned()),
+                    ]),
+                    network_domains: Vec::new(),
+                    sandbox: BashSandboxMode::Sandboxed,
+                },
+                CancellationToken::default(),
+                sink.clone(),
+            )
+            .await
+            .expect("safe cat");
+        assert_eq!(result.exit_code, 0);
+        assert!(!marker.exists(), "workspace-controlled cat was executed");
+        let output = sink
+            .0
+            .lock()
+            .expect("sink")
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<String>();
+        assert_eq!(output, "expected output\n");
     }
 
     #[test]

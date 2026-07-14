@@ -268,6 +268,12 @@ pub trait CodeIntelligenceProvider: Send + Sync {
     async fn definition(&self, path: &Path, position: Position) -> IntelligenceResult<Location>;
     async fn references(&self, path: &Path, position: Position) -> IntelligenceResult<Location>;
     async fn rename(&self, path: &Path, position: Position, new_name: &str) -> RenameResult;
+
+    /// Short identities for language-server processes that are active now.
+    /// Implementations backed only by syntax indexing return no services.
+    async fn active_lsp_servers(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[async_trait]
@@ -286,6 +292,10 @@ impl CodeIntelligenceProvider for CodeIntelligence {
 
     async fn rename(&self, path: &Path, position: Position, new_name: &str) -> RenameResult {
         self.rename(path, position, new_name).await
+    }
+
+    async fn active_lsp_servers(&self) -> Vec<String> {
+        self.active_server_names().await
     }
 }
 
@@ -675,6 +685,7 @@ mod tests {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn production_lsp_spawner_denies_writes_and_network_while_stdio_works() {
         let _lifecycle = crate::acquire_process_lifecycle_test_gate().await;
         if rw_sandbox::probe().support != rw_sandbox::SandboxSupport::Enforced {
@@ -769,6 +780,10 @@ if "TYPE_ERROR" in text:
             .await;
         assert_eq!(result.backend, rw_intel::IntelligenceBackend::Lsp);
         assert_eq!(result.items[0].message, "content-derived type error");
+        assert_eq!(
+            intelligence.active_lsp_servers().await,
+            vec!["fake-lsp.py".to_owned()]
+        );
         assert!(!workspace_canary.exists());
         assert!(!outside_canary.exists());
         assert_eq!(

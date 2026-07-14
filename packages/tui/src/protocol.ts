@@ -32,6 +32,8 @@ export type {
   PermissionApprovalScope,
   PermissionRuleDescriptor,
   PermissionStateDescriptor,
+  RuntimeServiceDescriptor,
+  RuntimeServiceKind,
   ProviderAuthKind,
   ProviderAuthAttemptId,
   ProviderAuthChallenge,

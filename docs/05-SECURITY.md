@@ -47,16 +47,16 @@ action = "deny"
 
 **Matching semantics (defined, not vibes):** patterns match against a *canonicalized* command, not the raw string — the command is parsed into argv; the binary is resolved to its basename; compound commands (`&&`, `||`, `;`, pipes, subshells) are split and **every** simple command must independently pass; flag order is normalized where the parser knows the tool (`rm -fr` ≡ `rm -rf`); anything the parser can't decompose (eval, backticks, `bash -c` strings) matches only `default`, never an `allow` rule. And stated plainly: **deny-by-pattern is best-effort UX, the sandbox is the actual security boundary** — a pattern rule may prevent a prompt, it must never be the only thing preventing damage.
 
-- MCP tools carry no trustworthy capability manifest → they classify as **network + exec** by default (always `ask`), downgradable per-server/per-tool by explicit user config. A benign-*looking* MCP tool is still a third-party process output.
+- The normal interactive policy prompts only for filesystem-writing tools and shell commands outside the hardened read-only safe-list. Reads, session todo updates, web fetch/search, and non-writing network/exec tools do not prompt. Explicit deny rules, MCP/plugin fingerprint approval, sandbox grants, and network policy remain independent gates. MCP tools that declare filesystem writes prompt like built-ins; under-declared plugin/MCP capabilities never expand their process sandbox.
 - Modes overlay policies: Discuss denies all mutating capabilities; Plan allows read-only; Execute uses the configured policy.
-- Non-interactive runs pick a policy via `--permission-mode {strict|auto-safe|yolo}`; `yolo` requires an explicit flag *and* refuses to run as root against `/` (footgun rails).
+- Non-interactive runs pick a policy via `--permission-mode {strict|auto-safe|yolo}`. A local interactive session using normal configured policy may switch its session-local override with `/permissions mode {default|strict|auto-safe|yolo}`. A launch-fixed headless or remote-strict policy cannot be weakened from a client command. `yolo` refuses to run as root against `/` in either path (footgun rails).
 - Approvals can be remembered at three scopes: once / session / project (written to project config).
 
 ## Layer 2 — OS sandbox for `bash`
 
 Commands classified before execution:
 
-1. **Safe-list** (built-in + user-extendable): read-only commands (`ls`, `cat`, `git status`, `rg`, build/test commands the user has blessed) → run **sandboxed, no prompt**.
+1. **Safe-list** (built-in + user-extendable): hardened read-only commands (`ls`, `cat`, an audited installed `bat`, `git status`, `git diff`; plus commands the user has explicitly blessed) → run **sandboxed, no prompt**. Built-ins are rewritten to audited absolute binaries with hostile shell/Git environment removed, and run in a write-denied sandbox. `bat` rejects pager, diff, paging, and config-file escape flags on this path.
 2. **Everything else** → prompt (per Layer 1), then run **sandboxed** with write access scoped to the workspace + scratch dir.
 3. **Escape hatch**: user can approve unsandboxed execution for commands that legitimately need it (e.g. `docker`), pattern-rememberable.
 
@@ -68,7 +68,7 @@ Sandbox implementation (`rw-sandbox`):
   3. **Plain seccomp deny-all** (floor): commands *not* granted network get `connect`/`bind` denied outright — no address filtering needed for the deny case.
   4. bubblewrap fallback; if none of this is available, degrade to prompt-everything and say so.
 - **Windows**: no sandbox in v1 — loud warning, stricter default prompting, recommend WSL.
-- Network egress inside sandbox: denied by default; `webfetch` and granted commands go through a local egress proxy enforcing a domain allowlist (default allows package registries and nothing else). **The recovery flow is defined, not dead-on-arrival**: a request to a domain outside the allowlist triggers an `ask` prompt ("allow example.com once / this session / always?"); remembered approvals feed the allowlist. Regardless of allowlist state, the egress proxy **hard-denies private and local destinations** — RFC-1918, link-local (169.254.x, cloud metadata endpoints), and loopback — closing the SSRF path from prompt-injected fetches; this deny is not user-configurable per-domain, only by an explicit global opt-out. The egress proxy is distinct from the user-configured outbound HTTP proxy (01 §4) and **chains to it** when one is set — policy enforcement first, then the corporate/network proxy.
+- Network egress inside sandbox is denied unless the invocation declares its bounded destinations. `webfetch` and granted commands go through a local egress proxy that admits only the normalized domains on that invocation; fetching a valid public URL does not create a routine permission prompt. The proxy **hard-denies private and local destinations** — RFC-1918, link-local (169.254.x, cloud metadata endpoints), and loopback — closing the SSRF path from prompt-injected fetches; this deny is not user-configurable per-domain, only by an explicit global opt-out. The egress proxy is distinct from the user-configured outbound HTTP proxy (01 §4) and **chains to it** when one is set — policy enforcement first, then the corporate/network proxy.
 
 ## Layer 3 — Data protection
 

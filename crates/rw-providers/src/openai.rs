@@ -41,6 +41,20 @@ pub enum OpenAiWireMode {
     Responses,
 }
 
+/// Request shape used for an OpenAI-compatible Chat Completions connection.
+///
+/// This is selected by the configured connection, never by a hardcoded model
+/// catalog. Strict `OpenAI` connections use the current `OpenAI` fields, while
+/// generic compatible servers receive the older, broadly-supported shape.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum OpenAiChatRequestProfile {
+    /// Current `OpenAI` Chat Completions request fields.
+    #[default]
+    OpenAi,
+    /// Conservative fields accepted by common OpenAI-compatible servers.
+    Compatible,
+}
+
 /// Runtime settings for an OpenAI-compatible endpoint.
 #[derive(Clone, Debug)]
 pub struct OpenAiCompatibleConfig {
@@ -58,6 +72,8 @@ pub struct OpenAiCompatibleConfig {
     pub network_policy: NetworkPolicy,
     /// Selected request/stream dialect.
     pub wire_mode: OpenAiWireMode,
+    /// Connection-level Chat Completions request shape. Ignored for Responses.
+    pub chat_request_profile: OpenAiChatRequestProfile,
     /// Whether this endpoint supports function tool calls.
     pub tool_calling: bool,
     /// Prompt-cache behavior declared by this endpoint.
@@ -116,7 +132,11 @@ impl OpenAiCompatibleProvider {
         let reasoning_endpoint = !self.config.supported_reasoning_efforts.is_empty();
         let material = self.config.auth.material().await?;
         let mut body = match self.config.wire_mode {
-            OpenAiWireMode::ChatCompletions => build_chat_request(&request, reasoning_endpoint),
+            OpenAiWireMode::ChatCompletions => build_chat_request(
+                &request,
+                reasoning_endpoint,
+                self.config.chat_request_profile,
+            ),
             OpenAiWireMode::Responses => build_responses_request(&request, reasoning_endpoint),
         };
         apply_auth_request_shape(&mut body, &material);
@@ -603,7 +623,11 @@ impl Provider for OpenAiCompatibleProvider {
     }
 }
 
-fn build_chat_request(request: &ProviderRequest, reasoning_endpoint: bool) -> Value {
+fn build_chat_request(
+    request: &ProviderRequest,
+    reasoning_endpoint: bool,
+    profile: OpenAiChatRequestProfile,
+) -> Value {
     let messages = request
         .turns
         .iter()
@@ -627,15 +651,22 @@ fn build_chat_request(request: &ProviderRequest, reasoning_endpoint: bool) -> Va
         ("model".to_owned(), json!(request.model)),
         ("messages".to_owned(), Value::Array(messages)),
         ("stream".to_owned(), Value::Bool(true)),
-        (
-            "stream_options".to_owned(),
-            json!({ "include_usage": true }),
-        ),
-        (
-            "max_completion_tokens".to_owned(),
-            json!(request.max_output_tokens),
-        ),
     ]);
+    match profile {
+        OpenAiChatRequestProfile::OpenAi => {
+            object.insert(
+                "stream_options".to_owned(),
+                json!({ "include_usage": true }),
+            );
+            object.insert(
+                "max_completion_tokens".to_owned(),
+                json!(request.max_output_tokens),
+            );
+        }
+        OpenAiChatRequestProfile::Compatible => {
+            object.insert("max_tokens".to_owned(), json!(request.max_output_tokens));
+        }
+    }
     if !tools.is_empty() {
         object.insert("tools".to_owned(), Value::Array(tools));
     }
@@ -973,12 +1004,9 @@ impl OpenAiState {
         for choice in value["choices"].as_array().into_iter().flatten() {
             let choice_index = choice["index"].as_u64().unwrap_or_default();
             let delta = &choice["delta"];
-            if let Some(text) = delta["content"].as_str()
-                && !text.is_empty()
-            {
-                events.push(ProviderEvent::TextDelta {
-                    text: text.to_owned(),
-                });
+            let text = chat_text_delta(delta);
+            if !text.is_empty() {
+                events.push(ProviderEvent::TextDelta { text });
             }
             let reasoning = delta["reasoning_content"]
                 .as_str()
@@ -994,42 +1022,22 @@ impl OpenAiState {
             }
             for tool in delta["tool_calls"].as_array().into_iter().flatten() {
                 let tool_index = tool["index"].as_u64().unwrap_or_default();
-                let key = (choice_index, tool_index);
-                let state = self.tools.entry(key).or_insert_with(|| OpenAiToolState {
-                    id: tool["id"].as_str().unwrap_or_default().to_owned(),
-                    name: tool["function"]["name"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
-                    arguments: String::new(),
-                    emitted_start: false,
-                });
-                if let Some(id) = tool["id"].as_str()
-                    && !id.is_empty()
-                {
-                    id.clone_into(&mut state.id);
-                }
-                if let Some(name) = tool["function"]["name"].as_str()
-                    && !name.is_empty()
-                {
-                    name.clone_into(&mut state.name);
-                }
-                if !state.emitted_start && !state.id.is_empty() && !state.name.is_empty() {
-                    state.emitted_start = true;
-                    events.push(ProviderEvent::ToolCallStart {
-                        id: state.id.clone(),
-                        name: state.name.clone(),
-                    });
-                }
-                if let Some(fragment) = tool["function"]["arguments"].as_str()
-                    && !fragment.is_empty()
-                {
-                    append_arguments(&mut state.arguments, fragment)?;
-                    events.push(ProviderEvent::ToolCallArgumentsDelta {
-                        id: state.id.clone(),
-                        json_fragment: fragment.to_owned(),
-                    });
-                }
+                self.handle_chat_tool_delta(
+                    &mut events,
+                    choice_index,
+                    tool_index,
+                    tool["id"].as_str(),
+                    &tool["function"],
+                )?;
+            }
+            if delta["function_call"].is_object() {
+                self.handle_chat_tool_delta(
+                    &mut events,
+                    choice_index,
+                    u64::MAX,
+                    None,
+                    &delta["function_call"],
+                )?;
             }
             if let Some(reason) = choice["finish_reason"].as_str() {
                 self.finish_reason = Some(map_finish(Some(reason)));
@@ -1041,6 +1049,55 @@ impl OpenAiState {
             });
         }
         Ok(events)
+    }
+
+    fn handle_chat_tool_delta(
+        &mut self,
+        events: &mut Vec<ProviderEvent>,
+        choice_index: u64,
+        tool_index: u64,
+        provider_id: Option<&str>,
+        function: &Value,
+    ) -> Result<(), ProviderError> {
+        let key = (choice_index, tool_index);
+        let fallback_id = deterministic_chat_tool_id(choice_index, tool_index);
+        let state = self.tools.entry(key).or_insert_with(|| OpenAiToolState {
+            id: provider_id
+                .filter(|id| !id.is_empty())
+                .unwrap_or(&fallback_id)
+                .to_owned(),
+            name: function["name"].as_str().unwrap_or_default().to_owned(),
+            arguments: String::new(),
+            emitted_start: false,
+        });
+        if !state.emitted_start
+            && let Some(id) = provider_id.filter(|id| !id.is_empty())
+        {
+            id.clone_into(&mut state.id);
+        }
+        if let Some(name) = function["name"].as_str().filter(|name| !name.is_empty()) {
+            name.clone_into(&mut state.name);
+        }
+        if !state.emitted_start && !state.name.is_empty() {
+            state.emitted_start = true;
+            events.push(ProviderEvent::ToolCallStart {
+                id: state.id.clone(),
+                name: state.name.clone(),
+            });
+        }
+        if let Some(fragment) = function["arguments"]
+            .as_str()
+            .filter(|fragment| !fragment.is_empty())
+        {
+            append_arguments(&mut state.arguments, fragment)?;
+            if state.emitted_start {
+                events.push(ProviderEvent::ToolCallArgumentsDelta {
+                    id: state.id.clone(),
+                    json_fragment: fragment.to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1247,6 +1304,46 @@ impl OpenAiState {
     }
 }
 
+fn deterministic_chat_tool_id(choice_index: u64, tool_index: u64) -> String {
+    if tool_index == u64::MAX {
+        format!("call-{choice_index}-legacy")
+    } else {
+        format!("call-{choice_index}-{tool_index}")
+    }
+}
+
+fn chat_text_delta(delta: &Value) -> String {
+    let mut text = String::new();
+    append_chat_content(&delta["content"], &mut text);
+    append_chat_content(&delta["refusal"], &mut text);
+    text
+}
+
+fn append_chat_content(value: &Value, output: &mut String) {
+    match value {
+        Value::String(text) => output.push_str(text),
+        Value::Array(parts) => {
+            for part in parts {
+                append_chat_content(part, output);
+            }
+        }
+        Value::Object(part) => {
+            if let Some(text) = part.get("text").and_then(Value::as_str) {
+                output.push_str(text);
+            } else if let Some(text) = part
+                .get("text")
+                .and_then(|text| text.get("value"))
+                .and_then(Value::as_str)
+            {
+                output.push_str(text);
+            } else if let Some(refusal) = part.get("refusal").and_then(Value::as_str) {
+                output.push_str(refusal);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
 fn reasoning_summary(item: &Value) -> String {
     item["summary"]
         .as_array()
@@ -1440,17 +1537,17 @@ mod tests {
     use url::Url;
 
     use crate::{
-        AuthMaterial, CacheBreakpointSupport, NativeWebSearchRequest, NetworkPolicy,
+        AuthMaterial, CacheBreakpointSupport, FinishReason, NativeWebSearchRequest, NetworkPolicy,
         ProviderErrorKind, ProviderEvent, ProviderRequest, Secret, StaticAuth, ThinkingLevel,
         TokenUsage, ToolChoice, ToolDefinition, sse::SseEvent,
     };
 
     use super::{
-        OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiState, OpenAiWireMode,
-        ResponsesReasoningSignature, apply_auth_request_shape, apply_subscription_request_shape,
-        build_chat_request, build_responses_request, decode_responses_reasoning_signature,
-        discovery_endpoint, encode_responses_reasoning_signature, openai_stream_error, parse_usage,
-        responses_items,
+        OpenAiChatRequestProfile, OpenAiCompatibleConfig, OpenAiCompatibleProvider, OpenAiState,
+        OpenAiWireMode, ResponsesReasoningSignature, apply_auth_request_shape,
+        apply_subscription_request_shape, build_chat_request, build_responses_request,
+        decode_responses_reasoning_signature, discovery_endpoint,
+        encode_responses_reasoning_signature, openai_stream_error, parse_usage, responses_items,
     };
 
     #[test]
@@ -1505,6 +1602,151 @@ mod tests {
             events.last(),
             Some(ProviderEvent::Finished { .. })
         ));
+    }
+
+    #[test]
+    fn compatible_chat_missing_ids_are_deterministic() {
+        let mut state = OpenAiState::new(OpenAiWireMode::ChatCompletions);
+        let frames = [
+            json!({"model":"fixture","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}),
+            json!({"model":"fixture","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"arguments":"\"a.rs\"}"}}]},"finish_reason":"tool_calls"}]}),
+        ];
+        let mut events = Vec::new();
+        for frame in frames {
+            events.extend(
+                state
+                    .handle(&SseEvent {
+                        event: None,
+                        data: frame.to_string(),
+                    })
+                    .unwrap_or_else(|error| panic!("compatible chunk must parse: {error}")),
+            );
+        }
+        events.extend(
+            state
+                .handle(&SseEvent {
+                    event: None,
+                    data: "[DONE]".to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("compatible completion must parse: {error}")),
+        );
+
+        assert!(events.contains(&ProviderEvent::ToolCallStart {
+            id: "call-0-2".to_owned(),
+            name: "read".to_owned(),
+        }));
+        assert!(events.contains(&ProviderEvent::ToolCallEnd {
+            id: "call-0-2".to_owned(),
+            arguments: json!({"path":"a.rs"}),
+        }));
+    }
+
+    #[test]
+    fn legacy_function_call_deltas_normalize_to_tool_events() {
+        let mut state = OpenAiState::new(OpenAiWireMode::ChatCompletions);
+        let frames = [
+            json!({"model":"fixture","choices":[{"index":0,"delta":{"function_call":{"name":"shell","arguments":"{\"command\":"}},"finish_reason":null}]}),
+            json!({"model":"fixture","choices":[{"index":0,"delta":{"function_call":{"arguments":"\"pwd\"}"}},"finish_reason":"function_call"}]}),
+        ];
+        let mut events = Vec::new();
+        for frame in frames {
+            events.extend(
+                state
+                    .handle(&SseEvent {
+                        event: None,
+                        data: frame.to_string(),
+                    })
+                    .unwrap_or_else(|error| panic!("legacy chunk must parse: {error}")),
+            );
+        }
+        events.extend(
+            state
+                .handle(&SseEvent {
+                    event: None,
+                    data: "[DONE]".to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("legacy completion must parse: {error}")),
+        );
+
+        assert!(events.contains(&ProviderEvent::ToolCallStart {
+            id: "call-0-legacy".to_owned(),
+            name: "shell".to_owned(),
+        }));
+        assert!(events.contains(&ProviderEvent::ToolCallEnd {
+            id: "call-0-legacy".to_owned(),
+            arguments: json!({"command":"pwd"}),
+        }));
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::Finished {
+                reason: FinishReason::ToolCalls
+            })
+        ));
+    }
+
+    #[test]
+    fn compatible_content_arrays_refusals_and_length_normalize() {
+        let mut state = OpenAiState::new(OpenAiWireMode::ChatCompletions);
+        let frames = [
+            json!({"model":"fixture","choices":[{"index":0,"delta":{"content":[{"type":"text","text":"hello "},{"type":"text","text":{"value":"world"}}]},"finish_reason":null}]}),
+            json!({"model":"fixture","choices":[{"index":0,"delta":{"refusal":"cannot continue"},"finish_reason":"length"}]}),
+        ];
+        let mut events = Vec::new();
+        for frame in frames {
+            events.extend(
+                state
+                    .handle(&SseEvent {
+                        event: None,
+                        data: frame.to_string(),
+                    })
+                    .unwrap_or_else(|error| panic!("content chunk must parse: {error}")),
+            );
+        }
+        events.extend(
+            state
+                .handle(&SseEvent {
+                    event: None,
+                    data: "[DONE]".to_owned(),
+                })
+                .unwrap_or_else(|error| panic!("content completion must parse: {error}")),
+        );
+
+        assert!(events.contains(&ProviderEvent::TextDelta {
+            text: "hello world".to_owned(),
+        }));
+        assert!(events.contains(&ProviderEvent::TextDelta {
+            text: "cannot continue".to_owned(),
+        }));
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::Finished {
+                reason: FinishReason::Length
+            })
+        ));
+    }
+
+    #[test]
+    fn chat_request_shape_is_selected_by_connection_profile() {
+        let request = ProviderRequest {
+            model: "fixture".to_owned(),
+            turns: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: ToolChoice::Auto,
+            max_output_tokens: 128,
+            temperature: None,
+            thinking: ThinkingLevel::Off,
+            cache_hint: None,
+        };
+
+        let openai = build_chat_request(&request, false, OpenAiChatRequestProfile::OpenAi);
+        assert_eq!(openai["max_completion_tokens"], 128);
+        assert_eq!(openai["stream_options"]["include_usage"], true);
+        assert!(openai.get("max_tokens").is_none());
+
+        let compatible = build_chat_request(&request, false, OpenAiChatRequestProfile::Compatible);
+        assert_eq!(compatible["max_tokens"], 128);
+        assert!(compatible.get("max_completion_tokens").is_none());
+        assert!(compatible.get("stream_options").is_none());
     }
 
     #[test]
@@ -1726,7 +1968,7 @@ mod tests {
         };
 
         assert_eq!(
-            build_chat_request(&request, false)["tool_choice"],
+            build_chat_request(&request, false, OpenAiChatRequestProfile::OpenAi)["tool_choice"],
             json!({"type":"function","function":{"name":"live_smoke_ping"}})
         );
         assert_eq!(
@@ -1739,7 +1981,10 @@ mod tests {
             (ToolChoice::None, "none"),
         ] {
             request.tool_choice = choice;
-            assert_eq!(build_chat_request(&request, false)["tool_choice"], expected);
+            assert_eq!(
+                build_chat_request(&request, false, OpenAiChatRequestProfile::OpenAi)["tool_choice"],
+                expected
+            );
             assert_eq!(
                 build_responses_request(&request, false)["tool_choice"],
                 expected
@@ -1996,6 +2241,7 @@ mod tests {
             proxy_authentication: None,
             network_policy: NetworkPolicy::Deny,
             wire_mode: OpenAiWireMode::Responses,
+            chat_request_profile: OpenAiChatRequestProfile::OpenAi,
             tool_calling: true,
             cache_breakpoints: CacheBreakpointSupport::None,
             supported_reasoning_efforts: Vec::new(),

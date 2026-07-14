@@ -94,6 +94,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   #onQuery: ((query: string) => void) | undefined
   #query = ""
   #anchored = false
+  #compact = false
   #desiredHeight = 12
   #secretMode = false
   #textMode = false
@@ -329,12 +330,13 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     title: string,
     items: readonly PickerItem<T>[],
     onSelect: (item: PickerItem<T>) => void,
+    compact = false,
   ): void {
     this.#clearInputModes()
     this.status.visible = false
     this.input.visible = true
     this.select.visible = true
-    this.#configurePresentation(false, items.length)
+    this.#configurePresentation(false, items.length, compact)
     this.title = ` ${title} `
     this.#items = items
     this.#onSelect = onSelect
@@ -412,12 +414,13 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     title: string,
     items: readonly PickerItem<T>[],
     onSelect: (item: PickerItem<T>) => void,
+    compact = false,
   ): void {
     if (!this.visible) {
-      this.open(title, items, onSelect)
+      this.open(title, items, onSelect, compact)
       return
     }
-    this.#configurePresentation(false, items.length)
+    this.#configurePresentation(false, items.length, compact)
     this.status.visible = false
     this.input.visible = true
     this.select.visible = true
@@ -535,11 +538,18 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.input.value = ""
   }
 
-  #configurePresentation(anchored: boolean, itemCount: number): void {
+  #configurePresentation(anchored: boolean, itemCount: number, compact = false): void {
     this.#anchored = anchored
+    this.#compact = !anchored && compact
     this.input.visible = !anchored
+    this.select.showDescription = !this.#compact
     this.gap = anchored ? 0 : 1
-    this.#desiredHeight = anchored ? Math.min(12, Math.max(3, itemCount + 2)) : 12
+    const compactLimit = Math.max(5, Math.floor(this.ctx.height / 2))
+    this.#desiredHeight = anchored
+      ? Math.min(12, Math.max(3, itemCount + 2))
+      : this.#compact
+        ? Math.min(14, compactLimit, Math.max(5, itemCount + 3))
+        : 12
     this.height = this.#desiredHeight
   }
 
@@ -611,8 +621,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   }
 
   #visibleItemCount(): number {
-    // Picker rows render a name plus description.
-    return Math.max(1, Math.floor(this.select.height / 2))
+    return Math.max(1, Math.floor(this.select.height / (this.#compact ? 1 : 2)))
   }
 
   #scrollOffset(): number {
@@ -627,7 +636,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   #mouseIndex(mouseY: number): number | null {
     const localRow = Math.floor(mouseY - this.select.y)
     if (localRow < 0 || localRow >= this.select.height) return null
-    const index = this.#scrollOffset() + Math.floor(localRow / 2)
+    const index = this.#scrollOffset() + Math.floor(localRow / (this.#compact ? 1 : 2))
     return index >= 0 && index < this.select.options.length ? index : null
   }
 }
