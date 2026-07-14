@@ -6472,7 +6472,7 @@ fn lazy_live_provider_model(
         project_config_path: project_config_path.clone(),
     });
     let initial_model: Arc<dyn ModelDriver> = Arc::new(UnavailableHostedModel {
-        alias: persisted_model_alias,
+        alias: persisted_model_alias.clone(),
         reason: "the provider has not been connected for this session yet".to_owned(),
         compaction: base_config.compaction.clone(),
         budget: base_config.budget.clone(),
@@ -6537,6 +6537,7 @@ fn lazy_live_provider_model(
 
     Arc::new(RecomposableHostedModel::new_lazy(
         initial_model,
+        persisted_model_alias,
         fallback_catalog,
         activate,
         initialize,
@@ -6557,6 +6558,7 @@ struct RecomposableHostedModel {
     catalog: Arc<dyn ModelCatalogSource>,
     activate: Arc<HostedProviderActivator>,
     initialize: Option<Arc<HostedRuntimeInitializer>>,
+    initial_alias: Option<String>,
     initial_load_pending: AtomicBool,
     activation: tokio::sync::Mutex<()>,
     activation_deadline: Duration,
@@ -6591,6 +6593,7 @@ impl RecomposableHostedModel {
             Duration::from_secs(5),
             None,
             None,
+            None,
         )
     }
 
@@ -6608,11 +6611,13 @@ impl RecomposableHostedModel {
             Duration::from_secs(5),
             active_post_commit,
             None,
+            None,
         )
     }
 
     fn new_lazy(
         inner: Arc<dyn ModelDriver>,
+        initial_alias: String,
         catalog: Arc<dyn ModelCatalogSource>,
         activate: Arc<HostedProviderActivator>,
         initialize: Arc<HostedRuntimeInitializer>,
@@ -6624,6 +6629,7 @@ impl RecomposableHostedModel {
             Duration::from_secs(5),
             None,
             Some(initialize),
+            Some(initial_alias),
         )
     }
 
@@ -6641,6 +6647,7 @@ impl RecomposableHostedModel {
             activation_deadline,
             None,
             None,
+            None,
         )
     }
 
@@ -6651,6 +6658,7 @@ impl RecomposableHostedModel {
         activation_deadline: Duration,
         active_post_commit: Option<Arc<dyn Fn() + Send + Sync>>,
         initialize: Option<Arc<HostedRuntimeInitializer>>,
+        initial_alias: Option<String>,
     ) -> Self {
         let initial_load_pending = initialize.is_some();
         Self {
@@ -6662,6 +6670,7 @@ impl RecomposableHostedModel {
             catalog,
             activate,
             initialize,
+            initial_alias,
             initial_load_pending: AtomicBool::new(initial_load_pending),
             activation: tokio::sync::Mutex::new(()),
             activation_deadline,
@@ -6762,6 +6771,14 @@ impl RecomposableHostedModel {
                     completes_initialization: true,
                 },
             );
+        if self.initial_alias.as_deref() == Some(alias) {
+            // The session's initial selection is already durable before the
+            // lazy provider runtime exists. Ordinary turns prepare that same
+            // alias without a ModelChanged event, so it is safe and necessary
+            // to activate here. A different alias remains staged until the
+            // model-switch event commits.
+            self.commit_prepared_model(alias);
+        }
         Ok(true)
     }
 }
@@ -12893,6 +12910,7 @@ mod tests {
         });
         let model = RecomposableHostedModel::new_lazy(
             unavailable_hosted_model("openai/live-model"),
+            "openai/live-model".to_owned(),
             Arc::new(QuickCatalogSource(false)),
             unused_hosted_activator(),
             initialize,
@@ -12914,16 +12932,9 @@ mod tests {
             .await
             .expect("first model use should initialize the provider runtime");
         assert_eq!(calls.load(Ordering::Acquire), 1);
-        assert!(
-            model
-                .stream("openai/live-model", quick_connect_request())
-                .is_err(),
-            "preparation must not activate the initialized runtime before persistence"
-        );
-        model.commit_prepared_model("openai/live-model");
         let events = model
             .stream("openai/live-model", quick_connect_request())
-            .expect("committed initialized model should stream")
+            .expect("the already-durable initial model should stream after preparation")
             .collect::<Vec<_>>()
             .await;
         assert!(events.iter().any(|event| {
@@ -12952,6 +12963,7 @@ mod tests {
         });
         let model = Arc::new(RecomposableHostedModel::new_lazy(
             unavailable_hosted_model("openai/live-model"),
+            "openai/live-model".to_owned(),
             Arc::new(QuickCatalogSource(false)),
             unused_hosted_activator(),
             initialize,
@@ -13013,6 +13025,7 @@ mod tests {
         });
         let model = Arc::new(RecomposableHostedModel::new_lazy(
             unavailable_hosted_model("local/base"),
+            "local/base".to_owned(),
             Arc::new(QuickCatalogSource(false)),
             unused_hosted_activator(),
             initialize,
@@ -13113,6 +13126,7 @@ mod tests {
         });
         let model = RecomposableHostedModel::new_lazy(
             unavailable_hosted_model("openai/live-model"),
+            "openai/live-model".to_owned(),
             Arc::new(QuickCatalogSource(false)),
             unused_hosted_activator(),
             initialize,
