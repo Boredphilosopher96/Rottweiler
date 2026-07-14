@@ -9,7 +9,7 @@ import {
   type TreeSitterClient,
 } from "@opentui/core"
 
-import { filetypeForPath, formatPercent, formatSessionCost, formatTokenCount, formatToolArguments } from "../render"
+import { filetypeForPath, formatPercent, formatSessionCost, formatTokenCount, formatToolArguments, presentableUnifiedDiff } from "../render"
 import type {
   ApprovalDecision,
   PlanArtifact,
@@ -250,7 +250,8 @@ export class ReviewPanelRenderable extends BoxRenderable {
       binary ? "Binary file" : "Current worktree diff",
       truncated ? "truncated" : "",
     ].filter(Boolean).join(" · ")
-    this.diff.diff = unifiedDiff
+    this.diff.diff = presentableUnifiedDiff(path, unifiedDiff)
+    this.diff.filetype = filetypeForPath(path)
     this.files.options = []
     this.hint.content = "Esc close"
   }
@@ -286,7 +287,9 @@ export class ReviewPanelRenderable extends BoxRenderable {
 
   #showSelected(): void {
     const file = this.#review?.files[this.files.getSelectedIndex()]
-    this.diff.diff = file?.unifiedDiff ?? ""
+    this.diff.diff = file === undefined
+      ? ""
+      : presentableUnifiedDiff(file.path, file.unifiedDiff)
     this.diff.filetype = file === undefined ? undefined : filetypeForPath(file.path)
     const revertUnavailable = file !== undefined && file.unrestorableReason !== null
     this.hint.content =
@@ -384,6 +387,27 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.select.on(SelectRenderableEvents.ITEM_SELECTED, (index: number) =>
       this.#selected(index),
     )
+    // OpenTUI's SelectRenderable intentionally owns keyboard selection only.
+    // A pointer click otherwise changes focus without committing the row, which
+    // made permission choices appear inert. Mirror the picker interaction: the
+    // press moves the highlight and the matching release activates exactly once.
+    this.select.onMouseDown = (event) => {
+      if (event.button !== 0) return
+      const index = this.#mouseOptionIndex(event.y)
+      if (index === null) return
+      this.select.setSelectedIndex(index)
+      event.preventDefault()
+      event.stopPropagation()
+    }
+    this.select.onMouseUp = (event) => {
+      if (event.button !== 0) return
+      const index = this.#mouseOptionIndex(event.y)
+      if (index === null) return
+      this.select.setSelectedIndex(index)
+      this.select.selectCurrent()
+      event.preventDefault()
+      event.stopPropagation()
+    }
     this.add(this.prompt)
     this.add(this.select)
   }
@@ -473,7 +497,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
           id: "approval-diff",
           width: "100%",
           height: 8,
-          diff: diff.unifiedDiff,
+          diff: presentableUnifiedDiff(diff.path, diff.unifiedDiff),
           ...(filetype === undefined ? {} : { filetype }),
           ...(this.#treeSitterClient === undefined
             ? {}
@@ -488,7 +512,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
         })
         this.insertBefore(this.#diff, this.select)
       } else {
-        this.#diff.diff = diff.unifiedDiff
+        this.#diff.diff = presentableUnifiedDiff(diff.path, diff.unifiedDiff)
         this.#diff.filetype = filetypeForPath(diff.path)
       }
     } else {
@@ -557,6 +581,15 @@ export class InteractionPanelRenderable extends BoxRenderable {
       const value = typeof option?.value === "string" ? option.value : option?.name ?? ""
       this.#callbacks.onAnswer(this.#activeQuestion, [value])
     }
+  }
+
+  #mouseOptionIndex(mouseY: number): number | null {
+    const localRow = Math.floor(mouseY - this.select.y)
+    if (localRow < 0 || localRow >= this.select.height) return null
+    // SelectRenderable uses two rows per option when descriptions are visible.
+    const scrollOffset = (this.select as unknown as { scrollOffset: number }).scrollOffset
+    const index = scrollOffset + Math.floor(localRow / 2)
+    return index >= 0 && index < this.select.options.length ? index : null
   }
 
   #removeDiff(): void {

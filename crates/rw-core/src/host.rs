@@ -245,7 +245,10 @@ impl HostedSession {
     /// lightweight host descriptor. The subscription is created before the
     /// task is spawned, so events committed between registration and the
     /// first poll are either replayed from the sink or retained by broadcast.
-    async fn project_durable_descriptor(&self) -> Result<(), HostError> {
+    async fn project_durable_descriptor(
+        &self,
+        queries: Arc<dyn HostQueryService>,
+    ) -> Result<(), HostError> {
         let descriptor = Arc::clone(&self.descriptor);
         // The factory-provided descriptor already represents recovered state.
         // Start at the current durable tail so it is never rolled backward by
@@ -257,22 +260,45 @@ impl HostedSession {
             .subscribe_client(ClientId("host-descriptor-projector".to_owned()), tail);
         tokio::spawn(async move {
             while let Ok(event) = events.recv().await {
-                let mut descriptor = descriptor
-                    .write()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match event {
-                    EngineEvent::SessionCreated {
-                        driver_client_id, ..
+                let persisted_model = {
+                    let mut descriptor = descriptor
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match event {
+                        EngineEvent::SessionCreated {
+                            driver_client_id, ..
+                        }
+                        | EngineEvent::DriverChanged {
+                            driver_client_id, ..
+                        } => {
+                            descriptor.driver_client_id = Some(driver_client_id);
+                            None
+                        }
+                        EngineEvent::ModelChanged { model, .. } => {
+                            descriptor.model = model.clone();
+                            Some((descriptor.clone(), model))
+                        }
+                        EngineEvent::SessionTitleUpdated { title, .. } => {
+                            descriptor.title = title;
+                            None
+                        }
+                        EngineEvent::UserShellStateChanged { active, .. } => {
+                            descriptor.shell_active = active;
+                            None
+                        }
+                        _ => None,
                     }
-                    | EngineEvent::DriverChanged {
-                        driver_client_id, ..
-                    } => descriptor.driver_client_id = Some(driver_client_id),
-                    EngineEvent::ModelChanged { model, .. } => descriptor.model = model,
-                    EngineEvent::SessionTitleUpdated { title, .. } => descriptor.title = title,
-                    EngineEvent::UserShellStateChanged { active, .. } => {
-                        descriptor.shell_active = active;
-                    }
-                    _ => {}
+                };
+                if let Some((descriptor, model)) = persisted_model {
+                    // `ModelChanged` is the durable commit boundary. A
+                    // `SwitchModel` acknowledgement may only have opened the
+                    // context-transfer question, so persisting from command
+                    // acceptance would select a model the user never chose to
+                    // activate. Cache each committed event exactly once from
+                    // this non-replayed projector instead.
+                    let _ = queries
+                        .persist_project_model_selection(&descriptor, &model)
+                        .await;
                 }
             }
         });
@@ -1167,7 +1193,10 @@ impl EngineHost {
                     && session.handle().session_id() == &request.session_id =>
             {
                 let session = Arc::new(session);
-                session.project_durable_descriptor().await.map(|()| session)
+                session
+                    .project_durable_descriptor(Arc::clone(&self.queries))
+                    .await
+                    .map(|()| session)
             }
             Ok(_) => Err(HostError::SessionIdentityMismatch),
             Err(error) => Err(error),
@@ -2535,12 +2564,6 @@ impl EngineHost {
                     ClientCommand::TakeDriver { meta, .. } => Some(meta.client_id.clone()),
                     _ => None,
                 };
-                let switched_model = match &command {
-                    ClientCommand::SwitchModel { model, .. } if model.0.contains('/') => {
-                        Some(model.clone())
-                    }
-                    _ => None,
-                };
                 let lifecycle = matches!(
                     command,
                     ClientCommand::TakeDriver { .. } | ClientCommand::SwitchModel { .. }
@@ -2559,8 +2582,9 @@ impl EngineHost {
                 if outcome == CommandOutcome::Accepted {
                     // TakeDriver persists its lease before returning Accepted.
                     // Model and shell commands acknowledge before their
-                    // durable event; those descriptor fields are therefore
-                    // updated only by `project_durable_descriptor`.
+                    // durable event; those descriptor fields and the cached
+                    // project model are therefore updated only by
+                    // `project_durable_descriptor`.
                     if let Some(driver) = driver {
                         if let Some(previous) =
                             previous_driver.filter(|previous| previous != &driver)
@@ -2569,11 +2593,6 @@ impl EngineHost {
                                 .cancel_session_client(&previous, &session_id);
                         }
                         session.set_driver(Some(driver));
-                    }
-                    if let Some(model) = switched_model {
-                        self.queries
-                            .persist_project_model_selection(&session.descriptor(), &model)
-                            .await?;
                     }
                 }
                 Ok((outcome, Some(session_id), Vec::new()))
@@ -2611,7 +2630,10 @@ impl EngineHost {
                     && session.handle().session_id() == &request.session_id =>
             {
                 let session = Arc::new(session);
-                match session.project_durable_descriptor().await {
+                match session
+                    .project_durable_descriptor(Arc::clone(&self.queries))
+                    .await
+                {
                     Ok(()) => Ok(session),
                     Err(error) => Err(error),
                 }
@@ -2673,7 +2695,10 @@ impl EngineHost {
                     && session.handle().session_id() == &request.child_session_id =>
             {
                 let session = Arc::new(session);
-                session.project_durable_descriptor().await.map(|()| session)
+                session
+                    .project_durable_descriptor(Arc::clone(&self.queries))
+                    .await
+                    .map(|()| session)
             }
             Ok(_) => Err(HostError::SessionIdentityMismatch),
             Err(error) => Err(error),
@@ -2776,7 +2801,10 @@ impl EngineHost {
                         && session.handle().session_id() == session_id =>
                 {
                     let session = Arc::new(session);
-                    match session.project_durable_descriptor().await {
+                    match session
+                        .project_durable_descriptor(Arc::clone(&self.queries))
+                        .await
+                    {
                         Ok(()) => Ok(session),
                         Err(error) => Err(error),
                     }
@@ -3827,6 +3855,8 @@ mod tests {
 
     struct ActivatableModel;
 
+    struct SummaryModel;
+
     struct MarkerCommand;
 
     #[async_trait]
@@ -3850,6 +3880,27 @@ mod tests {
             _request: ProviderRequest,
         ) -> Result<BoxEventStream, AgentLoopError> {
             Ok(Box::pin(stream::empty()))
+        }
+
+        fn has_model_alias(&self, alias: &str) -> bool {
+            matches!(alias, "fast" | "big") || alias.contains('/')
+        }
+    }
+
+    impl ModelDriver for SummaryModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            Ok(Box::pin(stream::iter([
+                Ok(rw_providers::ProviderEvent::TextDelta {
+                    text: "durable model handoff".to_owned(),
+                }),
+                Ok(rw_providers::ProviderEvent::Finished {
+                    reason: rw_providers::FinishReason::Stop,
+                }),
+            ])))
         }
 
         fn has_model_alias(&self, alias: &str) -> bool {
@@ -4328,7 +4379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_concrete_model_switches_persist_in_dispatch_order() {
+    async fn accepted_alias_and_concrete_model_switches_persist_in_dispatch_order() {
         let factory = Arc::new(StubFactory::new());
         let queries = Arc::new(StubQueries::default());
         let host = EngineHost::new(
@@ -4357,7 +4408,7 @@ mod tests {
             .await,
             CommandOutcome::Accepted
         );
-        for (request, model) in [("switch-a", "openai/a"), ("switch-b", "openai/b")] {
+        for (request, model) in [("switch-a", "big"), ("switch-b", "openai/b")] {
             assert_eq!(
                 host.dispatch(
                     driver.clone(),
@@ -4372,12 +4423,25 @@ mod tests {
                 CommandOutcome::Accepted
             );
         }
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while queries
+                .persisted_models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len()
+                != 2
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durable model selections persisted");
         assert_eq!(
             *queries
                 .persisted_models
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec!["openai/a".to_owned(), "openai/b".to_owned()]
+            vec!["big".to_owned(), "openai/b".to_owned()]
         );
         assert_eq!(
             host.session(&session_id)
@@ -4387,6 +4451,157 @@ mod tests {
                 .model,
             ModelAlias("openai/b".to_owned())
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn pending_switch_is_not_persisted_and_each_context_choice_persists_on_commit() {
+        #[allow(clippy::too_many_lines)]
+        async fn run(strategy: &str, model: Arc<dyn ModelDriver>) {
+            let factory = Arc::new(StubFactory::with_model(model));
+            let queries = Arc::new(StubQueries::default());
+            let host = EngineHost::new(
+                EngineHostConfig {
+                    max_sessions: 1,
+                    max_deduplicated_requests: 32,
+                },
+                factory,
+                queries.clone(),
+            )
+            .expect("host");
+            let session_id = SessionId(format!("model-context-{strategy}"));
+            let driver = BoundClient {
+                client_id: ClientId("driver".to_owned()),
+            };
+            assert_eq!(
+                host.dispatch(
+                    driver.clone(),
+                    ClientCommand::ResumeSession {
+                        meta: meta("spoofed", "resume"),
+                        session_id: session_id.clone(),
+                        last_seen_sequence: None,
+                        role: ClientRole::Driver,
+                    },
+                )
+                .await,
+                CommandOutcome::Accepted
+            );
+            assert_eq!(
+                host.dispatch(
+                    driver.clone(),
+                    ClientCommand::UserShellStarted {
+                        meta: meta("spoofed", "shell-start"),
+                        session_id: session_id.clone(),
+                        command: "printf durable-context".to_owned(),
+                    },
+                )
+                .await,
+                CommandOutcome::Accepted
+            );
+            let session = host.session(&session_id).await.expect("session");
+            let shell_id = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let Some(shell) = session
+                        .handle()
+                        .snapshot()
+                        .await
+                        .expect("shell snapshot")
+                        .active_shell
+                    {
+                        break shell.shell_id;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("shell became active");
+            host.complete_user_shell(&session_id, shell_id, 0, Some("durable-context".to_owned()))
+                .await
+                .expect("shell context committed");
+
+            let tail = session.handle().last_sequence().await.expect("tail");
+            let mut events = session
+                .handle()
+                .subscribe_client(driver.client_id.clone(), tail);
+            assert_eq!(
+                host.dispatch(
+                    driver.clone(),
+                    ClientCommand::SwitchModel {
+                        meta: meta("spoofed", "switch"),
+                        session_id: session_id.clone(),
+                        model: ModelAlias("big".to_owned()),
+                        provider: None,
+                    },
+                )
+                .await,
+                CommandOutcome::Accepted
+            );
+            let question_id = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if let EngineEvent::QuestionAsked { question_id, .. } =
+                        events.recv().await.expect("question event")
+                    {
+                        break question_id;
+                    }
+                }
+            })
+            .await
+            .expect("model context question");
+            tokio::task::yield_now().await;
+            assert!(
+                queries
+                    .persisted_models
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty(),
+                "opening a context-transfer question must not persist the target"
+            );
+            assert_eq!(session.descriptor().model, ModelAlias("fast".to_owned()));
+
+            assert_eq!(
+                host.dispatch(
+                    driver,
+                    ClientCommand::AnswerQuestion {
+                        meta: meta("spoofed", "answer"),
+                        session_id,
+                        question_id: question_id.clone(),
+                        answers: vec![rw_types::Answer {
+                            question_id,
+                            values: vec![strategy.to_owned()],
+                        }],
+                    },
+                )
+                .await,
+                CommandOutcome::Accepted
+            );
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    let persisted = queries
+                        .persisted_models
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if persisted == ["big"] {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("committed model persisted");
+            assert_eq!(
+                *queries
+                    .persisted_models
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+                vec!["big".to_owned()]
+            );
+            assert_eq!(session.descriptor().model, ModelAlias("big".to_owned()));
+        }
+
+        run("pass_summary", Arc::new(SummaryModel)).await;
+        run("pass_full_context", Arc::new(IdleModel)).await;
+        run("start_without_context", Arc::new(IdleModel)).await;
     }
 
     #[tokio::test]

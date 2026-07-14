@@ -2112,6 +2112,27 @@
       ]
     },
     {
+      "description": "The user explicitly chose to start the selected model without prior\nconversation. System and project instructions remain available.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "strategy": {
+          "$ref": "#/$defs/ModelContextTransfer"
+        },
+        "type": {
+          "type": "string",
+          "const": "model_context_cleared"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "strategy"
+      ]
+    },
+    {
       "type": "object",
       "properties": {
         "meta": {
@@ -4412,6 +4433,17 @@
           "items": {
             "$ref": "#/$defs/QuestionOption"
           }
+        },
+        "model_switch": {
+          "description": "Present only when this question gates a model switch.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelSwitchQuestion"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -4445,11 +4477,61 @@
             "string",
             "null"
           ]
+        },
+        "model_context_transfer": {
+          "description": "Present only for the three typed model-context transfer choices.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelContextTransfer"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
         "value",
         "label"
+      ]
+    },
+    "ModelContextTransfer": {
+      "description": "Explicit handling of existing conversation context when changing models.",
+      "oneOf": [
+        {
+          "description": "Compact the current conversation, then give the summary to the new model.",
+          "type": "string",
+          "const": "pass_summary"
+        },
+        {
+          "description": "Keep the complete current conversation for the new model.",
+          "type": "string",
+          "const": "pass_full_context"
+        },
+        {
+          "description": "Retain only system/project instructions and start a fresh conversation.",
+          "type": "string",
+          "const": "start_without_context"
+        }
+      ]
+    },
+    "ModelSwitchQuestion": {
+      "description": "Target retained in a durable model-switch interaction until the user chooses\nhow existing context should cross the model boundary.",
+      "type": "object",
+      "properties": {
+        "model": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "model"
       ]
     },
     "Answer": {

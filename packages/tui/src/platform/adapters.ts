@@ -9,7 +9,10 @@ const MAX_EDITOR_BYTES = 2 * 1024 * 1024
 const MAX_CLIPBOARD_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_PROCESS_DIAGNOSTIC_BYTES = 64 * 1024
 const MAX_PROVIDER_AUTH_URL_BYTES = 4 * 1024
-const MAX_CLIPBOARD_TEXT_BYTES = 4 * 1024
+// Transcript selections routinely span multiple code blocks. Keep copying
+// bounded without imposing the tiny challenge-code limit used by the original
+// adapter.
+const MAX_CLIPBOARD_TEXT_BYTES = 1024 * 1024
 
 export interface DesktopNotification {
   readonly title: string
@@ -549,7 +552,7 @@ function clipboardText(value: string): Uint8Array {
   if (
     bytes.length === 0 ||
     bytes.length > MAX_CLIPBOARD_TEXT_BYTES ||
-    /[\u0000-\u001f\u007f]/.test(value)
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)
   ) {
     throw new Error("clipboard text is invalid or exceeds its size limit")
   }

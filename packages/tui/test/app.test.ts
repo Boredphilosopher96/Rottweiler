@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { CliRenderEvents } from "@opentui/core"
+import { CliRenderEvents, type Selection } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp, type PresentationFrameScheduler } from "../src/app"
@@ -92,6 +92,51 @@ describe("Rottweiler OpenTUI shell", () => {
   afterEach(() => {
     renderer?.destroy()
     renderer = undefined
+  })
+
+  test("copies selections across transcript and non-transcript surfaces with confirmation", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const copied: string[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "1",
+          agentTurn: "turn-copy",
+          turn: {
+            role: "assistant",
+            blocks: [{ type: "text", text: "Selectable transcript text" }],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+      },
+      textClipboard: {
+        async writeText(value) {
+          copied.push(value)
+        },
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    const card = [...app.transcript.mountedCards.values()][0]
+    expect(card?.markdown.selectable).toBeTrue()
+
+    renderer.emit(CliRenderEvents.SELECTION, {
+      selectedRenderables: [card!.markdown],
+      getSelectedText: () => "transcript excerpt",
+    } as unknown as Selection)
+    await Bun.sleep(0)
+    expect(copied).toEqual(["transcript excerpt"])
+    expect(app.banner.plainText).toBe("Copied to clipboard")
+
+    renderer.emit(CliRenderEvents.SELECTION, {
+      selectedRenderables: [app.composer.editor],
+      getSelectedText: () => "composer draft",
+    } as unknown as Selection)
+    await Bun.sleep(0)
+    expect(copied).toEqual(["transcript excerpt", "composer draft"])
+    expect(app.banner.plainText).toBe("Copied to clipboard")
   })
 
   test("refreshes live runtime services around tool execution", async () => {
@@ -4101,6 +4146,37 @@ describe("Rottweiler OpenTUI shell", () => {
       (option) => option.value === "mcp.toggle.docs.remote",
     )
     app.picker.select.setSelectedIndex(enableIndex)
+    app.picker.select.selectCurrent()
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({
+      type: "set_mcp_server_enabled",
+      name: "docs.remote",
+      enabled: true,
+    }))
+
+    app.handleEvent({
+      type: "mcp_servers_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui",
+        request_id: "mcp-deferred",
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "session-local",
+      servers: [{
+        name: "docs.remote",
+        enabled: true,
+        approved: true,
+        state: { type: "disabled" },
+        tool_count: 0,
+        resource_count: 0,
+        prompt_count: 0,
+      }],
+    })
+    const connectIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "mcp.toggle.docs.remote",
+    )
+    expect(app.picker.select.options[connectIndex]?.name).toBe("Connect · docs.remote")
+    app.picker.select.setSelectedIndex(connectIndex)
     app.picker.select.selectCurrent()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
       type: "set_mcp_server_enabled",

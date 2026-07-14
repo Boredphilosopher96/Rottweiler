@@ -26,7 +26,7 @@ try {
 
   app.composer.value = "/status"
   await app.composer.submit()
-  await waitFor("human-readable status result", () => commandResult(app).includes("Agent: idle"))
+  await waitFor("human-readable status result", () => commandResult(app).includes("**Idle**"))
 
   app.composer.value = "Create approval.txt with the acceptance canary."
   await app.composer.submit()

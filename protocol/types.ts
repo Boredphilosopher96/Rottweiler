@@ -178,9 +178,21 @@ export type SessionReview = { session_id: SessionId, files: Array<SessionReviewF
 
 export type QuestionResponseKind = "text" | "select_one" | "select_many";
 
-export type QuestionOption = { value: string, label: string, description?: string | null, };
+export type ModelContextTransfer = "pass_summary" | "pass_full_context" | "start_without_context";
 
-export type Question = { id: QuestionId, prompt: string, response_kind: QuestionResponseKind, options: Array<QuestionOption>, };
+export type ModelSwitchQuestion = { model: ModelAlias, provider: string | null, };
+
+export type QuestionOption = { value: string, label: string, description?: string | null,
+/**
+ * Present only for the three typed model-context transfer choices.
+ */
+model_context_transfer?: ModelContextTransfer, };
+
+export type Question = { id: QuestionId, prompt: string, response_kind: QuestionResponseKind, options: Array<QuestionOption>,
+/**
+ * Present only when this question gates a model switch.
+ */
+model_switch?: ModelSwitchQuestion, };
 
 export type Answer = { question_id: QuestionId, values: Array<string>, };
 
@@ -325,4 +337,4 @@ provider?: string | null,
  * Durable per-session effort applied to this selection, including
  * concrete provider/model routes.
  */
-thinking?: ThinkingLevel, } | { "type": "context_item_pinned", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "context_item_evicted", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "user_shell_state_changed", meta: EventMeta, shell_id: ShellId, command?: string | null, active: boolean, status?: number | null, captured_output?: string | null, } | { "type": "hook_failed", meta: EventMeta, event: string, hook_id: string, fail_closed: boolean, message: string, } | { "type": "command_finished", meta: EventMeta, name: string, message: string, unrestorable_paths: Array<UnrestorablePath>, } | { "type": "guard_triggered", meta: EventMeta, turn_id: TurnId, guard: string, message: string, } | { "type": "error", meta: EventMeta, error: EngineError, };
+thinking?: ThinkingLevel, } | { "type": "model_context_cleared", meta: EventMeta, strategy: ModelContextTransfer, } | { "type": "context_item_pinned", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "context_item_evicted", meta: EventMeta, item_id: ContextItemId, effective_after_agent_turn: string, } | { "type": "user_shell_state_changed", meta: EventMeta, shell_id: ShellId, command?: string | null, active: boolean, status?: number | null, captured_output?: string | null, } | { "type": "hook_failed", meta: EventMeta, event: string, hook_id: string, fail_closed: boolean, message: string, } | { "type": "command_finished", meta: EventMeta, name: string, message: string, unrestorable_paths: Array<UnrestorablePath>, } | { "type": "guard_triggered", meta: EventMeta, turn_id: TurnId, guard: string, message: string, } | { "type": "error", meta: EventMeta, error: EngineError, };

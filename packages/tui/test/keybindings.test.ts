@@ -174,6 +174,39 @@ describe("standard TUI keyboard safety", () => {
     await Bun.sleep(0)
     expect(editorCalls).toBe(1)
   })
+
+  test("cycles accepted prompt history without stealing multiline cursor movement", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      onCommand() {
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.composer.value = "first prompt"
+    expect(await app.composer.submit()).toBeTrue()
+    app.composer.value = "second prompt"
+    expect(await app.composer.submit()).toBeTrue()
+    app.composer.value = "draft in progress"
+    app.composer.focus()
+
+    setup.mockInput.pressArrow("up")
+    expect(app.composer.value).toBe("second prompt")
+    setup.mockInput.pressArrow("up")
+    expect(app.composer.value).toBe("first prompt")
+    setup.mockInput.pressArrow("down")
+    expect(app.composer.value).toBe("second prompt")
+    setup.mockInput.pressArrow("down")
+    expect(app.composer.value).toBe("draft in progress")
+
+    app.composer.value = "top line\nbottom line"
+    app.composer.editor.gotoBufferEnd()
+    setup.mockInput.pressArrow("up")
+    expect(app.composer.value).toBe("top line\nbottom line")
+    expect(app.composer.editor.logicalCursor.row).toBe(0)
+  })
 })
 
 describe("Vim TUI interaction", () => {

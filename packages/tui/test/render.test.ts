@@ -1,171 +1,26 @@
 import { describe, expect, test } from "bun:test"
 
-import { CustomSpeedScroll, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, terminalMarkdown, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { CustomSpeedScroll, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, presentableUnifiedDiff, terminalMarkdown, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 import { embeddedParserConfigurations } from "../src/tree-sitter-runtime"
 
 describe("bounded retained rendering", () => {
-  test("renders completed Mermaid and flowchart fences as terminal diagrams without flashing source", () => {
-    const rendered = terminalMarkdown([
-      "## Architecture",
-      "",
-      "```mermaid",
-      "flowchart LR",
-      "  A[Client] --> B[Engine]",
-      "```",
-    ].join("\n"), 80)
-
-    expect(rendered).toContain("Architecture")
-    expect(rendered).toContain("Client")
-    expect(rendered).toContain("Engine")
-    expect(rendered).toMatch(/[┌┐└┘─│►]/)
-    expect(rendered).not.toContain("flowchart LR")
-    expect(rendered).not.toContain("```mermaid")
-
-    const flowchart = terminalMarkdown([
-      "```flowchart",
-      "graph TD",
-      "  Start --> Done",
-      "```",
-    ].join("\n"), 60)
-    expect(flowchart).toContain("Start")
-    expect(flowchart).toContain("Done")
-  })
-
-  test("keeps incomplete and invalid Mermaid definitions user-facing", () => {
-    const streaming = terminalMarkdown("before\n\n```mermaid\nflowchart TB\n A -->", 80, "streaming")
-    expect(streaming).toContain("Rendering diagram")
-    expect(streaming).not.toContain("flowchart TB")
-    expect(streaming).not.toContain("A -->")
-
-    const invalid = terminalMarkdown("```mermaid\nnot a diagram\n```", 80)
-    expect(invalid).toContain("Mermaid diagram")
-    expect(invalid).toContain("not supported")
-    expect(invalid).not.toContain("not a diagram")
-
-    const committed = terminalMarkdown("```mermaid\nflowchart TB\n A -->", 80)
-    expect(committed).toContain("closing fence is missing")
-    expect(committed).not.toContain("Rendering diagram")
-  })
-
-  test("supports CommonMark tilde fences and leaves indented code literal", () => {
-    const tilde = terminalMarkdown("~~~mermaid\nflowchart LR\n A --> B\n~~~", 60)
-    expect(tilde).toMatch(/[┌┐└┘─│►]/)
-    expect(tilde).not.toContain("flowchart LR")
-
-    const indented = terminalMarkdown("    ```mermaid\n    flowchart LR\n    A --> B\n    ```", 60)
-    expect(indented).toContain("```mermaid")
-    expect(indented).toContain("flowchart LR")
-
-    const titledTilde = terminalMarkdown("~~~mermaid title=`architecture`\nflowchart LR\n A --> B\n~~~", 60)
-    expect(titledTilde).toMatch(/[┌┐└┘─│►]/)
-    expect(titledTilde).not.toContain("flowchart LR")
-
-    const quoted = terminalMarkdown("> ```mermaid\n> flowchart LR\n> A --> B\n> ```", 60)
-    expect(quoted).toContain("> ```text")
-    expect(quoted).not.toContain("flowchart LR")
-
-    const listed = terminalMarkdown("- Architecture\n  ```mermaid\n  flowchart LR\n  A --> B\n  ```", 60)
-    expect(listed).toContain("  ```text")
-    expect(listed).not.toContain("flowchart LR")
-
-    const outsideClose = terminalMarkdown("> ```mermaid\n> flowchart LR\n> A --> B\n```\nafter", 100)
-    expect(outsideClose).toContain("closing fence is missing")
-    expect(outsideClose).toContain("```\nafter")
-    expect(outsideClose).not.toContain("```text")
-  })
-
-  test("paginates ordinary large graphs visually and rejects adversarial complexity", () => {
-    const source = `\`\`\`mermaid\nflowchart LR\n${Array.from({ length: 50 }, (_, index) => `N${index} --> N${index + 1}`).join("\n")}\n\`\`\``
-    const started = performance.now()
-    const rendered = terminalMarkdown(source, 80)
-    expect(performance.now() - started).toBeLessThan(100)
-    expect(rendered).toMatch(/[┌┐└┘─│▼]/)
-    expect(rendered).not.toContain("Mermaid diagram")
-    expect(rendered).not.toContain("N0 → N1")
-
-    const linear = `\`\`\`mermaid\nflowchart LR\n${Array.from({ length: 37 }, (_, index) => `N${index} --> N${index + 1}`).join("\n")}\n\`\`\``
-    const renderedLinear = terminalMarkdown(linear, 80)
-    expect(renderedLinear).toMatch(/[┌┐└┘─│▼]/)
-    expect(renderedLinear).not.toContain("Mermaid diagram")
-    expect(Math.max(...renderedLinear.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(80)
-
-    const wide = terminalMarkdown("```mermaid\nflowchart LR\n A --> B --> C --> D --> E --> F\n```", 40)
-    const body = wide.split("\n").slice(1, -1)
-    expect(Math.max(...body.map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(40)
-
-    for (const width of [20, 24]) {
-      const narrow = terminalMarkdown("```mermaid\nflowchart LR\n A[界面] --> B[核心引擎]\n```", width)
-      expect(Math.max(...narrow.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(width)
-    }
-  })
-
-  test("fits long labels with a real diagram and viewport-safe legend", () => {
-    const oversized = terminalMarkdown(
-      "```mermaid\nflowchart LR\n A[This node label is intentionally far wider than the terminal viewport] --> B[Destination]\n```",
-      32,
-    )
-
-    expect(oversized).toMatch(/[┌┐└┘─│►▼]/)
-    expect(oversized).toContain("Legend")
-    expect(oversized).toContain("This node label")
-    expect(oversized).not.toContain("Compact diagram")
-    expect(Math.max(...oversized.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(32)
-  })
-
-  test("keeps a 37-connection architecture graph visual instead of flattening it", () => {
-    const edges = [
-      ...Array.from({ length: 12 }, (_, index) => `RW[Rottweiler] --> N${index}[Subsystem ${index}]`),
-      ...Array.from({ length: 12 }, (_, index) => `N${index} --> X${index % 6}[Service ${index % 6}]`),
-      ...Array.from({ length: 13 }, (_, index) => `X${index % 6} --> Y${index % 4}[Adapter ${index % 4}]`),
-    ]
-    const rendered = terminalMarkdown(`\`\`\`mermaid\nflowchart LR\n${edges.join("\n")}\n\`\`\``, 100)
-
-    expect(rendered).toMatch(/[┌┐└┘─│►▼]/)
-    expect(rendered).toContain("Legend")
-    expect(rendered).toContain("Rottweiler")
-    expect(rendered).not.toContain("Compact diagram")
-    expect(rendered).not.toContain("RW →")
-    expect(Math.max(...rendered.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(100)
-  })
-
-  test("paginates a 200-edge simple flowchart without flattening it", () => {
-    const source = `\`\`\`mermaid\nflowchart LR\n${Array.from({ length: 200 }, (_, index) => `N${index} --> N${index + 1}`).join("\n")}\n\`\`\``
+  test("presents Mermaid as authored source without terminal-renderer claims", () => {
+    const source = "## Architecture\n\n```mermaid\nflowchart LR\n  A[Client] --> B[Engine]\n```"
     const rendered = terminalMarkdown(source, 80)
 
-    expect(rendered).toMatch(/[┌┐└┘─│▼]/)
+    expect(rendered).toContain("```text")
+    expect(rendered).toContain("flowchart LR")
+    expect(rendered).toContain("A[Client] --> B[Engine]")
     expect(rendered).not.toContain("Mermaid diagram")
-    expect(rendered).not.toContain("N0 → N1")
-    expect(Math.max(...rendered.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(80)
+    expect(rendered).not.toContain("Rendering diagram")
+    expect(rendered).not.toContain("cannot render")
   })
 
-  test("paginates a large branching graph without inventing continuation edges", () => {
-    const star = `\`\`\`mermaid\nflowchart LR\n${Array.from({ length: 49 }, (_, index) => `ROOT --> N${index}`).join("\n")}\n\`\`\``
-    for (const width of [20, 24, 32, 40, 100]) {
-      const rendered = terminalMarkdown(star, width)
-      expect(rendered).toContain("◇ Diagram 1 of")
-      expect(rendered).toMatch(/[┌┐└┘─│▼]/)
-      expect(rendered).not.toContain("Mermaid diagram")
-      expect(rendered).not.toContain("⋮")
-      expect(Math.max(...rendered.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(width)
-    }
-  })
-
-  test("does not rewrite unsupported Mermaid node shapes into malformed legends", () => {
-    const rendered = terminalMarkdown(
-      "```mermaid\nflowchart LR\nA[[Very long subroutine label]] --> B[(Very long database label)]\n```",
-      24,
-    )
-
-    expect(rendered).not.toContain("A: [Very")
-    expect(rendered).not.toContain("B: (Very")
-    expect(Math.max(...rendered.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(24)
-
-    const parallelogram = terminalMarkdown(
-      "```mermaid\nflowchart LR\nA[/Very long parallelogram label/] --> B[Done]\n```",
-      24,
-    )
-    expect(parallelogram).not.toContain("A: /Very")
-    expect(Math.max(...parallelogram.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(24)
+  test("keeps streaming, quoted, and tilde Mermaid fences as plain source", () => {
+    const streaming = terminalMarkdown("```mermaid\nflowchart TB\n A -->", 24, "streaming")
+    expect(streaming).toBe("```text\nflowchart TB\n A -->")
+    expect(terminalMarkdown("~~~mmd title=x\ngraph LR\nA --> B\n~~~", 24)).toContain("~~~text")
+    expect(terminalMarkdown("> ```flowchart\n> A --> B\n> ```", 24)).toContain("> ```text")
   })
 
   test("only exposes filetypes backed by the embedded parser catalog", () => {
@@ -189,38 +44,56 @@ describe("bounded retained rendering", () => {
     }
   })
 
+  test("repairs malformed unified-diff counts before structured rendering", () => {
+    const rendered = presentableUnifiedDiff(
+      "src/main.rs",
+      "\u001b[31m@@ -1,9 +1,9 @@\u001b[0m\n-old()\n+new()\n",
+    )
+    expect(rendered).toBe(
+      "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,1 +1,1 @@\n-old()\n+new()\n",
+    )
+    expect(rendered).not.toContain("\u001b")
+    expect(rendered).not.toContain("Error parsing diff")
+  })
+
+  test("adds a hunk when a tool returns file headers and changed lines only", () => {
+    expect(presentableUnifiedDiff("src/main.rs", [
+      "--- a/src/main.rs",
+      "+++ b/src/main.rs",
+      "-old",
+      "+new",
+    ].join("\n"))).toBe([
+      "--- a/src/main.rs",
+      "+++ b/src/main.rs",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new",
+      "",
+    ].join("\n"))
+  })
+
+  test("turns a headerless pseudo-diff into a safe structured preview", () => {
+    const rendered = presentableUnifiedDiff("src/generated.py", [
+      "approved full-file change",
+      "-print('old')",
+      "+print('new')",
+    ].join("\n"))
+    expect(rendered).toBe([
+      "--- a/src/generated.py",
+      "+++ b/src/generated.py",
+      "@@ -1,2 +1,2 @@",
+      " approved full-file change",
+      "-print('old')",
+      "+print('new')",
+      "",
+    ].join("\n"))
+    expect(rendered).not.toContain("Error parsing diff")
+  })
+
   test("uses OpenCode-compatible fixed scroll speed when configured", () => {
     const fixed = getScrollAcceleration({ scroll_speed: 4 })
     expect(fixed).toBeInstanceOf(CustomSpeedScroll)
     expect(fixed.tick()).toBe(4)
-  })
-
-  test("compacts grouped-node expansion and bounds aggregate diagram work", () => {
-    const group = Array.from({ length: 80 }, (_, index) => `N${index}`).join(" & ")
-    const grouped = `\`\`\`mermaid\nflowchart LR\n${group} --> ${group}\n\`\`\``
-    const groupedStart = performance.now()
-    expect(terminalMarkdown(grouped, 80)).toContain("6400 connections")
-    expect(performance.now() - groupedStart).toBeLessThan(16)
-
-    const diagram = "```mermaid\nflowchart LR\n A --> B --> C\n```"
-    const response = Array.from({ length: 20 }, () => diagram).join("\n")
-    const responseStart = performance.now()
-    const rendered = terminalMarkdown(response, 80)
-    expect(performance.now() - responseStart).toBeLessThan(33)
-    expect(rendered).toContain("Mermaid diagram")
-    expect(rendered).not.toContain("omitted")
-
-    const narrowOmissions = terminalMarkdown(response, 20)
-    expect(Math.max(...narrowOmissions.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(20)
-
-    const nested = terminalMarkdown("> > ```mermaid\n> > flowchart LR\n> > A[界面] --> B[核心]\n> > ```", 20)
-    expect(Math.max(...nested.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(20)
-
-    const deepPrefix = "> ".repeat(8)
-    const deep = terminalMarkdown(`${deepPrefix}\`\`\`mermaid\n${deepPrefix}flowchart LR\n${deepPrefix}A --> B\n${deepPrefix}\`\`\``, 20)
-    expect(Math.max(...deep.split("\n").map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(20)
-    expect(deep).toContain("◇")
-    expect(deep).not.toContain("unavailable")
   })
 
   test("formats compact context counters without confusing them with percentages", () => {
@@ -360,6 +233,19 @@ describe("bounded retained rendering", () => {
     expect(structuredOnly).not.toContain("tool_registry")
     expect(structuredOnly).not.toContain("tool_definitions")
     expect(structuredOnly).not.toContain("/private/repo")
+
+    expect(toolOutputText({
+      type: "text",
+      text: JSON.stringify({
+        data: { paths: ["src/main.rs"], machine_local_path: "/private/repo" },
+        stable_prefix_hash: "internal-hash",
+        truncated: false,
+      }),
+    })).toBe("src/main.rs")
+    expect(toolOutputText({
+      type: "text",
+      text: "{\n  \"name\": \"user-authored.json\"\n}",
+    })).toContain('"name": "user-authored.json"')
   })
 
 })

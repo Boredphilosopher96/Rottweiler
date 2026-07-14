@@ -1,5 +1,6 @@
 //! Configuration and persistent storage for Rottweiler.
 
+pub mod catalog_cache;
 pub mod checkpoint;
 pub mod config;
 pub mod credentials;

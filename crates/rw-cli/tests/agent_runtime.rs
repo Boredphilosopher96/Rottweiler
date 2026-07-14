@@ -566,7 +566,7 @@ fn supervised_tui_crosses_the_real_host_for_commands_and_tool_approval() {
     assert!(
         report["commandResult"]
             .as_str()
-            .is_some_and(|value| value.contains("Agent: idle"))
+            .is_some_and(|value| value.contains("**Idle**"))
     );
     assert!(report["approvalBanner"].as_str().is_some_and(|value| {
         value.contains("Waiting for approval") && value.contains("Write file")

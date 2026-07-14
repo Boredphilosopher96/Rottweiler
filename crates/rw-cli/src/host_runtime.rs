@@ -35,13 +35,15 @@ use rw_core::runtime_support::PricingTable;
 use rw_core::{
     AttachmentData, CachedModelCatalog, CommandDescriptor, CompletedForkOperation, Config,
     CreateSessionRequest, EngineEvent, ForkOperationKey, ForkOperationState, ForkSessionRequest,
-    HostError, HostQueryService, HostedSession, ModelAlias, ModelCatalogSnapshot,
-    PermissionDecision, PreparedForkOperation, ProviderAuthAttempt, ProviderAuthChallenge,
-    ProviderAuthCompletion, ProviderLogin, ProviderLoginCancellation, ProviderModelCatalogSource,
-    SessionDescriptor, SessionFactory, SessionId, ThinkingLevel, UserSettingDescriptor,
-    WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus, begin_provider_login,
-    builtin_command_registry, project_session_events,
+    HostError, HostQueryService, HostedSession, ModelAlias, ModelCatalogError,
+    ModelCatalogSnapshot, ModelCatalogSource, PermissionDecision, PreparedForkOperation,
+    ProviderAuthAttempt, ProviderAuthChallenge, ProviderAuthCompletion, ProviderLogin,
+    ProviderLoginCancellation, ProviderModelCatalogSource, SessionDescriptor, SessionFactory,
+    SessionId, ThinkingLevel, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
+    WorkspaceFilePreview, WorkspaceStatus, begin_provider_login, builtin_command_registry,
+    project_session_events,
 };
+use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;
 use rw_store::session::{SessionEventLog, SessionIndex, UtcTimestamp};
 use serde::{Deserialize, Serialize};
@@ -263,6 +265,26 @@ pub(crate) struct CliSessionFactory {
     model_catalog: Arc<CachedModelCatalog>,
 }
 
+struct PersistingModelCatalogSource {
+    inner: Arc<dyn ModelCatalogSource>,
+    cache_path: PathBuf,
+}
+
+#[async_trait]
+impl ModelCatalogSource for PersistingModelCatalogSource {
+    async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let snapshot = self.inner.discover().await?;
+        let cache_path = self.cache_path.clone();
+        let cached = snapshot.clone();
+        // The cache is explicitly non-authoritative. A live catalog remains a
+        // successful result even if the private cache cannot be refreshed.
+        let _ =
+            tokio::task::spawn_blocking(move || store_model_catalog_cache(&cache_path, &cached))
+                .await;
+        Ok(snapshot)
+    }
+}
+
 impl CliSessionFactory {
     pub(crate) fn new(mut options: CliHostOptions) -> Result<Self, HostError> {
         if options.max_turns == 0 || options.allowed_workspaces.is_empty() {
@@ -294,15 +316,22 @@ impl CliSessionFactory {
         } else {
             PricingTable::default()
         };
-        let source = Arc::new(ProviderModelCatalogSource::system(
-            options.credentials_path.clone(),
-            pricing,
-            options.config.clone(),
-        ));
+        let live_source: Arc<dyn ModelCatalogSource> =
+            Arc::new(ProviderModelCatalogSource::system(
+                options.credentials_path.clone(),
+                pricing,
+                options.config.clone(),
+            ));
+        let catalog_cache_path = options.storage_root.join("model-catalog.json");
+        let initial_catalog = load_model_catalog_cache(&catalog_cache_path).ok().flatten();
+        let source: Arc<dyn ModelCatalogSource> = Arc::new(PersistingModelCatalogSource {
+            inner: live_source,
+            cache_path: catalog_cache_path,
+        });
         let factory = Self {
             options: Arc::new(options),
             allowed_workspaces: Arc::new(allowed),
-            model_catalog: Arc::new(CachedModelCatalog::new(source)),
+            model_catalog: Arc::new(CachedModelCatalog::with_initial(source, initial_catalog)),
         };
         factory.recover_fork_operations()?;
         Ok(factory)
@@ -4232,6 +4261,42 @@ mod tests {
                 })
                 .await
                 .expect("switch parent model after fork boundary"),
+            CommandOutcome::Accepted
+        );
+        let model_question_id = loop {
+            if let rw_core::EngineEvent::QuestionAsked {
+                question_id,
+                questions,
+                ..
+            } = events.recv().await.expect("parent model question")
+                && questions.iter().any(|question| {
+                    question
+                        .model_switch
+                        .as_ref()
+                        .is_some_and(|target| target.model == switched_model)
+                })
+            {
+                break question_id;
+            }
+        };
+        assert_eq!(
+            parent
+                .handle()
+                .dispatch(ClientCommand::AnswerQuestion {
+                    meta: CommandMeta {
+                        protocol_version: PROTOCOL_VERSION,
+                        client_id: driver.clone(),
+                        request_id: RequestId("production-switch-context".to_owned()),
+                    },
+                    session_id: parent_id.clone(),
+                    question_id: model_question_id.clone(),
+                    answers: vec![rw_core::Answer {
+                        question_id: model_question_id,
+                        values: vec!["pass_full_context".to_owned()],
+                    }],
+                })
+                .await
+                .expect("answer parent model context question"),
             CommandOutcome::Accepted
         );
         loop {

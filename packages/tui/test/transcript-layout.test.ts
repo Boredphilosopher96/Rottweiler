@@ -294,7 +294,7 @@ describe("retained transcript layout", () => {
     expect(frame).not.toContain("**workspace**")
   })
 
-  test("refits a live Mermaid block when the terminal shrinks", async () => {
+  test("keeps live Mermaid source honest when the terminal shrinks", async () => {
     renderer = await createTestRenderer({ width: 100, height: 24, useThread: false })
     const initial = createInitialState()
     const source = [
@@ -322,12 +322,13 @@ describe("retained transcript layout", () => {
 
     renderer.resize(40, 24)
     await renderer.renderOnce()
-    const lines = app.transcript.compactionMarkdown.content.split("\n")
-    expect(Math.max(...lines.map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(36)
-    expect(app.transcript.compactionMarkdown.content).toMatch(/[┌┐└┘─│►▼]/)
+    expect(app.transcript.compactionMarkdown.content).toContain("```text")
+    expect(app.transcript.compactionMarkdown.content).toContain("flowchart LR")
+    expect(app.transcript.compactionMarkdown.content).not.toContain("Mermaid diagram")
+    expect(app.transcript.compactionMarkdown.content).not.toContain("cannot render")
   })
 
-  test("separates consecutive answers, renders Mermaid, and keeps prose on the primary foreground", async () => {
+  test("separates consecutive answers, preserves Mermaid source, and keeps prose on the primary foreground", async () => {
     parserDataPath = mkdtempSync(join(tmpdir(), "rottweiler-consecutive-mermaid-"))
     treeSitter = new TreeSitterClient({
       dataPath: parserDataPath,
@@ -390,7 +391,8 @@ describe("retained transcript layout", () => {
     expect(frame).toContain("FOLLOW_UP_QUESTION_START")
     expect(frame).toContain("OpenTUI")
     expect(frame).toContain("Rust core")
-    expect(frame).not.toContain("flowchart TB")
+    expect(frame).toContain("flowchart TB")
+    expect(frame).not.toContain("Mermaid diagram")
 
     const prose = renderer.captureSpans().lines
       .flatMap((line) => line.spans)

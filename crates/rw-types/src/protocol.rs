@@ -642,6 +642,28 @@ pub enum QuestionResponseKind {
     SelectMany,
 }
 
+/// Explicit handling of existing conversation context when changing models.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum ModelContextTransfer {
+    /// Compact the current conversation, then give the summary to the new model.
+    PassSummary,
+    /// Keep the complete current conversation for the new model.
+    PassFullContext,
+    /// Retain only system/project instructions and start a fresh conversation.
+    StartWithoutContext,
+}
+
+/// Target retained in a durable model-switch interaction until the user chooses
+/// how existing context should cross the model boundary.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ModelSwitchQuestion {
+    pub model: ModelAlias,
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
 /// A selectable response to an engine question.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[ts(optional_fields = nullable)]
@@ -649,6 +671,10 @@ pub struct QuestionOption {
     pub value: String,
     pub label: String,
     pub description: Option<String>,
+    /// Present only for the three typed model-context transfer choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_context_transfer: Option<ModelContextTransfer>,
 }
 
 /// A typed question sent to an interactive client.
@@ -658,6 +684,10 @@ pub struct Question {
     pub prompt: String,
     pub response_kind: QuestionResponseKind,
     pub options: Vec<QuestionOption>,
+    /// Present only when this question gates a model switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub model_switch: Option<ModelSwitchQuestion>,
 }
 
 /// One answer returned for a question entry.
@@ -2089,6 +2119,12 @@ pub enum EngineEvent {
         #[ts(optional)]
         thinking: Option<crate::config::ThinkingLevel>,
     },
+    /// The user explicitly chose to start the selected model without prior
+    /// conversation. System and project instructions remain available.
+    ModelContextCleared {
+        meta: EventMeta,
+        strategy: ModelContextTransfer,
+    },
     ContextItemPinned {
         meta: EventMeta,
         item_id: ContextItemId,
@@ -2213,6 +2249,7 @@ impl EngineEvent {
             | Self::PlanSubmitted { meta, .. }
             | Self::PlanReviewed { meta, .. }
             | Self::ModelChanged { meta, .. }
+            | Self::ModelContextCleared { meta, .. }
             | Self::ContextItemPinned { meta, .. }
             | Self::ContextItemEvicted { meta, .. }
             | Self::UserShellStateChanged { meta, .. }
@@ -2297,6 +2334,7 @@ impl EngineEvent {
             | Self::PlanSubmitted { meta, .. }
             | Self::PlanReviewed { meta, .. }
             | Self::ModelChanged { meta, .. }
+            | Self::ModelContextCleared { meta, .. }
             | Self::ContextItemPinned { meta, .. }
             | Self::ContextItemEvicted { meta, .. }
             | Self::UserShellStateChanged { meta, .. }

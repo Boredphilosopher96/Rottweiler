@@ -3622,6 +3622,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_yolo_survives_child_workspace_forks_and_never_prompts_for_subagent_control() {
+        let parent = tempfile::tempdir().expect("parent workspace");
+        let child = tempfile::tempdir().expect("child workspace");
+        let gate = PermissionGate::from_config(PermissionConfig {
+            default: PermissionDecision::Ask,
+            rules: Vec::new(),
+        })
+        .with_workspace_roots([parent.path()]);
+        gate.set_runtime_mode(Some(HeadlessPermissionMode::Yolo))
+            .expect("interactive yolo");
+
+        let child_gate = gate
+            .fork_for_workspace_roots([child.path()])
+            .expect("child permission generation");
+        assert_eq!(
+            child_gate.snapshot().runtime_mode,
+            Some(HeadlessPermissionMode::Yolo),
+            "a delegated child must inherit the active session permission overlay"
+        );
+
+        let approver = CountingDeny(AtomicUsize::new(0));
+        let spawn = PermissionRequest {
+            id: "spawn-general".to_owned(),
+            tool_name: "spawn_agent".to_owned(),
+            arguments: json!({
+                "action": "spawn",
+                "task": "inspect and update the delegated workspace",
+                "agent": "general",
+                "isolation": "shared",
+            }),
+            capabilities: vec![
+                ToolCapability::ReadFilesystem,
+                ToolCapability::WriteFilesystem,
+                ToolCapability::Execute,
+                ToolCapability::Network,
+            ],
+            approval_diff: None,
+        };
+        assert_eq!(
+            child_gate.authorize(spawn, &approver).await,
+            PermissionOutcome::Allowed
+        );
+        assert_eq!(
+            approver.0.load(Ordering::SeqCst),
+            0,
+            "YOLO subagent control must not enter the interactive approval channel"
+        );
+    }
+
+    #[tokio::test]
     async fn project_approval_round_trips_privately() {
         let root = tempfile::tempdir().expect("tempdir");
         let path = root.path().join("approvals.json");

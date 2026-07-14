@@ -42,17 +42,41 @@ impl CachedModelCatalog {
         Self::with_clock(source, Arc::new(TokioClock), Self::DEFAULT_TTL)
     }
 
+    /// Seeds the short process cache from a private durable cache. The seed is
+    /// never authoritative: explicit refresh still contacts the live source.
+    #[must_use]
+    pub fn with_initial(
+        source: Arc<dyn ModelCatalogSource>,
+        snapshot: Option<ModelCatalogSnapshot>,
+    ) -> Self {
+        let clock: Arc<dyn Clock> = Arc::new(TokioClock);
+        Self::with_clock_and_initial(source, clock, Self::DEFAULT_TTL, snapshot)
+    }
+
     #[must_use]
     pub fn with_clock(
         source: Arc<dyn ModelCatalogSource>,
         clock: Arc<dyn Clock>,
         ttl: Duration,
     ) -> Self {
+        Self::with_clock_and_initial(source, clock, ttl, None)
+    }
+
+    fn with_clock_and_initial(
+        source: Arc<dyn ModelCatalogSource>,
+        clock: Arc<dyn Clock>,
+        ttl: Duration,
+        snapshot: Option<ModelCatalogSnapshot>,
+    ) -> Self {
+        let discovered_at = clock.now();
         Self {
             source,
             clock,
             ttl,
-            snapshot: Mutex::new(None),
+            snapshot: Mutex::new(snapshot.map(|snapshot| CachedSnapshot {
+                discovered_at,
+                snapshot,
+            })),
         }
     }
 
@@ -127,5 +151,26 @@ mod tests {
         assert!(catalog.get(false).await.expect("cached").cached);
         assert!(!catalog.get(true).await.expect("refresh").cached);
         assert_eq!(source.0.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn durable_seed_avoids_launch_discovery_but_refresh_remains_live() {
+        let source = Arc::new(Source(AtomicUsize::new(0)));
+        let seed = ModelCatalogSnapshot {
+            aliases: Vec::new(),
+            models: Vec::new(),
+            providers: Vec::new(),
+            cached: false,
+            truncated: true,
+        };
+        let catalog = CachedModelCatalog::with_initial(source.clone(), Some(seed));
+
+        let initial = catalog.get(false).await.expect("seeded cache");
+        assert!(initial.cached);
+        assert!(initial.truncated);
+        assert_eq!(source.0.load(Ordering::SeqCst), 0);
+
+        assert!(!catalog.get(true).await.expect("explicit refresh").cached);
+        assert_eq!(source.0.load(Ordering::SeqCst), 1);
     }
 }

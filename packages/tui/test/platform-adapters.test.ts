@@ -153,7 +153,7 @@ describe("production TUI platform adapters", () => {
       return { status: 0, stdout: new Uint8Array() }
     }
     const adapter = createTextClipboardAdapter({ platform: "linux", executor })
-    await adapter.writeText("ABCD-1234")
+    await adapter.writeText("ABCD-1234\nselected transcript")
 
     expect(executor.calls.map((call) => call.executable)).toEqual([
       "wl-copy",
@@ -164,9 +164,9 @@ describe("production TUI platform adapters", () => {
       "ABCD-1234",
     )
     expect(new TextDecoder().decode(executor.calls[1]?.options?.stdin)).toBe(
-      "ABCD-1234",
+      "ABCD-1234\nselected transcript",
     )
-    await expect(adapter.writeText(`A${"x".repeat(4_096)}`)).rejects.toThrow(
+    await expect(adapter.writeText(`A${"x".repeat(1024 * 1024)}`)).rejects.toThrow(
       "size limit",
     )
     await expect(adapter.writeText("code\u0000tail")).rejects.toThrow("invalid")

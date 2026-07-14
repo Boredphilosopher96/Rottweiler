@@ -73,7 +73,7 @@ use rw_store::{
     trust::FolderTrustStore,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OnceCell, mpsc, oneshot};
 use url::{Host, Url};
 
 use crate::{OutputFormat, PermissionMode};
@@ -1483,33 +1483,22 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     };
     let tool_workspace_roots = workspace_roots.clone();
     let tool_execution_lease = Arc::clone(&execution_lease);
-    let proxy_config = loaded_config.config.clone();
     let proxy_credentials_path = config_loader.credentials_path().clone();
-    let search_credentials_path = proxy_credentials_path.clone();
-    let proxy_redactor = fixture_redactor.clone();
-    let global_proxy = tokio::task::spawn_blocking(move || {
-        resolve_tool_proxy(
-            &proxy_config,
-            &proxy_credentials_path,
-            offline_fixture,
-            &proxy_redactor,
-        )
-    })
-    .await
-    .map_err(|error| miette!("tool proxy credential worker failed: {error}"))??;
+    let deferred_global_proxy = DeferredToolProxy::from_config(
+        &loaded_config.config,
+        &proxy_credentials_path,
+        offline_fixture,
+        fixture_redactor.clone(),
+    )?;
     let websearch_config = loaded_config.config.websearch.clone();
-    let search_config = websearch_config.clone();
-    let search_redactor = fixture_redactor.clone();
-    let websearch_headers = tokio::task::spawn_blocking(move || {
-        resolve_websearch_headers(
-            &search_config,
-            &search_credentials_path,
-            offline_fixture,
-            &search_redactor,
-        )
-    })
-    .await
-    .map_err(|error| miette!("web-search credential worker failed: {error}"))??;
+    let deferred_websearch_headers = DeferredWebSearchHeaders::from_config(
+        &websearch_config,
+        &proxy_credentials_path,
+        offline_fixture,
+        fixture_redactor.clone(),
+    );
+    let global_proxy = None;
+    let websearch_headers = BTreeMap::new();
     let root_question_asker = Arc::clone(&question_asker);
     let command_safety = Arc::new(
         CommandSafetyClassifier::new(&loaded_config.config.sandbox.safe_list)
@@ -1519,9 +1508,11 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     let root_command_safety = Arc::clone(&command_safety);
     let root_command_fixture_mode = command_fixture_mode.clone();
     let root_global_proxy = global_proxy.clone();
+    let root_deferred_global_proxy = deferred_global_proxy.clone();
     let root_execution_lease = Arc::clone(&execution_lease);
     let root_websearch_config = websearch_config.clone();
     let root_websearch_headers = websearch_headers.clone();
+    let root_deferred_websearch_headers = deferred_websearch_headers.clone();
     let background_redactor: Arc<dyn CommandFixtureRedactor> =
         Arc::new(SharedCommandFixtureRedactor(fixture_redactor.clone()));
     let root_background_redactor = Arc::clone(&background_redactor);
@@ -1556,11 +1547,13 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
             question_asker,
             offline: offline_fixture,
             global_proxy: global_proxy.as_ref(),
+            deferred_global_proxy,
             command_fixture_mode,
             execution_lease: tool_execution_lease,
             command_safety: &tool_command_safety,
             websearch_config: &websearch_config,
             websearch_headers: &websearch_headers,
+            deferred_websearch_headers,
             native_websearch_possible,
             background_redactor,
             background_manager: None,
@@ -1928,11 +1921,13 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         question_asker: root_question_asker,
         offline: offline_fixture,
         global_proxy: root_global_proxy,
+        deferred_global_proxy: root_deferred_global_proxy,
         command_fixture_mode: root_command_fixture_mode,
         execution_lease: root_execution_lease,
         command_safety: root_command_safety,
         websearch_config: root_websearch_config,
         websearch_headers: root_websearch_headers,
+        deferred_websearch_headers: root_deferred_websearch_headers,
         background_redactor: root_background_redactor,
         background_manager: Arc::clone(&built_tools.background),
         native_websearch_possible,
@@ -2377,33 +2372,22 @@ pub(crate) async fn compose_hosted_actor(
     } else {
         CommandFixtureMode::Live
     };
-    let proxy_config = options.config.clone();
     let proxy_credentials_path = options.credentials_path.clone();
-    let search_credentials_path = proxy_credentials_path.clone();
-    let proxy_redactor = fixture_redactor.clone();
-    let global_proxy = tokio::task::spawn_blocking(move || {
-        resolve_tool_proxy(
-            &proxy_config,
-            &proxy_credentials_path,
-            offline,
-            &proxy_redactor,
-        )
-    })
-    .await
-    .map_err(|error| miette!("tool proxy credential worker failed: {error}"))??;
+    let deferred_global_proxy = DeferredToolProxy::from_config(
+        &options.config,
+        &proxy_credentials_path,
+        offline,
+        fixture_redactor.clone(),
+    )?;
     let websearch_config = options.config.websearch.clone();
-    let search_config = websearch_config.clone();
-    let search_redactor = fixture_redactor.clone();
-    let websearch_headers = tokio::task::spawn_blocking(move || {
-        resolve_websearch_headers(
-            &search_config,
-            &search_credentials_path,
-            offline,
-            &search_redactor,
-        )
-    })
-    .await
-    .map_err(|error| miette!("web-search credential worker failed: {error}"))??;
+    let deferred_websearch_headers = DeferredWebSearchHeaders::from_config(
+        &websearch_config,
+        &proxy_credentials_path,
+        offline,
+        fixture_redactor.clone(),
+    );
+    let global_proxy = None;
+    let websearch_headers = BTreeMap::new();
     let tool_workspace_roots = workspace_roots.clone();
     let tool_execution_lease = Arc::clone(&execution_lease);
     let root_question_asker: Arc<dyn QuestionAsker> = Arc::new(HeadlessQuestionAsker);
@@ -2416,9 +2400,11 @@ pub(crate) async fn compose_hosted_actor(
     let tool_question_asker = Arc::clone(&root_question_asker);
     let root_command_fixture_mode = command_fixture_mode.clone();
     let root_global_proxy = global_proxy.clone();
+    let root_deferred_global_proxy = deferred_global_proxy.clone();
     let root_execution_lease = Arc::clone(&execution_lease);
     let root_websearch_config = websearch_config.clone();
     let root_websearch_headers = websearch_headers.clone();
+    let root_deferred_websearch_headers = deferred_websearch_headers.clone();
     let background_redactor: Arc<dyn CommandFixtureRedactor> =
         Arc::new(SharedCommandFixtureRedactor(fixture_redactor.clone()));
     let root_background_redactor = Arc::clone(&background_redactor);
@@ -2441,11 +2427,13 @@ pub(crate) async fn compose_hosted_actor(
             question_asker: tool_question_asker,
             offline,
             global_proxy: global_proxy.as_ref(),
+            deferred_global_proxy,
             command_fixture_mode,
             execution_lease: tool_execution_lease,
             command_safety: &tool_command_safety,
             websearch_config: &websearch_config,
             websearch_headers: &websearch_headers,
+            deferred_websearch_headers,
             native_websearch_possible,
             background_redactor,
             background_manager: None,
@@ -2800,11 +2788,13 @@ pub(crate) async fn compose_hosted_actor(
         question_asker: root_question_asker,
         offline,
         global_proxy: root_global_proxy,
+        deferred_global_proxy: root_deferred_global_proxy,
         command_fixture_mode: root_command_fixture_mode,
         execution_lease: root_execution_lease,
         command_safety: root_command_safety,
         websearch_config: root_websearch_config,
         websearch_headers: root_websearch_headers,
+        deferred_websearch_headers: root_deferred_websearch_headers,
         background_redactor: root_background_redactor,
         background_manager: Arc::clone(&built_tools.background),
         native_websearch_possible,
@@ -4979,11 +4969,13 @@ struct RuntimeWorkspaceRootController {
     question_asker: Arc<dyn QuestionAsker>,
     offline: bool,
     global_proxy: Option<ResolvedToolProxy>,
+    deferred_global_proxy: Option<DeferredToolProxy>,
     command_fixture_mode: CommandFixtureMode,
     execution_lease: Arc<ExecutionLease>,
     command_safety: Arc<CommandSafetyClassifier>,
     websearch_config: WebSearchConfig,
     websearch_headers: BTreeMap<String, String>,
+    deferred_websearch_headers: Option<DeferredWebSearchHeaders>,
     background_redactor: Arc<dyn CommandFixtureRedactor>,
     background_manager: Arc<BackgroundProcessManager>,
     native_websearch_possible: bool,
@@ -5060,11 +5052,13 @@ impl RuntimeWorkspaceRootController {
             question_asker: Arc::clone(&self.question_asker),
             offline: self.offline,
             global_proxy: self.global_proxy.as_ref(),
+            deferred_global_proxy: self.deferred_global_proxy.clone(),
             command_fixture_mode: self.command_fixture_mode.clone(),
             execution_lease: Arc::clone(&self.execution_lease),
             command_safety: &self.command_safety,
             websearch_config: &self.websearch_config,
             websearch_headers: &self.websearch_headers,
+            deferred_websearch_headers: self.deferred_websearch_headers.clone(),
             native_websearch_possible: self.native_websearch_possible,
             background_redactor: Arc::clone(&self.background_redactor),
             background_manager: Some(Arc::clone(&self.background_manager)),
@@ -5141,11 +5135,13 @@ impl RuntimeWorkspaceRootController {
             question_asker: Arc::clone(&self.question_asker),
             offline: self.offline,
             global_proxy: self.global_proxy.clone(),
+            deferred_global_proxy: self.deferred_global_proxy.clone(),
             command_fixture_mode: self.command_fixture_mode.clone(),
             execution_lease: Arc::clone(&self.execution_lease),
             command_safety: Arc::clone(&self.command_safety),
             websearch_config: self.websearch_config.clone(),
             websearch_headers: self.websearch_headers.clone(),
+            deferred_websearch_headers: self.deferred_websearch_headers.clone(),
             background_redactor: Arc::clone(&self.background_redactor),
             background_manager: Arc::clone(&self.background_manager),
             native_websearch_possible: self.native_websearch_possible,
@@ -5211,11 +5207,13 @@ impl RuntimeWorkspaceRootController {
             question_asker: Arc::clone(&self.question_asker),
             offline: self.offline,
             global_proxy: self.global_proxy.as_ref(),
+            deferred_global_proxy: self.deferred_global_proxy.clone(),
             command_fixture_mode: self.command_fixture_mode.clone(),
             execution_lease: Arc::clone(&self.execution_lease),
             command_safety: &self.command_safety,
             websearch_config: &self.websearch_config,
             websearch_headers: &self.websearch_headers,
+            deferred_websearch_headers: self.deferred_websearch_headers.clone(),
             native_websearch_possible: self.native_websearch_possible,
             background_redactor: Arc::clone(&self.background_redactor),
             background_manager: Some(Arc::clone(&self.background_manager)),
@@ -7502,6 +7500,209 @@ struct ResolvedToolProxy {
     upstream: UpstreamProxy,
 }
 
+type DeferredCredentialResolver =
+    Arc<dyn Fn(&str) -> std::result::Result<String, String> + Send + Sync>;
+
+#[derive(Clone)]
+struct DeferredToolProxy {
+    configured: String,
+    username: Option<String>,
+    password_credential: Option<String>,
+    redactor: FixtureRedactor,
+    resolver: DeferredCredentialResolver,
+    resolved: Arc<OnceCell<ResolvedToolProxy>>,
+}
+
+impl DeferredToolProxy {
+    fn from_config(
+        config: &Config,
+        credentials_path: &Path,
+        offline: bool,
+        redactor: FixtureRedactor,
+    ) -> Result<Option<Self>> {
+        if offline {
+            return Ok(None);
+        }
+        let Some(configured) = config.network.proxy.clone() else {
+            return Ok(None);
+        };
+        Url::parse(&configured)
+            .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
+        match (
+            config.network.proxy_username.as_ref(),
+            config.network.proxy_password_credential.as_ref(),
+        ) {
+            (None, None) | (Some(_), Some(_)) => {}
+            _ => {
+                return Err(miette!(
+                    "global proxy authentication requires username and password credential reference"
+                ));
+            }
+        }
+        let credentials_path = credentials_path.to_path_buf();
+        let resolver: DeferredCredentialResolver = Arc::new(move |reference| {
+            let resolved = CredentialManager::system(&credentials_path)
+                .resolve_authorized(&CredentialReference::new(reference))
+                .map_err(|error| format!("global proxy credential could not resolve: {error}"))?;
+            for warning in resolved.warnings() {
+                eprintln!("warning: {warning}");
+            }
+            Ok(resolved.secret().expose_secret().clone())
+        });
+        Ok(Some(Self {
+            configured,
+            username: config.network.proxy_username.clone(),
+            password_credential: config.network.proxy_password_credential.clone(),
+            redactor,
+            resolver,
+            resolved: Arc::new(OnceCell::new()),
+        }))
+    }
+
+    #[cfg(test)]
+    fn with_resolver(
+        configured: impl Into<String>,
+        username: Option<String>,
+        password_credential: Option<String>,
+        redactor: FixtureRedactor,
+        resolver: DeferredCredentialResolver,
+    ) -> Self {
+        Self {
+            configured: configured.into(),
+            username,
+            password_credential,
+            redactor,
+            resolver,
+            resolved: Arc::new(OnceCell::new()),
+        }
+    }
+
+    async fn resolve(&self) -> std::result::Result<ResolvedToolProxy, String> {
+        self.resolved
+            .get_or_try_init(|| async {
+                let configured = self.configured.clone();
+                let username = self.username.clone();
+                let password_credential = self.password_credential.clone();
+                let redactor = self.redactor.clone();
+                let resolver = Arc::clone(&self.resolver);
+                tokio::task::spawn_blocking(move || {
+                    resolve_tool_proxy_parts(
+                        &configured,
+                        username.as_deref(),
+                        password_credential.as_deref(),
+                        &redactor,
+                        |reference| resolver(reference).map_err(miette::Report::msg),
+                    )
+                    .map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| format!("tool proxy credential worker failed: {error}"))?
+            })
+            .await
+            .cloned()
+    }
+}
+
+#[derive(Clone)]
+struct DeferredWebSearchHeaders {
+    config: WebSearchConfig,
+    redactor: FixtureRedactor,
+    resolver: DeferredCredentialResolver,
+    resolved: Arc<OnceCell<BTreeMap<String, String>>>,
+}
+
+impl DeferredWebSearchHeaders {
+    fn from_config(
+        config: &WebSearchConfig,
+        credentials_path: &Path,
+        offline: bool,
+        redactor: FixtureRedactor,
+    ) -> Option<Self> {
+        if offline || config.endpoint.is_none() || config.header_credentials.is_empty() {
+            return None;
+        }
+        let credentials_path = credentials_path.to_path_buf();
+        let resolver: DeferredCredentialResolver = Arc::new(move |reference| {
+            let resolved = CredentialManager::system(&credentials_path)
+                .resolve_authorized(&CredentialReference::new(reference))
+                .map_err(|error| {
+                    format!("web-search credential {reference:?} could not resolve: {error}")
+                })?;
+            for warning in resolved.warnings() {
+                eprintln!("warning: {warning}");
+            }
+            Ok(resolved.secret().expose_secret().clone())
+        });
+        Some(Self {
+            config: config.clone(),
+            redactor,
+            resolver,
+            resolved: Arc::new(OnceCell::new()),
+        })
+    }
+
+    #[cfg(test)]
+    fn with_resolver(
+        config: WebSearchConfig,
+        redactor: FixtureRedactor,
+        resolver: DeferredCredentialResolver,
+    ) -> Self {
+        Self {
+            config,
+            redactor,
+            resolver,
+            resolved: Arc::new(OnceCell::new()),
+        }
+    }
+
+    async fn resolve(&self) -> std::result::Result<BTreeMap<String, String>, String> {
+        self.resolved
+            .get_or_try_init(|| async {
+                let config = self.config.clone();
+                let redactor = self.redactor.clone();
+                let resolver = Arc::clone(&self.resolver);
+                tokio::task::spawn_blocking(move || {
+                    resolve_websearch_headers_with(&config, false, &redactor, |reference| {
+                        resolver(reference).map_err(miette::Report::msg)
+                    })
+                    .map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| format!("web-search credential worker failed: {error}"))?
+            })
+            .await
+            .cloned()
+    }
+}
+
+fn resolve_tool_proxy_parts(
+    configured: &str,
+    username: Option<&str>,
+    password_credential: Option<&str>,
+    redactor: &FixtureRedactor,
+    mut resolve: impl FnMut(&str) -> Result<String>,
+) -> Result<ResolvedToolProxy> {
+    let url = Url::parse(configured)
+        .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
+    let mut upstream = UpstreamProxy::new(url.clone())
+        .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
+    match (username, password_credential) {
+        (None, None) => {}
+        (Some(username), Some(reference)) => {
+            let password = resolve(reference)?;
+            redactor.register_known_value(&password);
+            upstream = upstream.with_basic_auth(username, &password);
+        }
+        _ => {
+            return Err(miette!(
+                "global proxy authentication requires username and password credential reference"
+            ));
+        }
+    }
+    Ok(ResolvedToolProxy { url, upstream })
+}
+
+#[cfg(test)]
 fn resolve_tool_proxy(
     config: &Config,
     credentials_path: &Path,
@@ -7514,53 +7715,22 @@ fn resolve_tool_proxy(
     let Some(configured) = config.network.proxy.as_deref() else {
         return Ok(None);
     };
-    let url = Url::parse(configured)
-        .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
-    let mut upstream = UpstreamProxy::new(url.clone())
-        .map_err(|error| miette!("configured global proxy is invalid: {error}"))?;
-    match (
+    resolve_tool_proxy_parts(
+        configured,
         config.network.proxy_username.as_deref(),
         config.network.proxy_password_credential.as_deref(),
-    ) {
-        (None, None) => {}
-        (Some(username), Some(reference)) => {
+        redactor,
+        |reference| {
             let resolved = CredentialManager::system(credentials_path)
                 .resolve(&CredentialReference::new(reference))
                 .map_err(|error| miette!("global proxy credential could not resolve: {error}"))?;
             for warning in resolved.warnings() {
                 eprintln!("warning: {warning}");
             }
-            let password = resolved.secret().expose_secret().clone();
-            redactor.register_known_value(&password);
-            upstream = upstream.with_basic_auth(username, &password);
-        }
-        _ => {
-            return Err(miette!(
-                "global proxy authentication requires username and password credential reference"
-            ));
-        }
-    }
-    Ok(Some(ResolvedToolProxy { url, upstream }))
-}
-
-fn resolve_websearch_headers(
-    config: &WebSearchConfig,
-    credentials_path: &Path,
-    offline: bool,
-    redactor: &FixtureRedactor,
-) -> Result<BTreeMap<String, String>> {
-    let manager = CredentialManager::system(credentials_path);
-    resolve_websearch_headers_with(config, offline, redactor, |reference| {
-        let resolved = manager
-            .resolve(&CredentialReference::new(reference))
-            .map_err(|error| {
-                miette!("web-search credential {reference:?} could not resolve: {error}")
-            })?;
-        for warning in resolved.warnings() {
-            eprintln!("warning: {warning}");
-        }
-        Ok(resolved.secret().expose_secret().clone())
-    })
+            Ok(resolved.secret().expose_secret().clone())
+        },
+    )
+    .map(Some)
 }
 
 fn resolve_websearch_headers_with(
@@ -9294,11 +9464,13 @@ struct BuildToolsInput<'a> {
     question_asker: Arc<dyn QuestionAsker>,
     offline: bool,
     global_proxy: Option<&'a ResolvedToolProxy>,
+    deferred_global_proxy: Option<DeferredToolProxy>,
     command_fixture_mode: CommandFixtureMode,
     execution_lease: Arc<ExecutionLease>,
     command_safety: &'a Arc<CommandSafetyClassifier>,
     websearch_config: &'a WebSearchConfig,
     websearch_headers: &'a BTreeMap<String, String>,
+    deferred_websearch_headers: Option<DeferredWebSearchHeaders>,
     native_websearch_possible: bool,
     background_redactor: Arc<dyn CommandFixtureRedactor>,
     background_manager: Option<Arc<BackgroundProcessManager>>,
@@ -9438,6 +9610,210 @@ impl CommandExecutor for ScratchGuardedCommandExecutor {
         output: Arc<dyn ToolOutputSink>,
     ) -> std::result::Result<ToolCommandOutcome, ToolError> {
         self.inner.run(request, cancellation, output).await
+    }
+}
+
+struct DeferredCommandExecutor {
+    workspace_roots: Vec<PathBuf>,
+    workspace: PathBuf,
+    command_fixture_mode: CommandFixtureMode,
+    execution_lease: Arc<ExecutionLease>,
+    command_safety: Arc<CommandSafetyClassifier>,
+    global_proxy: DeferredToolProxy,
+    inner: OnceCell<Arc<dyn CommandExecutor>>,
+}
+
+impl DeferredCommandExecutor {
+    fn new(
+        workspace_roots: &[PathBuf],
+        workspace: &Path,
+        command_fixture_mode: CommandFixtureMode,
+        execution_lease: Arc<ExecutionLease>,
+        command_safety: Arc<CommandSafetyClassifier>,
+        global_proxy: DeferredToolProxy,
+    ) -> Self {
+        Self {
+            workspace_roots: workspace_roots.to_vec(),
+            workspace: workspace.to_path_buf(),
+            command_fixture_mode,
+            execution_lease,
+            command_safety,
+            global_proxy,
+            inner: OnceCell::new(),
+        }
+    }
+
+    async fn inner(&self) -> std::result::Result<&Arc<dyn CommandExecutor>, ToolError> {
+        self.inner
+            .get_or_try_init(|| async {
+                let proxy = self
+                    .global_proxy
+                    .resolve()
+                    .await
+                    .map_err(ToolError::Command)?;
+                let workspace_roots = self.workspace_roots.clone();
+                let workspace = self.workspace.clone();
+                let command_fixture_mode = self.command_fixture_mode.clone();
+                let execution_lease = Arc::clone(&self.execution_lease);
+                let command_safety = Arc::clone(&self.command_safety);
+                tokio::task::spawn_blocking(move || {
+                    build_command_executor(
+                        &workspace_roots,
+                        &workspace,
+                        command_fixture_mode,
+                        &execution_lease,
+                        &command_safety,
+                        Some(&proxy),
+                    )
+                    .map_err(|error| ToolError::Command(error.to_string()))
+                })
+                .await
+                .map_err(|error| {
+                    ToolError::Command(format!("command startup worker failed: {error}"))
+                })?
+            })
+            .await
+    }
+}
+
+#[async_trait]
+impl CommandExecutor for DeferredCommandExecutor {
+    fn supports_background(&self) -> bool {
+        matches!(
+            self.command_fixture_mode,
+            CommandFixtureMode::Live | CommandFixtureMode::Record { .. }
+        )
+    }
+
+    async fn run(
+        &self,
+        request: CommandRequest,
+        cancellation: CancellationToken,
+        output: Arc<dyn ToolOutputSink>,
+    ) -> std::result::Result<ToolCommandOutcome, ToolError> {
+        self.inner().await?.run(request, cancellation, output).await
+    }
+}
+
+struct DeferredPolicyWebFetcher {
+    global_proxy: DeferredToolProxy,
+    inner: OnceCell<Arc<dyn WebFetcher>>,
+}
+
+impl DeferredPolicyWebFetcher {
+    fn new(global_proxy: DeferredToolProxy) -> Self {
+        Self {
+            global_proxy,
+            inner: OnceCell::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl WebFetcher for DeferredPolicyWebFetcher {
+    async fn fetch(
+        &self,
+        request: FetchRequest,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<FetchResponse, ToolError> {
+        let inner = self
+            .inner
+            .get_or_try_init(|| async {
+                let proxy = self
+                    .global_proxy
+                    .resolve()
+                    .await
+                    .map_err(ToolError::Network)?;
+                Ok::<Arc<dyn WebFetcher>, ToolError>(Arc::new(PolicyWebFetcher::new(
+                    false,
+                    Some(proxy),
+                )))
+            })
+            .await?;
+        inner.fetch(request, cancellation).await
+    }
+}
+
+struct DeferredConfiguredWebSearcher {
+    config: WebSearchConfig,
+    headers: DeferredWebSearchHeaders,
+    web_fetcher: Arc<dyn WebFetcher>,
+    limits: ToolLimits,
+    fixture_mode: CommandFixtureMode,
+    inner: OnceCell<Arc<dyn WebSearcher>>,
+}
+
+impl DeferredConfiguredWebSearcher {
+    fn new(
+        config: WebSearchConfig,
+        headers: DeferredWebSearchHeaders,
+        web_fetcher: Arc<dyn WebFetcher>,
+        limits: ToolLimits,
+        fixture_mode: CommandFixtureMode,
+    ) -> Result<Self> {
+        let endpoint = config
+            .endpoint
+            .as_deref()
+            .ok_or_else(|| miette!("deferred web-search credentials require an endpoint"))?;
+        let endpoint = Url::parse(endpoint)
+            .map_err(|error| miette!("configured web-search endpoint is invalid: {error}"))?;
+        ConfiguredSearchApi::new(
+            Arc::clone(&web_fetcher),
+            endpoint,
+            config.query_parameter.clone(),
+            BTreeMap::new(),
+            limits.max_web_bytes,
+        )
+        .map_err(|error| miette!("configured web-search API could not start: {error}"))?;
+        Ok(Self {
+            config,
+            headers,
+            web_fetcher,
+            limits,
+            fixture_mode,
+            inner: OnceCell::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl WebSearcher for DeferredConfiguredWebSearcher {
+    async fn search(
+        &self,
+        request: WebSearchRequest,
+        cancellation: CancellationToken,
+    ) -> std::result::Result<WebSearchResponse, ToolError> {
+        let inner = self
+            .inner
+            .get_or_try_init(|| async {
+                let headers = self.headers.resolve().await.map_err(ToolError::Network)?;
+                let config = self.config.clone();
+                let web_fetcher = Arc::clone(&self.web_fetcher);
+                let limits = self.limits;
+                let fixture_mode = self.fixture_mode.clone();
+                tokio::task::spawn_blocking(move || {
+                    configured_web_searcher(
+                        false,
+                        &config,
+                        &headers,
+                        &web_fetcher,
+                        limits,
+                        &fixture_mode,
+                    )
+                    .map_err(|error| ToolError::Network(error.to_string()))?
+                    .ok_or_else(|| {
+                        ToolError::Network(
+                            "configured web-search endpoint is unavailable".to_owned(),
+                        )
+                    })
+                })
+                .await
+                .map_err(|error| {
+                    ToolError::Network(format!("web-search startup worker failed: {error}"))
+                })?
+            })
+            .await?;
+        inner.search(request, cancellation).await
     }
 }
 
@@ -9947,11 +10323,13 @@ fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
         question_asker,
         offline,
         global_proxy,
+        deferred_global_proxy,
         command_fixture_mode,
         execution_lease,
         command_safety,
         websearch_config,
         websearch_headers,
+        deferred_websearch_headers,
         native_websearch_possible,
         background_redactor,
         background_manager,
@@ -9967,19 +10345,32 @@ fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
     let todo = Arc::new(TodoTool::new(limits));
     let web_fetcher: Arc<dyn WebFetcher> = if offline {
         Arc::new(OfflineWebFetcher)
+    } else if let Some(proxy) = deferred_global_proxy.clone() {
+        Arc::new(DeferredPolicyWebFetcher::new(proxy))
     } else {
         Arc::new(PolicyWebFetcher::new(false, global_proxy.cloned()))
     };
     let websearch_fixture_mode = command_fixture_mode.clone();
     let hook_fixture_mode = command_fixture_mode.clone();
-    let command_executor = build_command_executor(
-        workspace_roots,
-        workspace,
-        command_fixture_mode,
-        &execution_lease,
-        command_safety,
-        global_proxy,
-    )?;
+    let command_executor: Arc<dyn CommandExecutor> = if let Some(proxy) = deferred_global_proxy {
+        Arc::new(DeferredCommandExecutor::new(
+            workspace_roots,
+            workspace,
+            command_fixture_mode,
+            Arc::clone(&execution_lease),
+            Arc::clone(command_safety),
+            proxy,
+        ))
+    } else {
+        build_command_executor(
+            workspace_roots,
+            workspace,
+            command_fixture_mode,
+            &execution_lease,
+            command_safety,
+            global_proxy,
+        )?
+    };
     let background = background_manager.unwrap_or_else(|| {
         Arc::new(BackgroundProcessManager::new(
             background_redactor,
@@ -10021,14 +10412,24 @@ fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
         Arc::new(ReferencesTool::new(Arc::clone(&code_intelligence), limits)),
         Arc::new(RenameTool::new(Arc::clone(&code_intelligence), limits)),
     ];
-    let configured_searcher = configured_web_searcher(
-        offline,
-        websearch_config,
-        websearch_headers,
-        &web_fetcher,
-        limits,
-        &websearch_fixture_mode,
-    )?;
+    let configured_searcher = if let Some(headers) = deferred_websearch_headers {
+        Some(Arc::new(DeferredConfiguredWebSearcher::new(
+            websearch_config.clone(),
+            headers,
+            Arc::clone(&web_fetcher),
+            limits,
+            websearch_fixture_mode.clone(),
+        )?) as Arc<dyn WebSearcher>)
+    } else {
+        configured_web_searcher(
+            offline,
+            websearch_config,
+            websearch_headers,
+            &web_fetcher,
+            limits,
+            &websearch_fixture_mode,
+        )?
+    };
     let websearch = (configured_searcher.is_some() || native_websearch_possible)
         .then(|| Arc::new(RuntimeWebSearcher::new(configured_searcher)));
     if let Some(searcher) = &websearch {
@@ -15711,11 +16112,13 @@ mod tests {
             question_asker: Arc::new(HeadlessQuestionAsker),
             offline: false,
             global_proxy: None,
+            deferred_global_proxy: None,
             command_fixture_mode: CommandFixtureMode::Offline,
             execution_lease: lease,
             command_safety: &Arc::new(CommandSafetyClassifier::default()),
             websearch_config: &configured,
             websearch_headers: &BTreeMap::new(),
+            deferred_websearch_headers: None,
             native_websearch_possible: false,
             background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
             background_manager: None,
@@ -15754,11 +16157,13 @@ mod tests {
             question_asker: Arc::new(HeadlessQuestionAsker),
             offline: true,
             global_proxy: None,
+            deferred_global_proxy: None,
             command_fixture_mode: CommandFixtureMode::Offline,
             execution_lease: offline_lease,
             command_safety: &Arc::new(CommandSafetyClassifier::default()),
             websearch_config: &configured,
             websearch_headers: &BTreeMap::new(),
+            deferred_websearch_headers: None,
             native_websearch_possible: false,
             background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
             background_manager: None,
@@ -15777,11 +16182,13 @@ mod tests {
             question_asker: Arc::new(HeadlessQuestionAsker),
             offline: true,
             global_proxy: None,
+            deferred_global_proxy: None,
             command_fixture_mode: CommandFixtureMode::Offline,
             execution_lease: replay_lease,
             command_safety: &Arc::new(CommandSafetyClassifier::default()),
             websearch_config: &configured,
             websearch_headers: &BTreeMap::new(),
+            deferred_websearch_headers: None,
             native_websearch_possible: true,
             background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
             background_manager: None,
@@ -15907,6 +16314,99 @@ mod tests {
         assert_eq!(calls.get(), 1);
         assert!(!redactor.redact_text(canary).contains(canary));
         assert!(!format!("{config:?}").contains(canary));
+    }
+
+    #[tokio::test]
+    async fn tool_composition_defers_all_external_credential_backend_reads() {
+        let root = tempdir().expect("workspace");
+        let private = tempdir().expect("private state");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resolver_calls = Arc::clone(&calls);
+        let resolver: DeferredCredentialResolver = Arc::new(move |reference| {
+            resolver_calls.fetch_add(1, Ordering::SeqCst);
+            match reference {
+                "proxy-password" => Ok("proxy-secret-canary".to_owned()),
+                "search-token" => Ok("Bearer search-secret-canary".to_owned()),
+                _ => Err("unexpected credential reference".to_owned()),
+            }
+        });
+        let redactor = FixtureRedactor::default();
+        let deferred_proxy = DeferredToolProxy::with_resolver(
+            "http://127.0.0.1:9",
+            Some("proxy-user".to_owned()),
+            Some("proxy-password".to_owned()),
+            redactor.clone(),
+            Arc::clone(&resolver),
+        );
+        let websearch_config = WebSearchConfig {
+            endpoint: Some("https://search.example/v1".to_owned()),
+            query_parameter: "q".to_owned(),
+            header_credentials: BTreeMap::from([(
+                "Authorization".to_owned(),
+                "search-token".to_owned(),
+            )]),
+        };
+        let deferred_headers = DeferredWebSearchHeaders::with_resolver(
+            websearch_config.clone(),
+            redactor.clone(),
+            resolver,
+        );
+        let lease = Arc::new(
+            ExecutionLease::acquire(private.path().join("execution.lock"))
+                .expect("execution lease"),
+        );
+
+        let built = build_tools(BuildToolsInput {
+            workspace_roots: &[root.path().to_path_buf()],
+            trusted_lsp_roots: &[false],
+            question_asker: Arc::new(HeadlessQuestionAsker),
+            offline: false,
+            global_proxy: None,
+            deferred_global_proxy: Some(deferred_proxy.clone()),
+            command_fixture_mode: CommandFixtureMode::Offline,
+            execution_lease: lease,
+            command_safety: &Arc::new(CommandSafetyClassifier::default()),
+            websearch_config: &websearch_config,
+            websearch_headers: &BTreeMap::new(),
+            deferred_websearch_headers: Some(deferred_headers.clone()),
+            native_websearch_possible: false,
+            background_redactor: Arc::new(SharedCommandFixtureRedactor(redactor.clone())),
+            background_manager: None,
+        })
+        .expect("tool composition");
+        assert!(built.registry.resolve("webfetch").is_some());
+        assert!(built.registry.resolve("websearch").is_some());
+        assert!(built.registry.resolve("bash").is_some());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "ordinary startup must not read the credential backend"
+        );
+
+        deferred_proxy
+            .resolve()
+            .await
+            .expect("explicit proxy-backed operation resolves credentials");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let headers = deferred_headers
+            .resolve()
+            .await
+            .expect("explicit search operation resolves credentials");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer search-secret-canary")
+        );
+        assert!(
+            !redactor
+                .redact_text("proxy-secret-canary")
+                .contains("proxy-secret-canary")
+        );
+        assert!(
+            !redactor
+                .redact_text("Bearer search-secret-canary")
+                .contains("search-secret-canary")
+        );
     }
 
     #[test]
@@ -17197,11 +17697,13 @@ mod tests {
             question_asker: Arc::new(HeadlessQuestionAsker),
             offline: false,
             global_proxy: None,
+            deferred_global_proxy: None,
             command_fixture_mode: CommandFixtureMode::Live,
             execution_lease: lease,
             command_safety: Arc::new(CommandSafetyClassifier::default()),
             websearch_config: WebSearchConfig::default(),
             websearch_headers: BTreeMap::new(),
+            deferred_websearch_headers: None,
             background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
             background_manager: Arc::new(BackgroundProcessManager::new(
                 Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
@@ -17458,6 +17960,7 @@ mod tests {
             question_asker: Arc::new(HeadlessQuestionAsker),
             offline: false,
             global_proxy: None,
+            deferred_global_proxy: None,
             command_fixture_mode: CommandFixtureMode::Live,
             execution_lease: Arc::new(
                 ExecutionLease::acquire(private.join("execution-2.lock")).expect("second lease"),
@@ -17465,6 +17968,7 @@ mod tests {
             command_safety: Arc::new(CommandSafetyClassifier::default()),
             websearch_config: WebSearchConfig::default(),
             websearch_headers: BTreeMap::new(),
+            deferred_websearch_headers: None,
             background_redactor: Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),
             background_manager: Arc::new(BackgroundProcessManager::new(
                 Arc::new(SharedCommandFixtureRedactor(FixtureRedactor::default())),

@@ -50,6 +50,10 @@ export class ComposerRenderable extends BoxRenderable {
   #submitting = false
   #shellMode = false
   #dockHeight = 4
+  #history: string[] = []
+  #historyIndex: number | null = null
+  #historyDraft = ""
+  #restoringHistory = false
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, options: ComposerOptions) {
     super(ctx, {
@@ -135,6 +139,45 @@ export class ComposerRenderable extends BoxRenderable {
     this.#refreshHeight()
   }
 
+  /**
+   * Recall accepted prompts without stealing Up/Down from multiline editing.
+   * History starts only at the first/last logical line, matching shell-style
+   * composer behavior while preserving the draft that was being written.
+   */
+  navigateHistory(direction: "previous" | "next"): boolean {
+    if (this.#history.length === 0) return false
+    const cursor = this.editor.logicalCursor
+    if (direction === "previous") {
+      if (cursor.row !== 0) return false
+      if (this.#historyIndex === null) {
+        this.#historyDraft = this.editor.plainText
+        this.#historyIndex = this.#history.length - 1
+      } else if (this.#historyIndex > 0) {
+        this.#historyIndex -= 1
+      }
+    } else {
+      if (cursor.row !== this.editor.lineCount - 1 || this.#historyIndex === null) return false
+      if (this.#historyIndex < this.#history.length - 1) {
+        this.#historyIndex += 1
+      } else {
+        this.#historyIndex = null
+      }
+    }
+    const value = this.#historyIndex === null
+      ? this.#historyDraft
+      : (this.#history[this.#historyIndex] ?? "")
+    this.#restoringHistory = true
+    try {
+      this.editor.setText(value)
+      this.editor.gotoBufferEnd()
+      this.setShellMode(value.startsWith("!"))
+      this.#refreshHeight()
+    } finally {
+      this.#restoringHistory = false
+    }
+    return true
+  }
+
   get attachments(): readonly Attachment[] {
     return this.#attachments
   }
@@ -216,6 +259,7 @@ export class ComposerRenderable extends BoxRenderable {
     try {
       const accepted = await this.#options.onSubmit(content, submittedAttachments)
       if (accepted) {
+        this.#rememberPrompt(content)
         this.#options.onSubmitted?.()
       } else {
         this.#restoreRejectedSubmissionForScope(submissionScope, content, submittedAttachments)
@@ -391,12 +435,24 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   #contentChanged(): void {
+    if (!this.#restoringHistory) {
+      this.#historyIndex = null
+      this.#historyDraft = ""
+    }
     this.#refreshHeight()
     const value = this.editor.plainText
     this.setShellMode(value.startsWith("!"))
     this.#options.onInput?.(value)
     const mention = this.currentFileMention()
     if (mention !== null) this.#options.onFileMention(mention)
+  }
+
+  #rememberPrompt(content: string): void {
+    if (content.trim().length === 0) return
+    if (this.#history.at(-1) !== content) this.#history.push(content)
+    if (this.#history.length > 256) this.#history.splice(0, this.#history.length - 256)
+    this.#historyIndex = null
+    this.#historyDraft = ""
   }
 
   #refreshAttachments(): void {

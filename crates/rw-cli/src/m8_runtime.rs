@@ -41,6 +41,39 @@ use crate::m8_config::DiscoveredMcpServer;
 const MAX_CONTROL_OUTPUT: usize = 32 * 1024;
 const APPROVAL_VERSION: u16 = 1;
 
+type McpCredentialResolver = Arc<dyn Fn(&str) -> Result<String> + Send + Sync + 'static>;
+
+/// Resolves stdio credential bindings only when an explicit connection is
+/// requested. Registered MCP metadata must never make an idle TUI open the OS
+/// credential vault merely because a server exists in configuration.
+struct DeferredCredentialMcpConnector {
+    inner: Arc<dyn McpConnector>,
+    bindings: BTreeMap<ServerId, Vec<crate::m8_config::CredentialBinding>>,
+    resolve: McpCredentialResolver,
+}
+
+#[async_trait]
+impl McpConnector for DeferredCredentialMcpConnector {
+    async fn connect(
+        &self,
+        config: &McpServerConfig,
+    ) -> std::result::Result<Arc<dyn McpClient>, McpError> {
+        let mut resolved = config.clone();
+        if let McpTransportConfig::Stdio { environment, .. } = &mut resolved.transport
+            && let Some(bindings) = self.bindings.get(&config.id)
+        {
+            for binding in bindings {
+                environment.retain(|(name, _)| name != &binding.environment);
+                let secret = (self.resolve)(&binding.credential_reference).map_err(|_| {
+                    McpError::Policy("MCP credential could not be resolved".to_owned())
+                })?;
+                environment.push((binding.environment.clone(), secret));
+            }
+        }
+        self.inner.connect(&resolved).await
+    }
+}
+
 pub(crate) struct McpApprovalStore {
     path: PathBuf,
     expected: RwLock<BTreeMap<ServerId, String>>,
@@ -608,6 +641,67 @@ impl McpSessionRuntime {
         })
     }
 
+    /// Registers configured servers without resolving credentials or opening a
+    /// connection. The live admin's explicit enable operation is the first
+    /// boundary allowed to connect and therefore the first boundary allowed to
+    /// consult the credential vault.
+    async fn start_deferred(
+        configs: &[DiscoveredMcpServer],
+        connector: Arc<dyn McpConnector>,
+        private_session_root: &Path,
+        resolve_credential: impl Fn(&str) -> Result<String> + Send + Sync + 'static,
+        approvals: Arc<McpApprovalStore>,
+        scratch: PrivateMcpScratch,
+    ) -> Result<Self> {
+        let spool = Arc::new(
+            FilesystemSpool::new(private_session_root.to_path_buf())
+                .await
+                .map_err(|error| miette!(error.to_string()))?,
+        );
+        let bindings = configs
+            .iter()
+            .map(|config| {
+                Ok((
+                    ServerId::new(config.name.clone())
+                        .map_err(|error| miette!(error.to_string()))?,
+                    config.credentials.clone(),
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        let connector: Arc<dyn McpConnector> = Arc::new(DeferredCredentialMcpConnector {
+            inner: connector,
+            bindings,
+            resolve: Arc::new(resolve_credential),
+        });
+        let manager = Arc::new(McpManager::new(
+            connector,
+            spool.clone(),
+            Arc::new(ToonMcpEncoder),
+            McpLimits::default(),
+        ));
+        for config in configs {
+            // Build a metadata-only runtime config. Credential bindings are
+            // intentionally omitted here and restored by the deferred
+            // connector immediately before an explicit connect.
+            let mut runtime = config.runtime_config(|_| Ok(String::new()))?;
+            if let McpTransportConfig::Stdio { environment, .. } = &mut runtime.transport {
+                for binding in &config.credentials {
+                    environment.retain(|(name, _)| name != &binding.environment);
+                }
+            }
+            manager
+                .register_deferred(runtime)
+                .await
+                .map_err(|error| miette!("{}: {error}", config.origin.path().display()))?;
+        }
+        Ok(Self {
+            manager,
+            spool,
+            approvals,
+            _scratch: scratch,
+        })
+    }
+
     pub(crate) async fn shutdown(&self) {
         for (server, result) in self.manager.shutdown().await {
             if let Err(error) = result {
@@ -735,11 +829,11 @@ impl McpSessionRuntime {
             // configurations continue through the fail-closed launcher above.
             http
         };
-        Self::start(
+        Self::start_deferred(
             configs,
             connector,
             private_session_root,
-            |reference| {
+            move |reference| {
                 credentials
                     .resolve(&CredentialReference::new(reference))
                     .map(|resolved| resolved.secret().expose_secret().clone())
@@ -1904,6 +1998,76 @@ mod tests {
         .expect("HTTP-only MCP runtime must not require a stdio helper");
         assert_eq!(http_runtime.manager.statuses().await.len(), 1);
         http_runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn deferred_startup_does_not_resolve_mcp_credentials_or_connect() {
+        let root = tempfile::tempdir().expect("root");
+        #[cfg(unix)]
+        fs::set_permissions(
+            root.path(),
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .expect("private mode");
+        let config = DiscoveredMcpServer {
+            name: "private.docs".to_owned(),
+            enabled: true,
+            defer_tools: true,
+            transport: DiscoveredMcpTransport::Stdio {
+                argv: vec!["/bin/false".to_owned()],
+                cwd: None,
+                inherit_env: Vec::new(),
+                read_roots: Vec::new(),
+                write_roots: Vec::new(),
+                allowed_domains: Vec::new(),
+            },
+            credentials: vec![crate::m8_config::CredentialBinding {
+                environment: "PRIVATE_TOKEN".to_owned(),
+                credential_reference: "private-token".to_owned(),
+            }],
+            attested_files: Vec::new(),
+            origin: ExecutableConfigOrigin::User(root.path().join("mcp.toml")),
+            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            capability_override_origin: None,
+        };
+        let approvals = Arc::new(
+            McpApprovalStore::open(root.path(), std::slice::from_ref(&config)).expect("approvals"),
+        );
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resolver_calls = Arc::clone(&calls);
+        let runtime = McpSessionRuntime::start_deferred(
+            std::slice::from_ref(&config),
+            Arc::new(NoConnect),
+            root.path(),
+            move |reference| {
+                assert_eq!(reference, "private-token");
+                resolver_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok("secret-canary".to_owned())
+            },
+            approvals,
+            PrivateMcpScratch::create().expect("scratch"),
+        )
+        .await
+        .expect("metadata-only startup");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "ordinary startup must not consult the credential backend",
+        );
+        let server = ServerId::new("private.docs").expect("server");
+        let statuses = runtime.manager.statuses().await;
+        let status = &statuses[0];
+        assert!(status.enabled, "persisted enablement must remain visible");
+        assert!(matches!(status.state, ServerState::Disabled));
+
+        assert!(runtime.manager.set_enabled(&server, true).await.is_err());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the explicit enable boundary may resolve exactly once",
+        );
+        runtime.shutdown().await;
     }
 
     #[cfg(unix)]

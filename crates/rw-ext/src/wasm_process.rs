@@ -185,8 +185,25 @@ async fn invoke_helper_with_timeout(
     component: &[u8],
     request_timeout: Duration,
 ) -> Result<WasmHostResponse, WasmHookHostError> {
+    invoke_helper_with_timeout_and_slot(
+        helper,
+        request,
+        component,
+        request_timeout,
+        &WASM_HELPER_SLOT,
+    )
+    .await
+}
+
+async fn invoke_helper_with_timeout_and_slot(
+    helper: &std::path::Path,
+    request: &WasmHostRequest,
+    component: &[u8],
+    request_timeout: Duration,
+    helper_slot: &tokio::sync::Semaphore,
+) -> Result<WasmHostResponse, WasmHookHostError> {
     let started = Instant::now();
-    let _permit = tokio::time::timeout(request_timeout, WASM_HELPER_SLOT.acquire())
+    let _permit = tokio::time::timeout(request_timeout, helper_slot.acquire())
         .await
         .map_err(|_| helper_deadline_error())?
         .map_err(|_| WasmHookHostError::Execution {
@@ -384,12 +401,18 @@ mod tests {
             limits: WasmHookLimits::default(),
         };
         let started = Instant::now();
-        let error =
-            invoke_helper_with_timeout(&helper, &request, b"component", Duration::from_millis(200))
-                .await
-                .expect_err("hanging helper must time out");
+        let helper_slot = tokio::sync::Semaphore::new(1);
+        let error = invoke_helper_with_timeout_and_slot(
+            &helper,
+            &request,
+            b"component",
+            Duration::from_secs(2),
+            &helper_slot,
+        )
+        .await
+        .expect_err("hanging helper must time out");
         assert!(error.to_string().contains("deadline"));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(4));
 
         let pid = std::fs::read_to_string(&pid_file)
             .expect("helper pid")

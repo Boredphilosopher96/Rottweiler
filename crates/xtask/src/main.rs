@@ -15,10 +15,11 @@ use rw_types::{
     ContextSnapshot, Cost, CostSnapshot, DiffArtifact, EngineError, EngineErrorCategory,
     EngineEvent, EventMeta, ImageRef, McpApprovalReview, McpServerDescriptor, McpServerState,
     ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities,
-    ModelCatalogSnapshot, ModelDescriptor, PermissionAction, PermissionApprovalDescriptor,
-    PermissionApprovalScope, PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact,
-    PlanDecision, PlanStep, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
-    ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
+    ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor, ModelSwitchQuestion,
+    PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
+    PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PlanStep,
+    PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind,
+    ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget, Role,
     RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
     SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
@@ -1750,6 +1751,8 @@ fn generate_typescript() -> String {
     declaration!(SessionReviewFile);
     declaration!(SessionReview);
     declaration!(QuestionResponseKind);
+    declaration!(ModelContextTransfer);
+    declaration!(ModelSwitchQuestion);
     declaration!(QuestionOption);
     declaration!(Question);
     declaration!(Answer);
@@ -2216,16 +2219,37 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(9),
                 turn_id: TurnId("turn-fixture".to_owned()),
                 question_id: QuestionId("question-1".to_owned()),
-                questions: vec![Question {
-                    id: QuestionId("question-1".to_owned()),
-                    prompt: "Continue?".to_owned(),
-                    response_kind: QuestionResponseKind::SelectOne,
-                    options: vec![QuestionOption {
-                        value: "yes".to_owned(),
-                        label: "Yes".to_owned(),
-                        description: None,
-                    }],
-                }],
+                questions: vec![
+                    Question {
+                        id: QuestionId("question-1".to_owned()),
+                        prompt: "Continue?".to_owned(),
+                        response_kind: QuestionResponseKind::SelectOne,
+                        options: vec![QuestionOption {
+                            value: "yes".to_owned(),
+                            label: "Yes".to_owned(),
+                            description: None,
+                            model_context_transfer: None,
+                        }],
+                        model_switch: None,
+                    },
+                    Question {
+                        id: QuestionId("question-model-switch".to_owned()),
+                        prompt: "How should the new model receive this conversation?".to_owned(),
+                        response_kind: QuestionResponseKind::SelectOne,
+                        options: vec![QuestionOption {
+                            value: "pass_summary".to_owned(),
+                            label: "Pass summary".to_owned(),
+                            description: Some(
+                                "Compact this conversation, then switch models".to_owned(),
+                            ),
+                            model_context_transfer: Some(ModelContextTransfer::PassSummary),
+                        }],
+                        model_switch: Some(ModelSwitchQuestion {
+                            model: ModelAlias("openai/gpt-5".to_owned()),
+                            provider: Some("openai".to_owned()),
+                        }),
+                    },
+                ],
             },
             EngineEvent::QuestionAnswered {
                 meta: event_meta(10),
@@ -2315,18 +2339,22 @@ fn contract_fixture() -> ContractFixture {
                 provider: None,
                 thinking: Some(ThinkingLevel::Off),
             },
-            EngineEvent::ContextItemPinned {
+            EngineEvent::ModelContextCleared {
                 meta: event_meta(21),
+                strategy: ModelContextTransfer::StartWithoutContext,
+            },
+            EngineEvent::ContextItemPinned {
+                meta: event_meta(22),
                 item_id: ContextItemId("context-1".to_owned()),
                 effective_after_agent_turn: 3,
             },
             EngineEvent::ContextItemEvicted {
-                meta: event_meta(22),
+                meta: event_meta(23),
                 item_id: ContextItemId("context-2".to_owned()),
                 effective_after_agent_turn: 3,
             },
             EngineEvent::UserShellStateChanged {
-                meta: event_meta(23),
+                meta: event_meta(24),
                 shell_id: ShellId("shell-fixture".to_owned()),
                 command: Some("python".to_owned()),
                 active: false,
@@ -2334,7 +2362,7 @@ fn contract_fixture() -> ContractFixture {
                 captured_output: None,
             },
             EngineEvent::Error {
-                meta: event_meta(24),
+                meta: event_meta(25),
                 error: EngineError {
                     category: EngineErrorCategory::Protocol,
                     code: "invalid_command".to_owned(),
@@ -2344,11 +2372,11 @@ fn contract_fixture() -> ContractFixture {
                 },
             },
             EngineEvent::PlanSubmitted {
-                meta: event_meta(25),
+                meta: event_meta(26),
                 artifact: plan_artifact.clone(),
             },
             EngineEvent::PlanReviewed {
-                meta: event_meta(26),
+                meta: event_meta(27),
                 artifact: plan_artifact,
                 decision: PlanDecision::Approve,
                 revisions: None,
@@ -2383,7 +2411,7 @@ fn contract_fixture() -> ContractFixture {
                     emitted_at: "2026-01-01T00:00:00Z".to_owned(),
                 },
                 session_id: SessionId("session-fixture".to_owned()),
-                through_sequence: Some(SequenceId(25)),
+                through_sequence: Some(SequenceId(27)),
             },
             EngineEvent::SessionForked {
                 meta: CommandAckMeta {

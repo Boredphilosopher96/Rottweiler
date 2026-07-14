@@ -608,6 +608,23 @@ export const contractFixture = {
               "description": null
             }
           ]
+        },
+        {
+          "id": "question-model-switch",
+          "prompt": "How should the new model receive this conversation?",
+          "response_kind": "select_one",
+          "options": [
+            {
+              "value": "pass_summary",
+              "label": "Pass summary",
+              "description": "Compact this conversation, then switch models",
+              "model_context_transfer": "pass_summary"
+            }
+          ],
+          "model_switch": {
+            "model": "openai/gpt-5",
+            "provider": "openai"
+          }
         }
       ]
     },
@@ -825,11 +842,22 @@ export const contractFixture = {
       "thinking": "off"
     },
     {
-      "type": "context_item_pinned",
+      "type": "model_context_cleared",
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
         "sequence_id": "21",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "strategy": "start_without_context"
+    },
+    {
+      "type": "context_item_pinned",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "22",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -841,7 +869,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "22",
+        "sequence_id": "23",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -853,7 +881,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "23",
+        "sequence_id": "24",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -868,7 +896,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "24",
+        "sequence_id": "25",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -887,7 +915,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "25",
+        "sequence_id": "26",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -911,7 +939,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "26",
+        "sequence_id": "27",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -991,7 +1019,7 @@ export const contractFixture = {
         "emitted_at": "2026-01-01T00:00:00Z"
       },
       "session_id": "session-fixture",
-      "through_sequence": "25"
+      "through_sequence": "27"
     },
     {
       "type": "session_forked",

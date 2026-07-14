@@ -83,10 +83,12 @@ describe("M4 retained components", () => {
       .flatMap((child) => child.getChildren())
       .filter((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
     expect(cards).toHaveLength(1)
-    expect(cards[0]?.header.plainText.match(/canary output/g)?.length).toBe(1)
+    expect(cards[0]?.header.plainText).toContain("Read file")
+    expect(cards[0]?.header.plainText).toContain("1 line")
     cards[0]?.toggle()
     expect(cards[0]?.body.visible).toBeTrue()
     await setup.renderOnce()
+    expect(cards[0]?.body.plainText).toContain("canary output")
     cards = app.transcript.streamingCard
       .getChildren()
       .flatMap((child) => child.getChildren())
@@ -134,7 +136,9 @@ describe("M4 retained components", () => {
     expect([...app.transcript.mountedCards.values()][0]).toBe(toolOnlyCard)
     expect(cards[0]?.body.visible).toBeFalse()
     const visibleToolText = `${cards[0]?.header.plainText ?? ""}\n${cards[0]?.body.plainText ?? ""}`
-    expect(visibleToolText.match(/canary output/g)?.length).toBe(1)
+    expect(visibleToolText).toContain("Read file")
+    expect(visibleToolText).toContain("1 line")
+    expect(visibleToolText).not.toContain("canary output")
   })
   let treeSitter: MockTreeSitterClient | undefined
 
@@ -519,7 +523,7 @@ describe("M4 retained components", () => {
     expect(setup.captureCharFrame()).toContain("Running tools")
     expect(setup.captureCharFrame()).toContain("⌄ Thinking: checking the workspace")
     expect(setup.captureCharFrame()).toContain("checking the workspace")
-    expect(setup.captureCharFrame()).toContain("glob")
+    expect(setup.captureCharFrame()).toContain("Find files")
     expect(setup.captureCharFrame()).toContain("**/*.rs")
     expect(setup.captureCharFrame()).not.toContain("Working…")
 
@@ -533,7 +537,7 @@ describe("M4 retained components", () => {
       },
     })
     await setup.renderOnce()
-    expect(setup.captureCharFrame()).toContain("? glob")
+    expect(setup.captureCharFrame()).toContain("? Find files")
     expect(setup.captureCharFrame()).toContain("Awaiting approval…")
 
     app.setState({
@@ -589,7 +593,7 @@ describe("M4 retained components", () => {
         truncated: false,
       },
       chunks: [],
-      output: { type: "text" as const, text: "updated src/main.rs" },
+      output: { type: "text" as const, text: "applied 1 edit\nError parsing diff: Removed line count did not match for hunk at line 3" },
       isError: false,
       callIndex: 1,
     }
@@ -619,13 +623,21 @@ describe("M4 retained components", () => {
     const bashCard = cards.find((card) => card.id === "tool-bash-inline")
     const editCard = cards.find((card) => card.id === "tool-edit-inline")
     expect(bashCard?.command).toBeInstanceOf(CodeRenderable)
+    expect(bashCard?.header.plainText).toContain("Terminal command")
     expect((bashCard?.command as CodeRenderable).filetype).toBe("bash")
     expect((bashCard?.command as CodeRenderable).content).toBe("cargo test --workspace")
     expect(bashCard?.commandPrompt?.plainText).toBe("$")
     expect(setup.captureCharFrame()).toContain("$ cargo test --workspace")
     expect(editCard?.diff).toBeInstanceOf(DiffRenderable)
+    expect(editCard?.header.plainText).toContain("Edit file")
     expect((editCard?.diff as DiffRenderable).filetype).toBe("rust")
     expect((editCard?.diff as DiffRenderable).diff).toContain("+new")
+    editCard?.toggle()
+    await setup.renderOnce()
+    expect(editCard?.body.plainText).toContain("Result")
+    expect(editCard?.body.plainText).toContain("applied 1 edit")
+    expect(editCard?.body.plainText).not.toContain("Error parsing diff")
+    expect(setup.captureCharFrame()).not.toContain("Removed line count did not match")
 
     const retainedCommand = bashCard?.command
     app.setState({
@@ -767,6 +779,59 @@ describe("M4 retained components", () => {
         decision: "deny",
       }),
     )
+  })
+
+  test("commits the exact clicked permission choice once and keeps keyboard activation", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const tool = {
+      toolCallId: "click-approval",
+      turnId: "1",
+      name: "write",
+      args: { path: "src/clicked.rs" },
+      status: "awaiting_approval" as const,
+      capabilities: ["write_filesystem" as const],
+      rationale: "Create the selected file",
+      diff: null,
+      chunks: [],
+      output: null,
+      isError: null,
+      callIndex: 0,
+    }
+    const app = createRottweilerApp(renderer, {
+      initialState: { ...createInitialState(), tools: { [tool.toolCallId]: tool } },
+      onCommand(command) {
+        commands.push(command)
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    // Each described option occupies two terminal rows. Click the second row's
+    // label (Allow session), not the currently highlighted default.
+    await setup.mockMouse.click(
+      app.interactionPanel.select.x + 4,
+      app.interactionPanel.select.y + 2,
+    )
+    expect(commands.filter((command) => command.type === "approve_tool")).toEqual([
+      expect.objectContaining({
+        type: "approve_tool",
+        tool_call_id: "click-approval",
+        decision: "allow_session",
+      }),
+    ])
+
+    commands.length = 0
+    app.interactionPanel.select.setSelectedIndex(2)
+    app.interactionPanel.select.selectCurrent()
+    expect(commands.filter((command) => command.type === "approve_tool")).toEqual([
+      expect.objectContaining({
+        type: "approve_tool",
+        tool_call_id: "click-approval",
+        decision: "allow_project",
+      }),
+    ])
   })
 
   test("makes unsandboxed bash approvals conspicuous with the exact command", async () => {
@@ -1371,12 +1436,15 @@ describe("M4 retained components", () => {
       session_id: "session-local",
       diff: {
         path: "src/exact.rs",
-        unified_diff: "--- a/src/exact.rs\n+++ b/src/exact.rs\n-old\n+exact\n",
+        unified_diff: "--- a/src/exact.rs\n+++ b/src/exact.rs\n@@ -1,9 +1,9 @@\n-old\n+exact\n",
         truncated: false,
         binary: false,
       },
     })
     expect(app.reviewPanel.diff.diff).toContain("+exact")
+    expect(app.reviewPanel.diff.diff).toContain("@@ -1,1 +1,1 @@")
+    expect(app.reviewPanel.diff.filetype).toBe("rust")
+    expect(app.reviewPanel.diff.diff).not.toContain("Error parsing diff")
     expect(app.composer.visible).toBeFalse()
 
     setup.mockInput.pressEscape()

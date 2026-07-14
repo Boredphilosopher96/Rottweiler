@@ -122,17 +122,17 @@ export function toolOutputText(output: ToolOutput | null): string {
   }
   switch (output.type) {
     case "text":
-      return output.text
+      return presentableTextToolOutput(output.text)
     case "structured":
       return structuredToolSummary(output.value)
     case "mixed": {
       const text = output.parts
         .filter((part): part is Extract<(typeof output.parts)[number], { type: "text" }> => part.type === "text")
-        .map((part) => part.text)
+        .map((part) => presentableTextToolOutput(part.text))
         .filter(Boolean)
       const images = output.parts
         .filter((part): part is Extract<(typeof output.parts)[number], { type: "image" }> => part.type === "image")
-        .map((part) => `[image ${part.media_type}]`)
+        .map((part) => `Image attachment · ${part.media_type}`)
       if (text.length > 0) return [...text, ...images].join("\n")
       const structured = output.parts
         .filter((part): part is Extract<(typeof output.parts)[number], { type: "structured" }> => part.type === "structured")
@@ -141,6 +141,33 @@ export function toolOutputText(output: ToolOutput | null): string {
       return [...structured, ...images].join("\n")
     }
   }
+}
+
+function presentableTextToolOutput(source: string): string {
+  const safe = source
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
+  const trimmed = safe.trim()
+  // Some provider adapters serialize a structured ToolOutput as text. Decode
+  // only recognizable protocol envelopes; a file read containing ordinary
+  // JSON remains the file content the user asked to inspect.
+  if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && trimmed.length <= 512 * 1024) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed)
+      if (looksLikeToolEnvelope(parsed)) return structuredToolSummary(parsed)
+    } catch {
+      // User-authored or partial JSON is ordinary output, not a UI failure.
+    }
+  }
+  return safe
+}
+
+function looksLikeToolEnvelope(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return "data" in value || "truncated" in value || "machine_local_path" in value ||
+    "stable_prefix_hash" in value || "tool_call_id" in value
 }
 
 /** Compact, terminal-safe tool arguments for approval and activity surfaces. */
@@ -172,14 +199,14 @@ function structuredToolSummary(value: unknown): string {
   if (isRecord(payload)) {
     if (Array.isArray(payload.paths)) {
       const paths = payload.paths.filter((path): path is string => typeof path === "string")
-      return paths.length === 0 ? "No matching files." : paths.slice(0, 80).join("\n")
+      return paths.length === 0 ? "No matching files." : boundedSummaryRows(paths, "files")
     }
     if (Array.isArray(payload.entries)) {
       const entries = payload.entries.flatMap((entry) => {
         if (!isRecord(entry) || typeof entry.path !== "string") return []
         return [`${typeof entry.kind === "string" ? friendlyEnumValue(entry.kind) : "Item"}  ${entry.path}`]
       })
-      return entries.length === 0 ? "No entries." : entries.slice(0, 80).join("\n")
+      return entries.length === 0 ? "No entries." : boundedSummaryRows(entries, "entries")
     }
     if (Array.isArray(payload.matches)) {
       const matches = payload.matches.flatMap((match) => {
@@ -188,22 +215,27 @@ function structuredToolSummary(value: unknown): string {
         const text = typeof match.text === "string" ? `  ${match.text}` : ""
         return [`${match.path}${line}${text}`]
       })
-      return matches.length === 0 ? "No matches." : matches.slice(0, 80).join("\n")
+      return matches.length === 0 ? "No matches." : boundedSummaryRows(matches, "matches")
     }
   }
   const lines: string[] = []
   collectSummaryLines(payload, lines, "", 0)
-  return lines.length === 0 ? "Completed." : lines.slice(0, 80).join("\n")
+  return lines.length === 0 ? "Completed." : boundedSummaryRows(lines, "details")
+}
+
+function boundedSummaryRows(rows: readonly string[], noun: string, maximum = 24): string {
+  if (rows.length <= maximum) return rows.join("\n")
+  return [...rows.slice(0, maximum), `… ${rows.length - maximum} more ${noun}`].join("\n")
 }
 
 function collectSummaryLines(value: unknown, lines: string[], prefix: string, depth: number): void {
-  if (lines.length >= 80 || depth > 2) return
+  if (lines.length >= 32 || depth > 2) return
   if (!isRecord(value)) {
     if (prefix !== "") lines.push(`${prefix}: ${displayScalar(value)}`)
     return
   }
   for (const [key, nested] of Object.entries(value)) {
-    if (isInternalField(key) || lines.length >= 80) continue
+    if (isInternalField(key) || lines.length >= 32) continue
     const label = prefix === "" ? friendlyKey(key) : `${prefix} · ${friendlyKey(key)}`
     if (key === "unified_diff" && typeof nested === "string") {
       lines.push(`${label}: [diff omitted · ${nested.length} chars]`)

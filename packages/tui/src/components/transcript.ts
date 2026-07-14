@@ -15,6 +15,7 @@ import {
   filetypeForPath,
   formatToolArguments,
   getScrollAcceleration,
+  presentableUnifiedDiff,
   terminalMarkdown,
   toolOutputText,
   turnMarkdown,
@@ -82,6 +83,7 @@ export class ReasoningBlockRenderable extends BoxRenderable {
       height: 1,
       flexShrink: 0,
       wrapMode: "none",
+      selectable: true,
     })
     this.body = new MarkdownRenderable(ctx, {
       content: "",
@@ -95,6 +97,7 @@ export class ReasoningBlockRenderable extends BoxRenderable {
       visible: this.#expanded,
       internalBlockMode: "top-level",
     })
+    this.body.selectable = true
     this.header.onMouseDown = () => {
       this.toggle()
       this.#onInteraction?.()
@@ -217,12 +220,18 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#collapsed = expanded === undefined ? tool.status !== "awaiting_approval" : !expanded
     this.#onExpansionChange = onExpansionChange
     this.#rendering = rendering
-    this.header = new TextRenderable(ctx, { content: "", fg: theme.foreground, height: 1 })
+    this.header = new TextRenderable(ctx, {
+      content: "",
+      fg: theme.foreground,
+      height: 1,
+      selectable: true,
+    })
     this.body = new TextRenderable(ctx, {
       content: "",
       fg: theme.muted,
       wrapMode: "word",
       visible: !this.#collapsed,
+      selectable: true,
     })
     this.onKeyDown = (key) => {
       if (key.name === "return" || key.name === "space") {
@@ -230,7 +239,9 @@ export class ToolBlockRenderable extends BoxRenderable {
         this.toggle()
       }
     }
-    this.onMouseDown = () => this.toggle()
+    // Collapse from the disclosure row only. Dragging across output or a diff
+    // must remain a text-selection gesture instead of collapsing the card.
+    this.header.onMouseDown = () => this.toggle()
     this.add(this.header)
     this.add(this.body)
     this.update(tool)
@@ -252,7 +263,7 @@ export class ToolBlockRenderable extends BoxRenderable {
       tool.status === "finished" && this.#collapsed
         ? compactToolResult(tool)
         : ""
-    this.header.content = `${this.#collapsed ? "›" : "⌄"} ${glyph} ${tool.name}${args === "" ? "" : ` ${args}`}${approval}${result === "" ? "" : `  ${result}`}`
+    this.header.content = `${this.#collapsed ? "›" : "⌄"} ${glyph} ${toolDisplayName(tool.name)}${args === "" ? "" : ` · ${args}`}${approval}${result === "" ? "" : ` · ${result}`}`
     this.header.fg =
       tool.status === "awaiting_approval"
         ? this.#theme.warning
@@ -309,6 +320,7 @@ export class ToolBlockRenderable extends BoxRenderable {
           flexGrow: 1,
           height: rows,
           wrapMode: "none",
+          selectable: true,
         })
       : new CodeRenderable(this.ctx, {
           id: `tool-command-${tool.toolCallId}`,
@@ -323,6 +335,7 @@ export class ToolBlockRenderable extends BoxRenderable {
           drawUnstyledText: true,
           wrapMode: "none",
           streaming: false,
+          selectable: true,
         })
     container.add(this.commandPrompt)
     container.add(this.command)
@@ -349,6 +362,7 @@ export class ToolBlockRenderable extends BoxRenderable {
           fg: this.#theme.foreground,
           height: rows,
           wrapMode: "none",
+          selectable: true,
         })
       : new DiffRenderable(this.ctx, {
           id: `tool-diff-${tool.toolCallId}`,
@@ -367,6 +381,7 @@ export class ToolBlockRenderable extends BoxRenderable {
           removedBg: this.#theme.removed,
           contextBg: this.#theme.panel,
         })
+    this.diff.selectable = true
     this.insertBefore(this.diff, this.body)
   }
 
@@ -381,7 +396,8 @@ export class ToolBlockRenderable extends BoxRenderable {
 function toolBodyContent(tool: ToolProjection): string {
   const live = tool.chunks.map((chunk) => chunk.chunk).join("")
   const final = toolOutputText(tool.output)
-  const output = tool.status === "finished" && final !== "" ? final : live
+  const rawOutput = tool.status === "finished" && final !== "" ? final : live
+  const output = presentableToolText(rawOutput, tool.isError === true)
   const activity = tool.status === "awaiting_approval"
     ? "Awaiting approval…"
     : tool.status === "running"
@@ -389,10 +405,69 @@ function toolBodyContent(tool: ToolProjection): string {
       : final === "" && live === ""
         ? "Completed with no output."
         : ""
-  const argumentsLine = bashCommand(tool) === null ? `Arguments · ${formatToolArguments(tool.args)}` : ""
-  return [argumentsLine, tool.rationale, output, activity]
+  const argumentsLine = bashCommand(tool) === null ? detailedToolArguments(tool) : ""
+  const rationale = tool.rationale === null || tool.rationale.trim() === ""
+    ? ""
+    : `Why · ${singleLine(tool.rationale, 240)}`
+  const outputLabel = output === ""
+    ? ""
+    : `${tool.isError === true ? "Error" : tool.status === "running" ? "Live output" : "Result"}\n${output}`
+  return [argumentsLine, rationale, outputLabel, activity]
     .filter(Boolean)
     .join("\n")
+}
+
+function presentableToolText(value: string, isError: boolean): string {
+  const lines = value
+    .replaceAll("\r\n", "\n")
+    .replaceAll("\r", "\n")
+    .split("\n")
+    .map((line) => {
+      if (/^error parsing diff:/i.test(line) || /line count did not match for hunk/i.test(line)) {
+        return isError ? "Couldn't apply the requested change." : ""
+      }
+      return line
+    })
+    .filter((line, index, all) => line !== "" || (index > 0 && all[index - 1] !== ""))
+  return lines.join("\n").trim()
+}
+
+function detailedToolArguments(tool: ToolProjection): string {
+  if (!isRecord(tool.args)) {
+    const summary = formatToolArguments(tool.args)
+    return summary === "" ? "" : `Details · ${summary}`
+  }
+  const path = typeof tool.args.path === "string" ? tool.args.path : ""
+  const pattern = typeof tool.args.pattern === "string" ? tool.args.pattern : ""
+  const query = typeof tool.args.query === "string" ? tool.args.query : ""
+  const url = typeof tool.args.url === "string" ? tool.args.url : ""
+  const task = typeof tool.args.task === "string" ? tool.args.task : ""
+  switch (tool.name) {
+    case "read":
+    case "write":
+    case "edit":
+      return path === "" ? "" : `File · ${path}`
+    case "multi_edit":
+    case "apply_worktree_diff":
+      return path === "" ? "" : `Changes · ${path}`
+    case "ls":
+      return `Directory · ${path === "" ? "." : path}`
+    case "glob":
+      return `Pattern · ${pattern || "*"}${path === "" || path === "." ? "" : ` · in ${path}`}`
+    case "grep":
+    case "search":
+      return `Search · ${query || pattern}${path === "" || path === "." ? "" : ` · in ${path}`}`
+    case "webfetch":
+      return url === "" ? "" : `URL · ${url}`
+    case "websearch":
+      return query === "" ? "" : `Search · ${query}`
+    case "spawn_agent":
+      return task === "" ? "" : `Task · ${singleLine(task, 180)}`
+    default: {
+      const summary = formatToolArguments(tool.args)
+      return summary === "" ? "" : `Details · ${summary}`
+    }
+  }
 }
 
 function bashCommand(tool: ToolProjection): string | null {
@@ -424,7 +499,10 @@ function boundedLines(value: string, maximum: number): string {
 function readToolDiff(tool: ToolProjection): { path: string; unifiedDiff: string } | null {
   if (!isRecord(tool.diff)) return null
   return typeof tool.diff.path === "string" && typeof tool.diff.unified_diff === "string"
-    ? { path: tool.diff.path, unifiedDiff: tool.diff.unified_diff }
+    ? {
+        path: tool.diff.path,
+        unifiedDiff: presentableUnifiedDiff(tool.diff.path, tool.diff.unified_diff),
+      }
     : null
 }
 
@@ -459,8 +537,70 @@ function compactToolResult(tool: ToolProjection): string {
   const result = toolOutputText(tool.output).trim()
   if (result === "") return tool.isError === true ? "Failed" : "Done"
   const lines = result.split("\n").filter(Boolean)
-  if (lines.length > 1) return `${lines.length} lines · ${singleLine(lines[0] ?? "", 36)}`
-  return singleLine(result, 40)
+  if (tool.isError === true) return `Failed · ${singleLine(presentableToolText(result, true), 44)}`
+  switch (tool.name) {
+    case "read":
+      return `${lines.length} line${lines.length === 1 ? "" : "s"}`
+    case "glob":
+    case "ls":
+      return result === "No matching files." || result === "No entries."
+        ? result
+        : `${lines.length} item${lines.length === 1 ? "" : "s"}`
+    case "grep":
+    case "search":
+      return result === "No matches." ? result : `${lines.length} match${lines.length === 1 ? "" : "es"}`
+    case "write":
+      return "File written"
+    case "edit":
+    case "multi_edit":
+    case "apply_worktree_diff":
+      return "Changes applied"
+    case "todo":
+      return "Todos updated"
+    case "ask_user":
+      return "Answered"
+    case "submit_plan":
+      return "Plan submitted"
+    case "spawn_agent":
+      return "Child started"
+    case "background_kill":
+      return "Process stopped"
+    default:
+      if (lines.length > 1) return `${lines.length} lines · ${singleLine(lines[0] ?? "", 32)}`
+      return singleLine(result, 40)
+  }
+}
+
+function toolDisplayName(name: string): string {
+  return ({
+    read: "Read file",
+    write: "Write file",
+    edit: "Edit file",
+    multi_edit: "Edit files",
+    grep: "Search text",
+    search: "Search text",
+    glob: "Find files",
+    ls: "List directory",
+    bash: "Terminal command",
+    shell: "Terminal command",
+    background_status: "Check background process",
+    background_output: "Read background output",
+    background_kill: "Stop background process",
+    webfetch: "Fetch URL",
+    websearch: "Search web",
+    todo: "Update todos",
+    ask_user: "Ask user",
+    submit_plan: "Submit plan",
+    symbols: "Find symbols",
+    apply_worktree_diff: "Apply changes",
+    tool_search: "Find tools",
+    mcp_call: "MCP tool",
+    spawn_agent: "Start child agent",
+  } as Record<string, string>)[name] ?? name
+    .replace(/^mcp__/, "MCP · ")
+    .replaceAll("__", " · ")
+    .replaceAll("_", " ")
+    .replace(/^./, (letter) => letter.toUpperCase())
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -665,6 +805,7 @@ class TurnCardRenderable extends BoxRenderable {
       height: toolOnly ? 0 : 1,
       flexShrink: 0,
       visible: shell !== undefined || (!toolOnly && markdown !== ""),
+      selectable: true,
     })
     this.markdown = new MarkdownRenderable(ctx, {
       id: `markdown-${entryKey(entry)}`,
@@ -681,6 +822,7 @@ class TurnCardRenderable extends BoxRenderable {
       internalBlockMode: "top-level",
       tableOptions: { style: "grid", widthMode: "full", wrapMode: "word" },
     })
+    this.markdown.selectable = true
     this.reasoning = reasoning === ""
       ? null
       : new ReasoningBlockRenderable(ctx, theme, syntaxStyle, {
@@ -723,6 +865,7 @@ class TurnCardRenderable extends BoxRenderable {
             flexGrow: 1,
             height: rows,
             wrapMode: "none",
+            selectable: true,
           })
         : new CodeRenderable(ctx, {
             id: `shell-command-${shell.shellId}`,
@@ -735,6 +878,7 @@ class TurnCardRenderable extends BoxRenderable {
             drawUnstyledText: true,
             wrapMode: "none",
             streaming: false,
+            selectable: true,
           })
       this.shellCommand = renderedCommand
       commandRow.add(renderedCommand)
@@ -749,6 +893,7 @@ class TurnCardRenderable extends BoxRenderable {
         wrapMode: "word",
         flexShrink: 0,
         marginTop: 1,
+        selectable: true,
       })
       this.shellOutput = renderedOutput
       this.add(renderedOutput)
@@ -896,11 +1041,13 @@ export class TranscriptRenderable extends BoxRenderable {
       internalBlockMode: "top-level",
       tableOptions: { style: "grid", widthMode: "full", wrapMode: "word" },
     })
+    this.streamingMarkdown.selectable = true
     this.#tailCitations = new TextRenderable(ctx, {
       content: "",
       fg: theme.info,
       visible: false,
       wrapMode: "word",
+      selectable: true,
     })
     this.#tailTools = new BoxRenderable(ctx, {
       id: "streaming-tools",
@@ -959,6 +1106,7 @@ export class TranscriptRenderable extends BoxRenderable {
       internalBlockMode: "top-level",
       tableOptions: { style: "grid", widthMode: "full", wrapMode: "word" },
     })
+    this.compactionMarkdown.selectable = true
     this.compactionCard.add(this.#compactionHeader)
     this.compactionCard.add(this.#compactionReasoning)
     this.compactionCard.add(this.compactionMarkdown)

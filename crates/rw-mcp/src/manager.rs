@@ -85,6 +85,22 @@ impl McpManager {
     }
 
     pub async fn register(&self, config: McpServerConfig) -> Result<(), McpError> {
+        self.register_with_state(config, false).await
+    }
+
+    /// Registers configured enablement without opening a connection. This is
+    /// used by interactive hosts whose ordinary local startup must remain
+    /// credential- and network-idle; a later explicit `set_enabled(true)` is
+    /// the connection boundary.
+    pub async fn register_deferred(&self, config: McpServerConfig) -> Result<(), McpError> {
+        self.register_with_state(config, true).await
+    }
+
+    async fn register_with_state(
+        &self,
+        config: McpServerConfig,
+        defer_connection: bool,
+    ) -> Result<(), McpError> {
         let mut servers = self.servers.write().await;
         if servers.contains_key(&config.id) {
             return Err(McpError::DuplicateServer(config.id));
@@ -93,7 +109,7 @@ impl McpManager {
             .write()
             .map_err(|_| McpError::Policy("MCP capability policy lock was poisoned".to_owned()))?
             .insert(config.id.clone(), config.tool_capabilities.clone());
-        let state = if config.enabled {
+        let state = if config.enabled && !defer_connection {
             ServerState::Connecting
         } else {
             ServerState::Disabled

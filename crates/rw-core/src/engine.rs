@@ -42,11 +42,12 @@ use rw_types::{
     ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, CompactionReason, ContextItemId,
     ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModeId, ModelAlias,
-    PROTOCOL_VERSION, PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
-    PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump,
-    PromptTool, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
-    ReviewFileDecision, ReviewFileStatus, RewindTarget, Role, SequenceId, SessionId, SessionMode,
-    SessionReview, ShellId, StoredAttachment, SubagentId, ToolCallId, ToolOutput, ToolOutputPart,
+    ModelContextTransfer, ModelSwitchQuestion, PROTOCOL_VERSION, PermissionAction,
+    PermissionApprovalDescriptor, PermissionApprovalScope, PermissionRuleDescriptor,
+    PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, PromptTool, Question,
+    QuestionId, QuestionOption, QuestionResponseKind, RequestId, ReviewFileDecision,
+    ReviewFileStatus, RewindTarget, Role, SequenceId, SessionId, SessionMode, SessionReview,
+    ShellId, StoredAttachment, SubagentId, ToolCallId, ToolOutput, ToolOutputPart,
     ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
     UnrestorablePath, Usage,
 };
@@ -853,6 +854,9 @@ enum PendingEvent {
         provider: Option<String>,
         thinking: ThinkingLevel,
     },
+    ModelContextCleared {
+        strategy: ModelContextTransfer,
+    },
     ModeChanged {
         mode: SessionMode,
     },
@@ -927,6 +931,74 @@ fn parse_session_mode(mode: &str) -> Option<SessionMode> {
         "execute" => Some(SessionMode::Execute),
         _ => None,
     }
+}
+
+fn model_context_transfer_value(strategy: ModelContextTransfer) -> &'static str {
+    match strategy {
+        ModelContextTransfer::PassSummary => "pass_summary",
+        ModelContextTransfer::PassFullContext => "pass_full_context",
+        ModelContextTransfer::StartWithoutContext => "start_without_context",
+    }
+}
+
+fn parse_model_context_transfer(value: &str) -> Option<ModelContextTransfer> {
+    match value {
+        "pass_summary" => Some(ModelContextTransfer::PassSummary),
+        "pass_full_context" => Some(ModelContextTransfer::PassFullContext),
+        "start_without_context" => Some(ModelContextTransfer::StartWithoutContext),
+        _ => None,
+    }
+}
+
+fn model_switch_question(
+    question_id: QuestionId,
+    model: ModelAlias,
+    provider: Option<String>,
+) -> Question {
+    let option = |strategy, label: &str, description: &str| QuestionOption {
+        value: model_context_transfer_value(strategy).to_owned(),
+        label: label.to_owned(),
+        description: Some(description.to_owned()),
+        model_context_transfer: Some(strategy),
+    };
+    Question {
+        id: question_id,
+        prompt: "How should the new model receive this conversation?".to_owned(),
+        response_kind: QuestionResponseKind::SelectOne,
+        // The client highlights the first choice by default. Summary is the
+        // safe, economical default and never silently replays full history.
+        options: vec![
+            option(
+                ModelContextTransfer::PassSummary,
+                "Pass summary",
+                "Compact this conversation, then switch models",
+            ),
+            option(
+                ModelContextTransfer::PassFullContext,
+                "Pass full context",
+                "Switch models with the complete current history",
+            ),
+            option(
+                ModelContextTransfer::StartWithoutContext,
+                "Start without context",
+                "Keep project instructions but start a fresh conversation",
+            ),
+        ],
+        model_switch: Some(ModelSwitchQuestion { model, provider }),
+    }
+}
+
+fn model_switch_answer(
+    answers: &[Answer],
+    question_id: &QuestionId,
+) -> Option<ModelContextTransfer> {
+    let values = &answers
+        .iter()
+        .find(|answer| answer.question_id == *question_id)?
+        .values;
+    (values.len() == 1)
+        .then(|| parse_model_context_transfer(&values[0]))
+        .flatten()
 }
 
 fn unavailable_cost() -> Cost {
@@ -1383,6 +1455,9 @@ impl PendingEvent {
                 provider,
                 thinking: Some(provider_thinking_to_config(thinking)),
             },
+            Self::ModelContextCleared { strategy } => {
+                EngineEvent::ModelContextCleared { meta, strategy }
+            }
             Self::ModeChanged { mode } => EngineEvent::ModeChanged {
                 meta,
                 mode: ModeId(session_mode_name(mode).to_owned()),
@@ -2071,6 +2146,9 @@ fn recovered_pending_event(
             provider: provider.clone(),
             thinking: config_thinking_to_provider(thinking.unwrap_or_default()),
         },
+        EngineEvent::ModelContextCleared { strategy, .. } => PendingEvent::ModelContextCleared {
+            strategy: *strategy,
+        },
         EngineEvent::ModeChanged { mode, .. } => PendingEvent::ModeChanged {
             mode: parse_session_mode(&mode.0)
                 .ok_or_else(|| SessionProjectionError::InvalidMode(mode.0.clone()))?,
@@ -2520,6 +2598,19 @@ pub fn project_session_events(
                 model_alias = Some(model.0.clone());
                 selected_provider.clone_from(provider);
                 selected_thinking = Some(*thinking);
+            }
+            PendingEvent::ModelContextCleared { .. } => {
+                let retained = conversation
+                    .iter()
+                    .zip(conversation_agent_turns.iter().copied())
+                    .filter(|(turn, _)| turn.role == Role::System)
+                    .map(|(turn, agent_turn)| (turn.clone(), agent_turn))
+                    .collect::<Vec<_>>();
+                conversation = retained.iter().map(|(turn, _)| turn.clone()).collect();
+                conversation_agent_turns =
+                    retained.iter().map(|(_, agent_turn)| *agent_turn).collect();
+                context_surgery.clear();
+                pruned_tool_outputs.clear();
             }
             PendingEvent::ModeChanged { mode: changed } => {
                 mode = *changed;
@@ -5314,6 +5405,7 @@ enum TurnSignal {
         conversation: Vec<Turn>,
         context_surgery: Vec<ContextSurgeryAction>,
         result: Result<(), AgentLoopError>,
+        model_switch: Option<PreparedModelSwitch>,
         completion: Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>,
     },
     InitializationComplete {
@@ -5360,6 +5452,7 @@ struct ActorState {
     driver_client_id: Option<ClientId>,
     client_roles: BTreeMap<String, ClientRole>,
     pending_questions: BTreeMap<String, PendingQuestion>,
+    pending_model_switches: BTreeMap<String, PendingModelSwitch>,
     next_question: u64,
     context_surgery: Vec<ContextSurgeryAction>,
     pruned_tool_outputs: BTreeMap<String, u64>,
@@ -5381,6 +5474,25 @@ struct PendingQuestion {
     respond: oneshot::Sender<String>,
 }
 
+enum PrecommittedAnswer {
+    Turn(PendingQuestion, String),
+    Model(PendingModelSwitch, ModelContextTransfer),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PendingModelSwitch {
+    turn: u64,
+    model: ModelAlias,
+    provider: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PreparedModelSwitch {
+    model: ModelAlias,
+    provider: Option<String>,
+    thinking: ThinkingLevel,
+}
+
 struct PendingApproval {
     respond: oneshot::Sender<ApprovalDecision>,
     binding: Option<ApprovalBinding>,
@@ -5396,6 +5508,26 @@ impl ActorState {
         default_thinking: ThinkingLevel,
         recovered: &SessionRecoveredState,
     ) -> Self {
+        let pending_model_switches = recovered
+            .pending_questions
+            .iter()
+            .filter_map(|(question_id, recovered)| {
+                recovered
+                    .questions
+                    .iter()
+                    .find_map(|question| question.model_switch.as_ref())
+                    .map(|target| {
+                        (
+                            question_id.clone(),
+                            PendingModelSwitch {
+                                turn: recovered.agent_turn,
+                                model: target.model.clone(),
+                                provider: target.provider.clone(),
+                            },
+                        )
+                    })
+            })
+            .collect();
         Self {
             session_id,
             session_title: recovered.title.clone(),
@@ -5418,6 +5550,7 @@ impl ActorState {
             driver_client_id: recovered.driver_client_id.clone(),
             client_roles: BTreeMap::new(),
             pending_questions: BTreeMap::new(),
+            pending_model_switches,
             next_question: 0,
             context_surgery: recovered.context_surgery.clone(),
             pruned_tool_outputs: recovered.pruned_tool_outputs.clone(),
@@ -6951,12 +7084,48 @@ fn unsupported_in_m2(command: &ClientCommand) -> bool {
     )
 }
 
+async fn commit_prepared_model_switch(
+    state: &mut ActorState,
+    config: &Arc<SessionActorConfig>,
+    events: &broadcast::Sender<RoutedEvent>,
+    prepared: PreparedModelSwitch,
+    clear_context: bool,
+) -> Result<(), AgentLoopError> {
+    let mut durable = Vec::with_capacity(if clear_context { 2 } else { 1 });
+    if clear_context {
+        durable.push(PendingEvent::ModelContextCleared {
+            strategy: ModelContextTransfer::StartWithoutContext,
+        });
+    }
+    durable.push(PendingEvent::ModelChanged {
+        model: prepared.model.clone(),
+        provider: prepared.provider.clone(),
+        thinking: prepared.thinking,
+    });
+    let result = emit_batch(state, events, &config.event_sink, durable).await;
+    if result.is_ok() {
+        if clear_context {
+            state.conversation.retain(|turn| turn.role == Role::System);
+            state.context_surgery.clear();
+            state.pruned_tool_outputs.clear();
+        }
+        config.model.commit_prepared_model(&prepared.model.0);
+        state.model_alias = prepared.model.0;
+        state.provider = prepared.provider;
+        state.thinking = prepared.thinking;
+    } else {
+        config.model.discard_prepared_model(&prepared.model.0);
+    }
+    result
+}
+
 fn start_manual_compaction(
     state: &mut ActorState,
     config: &Arc<SessionActorConfig>,
     turn_signals: &mpsc::UnboundedSender<TurnSignal>,
     active_turn: &Arc<AtomicU64>,
     instructions: Option<String>,
+    model_switch: Option<PreparedModelSwitch>,
     completion: Option<oneshot::Sender<Result<ProtocolCompletion, AgentLoopError>>>,
 ) {
     let summary_turn = state.next_turn;
@@ -7027,6 +7196,7 @@ fn start_manual_compaction(
             conversation,
             context_surgery,
             result,
+            model_switch,
             completion,
         });
     });
@@ -7345,6 +7515,15 @@ async fn handle_actor_command(
                     let _ = respond.send(outcome);
                     return;
                 }
+                ClientCommand::SwitchModel { .. } if !state.pending_model_switches.is_empty() => {
+                    let outcome = protocol_rejection(
+                        "model_switch_pending",
+                        "choose how to transfer context for the pending model switch first",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
                 ClientCommand::SwitchModel {
                     model, provider, ..
                 } => {
@@ -7553,7 +7732,8 @@ async fn handle_actor_command(
                     question_id,
                     answers,
                     ..
-                } if !state.pending_questions.contains_key(&question_id.0)
+                } if (!state.pending_questions.contains_key(&question_id.0)
+                    && !state.pending_model_switches.contains_key(&question_id.0))
                     || !answers.iter().any(|answer| {
                         answer.question_id == *question_id && !answer.values.is_empty()
                     }) =>
@@ -7565,6 +7745,52 @@ async fn handle_actor_command(
                     send_ack(state, events, &meta, session, outcome.clone());
                     let _ = respond.send(outcome);
                     return;
+                }
+                ClientCommand::AnswerQuestion {
+                    question_id,
+                    answers,
+                    ..
+                } if state.pending_model_switches.contains_key(&question_id.0)
+                    && model_switch_answer(answers, question_id).is_none() =>
+                {
+                    let outcome = protocol_rejection(
+                        "invalid_model_context_transfer",
+                        "model switching requires exactly one of the displayed context choices",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::AnswerQuestion { question_id, .. }
+                    if state
+                        .pending_model_switches
+                        .get(&question_id.0)
+                        .is_some_and(|pending| {
+                            pending.provider.as_ref().is_some_and(|provider| {
+                                !config
+                                    .model
+                                    .has_provider_for_alias(&pending.model.0, provider)
+                            })
+                        }) =>
+                {
+                    let outcome = protocol_rejection(
+                        "unknown_provider_route",
+                        "the pending model no longer has the selected provider route",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                }
+                ClientCommand::AnswerQuestion { question_id, .. }
+                    if state.pending_model_switches.contains_key(&question_id.0) =>
+                {
+                    let pending = &state.pending_model_switches[&question_id.0];
+                    if let Err(error) = config.model.prepare_model(&pending.model.0).await {
+                        let outcome = protocol_rejection("unknown_model_alias", error.to_string());
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
                 }
                 ClientCommand::Compact { .. } if state.running.is_some() => {
                     let outcome = protocol_rejection(
@@ -7876,7 +8102,30 @@ async fn handle_actor_command(
                 ..
             } = &command
             {
-                let Some(pending) = state.pending_questions.remove(&question_id.0) else {
+                let answer = answers
+                    .iter()
+                    .find(|answer| answer.question_id == *question_id)
+                    .map(|answer| answer.values.join("\n"))
+                    .unwrap_or_default();
+                let pending = if let Some(pending) = state.pending_questions.remove(&question_id.0)
+                {
+                    PrecommittedAnswer::Turn(pending, answer)
+                } else if let Some(pending) = state.pending_model_switches.remove(&question_id.0) {
+                    let Some(strategy) = model_switch_answer(answers, question_id) else {
+                        state
+                            .pending_model_switches
+                            .insert(question_id.0.clone(), pending);
+                        state.transient_cause = None;
+                        let outcome = protocol_rejection(
+                            "invalid_model_context_transfer",
+                            "model context choice stopped being valid before commit",
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    };
+                    PrecommittedAnswer::Model(pending, strategy)
+                } else {
                     state.transient_cause = None;
                     let outcome = protocol_rejection(
                         "invalid_question_answer",
@@ -7886,24 +8135,25 @@ async fn handle_actor_command(
                     let _ = respond.send(outcome);
                     return;
                 };
-                let answer = answers
-                    .iter()
-                    .find(|answer| answer.question_id == *question_id)
-                    .map(|answer| answer.values.join("\n"))
-                    .unwrap_or_default();
+                let turn = match &pending {
+                    PrecommittedAnswer::Turn(pending, _) => pending.turn,
+                    PrecommittedAnswer::Model(pending, _) => pending.turn,
+                };
                 if let Err(error) = emit(
                     state,
                     events,
                     &config.event_sink,
                     PendingEvent::QuestionAnswered {
-                        turn: pending.turn,
+                        turn,
                         question_id: question_id.clone(),
                         answers: answers.clone(),
                     },
                 )
                 .await
                 {
-                    drop(pending.respond);
+                    if let PrecommittedAnswer::Turn(pending, _) = pending {
+                        drop(pending.respond);
+                    }
                     state.transient_cause = None;
                     if recover_actor_from_journal(state, config, events, active_turn)
                         .await
@@ -7925,7 +8175,7 @@ async fn handle_actor_command(
                     }
                     return;
                 }
-                precommitted_answer = Some((pending, answer));
+                precommitted_answer = Some(pending);
             }
             if matches!(
                 command,
@@ -8088,25 +8338,53 @@ async fn handle_actor_command(
                     model, provider, ..
                 } => {
                     let thinking = config.model.thinking_for_model(&model.0, state.thinking);
-                    let result = emit(
-                        state,
-                        events,
-                        &config.event_sink,
-                        PendingEvent::ModelChanged {
-                            model: model.clone(),
-                            provider: provider.clone(),
-                            thinking,
-                        },
-                    )
-                    .await;
-                    if result.is_ok() {
-                        config.model.commit_prepared_model(&model.0);
-                        state.model_alias = model.0;
-                        state.provider = provider;
-                        state.thinking = thinking;
+                    let prepared = PreparedModelSwitch {
+                        model: model.clone(),
+                        provider: provider.clone(),
+                        thinking,
+                    };
+                    let has_prior_context = state
+                        .conversation
+                        .iter()
+                        .any(|turn| turn.role != Role::System);
+                    let result = if has_prior_context
+                        && (state.model_alias != model.0 || state.provider != provider)
+                    {
+                        let question_id =
+                            QuestionId(format!("model-switch-{}", state.next_question));
+                        state.next_question = state.next_question.saturating_add(1);
+                        let question = model_switch_question(
+                            question_id.clone(),
+                            model.clone(),
+                            provider.clone(),
+                        );
+                        let result = emit(
+                            state,
+                            events,
+                            &config.event_sink,
+                            PendingEvent::QuestionAsked {
+                                turn: state.completed_turns,
+                                question_id: question_id.clone(),
+                                questions: vec![question],
+                            },
+                        )
+                        .await;
+                        if result.is_ok() {
+                            state.pending_model_switches.insert(
+                                question_id.0,
+                                PendingModelSwitch {
+                                    turn: state.completed_turns,
+                                    model,
+                                    provider,
+                                },
+                            );
+                        } else {
+                            config.model.discard_prepared_model(&prepared.model.0);
+                        }
+                        result
                     } else {
-                        config.model.discard_prepared_model(&model.0);
-                    }
+                        commit_prepared_model_switch(state, config, events, prepared, false).await
+                    };
                     if let Some(complete) = completion.take() {
                         let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
                     }
@@ -8249,8 +8527,55 @@ async fn handle_actor_command(
                     }
                 }
                 ClientCommand::AnswerQuestion { .. } => {
-                    if let Some((pending, answer)) = precommitted_answer.take() {
-                        let _ = pending.respond.send(answer);
+                    if let Some(answer) = precommitted_answer.take() {
+                        match answer {
+                            PrecommittedAnswer::Turn(pending, answer) => {
+                                let _ = pending.respond.send(answer);
+                            }
+                            PrecommittedAnswer::Model(pending, strategy) => {
+                                let prepared = PreparedModelSwitch {
+                                    thinking: config
+                                        .model
+                                        .thinking_for_model(&pending.model.0, state.thinking),
+                                    model: pending.model,
+                                    provider: pending.provider,
+                                };
+                                match strategy {
+                                    ModelContextTransfer::PassSummary => {
+                                        let completion = completion.take();
+                                        start_manual_compaction(
+                                            state,
+                                            config,
+                                            turn_signals,
+                                            active_turn,
+                                            Some(
+                                                "Summarize the conversation for transfer to the selected model. Preserve user intent, decisions, constraints, and unfinished work."
+                                                    .to_owned(),
+                                            ),
+                                            Some(prepared),
+                                            completion,
+                                        );
+                                    }
+                                    ModelContextTransfer::PassFullContext
+                                    | ModelContextTransfer::StartWithoutContext => {
+                                        let clear_context =
+                                            strategy == ModelContextTransfer::StartWithoutContext;
+                                        let result = commit_prepared_model_switch(
+                                            state,
+                                            config,
+                                            events,
+                                            prepared,
+                                            clear_context,
+                                        )
+                                        .await;
+                                        if let Some(complete) = completion.take() {
+                                            let _ = complete
+                                                .send(result.map(|()| ProtocolCompletion::Unit));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 ClientCommand::Rewind {
@@ -8425,6 +8750,7 @@ async fn handle_actor_command(
                         turn_signals,
                         active_turn,
                         instructions,
+                        None,
                         completion,
                     );
                 }
@@ -8744,6 +9070,7 @@ async fn handle_actor_command(
                                     turn_signals,
                                     active_turn,
                                     instructions,
+                                    None,
                                     None,
                                 );
                             }
@@ -9514,8 +9841,10 @@ async fn handle_turn_signal(
                         label: value.clone(),
                         value,
                         description: None,
+                        model_context_transfer: None,
                     })
                     .collect(),
+                model_switch: None,
             };
             emit(
                 state,
@@ -9658,7 +9987,8 @@ async fn handle_turn_signal(
             turn,
             conversation,
             context_surgery,
-            result,
+            mut result,
+            model_switch,
             completion,
         } => {
             if state.running.as_ref().map(|running| running.id) == Some(turn) {
@@ -9667,7 +9997,21 @@ async fn handle_turn_signal(
                 if result.is_ok() {
                     state.conversation = conversation;
                     state.context_surgery = context_surgery;
+                    if let Some(model_switch) = model_switch {
+                        result = commit_prepared_model_switch(
+                            state,
+                            config,
+                            events,
+                            model_switch,
+                            false,
+                        )
+                        .await;
+                    }
+                } else if let Some(model_switch) = model_switch {
+                    config.model.discard_prepared_model(&model_switch.model.0);
                 }
+            } else if let Some(model_switch) = model_switch {
+                config.model.discard_prepared_model(&model_switch.model.0);
             }
             if let Some(completion) = completion {
                 let _ = completion.send(result.map(|()| ProtocolCompletion::Unit));
@@ -24410,6 +24754,50 @@ mod tests {
                 .expect("switch model"),
             CommandOutcome::Accepted
         );
+        let durable = handle
+            .event_sink
+            .read_after(None)
+            .await
+            .expect("durable model switch question");
+        let (question_id, question) = durable
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::QuestionAsked {
+                    question_id,
+                    questions,
+                    ..
+                } => questions
+                    .iter()
+                    .find(|question| {
+                        question
+                            .model_switch
+                            .as_ref()
+                            .is_some_and(|target| target.model == ModelAlias("slow".to_owned()))
+                    })
+                    .map(|question| (question_id.clone(), question)),
+                _ => None,
+            })
+            .expect("typed model context question");
+        assert_eq!(
+            question.options[0].model_context_transfer,
+            Some(ModelContextTransfer::PassSummary)
+        );
+        assert_eq!(question.options[0].label, "Pass summary");
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AnswerQuestion {
+                    meta: protocol_meta("driver", "switch-model-context"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    question_id: question_id.clone(),
+                    answers: vec![Answer {
+                        question_id,
+                        values: vec!["start_without_context".to_owned()],
+                    }],
+                })
+                .await
+                .expect("answer model context question"),
+            CommandOutcome::Accepted
+        );
         assert_eq!(
             handle.snapshot().await.expect("model snapshot").model_alias,
             "slow"
@@ -24491,6 +24879,355 @@ mod tests {
                 .thinking,
             Some(ThinkingLevel::High)
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn model_switch_context_choices_are_explicit_and_reach_the_provider_boundary() {
+        async fn attach(handle: &SessionHandle, request: &str) {
+            assert_eq!(
+                handle
+                    .dispatch(ClientCommand::AttachSession {
+                        meta: protocol_meta("driver", request),
+                        session_id: SessionId("fixture-session".to_owned()),
+                        last_seen_sequence: None,
+                        role: ClientRole::Driver,
+                    })
+                    .await
+                    .expect("attach"),
+                CommandOutcome::Accepted
+            );
+        }
+
+        async fn request_switch(handle: &SessionHandle, request: &str) -> QuestionId {
+            assert_eq!(
+                handle
+                    .dispatch(ClientCommand::SwitchModel {
+                        meta: protocol_meta("driver", request),
+                        session_id: SessionId("fixture-session".to_owned()),
+                        model: ModelAlias("slow".to_owned()),
+                        provider: None,
+                    })
+                    .await
+                    .expect("switch model"),
+                CommandOutcome::Accepted
+            );
+            handle
+                .event_sink
+                .read_after(None)
+                .await
+                .expect("switch events")
+                .into_iter()
+                .find_map(|event| match event {
+                    EngineEvent::QuestionAsked {
+                        question_id,
+                        questions,
+                        ..
+                    } if questions.iter().any(|question| {
+                        question
+                            .model_switch
+                            .as_ref()
+                            .is_some_and(|target| target.model.0 == "slow")
+                    }) =>
+                    {
+                        Some(question_id)
+                    }
+                    _ => None,
+                })
+                .expect("model context question")
+        }
+
+        async fn answer_switch(
+            handle: &SessionHandle,
+            question_id: QuestionId,
+            strategy: ModelContextTransfer,
+            request: &str,
+        ) {
+            let mut events = handle.subscribe();
+            assert_eq!(
+                handle
+                    .dispatch(ClientCommand::AnswerQuestion {
+                        meta: protocol_meta("driver", request),
+                        session_id: SessionId("fixture-session".to_owned()),
+                        question_id: question_id.clone(),
+                        answers: vec![Answer {
+                            question_id,
+                            values: vec![model_context_transfer_value(strategy).to_owned()],
+                        }],
+                    })
+                    .await
+                    .expect("answer model context question"),
+                CommandOutcome::Accepted
+            );
+            next_matching(&mut events, |event| {
+                matches!(
+                    event,
+                    PendingEvent::ModelChanged { model, .. } if model.0 == "slow"
+                )
+            })
+            .await;
+        }
+
+        let original = vec![
+            text_turn(Role::System, "stable system policy"),
+            text_turn(Role::User, "original user context"),
+            text_turn(Role::Assistant, "original assistant context"),
+        ];
+
+        let root = TempDir::new().expect("summary workspace");
+        let summary_model = Arc::new(M3Model::new([
+            stop_script("durable handoff summary", &[]),
+            stop_script("continued after handoff", &[]),
+        ]));
+        let mut summary_config = config(
+            root.path(),
+            summary_model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        summary_config.recovered.conversation = original.clone();
+        let summary_handle = SessionActor::spawn(summary_config).expect("summary actor");
+        attach(&summary_handle, "attach-summary").await;
+        let summary_question = request_switch(&summary_handle, "switch-summary").await;
+        assert_eq!(
+            summary_handle
+                .snapshot()
+                .await
+                .expect("pending summary snapshot")
+                .model_alias,
+            "fast"
+        );
+        answer_switch(
+            &summary_handle,
+            summary_question,
+            ModelContextTransfer::PassSummary,
+            "answer-summary",
+        )
+        .await;
+        let summary_snapshot = summary_handle
+            .snapshot()
+            .await
+            .expect("summary switch snapshot");
+        assert_eq!(summary_snapshot.model_alias, "slow");
+        assert!(summary_snapshot.conversation.iter().any(|turn| {
+            turn.meta.summary
+                && matches!(turn.blocks.as_slice(), [Block::Text { text }] if text == "durable handoff summary")
+        }));
+        let compacted = serde_json::to_string(&summary_snapshot.conversation)
+            .expect("serialize compacted conversation");
+        assert!(!compacted.contains("original user context"));
+        assert!(!compacted.contains("original assistant context"));
+        let mut summary_events = summary_handle.subscribe();
+        assert_eq!(
+            summary_handle
+                .dispatch(ClientCommand::SendMessage {
+                    meta: protocol_meta("driver", "continue-summary"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    content: "continue on selected model".to_owned(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("continue after summary"),
+            CommandOutcome::Accepted
+        );
+        collect_turn(&mut summary_events).await;
+        let summary_requests = summary_model.requests();
+        assert_eq!(summary_requests.len(), 2);
+        let compaction_prompt =
+            serde_json::to_string(&summary_requests[0].turns).expect("compaction prompt");
+        assert!(compaction_prompt.contains("original user context"));
+        let selected_model_prompt =
+            serde_json::to_string(&summary_requests[1].turns).expect("selected model prompt");
+        assert!(selected_model_prompt.contains("durable handoff summary"));
+        assert!(selected_model_prompt.contains("continue on selected model"));
+        assert!(!selected_model_prompt.contains("original user context"));
+        assert!(!selected_model_prompt.contains("original assistant context"));
+
+        let root = TempDir::new().expect("full workspace");
+        let full_model = Arc::new(M3Model::new([stop_script("full context received", &[])]));
+        let mut full_config = config(
+            root.path(),
+            full_model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        full_config.recovered.conversation = original.clone();
+        let full_handle = SessionActor::spawn(full_config).expect("full actor");
+        attach(&full_handle, "attach-full").await;
+        let full_question = request_switch(&full_handle, "switch-full").await;
+        answer_switch(
+            &full_handle,
+            full_question,
+            ModelContextTransfer::PassFullContext,
+            "answer-full",
+        )
+        .await;
+        assert_eq!(
+            full_handle
+                .snapshot()
+                .await
+                .expect("full snapshot")
+                .conversation,
+            original
+        );
+        let mut full_events = full_handle.subscribe();
+        assert_eq!(
+            full_handle
+                .dispatch(ClientCommand::SendMessage {
+                    meta: protocol_meta("driver", "continue-full"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    content: "continue with full context".to_owned(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("continue with full context"),
+            CommandOutcome::Accepted
+        );
+        collect_turn(&mut full_events).await;
+        let full_prompt =
+            serde_json::to_string(&full_model.requests()[0].turns).expect("serialize full prompt");
+        assert!(full_prompt.contains("original user context"));
+        assert!(full_prompt.contains("original assistant context"));
+
+        let root = TempDir::new().expect("fresh workspace");
+        let fresh_model = Arc::new(M3Model::new([stop_script("fresh context received", &[])]));
+        let mut fresh_config = config(
+            root.path(),
+            fresh_model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        fresh_config.recovered.conversation = original.clone();
+        let fresh_handle = SessionActor::spawn(fresh_config).expect("fresh actor");
+        attach(&fresh_handle, "attach-fresh").await;
+        let fresh_question = request_switch(&fresh_handle, "switch-fresh").await;
+        answer_switch(
+            &fresh_handle,
+            fresh_question,
+            ModelContextTransfer::StartWithoutContext,
+            "answer-fresh",
+        )
+        .await;
+        assert_eq!(
+            fresh_handle
+                .snapshot()
+                .await
+                .expect("fresh snapshot")
+                .conversation,
+            vec![original[0].clone()]
+        );
+        let mut fresh_events = fresh_handle.subscribe();
+        assert_eq!(
+            fresh_handle
+                .dispatch(ClientCommand::SendMessage {
+                    meta: protocol_meta("driver", "continue-fresh"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    content: "continue without inherited context".to_owned(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("continue without context"),
+            CommandOutcome::Accepted
+        );
+        collect_turn(&mut fresh_events).await;
+        let fresh_prompt = serde_json::to_string(&fresh_model.requests()[0].turns)
+            .expect("serialize fresh prompt");
+        assert!(fresh_prompt.contains("stable system policy"));
+        assert!(fresh_prompt.contains("continue without inherited context"));
+        assert!(!fresh_prompt.contains("original user context"));
+        assert!(!fresh_prompt.contains("original assistant context"));
+    }
+
+    #[tokio::test]
+    async fn pending_model_switch_question_recovers_and_can_be_answered() {
+        let original = vec![
+            text_turn(Role::System, "system policy"),
+            text_turn(Role::User, "durable prior context"),
+        ];
+        let question_id = QuestionId("model-switch-recovered".to_owned());
+        let mut events = original
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(sequence, turn)| {
+                wire_event(
+                    u64::try_from(sequence).expect("sequence"),
+                    PendingEvent::ConversationTurnCommitted {
+                        agent_turn: 1,
+                        turn,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        events.push(wire_event(
+            2,
+            PendingEvent::QuestionAsked {
+                turn: 1,
+                question_id: question_id.clone(),
+                questions: vec![model_switch_question(
+                    question_id.clone(),
+                    ModelAlias("slow".to_owned()),
+                    None,
+                )],
+            },
+        ));
+        let recovered = project_session_events(&events).expect("project pending model question");
+        assert!(recovered.pending_questions.contains_key(&question_id.0));
+        let sink = Arc::new(NoopSessionEventSink::default());
+        for event in events {
+            sink.append(event).await.expect("seed recovered journal");
+        }
+
+        let root = TempDir::new().expect("recovery workspace");
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(M3Model::new(Vec::new())),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.recovered = recovered;
+        actor_config.event_sink = sink;
+        let handle = SessionActor::spawn(actor_config).expect("recovered actor");
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AttachSession {
+                    meta: protocol_meta("driver", "attach-recovered"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                })
+                .await
+                .expect("attach recovered"),
+            CommandOutcome::Accepted
+        );
+        let mut subscription = handle.subscribe();
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AnswerQuestion {
+                    meta: protocol_meta("driver", "answer-recovered"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    question_id: question_id.clone(),
+                    answers: vec![Answer {
+                        question_id,
+                        values: vec!["pass_full_context".to_owned()],
+                    }],
+                })
+                .await
+                .expect("answer recovered question"),
+            CommandOutcome::Accepted
+        );
+        next_matching(
+            &mut subscription,
+            |event| matches!(event, PendingEvent::ModelChanged { model, .. } if model.0 == "slow"),
+        )
+        .await;
+        let snapshot = handle.snapshot().await.expect("recovered switch snapshot");
+        assert_eq!(snapshot.model_alias, "slow");
+        assert_eq!(snapshot.conversation, original);
     }
 
     #[test]

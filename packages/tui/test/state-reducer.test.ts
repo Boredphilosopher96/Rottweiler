@@ -1234,6 +1234,175 @@ describe("pure TUI state reducer", () => {
     expect(text).not.toContain("session-private")
   })
 
+  test("presents built-in command results as bounded visual summaries", () => {
+    const fixtures = [
+      ["help", "/status — Show agent status\n/mode [execute] — Switch mode", "| Command | What it does |"],
+      ["status", "Agent: working\nQueued messages: 2\nMode: execute", "**Working** · Execute mode · 2 queued messages"],
+      ["mode", "mode changed to plan", "**Plan mode enabled**"],
+      ["permissions", "Permission mode: yolo\nDefault permission: allow\nConfigured rules:\n- deny · bash(rm *)\nSession rules: none\nRemembered approvals: 1 for this session, 0 for this project", "| Scope | Decision | Applies to |"],
+      ["plan", "Ship safely\nKeep state durable.\n1. Update UI\n   Verify: bun test", "## Ship safely"],
+      ["review", "Session review: 2 changed file(s) · 1 awaiting review\n- src/app.ts · needs review\n- src/lib.rs · accepted", "| File | Status | Note |"],
+      ["trust", "folder trust granted for this workspace", "**Folder trusted**"],
+      ["mcp", "docs · ready · 4 tools\nsearch · disabled · 0 tools", "| Server | Status |"],
+      ["compact", "compaction started", "**Compaction started**"],
+      ["interrupt", "interrupt requested", "**Interrupt requested**"],
+      ["rewind", "rewound to turn 4", "**Session rewound**"],
+      ["add-dir", "added workspace root @root/2", "**Workspace updated**"],
+    ] as const
+    let state = createInitialState()
+    for (const [index, [name, message, expected]] of fixtures.entries()) {
+      state = reduce(state, {
+        type: "command_finished",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "session-command-cards",
+          sequence_id: String(index + 1),
+          emitted_at: "2026-01-01T00:00:00Z",
+        },
+        name,
+        message,
+        unrestorable_paths: [],
+      })
+      const block = state.transcript.at(-1)?.turn.blocks[0]
+      const text = block?.type === "text" ? block.text : ""
+      expect(text).toContain(expected)
+      expect(text).not.toContain("{\"")
+      expect(text.split("\n").length).toBeLessThanOrEqual(35)
+    }
+
+    state = reduce(state, {
+      type: "command_finished",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-command-cards",
+        sequence_id: "99",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      name: "extension-report",
+      message: JSON.stringify({
+        data: {
+          entries: Array.from({ length: 80 }, (_, index) => ({ label: `entry-${index}` })),
+          stable_prefix_hash: "private",
+        },
+        truncated: false,
+      }),
+      unrestorable_paths: [],
+    })
+    const block = state.transcript.at(-1)?.turn.blocks[0]
+    const text = block?.type === "text" ? block.text : ""
+    expect(text.split("\n").length).toBeLessThanOrEqual(26)
+    expect(text).not.toContain("stable_prefix_hash")
+    expect(text).not.toContain("private")
+  })
+
+  test("renders context and cost commands as bounded visual summaries", () => {
+    const ackMeta = (requestId: string) => ({
+      protocol_version: PROTOCOL_VERSION,
+      client_id: "client-summary",
+      request_id: requestId,
+      emitted_at: "2026-01-01T00:00:00Z",
+    })
+    let state = reduce(createInitialState(), {
+      type: "context_snapshot_ready",
+      meta: ackMeta("context-summary"),
+      session_id: "session-summary",
+      snapshot: {
+        turn_id: "turn-private",
+        stable_prefix_hash: "hash-private",
+        used_tokens: "63552",
+        usable_tokens: "380000",
+        reserved_tokens: "20000",
+        context_window_known: true,
+        cache_breakpoints: [],
+        items: [
+          {
+            item_id: "system:0",
+            kind: "system",
+            label: "Base instructions",
+            source: "built_in",
+            machine_local_path: null,
+            estimated_tokens: "152",
+            state: { pinned: false, evicted: false, summarized: false, pruned: false },
+          },
+          {
+            item_id: "conversation:0",
+            kind: "conversation",
+            label: "Assistant turn",
+            source: "session",
+            machine_local_path: null,
+            estimated_tokens: "63400",
+            state: { pinned: false, evicted: false, summarized: false, pruned: false },
+          },
+        ],
+      },
+    })
+    state = reduce(state, {
+      type: "command_finished",
+      meta: { ...meta("1"), session_id: "session-summary" },
+      name: "context",
+      message: "this long engine copy is intentionally ignored",
+      unrestorable_paths: [],
+    })
+    const contextBlock = state.transcript.at(-1)?.turn.blocks[0]
+    const contextText = contextBlock?.type === "text" ? contextBlock.text : ""
+    expect(contextText).toContain("**63.5k / 380k tokens**")
+    expect(contextText).toContain("`███░░░░░░░░░░░░░░░░░` 16%")
+    expect(contextText).toContain("| Conversation | 1 | 63.4k |")
+    expect(contextText).not.toContain("turn-private")
+    expect(contextText).not.toContain("hash-private")
+
+    state = reduce(state, {
+      type: "cost_snapshot_ready",
+      meta: ackMeta("cost-summary"),
+      session_id: "session-summary",
+      snapshot: {
+        utc_day: "2026-01-01",
+        turns: [],
+        session_usage: {
+          input_tokens: "189823",
+          output_tokens: "2771",
+          cache_read_tokens: "380096",
+          cache_write_tokens: "0",
+          reasoning_tokens: "430",
+        },
+        session_cost_micros_usd: "0",
+        session_ai_credit_micros: "0",
+        daily_cost_micros_usd: "0",
+        daily_ai_credit_micros: "0",
+        trailing_minute_cost_micros_usd: "0",
+        trailing_minute_ai_credit_micros: "0",
+        cache_hit_basis_points: 6700,
+        session_cost_cap_micros_usd: null,
+        daily_cost_cap_micros_usd: null,
+        session_ai_credit_cap_micros: null,
+        daily_ai_credit_cap_micros: null,
+        spend_rate_alarm_micros_usd_per_minute: null,
+        ai_credit_rate_alarm_micros_per_minute: null,
+        hard_cap_reached: false,
+        session_monetary_accounting_complete: false,
+        daily_monetary_accounting_complete: false,
+        session_subscription_quota_entries: "1",
+        session_cost_unavailable_entries: "0",
+        session_non_usd_monetary_entries: "0",
+        daily_subscription_quota_entries: "1",
+        daily_cost_unavailable_entries: "0",
+        daily_non_usd_monetary_entries: "0",
+      },
+    })
+    state = reduce(state, {
+      type: "command_finished",
+      meta: { ...meta("2"), session_id: "session-summary" },
+      name: "cost",
+      message: "another long engine copy",
+      unrestorable_paths: [],
+    })
+    const costBlock = state.transcript.at(-1)?.turn.blocks[0]
+    const costText = costBlock?.type === "text" ? costBlock.text : ""
+    expect(costText).toContain("**Covered by subscription quota**")
+    expect(costText).toContain("| 189.8k | 2.7k | 430 | 380k | 67% |")
+    expect(costText).not.toContain("another long engine copy")
+  })
+
   test("projects turns, tools, questions, snapshots, mode, model, and shell state", () => {
     const context = {
       turn_id: "4",
@@ -1398,6 +1567,47 @@ describe("pure TUI state reducer", () => {
       active: false,
       status: 0,
       capturedOutput: "ok",
+    })
+  })
+
+  test("preserves typed model-switch context choices for the interaction dock", () => {
+    const state = reduce(createInitialState(), {
+      type: "question_asked",
+      meta: meta("1"),
+      turn_id: "4",
+      question_id: "model-switch-1",
+      questions: [{
+        id: "model-switch-1",
+        prompt: "How should context move to the selected model?",
+        response_kind: "select_one",
+        model_switch: { model: "openai/gpt-5", provider: "openai" },
+        options: [
+          {
+            value: "pass_summary",
+            label: "Pass summary",
+            model_context_transfer: "pass_summary",
+          },
+          {
+            value: "pass_full_context",
+            label: "Pass full context",
+            model_context_transfer: "pass_full_context",
+          },
+          {
+            value: "start_without_context",
+            label: "Start without context",
+            model_context_transfer: "start_without_context",
+          },
+        ],
+      }],
+    })
+
+    expect(state.questions["model-switch-1"]?.questions[0]).toMatchObject({
+      model_switch: { model: "openai/gpt-5", provider: "openai" },
+      options: [
+        { value: "pass_summary", model_context_transfer: "pass_summary" },
+        { value: "pass_full_context", model_context_transfer: "pass_full_context" },
+        { value: "start_without_context", model_context_transfer: "start_without_context" },
+      ],
     })
   })
 

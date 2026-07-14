@@ -4,6 +4,7 @@ import {
   SelectRenderableEvents,
   type KeyEvent,
   type RenderContext,
+  type Selection,
   type ThemeMode,
   type TreeSitterClient,
 } from "@opentui/core"
@@ -325,6 +326,7 @@ export class RottweilerApp extends BoxRenderable {
   #sessionSearchTimer: ReturnType<typeof setTimeout> | null = null
   #runtimeServicesTimer: ReturnType<typeof setTimeout> | null = null
   #interruptEscapeTimer: ReturnType<typeof setTimeout> | null = null
+  #clipboardNoticeTimer: ReturnType<typeof setTimeout> | null = null
   #interruptEscapeArmed = false
   #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
@@ -359,6 +361,21 @@ export class RottweilerApp extends BoxRenderable {
     this.#systemTheme = systemThemeFor(mode)
     const next = this.#systemTheme
     if (next.background !== this.#theme.background) this.#createThemedSurface(next)
+  }
+  #onSelection = (selection: Selection) => {
+    const selectedText = selection.getSelectedText()
+    if (selectedText.trim().length === 0) return
+    void this.#options.textClipboard.writeText(selectedText).then(() => {
+      if (this.#destroyed) return
+      this.#showClipboardNotice()
+    }).catch(() => {
+      if (this.#destroyed) return
+      this.#projectClientError(
+        "selection_copy_failed",
+        "Couldn't copy the selected transcript text to the clipboard.",
+        true,
+      )
+    })
   }
   #onGlobalKey = (key: KeyEvent) => {
     const focusOwner = this.#visibleFocusOwner()
@@ -417,6 +434,23 @@ export class RottweilerApp extends BoxRenderable {
     ) {
       if (key.name === "left") this.composer.editor.gotoLineStart()
       else this.composer.editor.gotoLineTextEnd()
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (
+      focusOwner === "composer" &&
+      !this.picker.visible &&
+      !this.#reviewOpen &&
+      !key.ctrl &&
+      !key.meta &&
+      !key.super &&
+      !key.option &&
+      !key.hyper &&
+      !key.shift &&
+      (key.name === "up" || key.name === "down") &&
+      this.composer.navigateHistory(key.name === "up" ? "previous" : "next")
+    ) {
       key.preventDefault()
       key.stopPropagation()
       return
@@ -503,6 +537,7 @@ export class RottweilerApp extends BoxRenderable {
     ctx.on(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     ctx.on(CliRenderEvents.BLUR, this.#onTerminalBlur)
     ctx.on(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
+    ctx.on(CliRenderEvents.SELECTION, this.#onSelection)
     ctx.keyInput.on("keypress", this.#onGlobalKey)
     this.setState(this.#state)
     if (this.#reviewOpen) {
@@ -1709,12 +1744,31 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearSessionSearchTimer()
     this.#clearRuntimeServicesTimer()
     this.#clearInterruptEscape(false)
+    this.#clearClipboardNotice()
     this.ctx.off(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     this.ctx.off(CliRenderEvents.BLUR, this.#onTerminalBlur)
     this.ctx.off(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
+    this.ctx.off(CliRenderEvents.SELECTION, this.#onSelection)
     this.ctx.keyInput.off("keypress", this.#onGlobalKey)
     this.#syntaxStyle.destroy()
     super.destroy()
+  }
+
+  #showClipboardNotice(): void {
+    this.#clearClipboardNotice()
+    this.banner.visible = true
+    this.banner.fg = this.#theme.success
+    this.banner.content = "Copied to clipboard"
+    this.#clipboardNoticeTimer = setTimeout(() => {
+      this.#clipboardNoticeTimer = null
+      if (!this.#destroyed) this.setState(this.#state)
+    }, 1_500)
+  }
+
+  #clearClipboardNotice(): void {
+    if (this.#clipboardNoticeTimer === null) return
+    clearTimeout(this.#clipboardNoticeTimer)
+    this.#clipboardNoticeTimer = null
   }
 
   #keybindingContext(): KeybindingContext {
@@ -2483,7 +2537,9 @@ export class RottweilerApp extends BoxRenderable {
             description: `${mcpTransportLabel(review.transport)} · ${review.endpoint ?? "local process"} · configuration fingerprint ${review.fingerprint}`,
             value: { kind: "approve", server: review.server, fingerprint: review.fingerprint },
           }] satisfies PickerItem<McpPickerAction>[]),
-          ...this.#state.mcpServers.flatMap<PickerItem<McpPickerAction>>((server) => [
+          ...this.#state.mcpServers.flatMap<PickerItem<McpPickerAction>>((server) => {
+            const deferred = server.enabled && server.state.type === "disabled"
+            return [
             {
               id: `mcp.review.${server.name}`,
               label: `Review approval · ${server.name}`,
@@ -2492,11 +2548,12 @@ export class RottweilerApp extends BoxRenderable {
             },
             ...(server.approved || server.enabled ? [{
               id: `mcp.toggle.${server.name}`,
-              label: `${server.enabled ? "Disable" : "Enable"} · ${server.name}`,
+              label: `${deferred ? "Connect" : server.enabled ? "Disable" : "Enable"} · ${server.name}`,
               description: `${mcpStateLabel(server.state.type)} · applies to this live session and persists after validation`,
-              value: { kind: "toggle", server: server.name, enabled: server.enabled },
+              value: { kind: "toggle", server: server.name, enabled: deferred ? false : server.enabled },
             }] satisfies PickerItem<McpPickerAction>[] : []),
-          ])
+          ]
+          })
           ]
         this.#openPicker(
           "MCP connections",

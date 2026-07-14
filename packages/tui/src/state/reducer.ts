@@ -1120,7 +1120,7 @@ function applyKnownEvent(
       return { ...state, errors: [...state.errors.slice(-63), event.error] }
     case "command_finished": {
       const commandSequence = sequenceId ?? state.lastSequence ?? "0"
-      const message = formatCommandMessage(event.message)
+      const message = formatCommandMessage(event.name, event.message, state)
       return {
         ...state,
         errors: [],
@@ -1166,6 +1166,7 @@ function applyKnownEvent(
       return state
     case "compaction_attempt_finished":
     case "tool_output_pruned":
+    case "model_context_cleared":
     case "context_item_pinned":
     case "context_item_evicted":
     case "hook_failed":
@@ -1190,18 +1191,294 @@ const HIDDEN_COMMAND_RESULT_FIELDS = new Set([
 ])
 
 /** Keep extension command payloads structured on the wire without exposing wire JSON in the UI. */
-function formatCommandMessage(source: string): string {
+function formatCommandMessage(name: string, source: string, state: RottweilerState): string {
+  if (name === "context" && state.context !== null) return formatContextCommand(state.context)
+  if (name === "cost" && state.cost !== null) return formatCostCommand(state.cost)
+
   const trimmed = source.trim()
+  if (name === "help") return formatHelpCommand(trimmed)
+  if (name === "status") return formatStatusCommand(trimmed)
+  if (name === "mode") return formatModeCommand(trimmed)
+  if (name === "permissions") return formatPermissionCommand(trimmed)
+  if (name === "plan") return formatPlanCommand(trimmed)
+  if (name === "review") return formatReviewCommand(trimmed)
+  if (name === "trust") return formatTrustCommand(trimmed)
+  if (name === "mcp") return formatMcpCommand(trimmed)
+  const completion = commandCompletionTitle(name)
+  if (completion !== null) return trimmed.length === 0
+    ? `**${completion}**`
+    : `**${completion}** · ${sentenceCase(singleLineCommand(trimmed, 180))}`
   if (trimmed.length === 0 || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
-    return trimmed
+    return boundedCommandText(trimmed)
   }
   try {
     const parsed: unknown = JSON.parse(trimmed)
-    const lines = humanResultLines(parsed, 0).slice(0, 80)
-    return lines.length === 0 ? "Command completed." : lines.join("\n")
+    const lines = humanResultLines(parsed, 0)
+    return lines.length === 0 ? "Command completed." : boundedCommandRows(lines)
   } catch {
-    return trimmed
+    return boundedCommandText(trimmed)
   }
+}
+
+function formatContextCommand(snapshot: NonNullable<RottweilerState["context"]>): string {
+  const used = unsigned(snapshot.used_tokens)
+  const usable = unsigned(snapshot.usable_tokens)
+  const reserved = unsigned(snapshot.reserved_tokens)
+  const percent = snapshot.context_window_known && usable > 0n
+    ? Number((used * 100n) / usable)
+    : null
+  const filled = percent === null ? 0 : Math.min(20, Math.round(percent / 5))
+  const meter = percent === null ? "" : `\`${"█".repeat(filled)}${"░".repeat(20 - filled)}\` ${percent}%`
+  const groups = new Map<string, { count: number; tokens: bigint }>()
+  for (const item of snapshot.items) {
+    const current = groups.get(item.kind) ?? { count: 0, tokens: 0n }
+    current.count += 1
+    current.tokens += unsigned(item.estimated_tokens)
+    groups.set(item.kind, current)
+  }
+  const rows = [...groups.entries()]
+    .sort((left, right) => left[1].tokens === right[1].tokens
+      ? left[0].localeCompare(right[0])
+      : left[1].tokens > right[1].tokens ? -1 : 1)
+    .map(([kind, group]) => `| ${contextKindLabel(kind)} | ${group.count} | ${compactNumber(group.tokens)} |`)
+
+  const capacity = snapshot.context_window_known
+    ? `**${compactNumber(used)} / ${compactNumber(usable)} tokens** · ${compactNumber(reserved)} reserved`
+    : `**${compactNumber(used)} tokens used** · context limit unavailable`
+  return [
+    capacity,
+    ...(meter === "" ? [] : [meter]),
+    `**${snapshot.items.length} items** in the active context`,
+    ...(rows.length === 0
+      ? ["\n_No context items yet._"]
+      : ["\n| Source | Items | Tokens |", "| --- | ---: | ---: |", ...rows]),
+  ].join("\n")
+}
+
+function formatCostCommand(snapshot: NonNullable<RottweilerState["cost"]>): string {
+  const usage = snapshot.session_usage
+  const cachePercent = (snapshot.cache_hit_basis_points / 100).toFixed(
+    snapshot.cache_hit_basis_points % 100 === 0 ? 0 : 2,
+  )
+  const subscription = unsigned(snapshot.session_subscription_quota_entries) > 0n
+  const unavailable = unsigned(snapshot.session_cost_unavailable_entries) > 0n
+  const billing = subscription
+    ? "Covered by subscription quota"
+    : unavailable || !snapshot.session_monetary_accounting_complete
+      ? "Cost unavailable for part of this session"
+      : formatMicrosUsd(snapshot.session_cost_micros_usd)
+  return [
+    `**${billing}**`,
+    `| Input | Output | Reasoning | Cache read | Cache hit |`,
+    `| ---: | ---: | ---: | ---: | ---: |`,
+    `| ${compactNumber(unsigned(usage.input_tokens))} | ${compactNumber(unsigned(usage.output_tokens))} | ${compactNumber(unsigned(usage.reasoning_tokens))} | ${compactNumber(unsigned(usage.cache_read_tokens))} | ${cachePercent}% |`,
+    `\n${snapshot.turns.length} accounted turn${snapshot.turns.length === 1 ? "" : "s"} · ${snapshot.utc_day} UTC`,
+  ].join("\n")
+}
+
+function formatHelpCommand(source: string): string {
+  const rows = source.split("\n").map((line) => line.trim()).filter(Boolean).flatMap((line) => {
+    const [usage, description] = line.split(/\s+—\s+/, 2)
+    return usage === undefined || description === undefined ? [] : [`| \`${usage}\` | ${description} |`]
+  })
+  return rows.length === 0
+    ? (source.length === 0 ? "No commands are available." : source)
+    : [
+        "| Command | What it does |",
+        "| --- | --- |",
+        ...rows.slice(0, 30),
+        ...(rows.length > 30 ? [`| … | ${rows.length - 30} more commands |`] : []),
+      ].join("\n")
+}
+
+function formatStatusCommand(source: string): string {
+  const values = new Map(source.split("\n").flatMap((line) => {
+    const separator = line.indexOf(":")
+    return separator < 0 ? [] : [[line.slice(0, separator).trim().toLowerCase(), line.slice(separator + 1).trim()]]
+  }))
+  const agent = values.get("agent")
+  const mode = values.get("mode")
+  const queued = values.get("queued messages")
+  if (agent === undefined || mode === undefined || queued === undefined) return source
+  return `**${sentenceCase(agent)}** · ${sentenceCase(mode)} mode · ${queued} queued message${queued === "1" ? "" : "s"}`
+}
+
+function formatPermissionCommand(source: string): string {
+  if (source.length === 0) return "**Permissions updated**"
+  const lines = source.split("\n").map((line) => line.trim()).filter(Boolean)
+  if (lines.length <= 1) return `**Permissions** · ${sentenceCase(lines[0] ?? "updated")}`
+
+  const mode = lines.find((line) => /^permission mode:/i.test(line))?.split(":", 2)[1]?.trim()
+  const fallback = lines.find((line) => /^default permission:/i.test(line))?.split(":", 2)[1]?.trim()
+  const approvals = lines.find((line) => /^remembered approvals:/i.test(line))
+  const rules: string[] = []
+  let scope = "Project"
+  for (const line of lines) {
+    if (/^configured rules:/i.test(line)) {
+      scope = "Project"
+      continue
+    }
+    if (/^session rules:/i.test(line)) {
+      scope = "Session"
+      continue
+    }
+    if (/^this session:/i.test(line)) {
+      scope = "Session"
+      continue
+    }
+    if (/^this project:/i.test(line)) {
+      scope = "Project"
+      continue
+    }
+    if (!line.startsWith("- ")) continue
+    const values = line.slice(2).split(" · ")
+    // Approval inventory rows contain an opaque revocation id. The dedicated
+    // permission picker owns revocation; the transcript should show intent,
+    // not internal credential/rule identifiers.
+    if (values.length >= 3 && values.at(-1)?.startsWith("revoke with ")) {
+      rules.push(`| ${scope} | Remembered | ${markdownCell(humanLabel(values[0] ?? "tool"))} |`)
+      continue
+    }
+    rules.push(`| ${scope} | ${sentenceCase(values[0] ?? "ask")} | \`${markdownCell(values.slice(1).join(" · ") || "all tools")}\` |`)
+  }
+  const heading = mode === undefined
+    ? "**Permission settings**"
+    : `**${sentenceCase(mode)} permissions**${fallback === undefined ? "" : ` · ${fallback} by default`}`
+  return [
+    heading,
+    ...(approvals === undefined ? [] : [approvals.replace(/^remembered approvals:/i, "Remembered:")]),
+    ...(rules.length === 0
+      ? []
+      : ["\n| Scope | Decision | Applies to |", "| --- | --- | --- |", ...rules.slice(0, 16)]),
+    ...(rules.length > 16 ? [`\n… ${rules.length - 16} more rules · open \`/permissions\` to manage`] : []),
+  ].join("\n")
+}
+
+function formatModeCommand(source: string): string {
+  const match = /^(?:active mode:|mode changed to)\s*(\S+)/i.exec(source)
+  if (match === null) return source.length === 0 ? "**Mode unchanged**" : boundedCommandText(source)
+  const mode = sentenceCase(match[1] ?? "execute")
+  return source.toLocaleLowerCase().startsWith("active")
+    ? `**${mode} mode** · currently active`
+    : `**${mode} mode enabled**`
+}
+
+function formatPlanCommand(source: string): string {
+  if (source.length === 0 || /^no plan/i.test(source)) return "_No plan has been submitted._"
+  const lines = source.split("\n")
+  const title = lines.shift()?.trim() ?? "Plan"
+  const body = boundedCommandRows(lines, 32)
+  return [`## ${title.replace(/^#+\s*/, "")}`, body].filter(Boolean).join("\n\n")
+}
+
+function formatReviewCommand(source: string): string {
+  if (source.length === 0 || /no changed files/i.test(source)) return "**No changed files**"
+  const lines = source.split("\n").map((line) => line.trim()).filter(Boolean)
+  const summary = lines.shift() ?? "Session review"
+  const files = lines.filter((line) => line.startsWith("- ")).map((line) => {
+    const [path, status, note] = line.slice(2).split(" · ")
+    return `| \`${markdownCell(path ?? "file")}\` | ${sentenceCase(status ?? "changed")} | ${markdownCell(note ?? "")} |`
+  })
+  return [
+    `**${sentenceCase(summary)}**`,
+    ...(files.length === 0 ? [] : ["\n| File | Status | Note |", "| --- | --- | --- |", ...files.slice(0, 20)]),
+    ...(files.length > 20 ? [`\n… ${files.length - 20} more files · open \`/review\` for the full diff`] : []),
+  ].join("\n")
+}
+
+function formatTrustCommand(source: string): string {
+  if (source.length === 0) return "**Folder trust updated**"
+  const safe = singleLineCommand(source, 200)
+  const trusted = /(?:^|\b)(?:trusted|granted)(?:\b|$)/i.test(safe) && !/untrusted|not trusted/i.test(safe)
+  const revoked = /revoked|untrusted|not trusted/i.test(safe)
+  return `**${trusted ? "Folder trusted" : revoked ? "Folder not trusted" : "Folder trust"}** · ${sentenceCase(safe)}`
+}
+
+function formatMcpCommand(source: string): string {
+  if (source.length === 0) return "**MCP settings updated**"
+  const lines = source.split("\n").map((line) => line.trim()).filter(Boolean)
+  const rows = lines.flatMap((line) => {
+    const values = line.replace(/^-\s*/, "").split(" · ")
+    return values.length < 2 ? [] : [`| ${markdownCell(values[0] ?? "Server")} | ${markdownCell(values.slice(1).join(" · "))} |`]
+  })
+  return rows.length === 0
+    ? boundedCommandText(source)
+    : ["| Server | Status |", "| --- | --- |", ...rows.slice(0, 20), ...(rows.length > 20 ? [`| … | ${rows.length - 20} more servers |`] : [])].join("\n")
+}
+
+function commandCompletionTitle(name: string): string | null {
+  return ({
+    compact: "Compaction started",
+    interrupt: "Interrupt requested",
+    rewind: "Session rewound",
+    fork: "Session forked",
+    "add-dir": "Workspace updated",
+    init: "Workspace initialized",
+    "deep-init": "Workspace initialized",
+  } as Record<string, string>)[name] ?? null
+}
+
+function boundedCommandText(source: string): string {
+  if (source === "") return "Command completed."
+  return boundedCommandRows(source.split("\n"), 32)
+}
+
+function boundedCommandRows(lines: readonly string[], maximum = 24): string {
+  if (lines.length <= maximum) return lines.join("\n")
+  return [...lines.slice(0, maximum), `\n… ${lines.length - maximum} more lines`].join("\n")
+}
+
+function singleLineCommand(source: string, maximum: number): string {
+  const safe = source.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").replace(/\s+/g, " ").trim()
+  return safe.length <= maximum ? safe : `${safe.slice(0, maximum - 1)}…`
+}
+
+function markdownCell(value: string): string {
+  return value.replaceAll("|", "\\|").replaceAll("`", "'")
+}
+
+function contextKindLabel(kind: string): string {
+  return ({
+    system: "System",
+    tool_definitions: "Tools",
+    project_instructions: "Project instructions",
+    conversation: "Conversation",
+    tool_result: "Tool results",
+    pinned: "Pinned",
+    queued_message: "Queued messages",
+  } as Record<string, string>)[kind] ?? humanLabel(kind)
+}
+
+function compactNumber(value: bigint): string {
+  const units = [[1_000_000_000n, "B"], [1_000_000n, "M"], [1_000n, "k"]] as const
+  for (const [divisor, suffix] of units) {
+    if (value < divisor) continue
+    const whole = value / divisor
+    const tenth = (value % divisor) * 10n / divisor
+    return `${whole}${tenth === 0n ? "" : `.${tenth}`}${suffix}`
+  }
+  return value.toString()
+}
+
+function formatMicrosUsd(value: string): string {
+  const micros = unsigned(value)
+  const dollars = micros / 1_000_000n
+  const cents = (micros % 1_000_000n) / 10_000n
+  return `$${dollars}.${cents.toString().padStart(2, "0")}`
+}
+
+function unsigned(value: string): bigint {
+  try {
+    const parsed = BigInt(value)
+    return parsed < 0n ? 0n : parsed
+  } catch {
+    return 0n
+  }
+}
+
+function sentenceCase(value: string): string {
+  if (value.length === 0) return value
+  return `${value.slice(0, 1).toUpperCase()}${value.slice(1).replace(/[.!]+$/, "")}`
 }
 
 function humanResultLines(value: unknown, depth: number, label?: string): string[] {
