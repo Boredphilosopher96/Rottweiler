@@ -2252,6 +2252,23 @@ fn contract_fixture() -> ContractFixture {
                 meta: event_meta(12),
                 reason: CompactionReason::Automatic,
             },
+            EngineEvent::CompactionAttemptStarted {
+                session_id: SessionId("session-fixture".to_owned()),
+                summary_turn_id: TurnId("summary-turn".to_owned()),
+                attempt: 0,
+            },
+            EngineEvent::CompactionThinkingDelta {
+                session_id: SessionId("session-fixture".to_owned()),
+                summary_turn_id: TurnId("summary-turn".to_owned()),
+                attempt: 0,
+                text: "Identifying durable context".to_owned(),
+            },
+            EngineEvent::CompactionTextDelta {
+                session_id: SessionId("session-fixture".to_owned()),
+                summary_turn_id: TurnId("summary-turn".to_owned()),
+                attempt: 0,
+                text: "## Goal\nContinue the task.".to_owned(),
+            },
             EngineEvent::CompactionFinished {
                 meta: event_meta(13),
                 summary_turn_id: TurnId("summary-turn".to_owned()),
@@ -2259,49 +2276,53 @@ fn contract_fixture() -> ContractFixture {
                 usage: None,
                 cost: None,
             },
-            EngineEvent::SubagentSpawned {
+            EngineEvent::CompactionFailed {
                 meta: event_meta(14),
+                summary_turn_id: TurnId("failed-summary-turn".to_owned()),
+            },
+            EngineEvent::SubagentSpawned {
+                meta: event_meta(15),
                 subagent_id: SubagentId("subagent-1".to_owned()),
                 child_session_id: SessionId("child-session-1".to_owned()),
                 task: "inspect protocol".to_owned(),
             },
             EngineEvent::SubagentFinished {
-                meta: event_meta(15),
+                meta: event_meta(16),
                 subagent_id: SubagentId("subagent-1".to_owned()),
                 result: subagent_result("subagent-1", "child-session-1", "done"),
             },
             EngineEvent::SubagentFinished {
-                meta: event_meta(16),
+                meta: event_meta(17),
                 subagent_id: SubagentId("subagent-2".to_owned()),
                 result: subagent_result("subagent-2", "child-session-2", "three files"),
             },
             EngineEvent::ToolOutputPruned {
-                meta: event_meta(17),
+                meta: event_meta(18),
                 tool_call_id: ToolCallId("tool-old".to_owned()),
                 reclaimed_tokens: 21_000,
             },
             EngineEvent::ModeChanged {
-                meta: event_meta(18),
+                meta: event_meta(19),
                 mode: ModeId("plan".to_owned()),
             },
             EngineEvent::ModelChanged {
-                meta: event_meta(19),
+                meta: event_meta(20),
                 model: ModelAlias("fast".to_owned()),
                 provider: None,
                 thinking: Some(ThinkingLevel::Off),
             },
             EngineEvent::ContextItemPinned {
-                meta: event_meta(20),
+                meta: event_meta(21),
                 item_id: ContextItemId("context-1".to_owned()),
                 effective_after_agent_turn: 3,
             },
             EngineEvent::ContextItemEvicted {
-                meta: event_meta(21),
+                meta: event_meta(22),
                 item_id: ContextItemId("context-2".to_owned()),
                 effective_after_agent_turn: 3,
             },
             EngineEvent::UserShellStateChanged {
-                meta: event_meta(22),
+                meta: event_meta(23),
                 shell_id: ShellId("shell-fixture".to_owned()),
                 command: Some("python".to_owned()),
                 active: false,
@@ -2309,7 +2330,7 @@ fn contract_fixture() -> ContractFixture {
                 captured_output: None,
             },
             EngineEvent::Error {
-                meta: event_meta(23),
+                meta: event_meta(24),
                 error: EngineError {
                     category: EngineErrorCategory::Protocol,
                     code: "invalid_command".to_owned(),
@@ -2319,11 +2340,11 @@ fn contract_fixture() -> ContractFixture {
                 },
             },
             EngineEvent::PlanSubmitted {
-                meta: event_meta(24),
+                meta: event_meta(25),
                 artifact: plan_artifact.clone(),
             },
             EngineEvent::PlanReviewed {
-                meta: event_meta(25),
+                meta: event_meta(26),
                 artifact: plan_artifact,
                 decision: PlanDecision::Approve,
                 revisions: None,

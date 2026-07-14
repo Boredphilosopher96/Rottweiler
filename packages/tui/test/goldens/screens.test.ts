@@ -374,7 +374,15 @@ function scenarios(): ScreenScenario[] {
       name: "14-compaction",
       state: {
         ...base,
-        compaction: { active: true, reason: "automatic", summaryTurnId: null, reclaimedTokens: null },
+        compaction: {
+          active: true,
+          reason: "automatic",
+          summaryTurnId: null,
+          reclaimedTokens: null,
+          attempt: null,
+          text: "",
+          thinking: "",
+        },
       },
     },
     {

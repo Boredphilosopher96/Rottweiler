@@ -258,6 +258,75 @@ describe("retained transcript layout", () => {
     )
   }, 20_000)
 
+  test("retains one Markdown renderer while compaction text and thoughts stream", async () => {
+    renderer = await createTestRenderer({ width: 80, height: 24, useThread: false })
+    const initial = createInitialState()
+    const app = createRottweilerApp(renderer.renderer, { initialState: initial })
+    renderer.renderer.root.add(app)
+    const markdown = app.transcript.compactionMarkdown
+    const chunks = ["# Context summary", "\n\nThe **workspace**", " remains ready."]
+    let text = ""
+    for (const [index, chunk] of chunks.entries()) {
+      text += chunk
+      app.setState({
+        ...initial,
+        compaction: {
+          active: true,
+          reason: "automatic",
+          summaryTurnId: "7",
+          reclaimedTokens: null,
+          attempt: 0,
+          text,
+          thinking: `Reviewing context ${index + 1}`,
+        },
+      })
+      await renderer.renderOnce()
+      expect(app.transcript.compactionMarkdown).toBe(markdown)
+      expect(app.transcript.compactionMarkdown.streaming).toBeTrue()
+    }
+
+    for (let attempt = 0; attempt < 5; attempt += 1) await renderer.renderOnce()
+    const frame = renderer.captureCharFrame()
+    expect(frame).toContain("Context summary")
+    expect(frame).toContain("workspace")
+    expect(frame).toContain("Reviewing context 3")
+    expect(frame).not.toContain("# Context summary")
+    expect(frame).not.toContain("**workspace**")
+  })
+
+  test("refits a live Mermaid block when the terminal shrinks", async () => {
+    renderer = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    const initial = createInitialState()
+    const source = [
+      "```mermaid",
+      "flowchart LR",
+      "A[Long provider catalog label] --> B[Tool execution engine] --> C[Transcript renderer]",
+      "```",
+    ].join("\n")
+    const app = createRottweilerApp(renderer.renderer, {
+      initialState: {
+        ...initial,
+        compaction: {
+          active: true,
+          reason: "automatic",
+          summaryTurnId: "8",
+          reclaimedTokens: null,
+          attempt: 0,
+          text: source,
+          thinking: "",
+        },
+      },
+    })
+    renderer.renderer.root.add(app)
+    await renderer.renderOnce()
+
+    renderer.resize(40, 24)
+    await renderer.renderOnce()
+    const lines = app.transcript.compactionMarkdown.content.split("\n")
+    expect(Math.max(...lines.map((line) => Bun.stringWidth(line)))).toBeLessThanOrEqual(36)
+    expect(app.transcript.compactionMarkdown.content).toMatch(/[┌┐└┘─│►▼]/)
+  })
+
   test("separates consecutive answers, renders Mermaid, and keeps prose on the primary foreground", async () => {
     parserDataPath = mkdtempSync(join(tmpdir(), "rottweiler-consecutive-mermaid-"))
     treeSitter = new TreeSitterClient({

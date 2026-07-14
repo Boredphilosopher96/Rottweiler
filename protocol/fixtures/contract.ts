@@ -667,6 +667,26 @@ export const contractFixture = {
       "reason": "automatic"
     },
     {
+      "type": "compaction_attempt_started",
+      "session_id": "session-fixture",
+      "summary_turn_id": "summary-turn",
+      "attempt": 0
+    },
+    {
+      "type": "compaction_thinking_delta",
+      "session_id": "session-fixture",
+      "summary_turn_id": "summary-turn",
+      "attempt": 0,
+      "text": "Identifying durable context"
+    },
+    {
+      "type": "compaction_text_delta",
+      "session_id": "session-fixture",
+      "summary_turn_id": "summary-turn",
+      "attempt": 0,
+      "text": "## Goal\nContinue the task."
+    },
+    {
       "type": "compaction_finished",
       "meta": {
         "protocol_version": 1,
@@ -681,11 +701,22 @@ export const contractFixture = {
       "cost": null
     },
     {
-      "type": "subagent_spawned",
+      "type": "compaction_failed",
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
         "sequence_id": "14",
+        "emitted_at": "2026-01-01T00:00:00Z",
+        "caused_by": null
+      },
+      "summary_turn_id": "failed-summary-turn"
+    },
+    {
+      "type": "subagent_spawned",
+      "meta": {
+        "protocol_version": 1,
+        "session_id": "session-fixture",
+        "sequence_id": "15",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -698,7 +729,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "15",
+        "sequence_id": "16",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -730,7 +761,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "16",
+        "sequence_id": "17",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -762,7 +793,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "17",
+        "sequence_id": "18",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -774,7 +805,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "18",
+        "sequence_id": "19",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -785,7 +816,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "19",
+        "sequence_id": "20",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -798,7 +829,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "20",
+        "sequence_id": "21",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -810,7 +841,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "21",
+        "sequence_id": "22",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -822,7 +853,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "22",
+        "sequence_id": "23",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -837,7 +868,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "23",
+        "sequence_id": "24",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -856,7 +887,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "24",
+        "sequence_id": "25",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },
@@ -880,7 +911,7 @@ export const contractFixture = {
       "meta": {
         "protocol_version": 1,
         "session_id": "session-fixture",
-        "sequence_id": "25",
+        "sequence_id": "26",
         "emitted_at": "2026-01-01T00:00:00Z",
         "caused_by": null
       },

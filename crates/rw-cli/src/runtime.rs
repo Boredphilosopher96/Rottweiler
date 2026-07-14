@@ -7227,6 +7227,29 @@ impl rw_core::SecretRedactor for SharedEngineSecretRedactor {
     fn redact(&self, value: &str) -> String {
         self.0.redact_text(value)
     }
+
+    fn max_secret_bytes(&self) -> usize {
+        self.0.maximum_registered_secret_bytes().max(64)
+    }
+
+    fn has_incomplete_secret_envelope(&self, text: &str) -> bool {
+        let Some(begin) = text.rfind("-----BEGIN ") else {
+            return false;
+        };
+        let pending = &text[begin..];
+        let Some(kind_end) = pending.find("PRIVATE KEY-----") else {
+            return false;
+        };
+        !pending[kind_end..].lines().any(|line| {
+            let Some(end) = line.find("-----END ") else {
+                return false;
+            };
+            let marker = line[end + "-----END ".len()..].trim_end_matches('\r');
+            marker
+                .strip_suffix("PRIVATE KEY-----")
+                .is_some_and(|label| !label.contains('-'))
+        })
+    }
 }
 
 const MAX_TOOLCHAIN_DIAGNOSTIC_BYTES: usize = 64 * 1024;
@@ -17421,5 +17444,18 @@ mod tests {
             worker.overflow.load(Ordering::Acquire) >= PLUGIN_EVENT_SUSTAINED_OVERFLOW,
             "sustained delivery failures were not accounted"
         );
+    }
+
+    #[test]
+    fn engine_stream_redactor_holds_every_supported_private_key_envelope() {
+        let redactor = SharedEngineSecretRedactor(FixtureRedactor::default());
+        let incomplete = "prefix\n-----BEGIN OPENSSH PRIVATE KEY-----\nsecret\n-----END harmless";
+        assert!(rw_core::SecretRedactor::has_incomplete_secret_envelope(
+            &redactor, incomplete,
+        ));
+        let complete = format!("{incomplete}\n-----END OPENSSH PRIVATE KEY-----\nsuffix");
+        assert!(!rw_core::SecretRedactor::has_incomplete_secret_envelope(
+            &redactor, &complete,
+        ));
     }
 }

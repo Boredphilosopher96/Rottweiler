@@ -124,6 +124,13 @@ export class ReasoningBlockRenderable extends BoxRenderable {
     if (notify) this.#onExpansionChange(false)
   }
 
+  expand(notify = true): void {
+    if (this.#expanded) return
+    this.#expanded = true
+    this.#layout()
+    if (notify) this.#onExpansionChange(true)
+  }
+
   toggle(): void {
     if (this.#content === "") return
     this.#expanded = !this.#expanded
@@ -688,10 +695,14 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly scroller: ScrollBoxRenderable
   readonly streamingCard: BoxRenderable
   readonly streamingMarkdown: MarkdownRenderable
+  readonly compactionCard: BoxRenderable
+  readonly compactionMarkdown: MarkdownRenderable
   readonly subagentPanel: SubagentPanelRenderable
   readonly mountedCards = new Map<string, TurnCardRenderable>()
   readonly #tailReasoning: ReasoningBlockRenderable
+  readonly #compactionReasoning: ReasoningBlockRenderable
   readonly #tailHeader: TextRenderable
+  readonly #compactionHeader: TextRenderable
   readonly #tailCitations: TextRenderable
   readonly #tailTools: BoxRenderable
   readonly #theme: RottweilerTheme
@@ -709,6 +720,7 @@ export class TranscriptRenderable extends BoxRenderable {
   #turns: RottweilerState["turns"] | null = null
   #subagents: RottweilerState["subagents"] | null = null
   #tailReasoningTurnId: string | null = null
+  #compactionAttempt: number | null = null
 
   constructor(
     ctx: RenderContext,
@@ -759,6 +771,7 @@ export class TranscriptRenderable extends BoxRenderable {
     })
     this.#tailReasoning = new ReasoningBlockRenderable(ctx, theme, options.syntaxStyle, {
       content: "",
+      expanded: true,
       streaming: true,
       width: Math.max(20, this.width || ctx.width),
       ...(options.treeSitterClient === undefined ? {} : { treeSitterClient: options.treeSitterClient }),
@@ -806,6 +819,54 @@ export class TranscriptRenderable extends BoxRenderable {
     this.streamingCard.add(this.subagentPanel)
     this.streamingCard.add(this.#tailTools)
     this.scroller.add(this.streamingCard)
+    this.compactionCard = new BoxRenderable(ctx, {
+      id: "compaction-stream",
+      width: "100%",
+      minHeight: 2,
+      flexDirection: "column",
+      flexShrink: 0,
+      backgroundColor: theme.background,
+      paddingX: 1,
+      paddingY: 1,
+      visible: false,
+    })
+    this.#compactionHeader = new TextRenderable(ctx, {
+      content: "Rottweiler · compacting context",
+      fg: theme.accentStrong,
+      height: 1,
+      flexShrink: 0,
+    })
+    this.#compactionReasoning = new ReasoningBlockRenderable(ctx, theme, options.syntaxStyle, {
+      content: "",
+      expanded: true,
+      streaming: true,
+      width: Math.max(20, this.width || ctx.width),
+      ...(options.treeSitterClient === undefined ? {} : { treeSitterClient: options.treeSitterClient }),
+      onExpansionChange: () => {
+        if (this.#state !== null) this.#updateCompaction(this.#state)
+      },
+      ...(this.#onInteraction === undefined ? {} : { onInteraction: this.#onInteraction }),
+    })
+    this.compactionMarkdown = new MarkdownRenderable(ctx, {
+      id: "compaction-markdown",
+      content: "",
+      syntaxStyle: options.syntaxStyle,
+      ...(options.treeSitterClient === undefined
+        ? {}
+        : { treeSitterClient: options.treeSitterClient }),
+      fg: theme.markdownText,
+      conceal: true,
+      concealCode: false,
+      streaming: true,
+      width: "100%",
+      flexShrink: 0,
+      internalBlockMode: "top-level",
+      tableOptions: { style: "grid", widthMode: "full", wrapMode: "word" },
+    })
+    this.compactionCard.add(this.#compactionHeader)
+    this.compactionCard.add(this.#compactionReasoning)
+    this.compactionCard.add(this.compactionMarkdown)
+    this.scroller.add(this.compactionCard)
     this.add(this.scroller)
   }
 
@@ -820,6 +881,15 @@ export class TranscriptRenderable extends BoxRenderable {
   update(state: RottweilerState): void {
     this.#state = state
     const transcriptChanged = this.#transcript !== state.transcript
+    if (transcriptChanged && state.streamingTail === null && this.#tailReasoningTurnId !== null) {
+      const committed = [...state.transcript]
+        .reverse()
+        .find((entry) =>
+          entry.agentTurn === this.#tailReasoningTurnId && entry.turn.role === "assistant")
+      if (committed !== undefined) {
+        this.#reasoningExpansion.set(entryKey(committed), this.#tailReasoning.expanded)
+      }
+    }
     const historicalToolsChanged = this.#tools !== state.tools && toolProjectionChangedForHistory(
       this.#tools,
       state.tools,
@@ -836,6 +906,7 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#presentableTranscript = presentableTranscript(state)
     }
     this.#updateTail(state)
+    this.#updateCompaction(state)
     if (transcriptChanged || cardProjectionChanged || turnProjectionChanged) {
       this.#reconcileHistory()
     }
@@ -854,6 +925,10 @@ export class TranscriptRenderable extends BoxRenderable {
   }
 
   protected override onResize(_width: number, _height: number): void {
+    if (this.#state !== null) {
+      this.#updateTail(this.#state)
+      this.#updateCompaction(this.#state)
+    }
     this.#reconcileHistory()
   }
 
@@ -989,7 +1064,7 @@ export class TranscriptRenderable extends BoxRenderable {
     )
     this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? activity : turnDetail(tail.finished.cost, tail.finished.usage)}`
     if (this.#tailReasoningTurnId !== tail.turnId) {
-      this.#tailReasoning.collapse(false)
+      this.#tailReasoning.expand(false)
       this.#tailReasoningTurnId = tail.turnId
     }
     this.#tailReasoning.update(
@@ -1003,6 +1078,36 @@ export class TranscriptRenderable extends BoxRenderable {
       .join("  ")
     this.#tailCitations.height = tail.citations.length > 0 ? 1 : 0
     this.#replaceTailTools(tools)
+  }
+
+  #updateCompaction(state: RottweilerState): void {
+    const compaction = state.compaction
+    this.compactionCard.visible = compaction.active &&
+      (compaction.text !== "" || compaction.thinking !== "")
+    if (!compaction.active) {
+      this.compactionMarkdown.streaming = false
+      this.compactionMarkdown.content = ""
+      this.compactionMarkdown.visible = false
+      this.#compactionReasoning.update("", false, Math.max(20, this.width || this.ctx.width))
+      this.#compactionAttempt = null
+      return
+    }
+    if (this.#compactionAttempt !== compaction.attempt) {
+      this.#compactionReasoning.expand(false)
+      this.#compactionAttempt = compaction.attempt
+    }
+    const width = Math.max(20, (this.width || this.ctx.width) - 4)
+    this.compactionMarkdown.streaming = true
+    this.compactionMarkdown.visible = compaction.text !== ""
+    this.compactionMarkdown.content = terminalMarkdown(compaction.text, width, "streaming")
+    this.#compactionReasoning.update(
+      compaction.thinking,
+      true,
+      Math.max(20, this.width || this.ctx.width),
+    )
+    this.#compactionHeader.content = compaction.text === "" && compaction.thinking === ""
+      ? "Rottweiler · compacting context"
+      : "Rottweiler · summarizing context"
   }
 
   #replaceTailTools(tools: readonly ToolProjection[]): void {

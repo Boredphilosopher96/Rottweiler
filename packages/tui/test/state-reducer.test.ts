@@ -11,6 +11,7 @@ import {
 import {
   createInitialState,
   engineEvent,
+  MAX_COMPACTION_STREAM_BYTES,
   MAX_SUBAGENT_TASK_BYTES,
   MAX_TERMINAL_SUBAGENT_HISTORY,
   MAX_TODO_CONTENT_BYTES,
@@ -591,6 +592,168 @@ describe("pure TUI state reducer", () => {
     expect(state.streamingTail).toBeNull()
     expect(state.model).toBe("copilot/gpt-5-mini")
     expect(state.provider).toBe("copilot")
+  })
+
+  test("streams compaction attempts separately and resets discarded fallback text", () => {
+    let state = reduce(createInitialState(), {
+      type: "compaction_started",
+      meta: meta("1"),
+      reason: "automatic",
+    })
+    state = reduce(state, {
+      type: "compaction_attempt_started",
+      session_id: "session-state",
+      summary_turn_id: "7",
+      attempt: 0,
+    })
+    state = reduce(state, {
+      type: "compaction_thinking_delta",
+      session_id: "session-state",
+      summary_turn_id: "7",
+      attempt: 0,
+      text: "Inspecting ",
+    })
+    state = reduce(state, {
+      type: "compaction_text_delta",
+      session_id: "session-state",
+      summary_turn_id: "7",
+      attempt: 0,
+      text: "Old partial",
+    })
+    expect(state.compaction).toMatchObject({
+      active: true,
+      attempt: 0,
+      thinking: "Inspecting ",
+      text: "Old partial",
+    })
+
+    state = reduce(state, {
+      type: "compaction_attempt_started",
+      session_id: "session-state",
+      summary_turn_id: "7",
+      attempt: 1,
+    })
+    expect(state.compaction).toMatchObject({ attempt: 1, thinking: "", text: "" })
+    state = reduce(state, {
+      type: "compaction_text_delta",
+      session_id: "session-state",
+      summary_turn_id: "7",
+      attempt: 1,
+      text: "## Fresh summary",
+    })
+    expect(state.compaction).toMatchObject({
+      attempt: 1,
+      thinking: "",
+      text: "## Fresh summary",
+    })
+    state = reduce(state, {
+      type: "compaction_finished",
+      meta: meta("2"),
+      summary_turn_id: "7",
+      reclaimed_tokens: "1200",
+    })
+    expect(state.compaction).toMatchObject({
+      active: false,
+      attempt: null,
+      text: "",
+      thinking: "",
+      reclaimedTokens: "1200",
+    })
+  })
+
+  test("only a correlated compaction terminal event clears streamed progress", () => {
+    let state = reduce(createInitialState(), {
+      type: "compaction_started",
+      meta: meta("1"),
+      reason: "manual",
+    })
+    state = reduce(state, {
+      type: "compaction_attempt_started",
+      session_id: "session-state",
+      summary_turn_id: "9",
+      attempt: 0,
+    })
+    state = reduce(state, {
+      type: "compaction_text_delta",
+      session_id: "session-state",
+      summary_turn_id: "9",
+      attempt: 0,
+      text: "partial",
+    })
+    state = reduce(state, {
+      type: "compaction_text_delta",
+      session_id: "session-state",
+      summary_turn_id: "8",
+      attempt: 0,
+      text: "stale turn",
+    })
+    state = reduce(state, {
+      type: "compaction_thinking_delta",
+      session_id: "session-state",
+      summary_turn_id: "9",
+      attempt: 1,
+      text: "stale attempt",
+    })
+    state = reduce(state, {
+      type: "compaction_failed",
+      meta: meta("2"),
+      summary_turn_id: "8",
+    })
+    expect(state.compaction).toMatchObject({ active: true, text: "partial", thinking: "" })
+    state = reduce(state, {
+      type: "error",
+      meta: meta("3"),
+      error: {
+        category: "provider",
+        code: "unrelated",
+        message: "another operation failed",
+        retryable: false,
+      },
+    })
+    expect(state.compaction).toMatchObject({ active: true, text: "partial" })
+    state = reduce(state, {
+      type: "compaction_failed",
+      meta: meta("4"),
+      summary_turn_id: "9",
+    })
+    expect(state.compaction).toMatchObject({ active: false, text: "", thinking: "" })
+  })
+
+  test("bounds connection-scoped compaction text and reasoning", () => {
+    let state = reduce(createInitialState(), {
+      type: "compaction_started",
+      meta: meta("1"),
+      reason: "automatic",
+    })
+    state = reduce(state, {
+      type: "compaction_attempt_started",
+      session_id: "session-state",
+      summary_turn_id: "11",
+      attempt: 0,
+    })
+    const oversized = "界".repeat(MAX_COMPACTION_STREAM_BYTES)
+    state = reduce(state, {
+      type: "compaction_text_delta",
+      session_id: "session-state",
+      summary_turn_id: "11",
+      attempt: 0,
+      text: oversized,
+    })
+    state = reduce(state, {
+      type: "compaction_thinking_delta",
+      session_id: "session-state",
+      summary_turn_id: "11",
+      attempt: 0,
+      text: oversized,
+    })
+
+    const encoder = new TextEncoder()
+    expect(encoder.encode(state.compaction.text).byteLength).toBeLessThanOrEqual(
+      MAX_COMPACTION_STREAM_BYTES,
+    )
+    expect(encoder.encode(state.compaction.thinking).byteLength).toBeLessThanOrEqual(
+      MAX_COMPACTION_STREAM_BYTES,
+    )
   })
 
   test("projects subagent lifecycle in deterministic spawn order and retains turn history", () => {

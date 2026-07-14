@@ -1572,6 +1572,95 @@
       ]
     },
     {
+      "description": "Connection-scoped boundary for one compaction provider attempt.\nThis never enters the durable session sequence.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "summary_turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "compaction_attempt_started"
+        }
+      },
+      "required": [
+        "type",
+        "session_id",
+        "summary_turn_id",
+        "attempt"
+      ]
+    },
+    {
+      "description": "Connection-scoped provider text produced while a compaction summary is\ngenerated. This never enters the durable session sequence.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "summary_turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "compaction_text_delta"
+        }
+      },
+      "required": [
+        "type",
+        "session_id",
+        "summary_turn_id",
+        "attempt",
+        "text"
+      ]
+    },
+    {
+      "description": "Connection-scoped provider reasoning produced during compaction.",
+      "type": "object",
+      "properties": {
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "summary_turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "attempt": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "text": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "compaction_thinking_delta"
+        }
+      },
+      "required": [
+        "type",
+        "session_id",
+        "summary_turn_id",
+        "attempt",
+        "text"
+      ]
+    },
+    {
       "description": "Accounting for one billed compaction provider attempt that did not\nproduce the committed summary. This event is deliberately non-terminal:\nfallback attempts continue inside the same compaction transaction.",
       "type": "object",
       "properties": {
@@ -1644,6 +1733,26 @@
         "meta",
         "summary_turn_id",
         "reclaimed_tokens"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "summary_turn_id": {
+          "$ref": "#/$defs/TurnId"
+        },
+        "type": {
+          "type": "string",
+          "const": "compaction_failed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "summary_turn_id"
       ]
     },
     {

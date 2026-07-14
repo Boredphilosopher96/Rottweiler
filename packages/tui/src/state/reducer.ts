@@ -17,6 +17,7 @@ export const MAX_TODO_ID_BYTES = 256
 export const MAX_TODO_CONTENT_BYTES = 4_096
 export const MAX_TODO_TOTAL_BYTES = 64 * 1_024
 export const MAX_COMMAND_ACKS = 256
+export const MAX_COMPACTION_STREAM_BYTES = 256 * 1_024
 const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "command_acknowledged",
   "context_snapshot_ready",
@@ -70,8 +71,12 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "context_usage_updated",
   "budget_status_changed",
   "compaction_started",
+  "compaction_attempt_started",
+  "compaction_text_delta",
+  "compaction_thinking_delta",
   "compaction_attempt_finished",
   "compaction_finished",
+  "compaction_failed",
   "subagent_spawned",
   "subagent_finished",
   "subagent_progress",
@@ -180,7 +185,12 @@ export function reduceWireEvent(
 ): RottweilerState {
   // Child progress is connection-scoped: it updates the retained projection
   // without consuming or perturbing the parent's durable replay cursor.
-  if (event.type === "subagent_progress") {
+  if (
+    event.type === "subagent_progress" ||
+    event.type === "compaction_attempt_started" ||
+    event.type === "compaction_text_delta" ||
+    event.type === "compaction_thinking_delta"
+  ) {
     return applyKnownEvent(state, event as EngineEvent, null)
   }
   if (ACK_EVENT_TYPES.has(event.type as EngineEvent["type"])) {
@@ -981,9 +991,62 @@ function applyKnownEvent(
           reason: event.reason,
           summaryTurnId: null,
           reclaimedTokens: null,
+          attempt: null,
+          text: "",
+          thinking: "",
         },
       }
+    case "compaction_attempt_started":
+      return {
+        ...state,
+        compaction: {
+          ...state.compaction,
+          active: true,
+          summaryTurnId: event.summary_turn_id,
+          attempt: event.attempt,
+          text: "",
+          thinking: "",
+        },
+      }
+    case "compaction_text_delta": {
+      if (
+        !state.compaction.active ||
+        state.compaction.summaryTurnId !== event.summary_turn_id ||
+        state.compaction.attempt !== event.attempt
+      ) return state
+      return {
+        ...state,
+        compaction: {
+          ...state.compaction,
+          text: boundedUtf8(
+            `${state.compaction.text}${event.text}`,
+            MAX_COMPACTION_STREAM_BYTES,
+          ),
+        },
+      }
+    }
+    case "compaction_thinking_delta": {
+      if (
+        !state.compaction.active ||
+        state.compaction.summaryTurnId !== event.summary_turn_id ||
+        state.compaction.attempt !== event.attempt
+      ) return state
+      return {
+        ...state,
+        compaction: {
+          ...state.compaction,
+          thinking: boundedUtf8(
+            `${state.compaction.thinking}${event.text}`,
+            MAX_COMPACTION_STREAM_BYTES,
+          ),
+        },
+      }
+    }
     case "compaction_finished":
+      if (
+        state.compaction.summaryTurnId !== null &&
+        state.compaction.summaryTurnId !== event.summary_turn_id
+      ) return state
       return {
         ...state,
         compaction: {
@@ -991,6 +1054,25 @@ function applyKnownEvent(
           reason: state.compaction.reason,
           summaryTurnId: event.summary_turn_id,
           reclaimedTokens: event.reclaimed_tokens,
+          attempt: null,
+          text: "",
+          thinking: "",
+        },
+      }
+    case "compaction_failed":
+      if (
+        state.compaction.summaryTurnId !== null &&
+        state.compaction.summaryTurnId !== event.summary_turn_id
+      ) return state
+      return {
+        ...state,
+        compaction: {
+          ...state.compaction,
+          active: false,
+          summaryTurnId: event.summary_turn_id,
+          attempt: null,
+          text: "",
+          thinking: "",
         },
       }
     case "mode_changed":

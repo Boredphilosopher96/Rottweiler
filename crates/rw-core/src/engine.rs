@@ -253,6 +253,19 @@ fn diff_binding(diff: &UnifiedDiff) -> ApprovalBinding {
 /// broadcast, or the next provider request.
 pub trait SecretRedactor: Send + Sync {
     fn redact(&self, text: &str) -> String;
+
+    /// Longest secret that may be replaced, so streaming boundaries can retain
+    /// enough overlap to avoid exposing a value split across provider chunks.
+    fn max_secret_bytes(&self) -> usize {
+        0
+    }
+
+    /// Returns true while `text` ends inside a strict secret envelope whose
+    /// terminator has not arrived yet. Streaming callers retain the whole
+    /// pending envelope rather than relying on a fixed overlap.
+    fn has_incomplete_secret_envelope(&self, _text: &str) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Default)]
@@ -261,6 +274,60 @@ pub struct NoopSecretRedactor;
 impl SecretRedactor for NoopSecretRedactor {
     fn redact(&self, text: &str) -> String {
         text.to_owned()
+    }
+}
+
+struct StreamingSecretRedactor<'a> {
+    redactor: &'a dyn SecretRedactor,
+    raw: String,
+    emitted: String,
+    overlap_bytes: usize,
+}
+
+impl<'a> StreamingSecretRedactor<'a> {
+    fn new(redactor: &'a dyn SecretRedactor) -> Self {
+        Self {
+            redactor,
+            raw: String::new(),
+            emitted: String::new(),
+            overlap_bytes: redactor.max_secret_bytes().saturating_sub(1),
+        }
+    }
+
+    fn push(&mut self, chunk: &str) -> String {
+        self.raw.push_str(chunk);
+        if self.redactor.has_incomplete_secret_envelope(&self.raw) {
+            return String::new();
+        }
+        let redacted = self.redactor.redact(&self.raw);
+        if redacted.len() <= self.overlap_bytes || !redacted.starts_with(&self.emitted) {
+            return String::new();
+        }
+        let mut safe_end = redacted.len().saturating_sub(self.overlap_bytes);
+        while safe_end > self.emitted.len() && !redacted.is_char_boundary(safe_end) {
+            safe_end = safe_end.saturating_sub(1);
+        }
+        if safe_end <= self.emitted.len() {
+            return String::new();
+        }
+        let delta = redacted[self.emitted.len()..safe_end].to_owned();
+        self.emitted.push_str(&delta);
+        delta
+    }
+
+    fn finish(&mut self) -> String {
+        let redacted = if self.redactor.has_incomplete_secret_envelope(&self.raw) {
+            "[REDACTED]".to_owned()
+        } else {
+            self.redactor.redact(&self.raw)
+        };
+        let delta = redacted
+            .strip_prefix(&self.emitted)
+            .unwrap_or(&redacted)
+            .to_owned();
+        self.raw.clear();
+        self.emitted.clear();
+        delta
     }
 }
 
@@ -750,6 +817,9 @@ enum PendingEvent {
         reclaimed_tokens: u64,
         usage: Option<SessionUsage>,
         cost: Option<Cost>,
+    },
+    CompactionFailed {
+        summary_turn: u64,
     },
     SubagentSpawned {
         subagent_id: SubagentId,
@@ -1243,6 +1313,10 @@ impl PendingEvent {
                 usage: usage.map(Into::into),
                 cost,
             },
+            Self::CompactionFailed { summary_turn } => EngineEvent::CompactionFailed {
+                meta,
+                summary_turn_id: wire_turn_id(summary_turn),
+            },
             Self::SubagentSpawned {
                 subagent_id,
                 child_session_id,
@@ -1581,7 +1655,11 @@ fn recovered_pending_event(
     event: &EngineEvent,
 ) -> Result<Option<PendingEvent>, SessionProjectionError> {
     let pending = match event {
-        EngineEvent::CommandAcknowledged { .. } | EngineEvent::SubagentProgress { .. } => {
+        EngineEvent::CommandAcknowledged { .. }
+        | EngineEvent::SubagentProgress { .. }
+        | EngineEvent::CompactionAttemptStarted { .. }
+        | EngineEvent::CompactionTextDelta { .. }
+        | EngineEvent::CompactionThinkingDelta { .. } => {
             return Err(SessionProjectionError::ConnectionScopedEvent);
         }
         EngineEvent::ContextSnapshotReady { .. }
@@ -1931,6 +2009,11 @@ fn recovered_pending_event(
             }),
             cost: cost.clone(),
         },
+        EngineEvent::CompactionFailed {
+            summary_turn_id, ..
+        } => PendingEvent::CompactionFailed {
+            summary_turn: parse_turn_id(summary_turn_id)?,
+        },
         EngineEvent::ToolOutputPruned {
             tool_call_id,
             reclaimed_tokens,
@@ -2278,7 +2361,7 @@ pub fn project_session_events(
             | PendingEvent::CommandFinished { .. }
             | PendingEvent::GuardTriggered { .. }
             | PendingEvent::BudgetStatus { .. } => {}
-            PendingEvent::Error { .. } => {
+            PendingEvent::Error { .. } | PendingEvent::CompactionFailed { .. } => {
                 compacted_conversation = None;
                 if let Some(start) = compaction_surgery_start.take() {
                     context_surgery.truncate(start);
@@ -5104,6 +5187,18 @@ struct RunningTurn {
     caused_by: Option<RequestId>,
 }
 
+enum CompactionProgressKind {
+    AttemptStarted,
+    Text(String),
+    Thinking(String),
+}
+
+struct CompactionProgress {
+    summary_turn: u64,
+    attempt: u32,
+    kind: CompactionProgressKind,
+}
+
 enum TurnSignal {
     Event(PendingEvent),
     ToolOutput {
@@ -5115,6 +5210,7 @@ enum TurnSignal {
         respond: oneshot::Sender<Result<(), AgentLoopError>>,
     },
     SubagentProgress(SubagentProgressEvent),
+    CompactionProgress(CompactionProgress),
     Approval {
         request: PermissionRequest,
         respond: oneshot::Sender<ApprovalDecision>,
@@ -9139,6 +9235,34 @@ async fn handle_turn_signal(
                 event,
             });
         }
+        TurnSignal::CompactionProgress(progress) => {
+            if state.running.as_ref().map(|running| running.id) != Some(progress.summary_turn) {
+                return Ok(());
+            }
+            let event = match progress.kind {
+                CompactionProgressKind::AttemptStarted => EngineEvent::CompactionAttemptStarted {
+                    session_id: state.session_id.clone(),
+                    summary_turn_id: wire_turn_id(progress.summary_turn),
+                    attempt: progress.attempt,
+                },
+                CompactionProgressKind::Text(text) => EngineEvent::CompactionTextDelta {
+                    session_id: state.session_id.clone(),
+                    summary_turn_id: wire_turn_id(progress.summary_turn),
+                    attempt: progress.attempt,
+                    text,
+                },
+                CompactionProgressKind::Thinking(text) => EngineEvent::CompactionThinkingDelta {
+                    session_id: state.session_id.clone(),
+                    summary_turn_id: wire_turn_id(progress.summary_turn),
+                    attempt: progress.attempt,
+                    text,
+                },
+            };
+            let _ = events.send(RoutedEvent {
+                target: state.driver_client_id.clone(),
+                event,
+            });
+        }
         TurnSignal::Approval { request, respond } => {
             let Some(turn) = state.running.as_ref().map(|running| running.id) else {
                 let _ = respond.send(ApprovalDecision::Deny);
@@ -10379,6 +10503,19 @@ impl DoomLoopGuard {
 
 fn send_event(signals: &mpsc::UnboundedSender<TurnSignal>, kind: PendingEvent) {
     let _ = signals.send(TurnSignal::Event(kind));
+}
+
+fn send_compaction_progress(
+    signals: &mpsc::UnboundedSender<TurnSignal>,
+    summary_turn: u64,
+    attempt: u32,
+    kind: CompactionProgressKind,
+) {
+    let _ = signals.send(TurnSignal::CompactionProgress(CompactionProgress {
+        summary_turn,
+        attempt,
+        kind,
+    }));
 }
 
 fn flush_pending_text_delta(
@@ -12243,7 +12380,14 @@ async fn execute_compaction(
     let mut completed = None;
     let mut failed_attempt_cost_micros = 0_u64;
     let mut failed_attempt_credit_micros = 0_u64;
-    for alias in aliases {
+    for (attempt_index, alias) in aliases.into_iter().enumerate() {
+        let attempt = u32::try_from(attempt_index).unwrap_or(u32::MAX);
+        send_compaction_progress(
+            signals,
+            turn,
+            attempt,
+            CompactionProgressKind::AttemptStarted,
+        );
         if let Err(error) = config.model.prepare_model(&alias).await {
             last_error = Some(error);
             continue;
@@ -12289,6 +12433,8 @@ async fn execute_compaction(
             }
         };
         let mut summary = String::new();
+        let mut text_redactor = StreamingSecretRedactor::new(config.secret_redactor.as_ref());
+        let mut thinking_redactor = StreamingSecretRedactor::new(config.secret_redactor.as_ref());
         let mut usage = SessionUsage::default();
         let mut reported_model = None;
         let mut selected_route = None;
@@ -12309,7 +12455,29 @@ async fn execute_compaction(
             match event {
                 Ok(ProviderEvent::RouteSelected { route }) => selected_route = Some(route),
                 Ok(ProviderEvent::MessageStart { model }) => reported_model = Some(model),
-                Ok(ProviderEvent::TextDelta { text }) => summary.push_str(&text),
+                Ok(ProviderEvent::TextDelta { text }) => {
+                    let text = text_redactor.push(&text);
+                    summary.push_str(&text);
+                    if !text.is_empty() {
+                        send_compaction_progress(
+                            signals,
+                            turn,
+                            attempt,
+                            CompactionProgressKind::Text(text),
+                        );
+                    }
+                }
+                Ok(ProviderEvent::ThinkingDelta { content, .. }) => {
+                    let text = thinking_redactor.push(&content);
+                    if !text.is_empty() {
+                        send_compaction_progress(
+                            signals,
+                            turn,
+                            attempt,
+                            CompactionProgressKind::Thinking(text),
+                        );
+                    }
+                }
                 Ok(ProviderEvent::Usage { usage: latest }) => usage.update(latest),
                 Ok(
                     ProviderEvent::ToolCallStart { .. }
@@ -12321,11 +12489,7 @@ async fn execute_compaction(
                     ));
                     break;
                 }
-                Ok(
-                    ProviderEvent::ThinkingDelta { .. }
-                    | ProviderEvent::Citation { .. }
-                    | ProviderEvent::Finished { .. },
-                ) => {}
+                Ok(ProviderEvent::Citation { .. } | ProviderEvent::Finished { .. }) => {}
                 Err(error) => {
                     failed = Some(AgentLoopError::Provider(error.to_string()));
                     break;
@@ -12368,6 +12532,25 @@ async fn execute_compaction(
             }
             last_error = Some(error);
             continue;
+        }
+        let text_tail = text_redactor.finish();
+        summary.push_str(&text_tail);
+        if !text_tail.is_empty() {
+            send_compaction_progress(
+                signals,
+                turn,
+                attempt,
+                CompactionProgressKind::Text(text_tail),
+            );
+        }
+        let thinking_tail = thinking_redactor.finish();
+        if !thinking_tail.is_empty() {
+            send_compaction_progress(
+                signals,
+                turn,
+                attempt,
+                CompactionProgressKind::Thinking(thinking_tail),
+            );
         }
         if summary.trim().is_empty() {
             if let Some((cost, false)) = persist_failed_compaction_attempt(
@@ -12494,73 +12677,88 @@ async fn compact_during_turn(
         },
     )
     .await?;
-    let execution = execute_compaction(
-        conversation,
-        surgery,
-        reason,
-        instructions,
-        config,
-        local_session_accounting,
-        cancellation,
-        signals,
-        turn,
-        current_turn_cost_micros,
-        current_turn_credit_micros,
-        true,
-    )
-    .await?;
-    for compacted_turn in &execution.conversation {
-        persist_conversation_turn(signals, turn, compacted_turn).await?;
-    }
-    surgery.clear();
-    for item_id in &execution.remapped_pins {
+    let transaction = async {
+        let execution = execute_compaction(
+            conversation,
+            surgery,
+            reason,
+            instructions,
+            config,
+            local_session_accounting,
+            cancellation,
+            signals,
+            turn,
+            current_turn_cost_micros,
+            current_turn_credit_micros,
+            true,
+        )
+        .await?;
+        for compacted_turn in &execution.conversation {
+            persist_conversation_turn(signals, turn, compacted_turn).await?;
+        }
+        surgery.clear();
+        for item_id in &execution.remapped_pins {
+            persist_event(
+                signals,
+                PendingEvent::ContextItemPinned {
+                    item_id: item_id.clone(),
+                    effective_after_agent_turn: turn,
+                },
+            )
+            .await?;
+            surgery.push(ContextSurgeryAction {
+                item_id: item_id.clone(),
+                pinned: true,
+                effective_after_agent_turn: turn,
+            });
+        }
+        let (successful_cost_micros, successful_credit_micros) = cost_units(&execution.cost);
+        let cost_micros =
+            successful_cost_micros.saturating_add(execution.failed_attempt_cost_micros);
+        let credit_micros =
+            successful_credit_micros.saturating_add(execution.failed_attempt_credit_micros);
+        let now = config.event_clock.unix_time_millis();
+        let ledger = config
+            .event_sink
+            .budget_totals(BudgetLedgerQuery {
+                now_unix_ms: now,
+                utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
+                trailing_minute_start_unix_ms: now.saturating_sub(60_000),
+            })
+            .await?;
         persist_event(
             signals,
-            PendingEvent::ContextItemPinned {
-                item_id: item_id.clone(),
-                effective_after_agent_turn: turn,
+            PendingEvent::CompactionFinished {
+                summary_turn: turn,
+                reclaimed_tokens: execution.reclaimed_tokens,
+                usage: Some(execution.usage),
+                cost: Some(execution.cost),
             },
         )
         .await?;
-        surgery.push(ContextSurgeryAction {
-            item_id: item_id.clone(),
-            pinned: true,
-            effective_after_agent_turn: turn,
-        });
+        *conversation = execution.conversation;
+        Ok((
+            if ledger.authoritative { 0 } else { cost_micros },
+            if ledger.authoritative {
+                0
+            } else {
+                credit_micros
+            },
+            execution.hard_stop,
+        ))
     }
-    let (successful_cost_micros, successful_credit_micros) = cost_units(&execution.cost);
-    let cost_micros = successful_cost_micros.saturating_add(execution.failed_attempt_cost_micros);
-    let credit_micros =
-        successful_credit_micros.saturating_add(execution.failed_attempt_credit_micros);
-    persist_event(
-        signals,
-        PendingEvent::CompactionFinished {
-            summary_turn: turn,
-            reclaimed_tokens: execution.reclaimed_tokens,
-            usage: Some(execution.usage),
-            cost: Some(execution.cost),
-        },
-    )
-    .await?;
-    let now = config.event_clock.unix_time_millis();
-    let ledger = config
-        .event_sink
-        .budget_totals(BudgetLedgerQuery {
-            now_unix_ms: now,
-            utc_day_start_unix_ms: now.saturating_sub(now % 86_400_000),
-            trailing_minute_start_unix_ms: now.saturating_sub(60_000),
-        })
-        .await?;
-    *conversation = execution.conversation;
-    Ok((
-        if ledger.authoritative { 0 } else { cost_micros },
-        if ledger.authoritative {
-            0
-        } else {
-            credit_micros
-        },
-        execution.hard_stop,
-    ))
+    .await;
+    match transaction {
+        Ok(result) => Ok(result),
+        Err(error) => {
+            persist_event(
+                signals,
+                PendingEvent::CompactionFailed { summary_turn: turn },
+            )
+            .await?;
+            Err(error)
+        }
+    }
 }
 
 struct CommandToolRuntime<'a> {
@@ -14774,6 +14972,60 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct FailCompactionLedgerSink {
+        inner: RecordingSink,
+    }
+
+    #[async_trait]
+    impl SessionEventSink for FailCompactionLedgerSink {
+        async fn append(&self, event: EngineEvent) -> Result<EngineEvent, AgentLoopError> {
+            self.inner.append(event).await
+        }
+
+        async fn append_batch(
+            &self,
+            events: Vec<EngineEvent>,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            self.inner.append_batch(events).await
+        }
+
+        async fn read_after(
+            &self,
+            last_seen: Option<SequenceId>,
+        ) -> Result<Vec<EngineEvent>, AgentLoopError> {
+            self.inner.read_after(last_seen).await
+        }
+
+        async fn last_sequence(&self) -> Result<Option<SequenceId>, AgentLoopError> {
+            self.inner.last_sequence().await
+        }
+
+        async fn budget_totals(
+            &self,
+            _query: BudgetLedgerQuery,
+        ) -> Result<BudgetLedgerTotals, AgentLoopError> {
+            if self
+                .inner
+                .events
+                .lock()
+                .expect("event sink lock")
+                .iter()
+                .any(|event| {
+                    matches!(
+                        &event.kind,
+                        PendingEvent::ConversationTurnCommitted { turn, .. } if turn.meta.summary
+                    )
+                })
+            {
+                return Err(AgentLoopError::Persistence(
+                    "compaction ledger fixture failure".to_owned(),
+                ));
+            }
+            Ok(BudgetLedgerTotals::default())
+        }
+    }
+
+    #[derive(Default)]
     struct FailNextBatchSink {
         inner: RecordingSink,
         fail_next: AtomicBool,
@@ -15841,6 +16093,77 @@ mod tests {
         fn redact(&self, text: &str) -> String {
             text.replace("KNOWN_CANARY", "[REDACTED]")
         }
+
+        fn max_secret_bytes(&self) -> usize {
+            "KNOWN_CANARY".len()
+        }
+    }
+
+    #[derive(Debug)]
+    struct PemSecretRedactor;
+
+    impl SecretRedactor for PemSecretRedactor {
+        fn redact(&self, text: &str) -> String {
+            let Some(start) = text.find("-----BEGIN PRIVATE KEY-----") else {
+                return text.to_owned();
+            };
+            let Some(relative_end) = text[start..].find("-----END PRIVATE KEY-----") else {
+                return text.to_owned();
+            };
+            let end = start + relative_end + "-----END PRIVATE KEY-----".len();
+            format!("{}[REDACTED]{}", &text[..start], &text[end..])
+        }
+
+        fn max_secret_bytes(&self) -> usize {
+            64
+        }
+
+        fn has_incomplete_secret_envelope(&self, text: &str) -> bool {
+            text.rfind("-----BEGIN PRIVATE KEY-----")
+                .is_some_and(|start| !text[start..].contains("-----END PRIVATE KEY-----"))
+        }
+    }
+
+    #[test]
+    fn streaming_redaction_holds_split_secrets_until_they_are_safe() {
+        let redactor = CanarySecretRedactor;
+        let mut stream = StreamingSecretRedactor::new(&redactor);
+        let mut visible = stream.push("prefix KNOWN_");
+        assert!(!visible.contains("KNOWN_"));
+        visible.push_str(&stream.push("CANARY suffix"));
+        visible.push_str(&stream.finish());
+        assert_eq!(visible, "prefix [REDACTED] suffix");
+        assert!(!visible.contains("KNOWN_CANARY"));
+    }
+
+    #[test]
+    fn streaming_redaction_never_exposes_an_unterminated_private_key() {
+        let redactor = PemSecretRedactor;
+        let mut stream = StreamingSecretRedactor::new(&redactor);
+        let mut visible = stream.push(
+            "safe\n-----BEGIN PRIVATE KEY-----\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        assert!(visible.is_empty());
+        visible.push_str(&stream.push(
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\n-----END PRIVATE KEY-----\nafter",
+        ));
+        visible.push_str(&stream.finish());
+        assert_eq!(visible, "safe\n[REDACTED]\nafter");
+        assert!(!visible.contains("AAAA"));
+        assert!(!visible.contains("BBBB"));
+    }
+
+    #[test]
+    fn streaming_redaction_drops_a_private_key_when_the_stream_ends_unterminated() {
+        let redactor = PemSecretRedactor;
+        let mut stream = StreamingSecretRedactor::new(&redactor);
+        let mut visible = stream.push(
+            "safe\n-----BEGIN PRIVATE KEY-----\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        visible.push_str(&stream.finish());
+        assert_eq!(visible, "[REDACTED]");
+        assert!(!visible.contains("AAAA"));
+        assert!(!visible.contains("PRIVATE KEY"));
     }
 
     #[derive(Clone, Debug, PartialEq)]
@@ -15927,6 +16250,29 @@ mod tests {
                 continue;
             };
             let done = matches!(event.kind, PendingEvent::TurnFinished { .. });
+            events.push(event);
+            if done {
+                return events;
+            }
+        }
+    }
+
+    async fn collect_wire_turn(receiver: &mut SessionSubscription) -> Vec<EngineEvent> {
+        let mut events = Vec::new();
+        loop {
+            let routed = timeout(Duration::from_secs(3), receiver.receiver.recv())
+                .await
+                .expect("wire event timeout")
+                .expect("wire event channel");
+            if routed
+                .target
+                .as_ref()
+                .is_some_and(|target| target != &receiver.client_id)
+            {
+                continue;
+            }
+            let event = routed.event;
+            let done = matches!(event, EngineEvent::TurnFinished { .. });
             events.push(event);
             if done {
                 return events;
@@ -22386,19 +22732,25 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn one_hundred_fifty_turn_overflow_compacts_and_continues_through_actor() {
         let root = TempDir::new().expect("tempdir");
-        let mut model = M3Model::new([
-            stop_script(
-                "## Goal\ncontinue\n\n## Instructions\nkeep intent\n\n## Discoveries\nsrc/lib.rs checksum amber-42\n\n## Accomplished\n150 turns\n\n## Relevant files & directories\nsrc/lib.rs\nPROJECT.md",
-                &[TokenUsage {
-                    input_tokens: 2_000,
-                    output_tokens: 60,
-                    ..TokenUsage::default()
-                }],
-            ),
-            stop_script("amber-42", &[]),
-        ]);
+        let mut compaction_script = stop_script(
+            "## Goal\ncontinue\n\n## Instructions\nkeep intent\n\n## Discoveries\nsrc/lib.rs checksum amber-42\n\n## Accomplished\n150 turns\n\n## Relevant files & directories\nsrc/lib.rs\nPROJECT.md",
+            &[TokenUsage {
+                input_tokens: 2_000,
+                output_tokens: 60,
+                ..TokenUsage::default()
+            }],
+        );
+        compaction_script.insert(
+            0,
+            Ok(ProviderEvent::ThinkingDelta {
+                content: "Identifying durable context".to_owned(),
+                signature: None,
+            }),
+        );
+        let mut model = M3Model::new([compaction_script, stop_script("amber-42", &[])]);
         model.metadata = ModelContextMetadata {
             max_context_tokens: Some(2_000),
             max_output_tokens: Some(256),
@@ -22433,11 +22785,13 @@ mod tests {
         actor_config.event_sink = sink.clone();
         let handle = SessionActor::spawn(actor_config).expect("actor");
         let mut events = handle.subscribe();
+        let mut wire_events = handle.subscribe();
         handle
             .send_message("What is the src/lib.rs checksum?")
             .await
             .expect("message");
         let events = collect_turn(&mut events).await;
+        let wire_events = collect_wire_turn(&mut wire_events).await;
         assert!(events.iter().any(|event| matches!(
             event.kind,
             PendingEvent::CompactionStarted {
@@ -22449,6 +22803,20 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event.kind, PendingEvent::CompactionFinished { .. }))
         );
+        assert!(wire_events.iter().any(|event| matches!(
+            event,
+            EngineEvent::CompactionAttemptStarted { attempt: 0, .. }
+        )));
+        assert!(wire_events.iter().any(|event| matches!(
+            event,
+            EngineEvent::CompactionThinkingDelta { attempt: 0, text, .. }
+                if text == "Identifying durable context"
+        )));
+        assert!(wire_events.iter().any(|event| matches!(
+            event,
+            EngineEvent::CompactionTextDelta { attempt: 0, text, .. }
+                if text.contains("src/lib.rs checksum amber-42")
+        )));
         let requests = model.requests();
         assert_eq!(requests.len(), 2);
         assert!(requests[0].tools.is_empty());
@@ -22473,6 +22841,67 @@ mod tests {
                 .is_some_and(|turn| turn.meta.summary)
         );
         assert!(resumed.conversation.len() < 10);
+    }
+
+    #[tokio::test]
+    async fn post_summary_compaction_failure_emits_correlated_terminal() {
+        let root = TempDir::new().expect("tempdir");
+        let mut model = M3Model::new([stop_script("durable compacted summary", &[])]);
+        model.metadata = ModelContextMetadata {
+            max_context_tokens: Some(600),
+            max_output_tokens: Some(128),
+            cache_breakpoints: None,
+        };
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(model),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.recovered.conversation = (0..40)
+            .map(|index| {
+                text_turn(
+                    if index % 2 == 0 {
+                        Role::User
+                    } else {
+                        Role::Assistant
+                    },
+                    format!("turn {index}: {}", "context ".repeat(20)),
+                )
+            })
+            .collect();
+        let sink = Arc::new(FailCompactionLedgerSink::default());
+        actor_config.event_sink = sink.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle.send_message("continue").await.expect("message");
+        let events = collect_turn(&mut events).await;
+
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::CompactionFailed { summary_turn: 1 }
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::TurnFinished {
+                status: AgentTurnStatus::Failed,
+                ..
+            }
+        )));
+        let durable = sink.read_after(None).await.expect("durable events");
+        assert!(durable.iter().any(|event| matches!(
+            event,
+            EngineEvent::CompactionFailed {
+                summary_turn_id,
+                ..
+            } if summary_turn_id.0 == "1"
+        )));
+        assert!(
+            !durable
+                .iter()
+                .any(|event| matches!(event, EngineEvent::CompactionFinished { .. }))
+        );
     }
 
     #[tokio::test]

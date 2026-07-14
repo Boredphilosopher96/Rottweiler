@@ -3,17 +3,19 @@
 import { renderMermaidASCII } from "./beautiful-mermaid-ascii.js"
 
 const MERMAID_LANGUAGES = new Set(["mermaid", "mmd", "flowchart"])
-const MAX_DIAGRAM_BYTES = 8 * 1024
-const MAX_DIAGRAM_LINES = 80
-const MAX_DIAGRAM_EDGES = 24
-const MAX_DIAGRAM_STATEMENTS = 40
-const MAX_DIAGRAM_GROUP_SEPARATORS = 24
-const MAX_DIAGRAMS_PER_RESPONSE = 4
-const MAX_RESPONSE_DIAGRAM_BYTES = 16 * 1024
-const MAX_RESPONSE_DIAGRAM_EDGES = 32
-const MAX_RESPONSE_DIAGRAM_STATEMENTS = 64
-const MAX_RENDERED_BYTES = 32 * 1024
-const MAX_RENDERED_LINES = 24
+const MAX_DIAGRAM_BYTES = 32 * 1024
+const MAX_DIAGRAM_LINES = 320
+const MAX_DIAGRAM_EDGES = 256
+const MAX_DIAGRAM_STATEMENTS = 384
+const MAX_DIAGRAM_GROUP_SEPARATORS = 128
+const MAX_DIAGRAMS_PER_RESPONSE = 8
+const MAX_RESPONSE_DIAGRAM_BYTES = 128 * 1024
+const MAX_RESPONSE_DIAGRAM_EDGES = 1_024
+const MAX_RESPONSE_DIAGRAM_STATEMENTS = 1_024
+const MAX_RENDERED_BYTES = 128 * 1024
+// Height is handled by the transcript's scroll viewport. This is only a guard
+// against a broken renderer producing an unbounded allocation.
+const MAX_RENDERED_LINES = 2_048
 const MAX_CACHE_ENTRIES = 64
 const MAX_CACHE_BYTES = 256 * 1024
 
@@ -139,9 +141,9 @@ export function terminalMarkdown(
       responseDiagramStatements + metrics.statements > MAX_RESPONSE_DIAGRAM_STATEMENTS
     const diagramWidth = Math.max(1, width - prefixWidth)
     const rendered = sourceTooLarge || exceedsDiagramBudget
-      ? compactDiagramPreview(sourceText, diagramWidth, metrics, sourceTooLarge)
+      ? diagramFallback(diagramWidth, metrics, sourceTooLarge)
       : exceedsResponseBudget
-        ? compactDiagramPreview(sourceText, diagramWidth, metrics)
+        ? diagramFallback(diagramWidth, metrics)
         : renderDiagram(sourceText, diagramWidth, metrics)
     if (!sourceTooLarge && !exceedsDiagramBudget && !exceedsResponseBudget) {
       renderedDiagrams += 1
@@ -160,7 +162,10 @@ export function terminalMarkdown(
 
 function renderDiagram(source: string, width: number, metrics: DiagramMetrics): string {
   if (diagramExceedsLimits(metrics)) {
-    return compactDiagramPreview(source, width, metrics)
+    return diagramFallback(width, metrics)
+  }
+  if (metrics.edges > 48 && !isChunkableFlowchart(source)) {
+    return diagramFallback(width, metrics)
   }
 
   const requestedWidth = Math.max(1, Math.floor(width))
@@ -173,21 +178,29 @@ function renderDiagram(source: string, width: number, metrics: DiagramMetrics): 
     return cached
   }
 
-  let rendered: string
-  try {
-    rendered = renderMermaidASCII(source, {
-      useAscii: false,
-      colorMode: "none",
-      paddingX: layoutWidth < 80 ? 1 : 3,
-      paddingY: layoutWidth < 80 ? 1 : 2,
-      boxBorderPadding: layoutWidth < 48 ? 0 : 1,
-    }).trimEnd()
-    if (rendered.trim().length === 0) rendered = "Diagram has no visible nodes."
-    const fitted = fitRenderedDiagram(rendered, requestedWidth)
-    rendered = fitted ?? compactDiagramPreview(source, requestedWidth, metrics)
-  } catch {
-    rendered = compactDiagramPreview(source, requestedWidth, metrics)
+  let rendered: string | null = renderChunkedFlowchart(source, requestedWidth, metrics)
+  for (const candidate of rendered === null ? diagramCandidates(source, layoutWidth, metrics) : []) {
+    try {
+      const picture = renderMermaidASCII(candidate.source, {
+        useAscii: false,
+        colorMode: "none",
+        ...candidate.padding,
+      }).trimEnd()
+      if (picture.trim().length === 0) continue
+      const withLegend = candidate.legend.length === 0
+        ? picture
+        : `${picture}\n\n${renderLegend(candidate.legend, requestedWidth)}`
+      const fitted = fitRenderedDiagram(withLegend, requestedWidth)
+      if (fitted !== null) {
+        rendered = fitted
+        break
+      }
+    } catch {
+      // Some Mermaid layouts are unsupported by the terminal renderer. Keep
+      // trying narrower layouts rather than leaking parser internals.
+    }
   }
+  rendered ??= diagramFallback(requestedWidth, metrics, false, true)
 
   const renderedBytes = new TextEncoder().encode(rendered).length
   renderedDiagramCache.set(cacheKey, rendered)
@@ -221,52 +234,176 @@ function fitRenderedDiagram(rendered: string, width: number): string | null {
   return rendered
 }
 
-function compactDiagramPreview(
-  source: string,
+function diagramFallback(
   width: number,
   metrics: DiagramMetrics,
   sourceTruncated = false,
+  renderFailed = false,
 ): string {
   const columns = Math.max(1, Math.floor(width))
-  const header = metrics.edges > 0
-    ? `◇ Compact diagram · ${metrics.edges} connection${metrics.edges === 1 ? "" : "s"}${sourceTruncated ? " · partial preview" : ""}`
-    : `◇ Compact diagram${sourceTruncated ? " · partial preview" : ""}`
-  const statements = source
-    .split(/\n|;/)
-    .map(compactDiagramStatement)
-    .filter((line): line is string => line !== null)
-  const unique = [...new Set(statements)]
-  const bodyLimit = Math.max(1, MAX_RENDERED_LINES - 1)
-  const visible = unique.slice(0, bodyLimit)
-  if (sourceTruncated && visible.length > 0) {
-    visible[visible.length - 1] = "… diagram preview truncated"
-  } else if (unique.length > visible.length) {
-    visible[visible.length - 1] = `… ${unique.length - visible.length + 1} more connections`
-  }
-  const body = visible.length === 0 ? ["No visible connections"] : visible
-  return [header, ...body]
-    .slice(0, MAX_RENDERED_LINES)
+  const reason = renderFailed
+    ? "This Mermaid syntax is not supported by the terminal renderer."
+    : sourceTruncated
+      ? "This Mermaid source exceeds the safe rendering limit."
+      : "This diagram exceeds the safe rendering limit."
+  const details = metrics.edges > 0
+    ? `${metrics.edges} connection${metrics.edges === 1 ? "" : "s"}`
+    : `${metrics.statements} statement${metrics.statements === 1 ? "" : "s"}`
+  return ["◇ Mermaid diagram", reason, details]
     .map((line) => clipTerminalLine(line, columns))
     .join("\n")
 }
 
-function compactDiagramStatement(statement: string): string | null {
-  const trimmed = statement.trim()
-  if (
-    trimmed === "" ||
-    /^(?:%%|flowchart\b|graph\b|subgraph\b|end$|direction\b|style\b|classDef\b|class\b|click\b|linkStyle\b)/i.test(trimmed)
-  ) return null
-  const compact = trimmed
-    .replace(/<br\s*\/?\s*>/gi, " ")
-    .replace(/\|[^|]*\|/g, " ")
-    .replace(/([A-Za-z_][\w.-]*)\s*\[([^\]]+)]/g, "$2")
-    .replace(/([A-Za-z_][\w.-]*)\s*\(([^)]+)\)/g, "$2")
-    .replace(/([A-Za-z_][\w.-]*)\s*\{([^}]+)}/g, "$2")
-    .replace(/(?:--+>|--{2,}|==+>|-\.->|<--?>|->>|-->>|\.{2,}>)/g, " → ")
-    .replace(/["'`]/g, "")
+interface DiagramCandidate {
+  readonly source: string
+  readonly padding: {
+    readonly paddingX: number
+    readonly paddingY: number
+    readonly boxBorderPadding: number
+  }
+  readonly legend: readonly [string, string][]
+}
+
+function diagramCandidates(source: string, width: number, metrics: DiagramMetrics): readonly DiagramCandidate[] {
+  const normal = {
+    paddingX: width < 80 ? 1 : 3,
+    paddingY: width < 80 ? 1 : 2,
+    boxBorderPadding: width < 48 ? 0 : 1,
+  }
+  const tight = { paddingX: 1, paddingY: 1, boxBorderPadding: 0 }
+  const flush = { paddingX: 0, paddingY: 0, boxBorderPadding: 0 }
+  const vertical = verticalFlowchart(source)
+  const compact = compactFlowchartLabels(vertical)
+  const candidates: DiagramCandidate[] = metrics.edges > 16
+    ? [{ source: vertical, padding: flush, legend: [] }]
+    : [
+        { source, padding: normal, legend: [] },
+        { source, padding: tight, legend: [] },
+        { source: vertical, padding: flush, legend: [] },
+      ]
+  if (compact.source !== vertical) {
+    candidates.push({ source: compact.source, padding: flush, legend: compact.legend })
+  }
+  return candidates
+}
+
+function renderChunkedFlowchart(
+  source: string,
+  width: number,
+  metrics: DiagramMetrics,
+): string | null {
+  if (metrics.edges <= 16 || !isChunkableFlowchart(source)) return null
+  const lines = verticalFlowchart(source).split("\n")
+  const header = lines.find((line) => /^\s*(?:flowchart|graph)\s+/i.test(line)) ?? "flowchart TB"
+  const edges = lines.filter(hasMermaidEdge)
+  for (const pageSize of [8, 4, 2, 1]) {
+    const pictures: string[] = []
+    let failed = false
+    for (let index = 0; index < edges.length; index += pageSize) {
+      const chunkSource = [header, ...edges.slice(index, index + pageSize)].join("\n")
+      try {
+        const picture = renderMermaidASCII(chunkSource, {
+          useAscii: false,
+          colorMode: "none",
+          paddingX: 0,
+          paddingY: 0,
+          boxBorderPadding: 0,
+        }).trimEnd()
+        if (picture === "") {
+          failed = true
+          break
+        }
+        const page = Math.floor(index / pageSize) + 1
+        const pages = Math.ceil(edges.length / pageSize)
+        const title = clipTerminalLine(`◇ Diagram ${page} of ${pages}`, width)
+        pictures.push(`${title}\n${picture}`)
+      } catch {
+        failed = true
+        break
+      }
+    }
+    if (failed) continue
+    const fitted = fitRenderedDiagram(pictures.join("\n\n"), width)
+    if (fitted !== null) return fitted
+  }
+  return null
+}
+
+function isFlowchartHeader(line: string): boolean {
+  return /^\s*(?:flowchart|graph)\s+/i.test(line)
+}
+
+function hasMermaidEdge(line: string): boolean {
+  return /(?:--+>|--{2,}|==+>|-\.->|<--?>|->>|-->>|\.{2,}>)/.test(line)
+}
+
+const SIMPLE_FLOWCHART_EDGE = /^\s*([A-Za-z_][\w.-]*)\s*(?:--+>|==+>|-\.->|->>|-->>|\.{2,}>)\s*([A-Za-z_][\w.-]*)\s*;?\s*$/
+
+function isChunkableFlowchart(source: string): boolean {
+  let edges = 0
+  for (const line of source.split("\n")) {
+    if (line.trim() === "" || isFlowchartHeader(line) || /^\s*%%/.test(line)) continue
+    if (!SIMPLE_FLOWCHART_EDGE.test(line)) return false
+    edges += 1
+  }
+  return edges > 0
+}
+
+function verticalFlowchart(source: string): string {
+  return source.replace(/^(\s*(?:flowchart|graph)\s+)(?:LR|RL)(\b)/im, "$1TB$2")
+}
+
+function compactFlowchartLabels(source: string): {
+  readonly source: string
+  readonly legend: readonly [string, string][]
+} {
+  const labels = new Map<string, string>()
+  const compact = source.replace(
+    /\b([A-Za-z_][\w.-]*)\s*\[(?![\[(])([^\][\n]*)\]/g,
+    (match, identifier: string, rawLabel: string) => {
+      const shapeLabel = rawLabel.trim()
+      if (/^[\\/]|[\\/]$/.test(shapeLabel)) return match
+      const label = cleanMermaidLabel(rawLabel)
+      if (label !== "" && label !== identifier && !labels.has(identifier)) labels.set(identifier, label)
+      return `${identifier}[${identifier}]`
+    },
+  )
+  return { source: compact, legend: [...labels] }
+}
+
+function cleanMermaidLabel(label: string): string {
+  return label
+    .replace(/<br\s*\/?\s*>/gi, " / ")
+    .replace(/^["'`]|["'`]$/g, "")
     .replace(/\s+/g, " ")
     .trim()
-  return compact === "" ? null : compact
+}
+
+function renderLegend(entries: readonly [string, string][], width: number): string {
+  const lines = ["Legend"]
+  for (const [identifier, label] of entries) {
+    lines.push(...wrapTerminalLine(`${identifier}: ${label}`, width))
+  }
+  return lines.join("\n")
+}
+
+function wrapTerminalLine(line: string, width: number): string[] {
+  const columns = Math.max(1, Math.floor(width))
+  if (Bun.stringWidth(line) <= columns) return [line]
+  const words = line.split(/\s+/)
+  const output: string[] = []
+  let current = ""
+  for (const word of words) {
+    const candidate = current === "" ? word : `${current} ${word}`
+    if (Bun.stringWidth(candidate) <= columns) {
+      current = candidate
+      continue
+    }
+    if (current !== "") output.push(current)
+    current = Bun.stringWidth(word) <= columns ? word : clipTerminalLine(word, columns)
+  }
+  if (current !== "") output.push(current)
+  return output
 }
 
 function clipTerminalLine(line: string, width: number): string {

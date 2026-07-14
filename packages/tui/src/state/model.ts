@@ -199,6 +199,9 @@ export interface CompactionProjection {
   readonly reason: string | null
   readonly summaryTurnId: string | null
   readonly reclaimedTokens: string | null
+  readonly attempt: number | null
+  readonly text: string
+  readonly thinking: string
 }
 
 export interface ShellProjection {
@@ -446,6 +449,9 @@ export function createInitialState(): RottweilerState {
       reason: null,
       summaryTurnId: null,
       reclaimedTokens: null,
+      attempt: null,
+      text: "",
+      thinking: "",
     },
     budgets: [],
     errors: [],

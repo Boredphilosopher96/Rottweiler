@@ -1892,6 +1892,28 @@ pub enum EngineEvent {
         meta: EventMeta,
         reason: CompactionReason,
     },
+    /// Connection-scoped boundary for one compaction provider attempt.
+    /// This never enters the durable session sequence.
+    CompactionAttemptStarted {
+        session_id: SessionId,
+        summary_turn_id: TurnId,
+        attempt: u32,
+    },
+    /// Connection-scoped provider text produced while a compaction summary is
+    /// generated. This never enters the durable session sequence.
+    CompactionTextDelta {
+        session_id: SessionId,
+        summary_turn_id: TurnId,
+        attempt: u32,
+        text: String,
+    },
+    /// Connection-scoped provider reasoning produced during compaction.
+    CompactionThinkingDelta {
+        session_id: SessionId,
+        summary_turn_id: TurnId,
+        attempt: u32,
+        text: String,
+    },
     /// Accounting for one billed compaction provider attempt that did not
     /// produce the committed summary. This event is deliberately non-terminal:
     /// fallback attempts continue inside the same compaction transaction.
@@ -1912,6 +1934,10 @@ pub enum EngineEvent {
         usage: Option<Usage>,
         #[serde(default)]
         cost: Option<Cost>,
+    },
+    CompactionFailed {
+        meta: EventMeta,
+        summary_turn_id: TurnId,
     },
     SubagentSpawned {
         meta: EventMeta,
@@ -2048,6 +2074,9 @@ impl EngineEvent {
             | Self::WorkspaceStatusReady { .. }
             | Self::WorkspaceDiffReady { .. }
             | Self::SubagentProgress { .. }
+            | Self::CompactionAttemptStarted { .. }
+            | Self::CompactionTextDelta { .. }
+            | Self::CompactionThinkingDelta { .. }
             | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }
             | Self::WorkspaceRootsChanged { meta, .. }
@@ -2077,6 +2106,7 @@ impl EngineEvent {
             | Self::CompactionStarted { meta, .. }
             | Self::CompactionAttemptFinished { meta, .. }
             | Self::CompactionFinished { meta, .. }
+            | Self::CompactionFailed { meta, .. }
             | Self::SubagentSpawned { meta, .. }
             | Self::SubagentFinished { meta, .. }
             | Self::ToolOutputPruned { meta, .. }
@@ -2125,6 +2155,9 @@ impl EngineEvent {
             | Self::WorkspaceStatusReady { .. }
             | Self::WorkspaceDiffReady { .. }
             | Self::SubagentProgress { .. }
+            | Self::CompactionAttemptStarted { .. }
+            | Self::CompactionTextDelta { .. }
+            | Self::CompactionThinkingDelta { .. }
             | Self::HostShutdown { .. } => None,
             Self::SessionCreated { meta, .. }
             | Self::WorkspaceRootsChanged { meta, .. }
@@ -2154,6 +2187,7 @@ impl EngineEvent {
             | Self::CompactionStarted { meta, .. }
             | Self::CompactionAttemptFinished { meta, .. }
             | Self::CompactionFinished { meta, .. }
+            | Self::CompactionFailed { meta, .. }
             | Self::SubagentSpawned { meta, .. }
             | Self::SubagentFinished { meta, .. }
             | Self::ToolOutputPruned { meta, .. }
