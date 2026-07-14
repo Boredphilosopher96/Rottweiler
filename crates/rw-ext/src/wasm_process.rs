@@ -222,55 +222,8 @@ async fn invoke_helper_with_timeout(
             message: format!("private WASM helper could not start: {error}"),
         })?;
     let exchange = async {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| WasmHookHostError::Execution {
-                message: "private WASM helper stdin is unavailable".to_owned(),
-            })?;
-        stdin
-            .write_all(&header_len.to_be_bytes())
-            .await
-            .map_err(|error| io_error(&error))?;
-        stdin
-            .write_all(&component_len.to_be_bytes())
-            .await
-            .map_err(|error| io_error(&error))?;
-        stdin
-            .write_all(&header)
-            .await
-            .map_err(|error| io_error(&error))?;
-        stdin
-            .write_all(component)
-            .await
-            .map_err(|error| io_error(&error))?;
-        stdin.shutdown().await.map_err(|error| io_error(&error))?;
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| WasmHookHostError::Execution {
-                message: "private WASM helper stdout is unavailable".to_owned(),
-            })?;
-        let response_len = stdout.read_u32().await.map_err(|error| io_error(&error))? as usize;
-        if response_len > MAX_WASM_HOST_RESPONSE_BYTES {
-            return Err(WasmHookHostError::OutputTooLarge {
-                limit: MAX_WASM_HOST_RESPONSE_BYTES,
-            });
-        }
-        let mut response = vec![0; response_len];
-        stdout
-            .read_exact(&mut response)
-            .await
-            .map_err(|error| io_error(&error))?;
-        let status = child.wait().await.map_err(|error| io_error(&error))?;
-        if !status.success() {
-            return Err(WasmHookHostError::Execution {
-                message: "private WASM helper exited unsuccessfully".to_owned(),
-            });
-        }
-        serde_json::from_slice(&response).map_err(|error| WasmHookHostError::InvalidDirective {
-            message: format!("private WASM helper returned malformed output: {error}"),
-        })
+        write_helper_request(&mut child, header_len, component_len, &header, component).await?;
+        read_helper_response(&mut child).await
     };
     match tokio::time::timeout(remaining, exchange).await {
         Ok(Ok(response)) => Ok(response),
@@ -283,6 +236,82 @@ async fn invoke_helper_with_timeout(
             Err(helper_deadline_error())
         }
     }
+}
+
+async fn write_helper_request(
+    child: &mut tokio::process::Child,
+    header_len: u32,
+    component_len: u32,
+    header: &[u8],
+    component: &[u8],
+) -> Result<(), WasmHookHostError> {
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| WasmHookHostError::Execution {
+            message: "private WASM helper stdin is unavailable".to_owned(),
+        })?;
+    stdin
+        .write_all(&header_len.to_be_bytes())
+        .await
+        .map_err(|error| io_error(&error))?;
+    stdin
+        .write_all(&component_len.to_be_bytes())
+        .await
+        .map_err(|error| io_error(&error))?;
+    stdin
+        .write_all(header)
+        .await
+        .map_err(|error| io_error(&error))?;
+    stdin
+        .write_all(component)
+        .await
+        .map_err(|error| io_error(&error))?;
+    stdin.shutdown().await.map_err(|error| io_error(&error))
+}
+
+async fn read_helper_response(
+    child: &mut tokio::process::Child,
+) -> Result<WasmHostResponse, WasmHookHostError> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| WasmHookHostError::Execution {
+            message: "private WASM helper stdout is unavailable".to_owned(),
+        })?;
+    let response_len = match stdout.read_u32().await {
+        Ok(length) => length as usize,
+        Err(error) => return Err(helper_read_error(child, &error).await),
+    };
+    if response_len > MAX_WASM_HOST_RESPONSE_BYTES {
+        return Err(WasmHookHostError::OutputTooLarge {
+            limit: MAX_WASM_HOST_RESPONSE_BYTES,
+        });
+    }
+    let mut response = vec![0; response_len];
+    if let Err(error) = stdout.read_exact(&mut response).await {
+        return Err(helper_read_error(child, &error).await);
+    }
+    let status = child.wait().await.map_err(|error| io_error(&error))?;
+    if !status.success() {
+        return Err(WasmHookHostError::Execution {
+            message: "private WASM helper exited unsuccessfully".to_owned(),
+        });
+    }
+    serde_json::from_slice(&response).map_err(|error| WasmHookHostError::InvalidDirective {
+        message: format!("private WASM helper returned malformed output: {error}"),
+    })
+}
+
+async fn helper_read_error(
+    child: &mut tokio::process::Child,
+    error: &std::io::Error,
+) -> WasmHookHostError {
+    let status = tokio::time::timeout(WASM_HOST_REAP_TIMEOUT, child.wait())
+        .await
+        .ok()
+        .and_then(Result::ok);
+    io_error_with_status(error, status.as_ref())
 }
 
 fn helper_deadline_error() -> WasmHookHostError {
@@ -299,6 +328,24 @@ async fn terminate_and_reap(child: &mut tokio::process::Child) {
 fn io_error(error: &std::io::Error) -> WasmHookHostError {
     WasmHookHostError::Execution {
         message: format!("private WASM helper communication failed: {error}"),
+    }
+}
+
+fn io_error_with_status(
+    error: &std::io::Error,
+    status: Option<&std::process::ExitStatus>,
+) -> WasmHookHostError {
+    let outcome = status.map_or_else(
+        || "without an exit status".to_owned(),
+        |status| {
+            status.code().map_or_else(
+                || "after a signal".to_owned(),
+                |code| format!("with exit code {code}"),
+            )
+        },
+    );
+    WasmHookHostError::Execution {
+        message: format!("private WASM helper communication failed {outcome}: {error}"),
     }
 }
 

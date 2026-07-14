@@ -1,21 +1,23 @@
 //! Private one-shot WASM runtime. It is never a public application entrypoint.
 
-use std::process::ExitCode;
+use std::{io::Write as _, process::ExitCode};
 
 use rw_ext::{
     HookDirective, MAX_WASM_HOST_HEADER_BYTES, MAX_WASM_HOST_RESPONSE_BYTES, WasmHookHost,
     WasmHostRequest, WasmHostResponse,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 const ABSOLUTE_MAX_COMPONENT_BYTES: usize = 8 * 1024 * 1024;
 
-#[tokio::main]
+// This is a one-request helper. A current-thread runtime avoids needless
+// executor migration and keeps the process resource bound deterministic.
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
-            let _ = write_response(&WasmHostResponse::Error { message }).await;
+            let _ = write_response(&WasmHostResponse::Error { message });
             ExitCode::SUCCESS
         }
     }
@@ -62,10 +64,10 @@ async fn run() -> Result<(), String> {
             },
         },
     };
-    write_response(&response).await
+    write_response(&response)
 }
 
-async fn write_response(response: &WasmHostResponse) -> Result<(), String> {
+fn write_response(response: &WasmHostResponse) -> Result<(), String> {
     let bytes = serde_json::to_vec(response)
         .map_err(|_| "WASM helper response could not encode".to_owned())?;
     if bytes.len() > MAX_WASM_HOST_RESPONSE_BYTES {
@@ -73,13 +75,13 @@ async fn write_response(response: &WasmHostResponse) -> Result<(), String> {
     }
     let len = u32::try_from(bytes.len())
         .map_err(|_| "WASM helper response exceeds its wire limit".to_owned())?;
-    let mut stdout = tokio::io::stdout();
-    stdout
-        .write_all(&len.to_be_bytes())
-        .await
-        .map_err(io_message)?;
-    stdout.write_all(&bytes).await.map_err(io_message)?;
-    stdout.shutdown().await.map_err(io_message)
+    let mut frame = Vec::with_capacity(bytes.len() + size_of::<u32>());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(&bytes);
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    stdout.write_all(&frame).map_err(io_message)?;
+    stdout.flush().map_err(io_message)
 }
 
 fn io_message(_: std::io::Error) -> String {
