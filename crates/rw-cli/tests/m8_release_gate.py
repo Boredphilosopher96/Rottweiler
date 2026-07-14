@@ -190,23 +190,34 @@ def approve_exact_mcp_configs(
         raise RuntimeError(f"approval ledger did not contain exactly three configs: {ledger!r}")
 
 
-def parse_status(stdout: bytes, server_names: list[str]) -> None:
+def parse_status(
+    stdout: bytes,
+    server_names: list[str],
+    *,
+    expected_ready: set[str],
+) -> None:
     text = ANSI_ESCAPE.sub("", stdout.decode("utf-8", errors="replace")).replace(
         "\r", ""
     )
     matches = list(MCP_STATUS_ROW.finditer(text))
-    statuses = {match.group("id"): match.groupdict() for match in matches}
-    if len(matches) != len(server_names) or set(statuses) != set(server_names):
+    latest = matches[-len(server_names) :]
+    statuses = {match.group("id"): match.groupdict() for match in latest}
+    if len(latest) != len(server_names) or set(statuses) != set(server_names):
         raise RuntimeError(f"/mcp status omitted three real catalogs: {stdout!r}")
     for server in server_names:
         status = statuses[server]
-        if status["state"] != "ready":
-            raise RuntimeError(f"MCP {server} was not ready: {statuses!r}")
-        if (
-            int(status["tools"]) != 3
-            or int(status["resources"]) != 1
-            or int(status["prompts"]) != 1
-        ):
+        expected_state = "ready" if server in expected_ready else "disabled"
+        expected_catalog = (3, 1, 1) if server in expected_ready else (0, 0, 0)
+        if status["state"] != expected_state:
+            raise RuntimeError(
+                f"MCP {server} was not {expected_state}: {statuses!r}"
+            )
+        catalog = (
+            int(status["tools"]),
+            int(status["resources"]),
+            int(status["prompts"]),
+        )
+        if catalog != expected_catalog:
             raise RuntimeError(f"MCP {server} catalog evidence was incomplete: {status!r}")
 
 
@@ -340,6 +351,7 @@ def one_sample(
     captured_stderr = bytearray()
     terminal_output = bytearray()
     prompt_ready_ms: float | None = None
+    startup_fixture_records: list[tuple[int, int]] = []
     fixture_records: list[tuple[int, int]] = []
     child_groups: set[int] = set()
     deadline = time.monotonic() + 10
@@ -367,8 +379,7 @@ def one_sample(
             ):
                 prompt_ready_ms = (time.perf_counter_ns() - started) / 1_000_000
                 descendants = descendant_processes(process.pid)
-                fixture_records = fixture_processes(descendants, fixture)
-                child_groups = {record[2] for record in descendants} - {process.pid}
+                startup_fixture_records = fixture_processes(descendants, fixture)
                 break
         if prompt_ready_ms is None:
             raise RuntimeError(
@@ -392,7 +403,11 @@ def one_sample(
                 else:
                     append_bounded(terminal_output, chunk)
             with contextlib.suppress(RuntimeError):
-                parse_status(bytes(terminal_output), server_names)
+                parse_status(
+                    bytes(terminal_output),
+                    server_names,
+                    expected_ready=set(),
+                )
                 status_ready = True
             if status_ready:
                 break
@@ -402,9 +417,65 @@ def one_sample(
             raise RuntimeError(
                 f"sample {sample} did not render /mcp status: {terminal_output[-3000:]!r}"
             )
-        parse_status(bytes(terminal_output), server_names)
+        parse_status(
+            bytes(terminal_output),
+            server_names,
+            expected_ready=set(),
+        )
+        if startup_fixture_records:
+            raise RuntimeError(
+                f"sample {sample} eagerly started MCP fixtures before explicit enable: "
+                f"{startup_fixture_records!r}"
+            )
+
+        # Startup deliberately registers persisted MCP configurations without
+        # touching credentials or starting transports. Exercise the explicit
+        # activation path before verifying catalogs and shutdown/reaping.
+        activated_servers: set[str] = set()
+        for server in server_names:
+            write_terminal_line(terminal_master, f"/mcp enable {server}")
+            activated_servers.add(server)
+            activation_deadline = time.monotonic() + 10
+            activated = False
+            while time.monotonic() < activation_deadline:
+                ready, _, _ = select.select(
+                    [stderr_descriptor, terminal_master], [], [], 0.01
+                )
+                for descriptor in ready:
+                    try:
+                        chunk = os.read(descriptor, 65536)
+                    except OSError:
+                        chunk = b""
+                    if descriptor == stderr_descriptor:
+                        append_bounded(captured_stderr, chunk)
+                    else:
+                        append_bounded(terminal_output, chunk)
+                with contextlib.suppress(RuntimeError):
+                    parse_status(
+                        bytes(terminal_output),
+                        server_names,
+                        expected_ready=activated_servers,
+                    )
+                    activated = True
+                if activated:
+                    break
+                if process.poll() is not None:
+                    break
+            if not activated:
+                raise RuntimeError(
+                    f"sample {sample} did not activate MCP {server}: "
+                    f"{terminal_output[-5000:]!r}"
+                )
+        descendants = descendant_processes(process.pid)
+        fixture_records = fixture_processes(descendants, fixture)
+        child_groups = {record[2] for record in descendants} - {process.pid}
+
         exit_deadline = time.monotonic() + 5
-        while terminal_output.count(b"rw> ") < 2 and time.monotonic() < exit_deadline:
+        expected_prompts = 2 + len(server_names)
+        while (
+            terminal_output.count(b"rw> ") < expected_prompts
+            and time.monotonic() < exit_deadline
+        ):
             ready, _, _ = select.select(
                 [stderr_descriptor, terminal_master], [], [], 0.01
             )
@@ -417,9 +488,9 @@ def one_sample(
                     append_bounded(captured_stderr, chunk)
                 else:
                     append_bounded(terminal_output, chunk)
-        if terminal_output.count(b"rw> ") < 2:
+        if terminal_output.count(b"rw> ") < expected_prompts:
             raise RuntimeError(
-                f"sample {sample} line client did not return after /mcp status: "
+                f"sample {sample} line client did not return after MCP activation: "
                 f"{terminal_output[-3000:]!r}"
             )
         # Rustyline maps Ctrl-D at an empty prompt to EOF; the production REPL
@@ -458,7 +529,7 @@ def one_sample(
     if len(fixture_pids) != 3 or len(fixture_groups) != 3:
         raise RuntimeError(
             f"sample {sample} did not expose three canonical fixture processes in distinct "
-            f"groups at prompt-ready: {fixture_records!r}"
+            f"groups after explicit activation: {fixture_records!r}"
         )
     leaked = group_members(child_groups)
     if leaked:
