@@ -80,6 +80,26 @@ impl ProviderModelCatalogSource {
             config,
         }
     }
+
+    /// Builds a provider inventory without resolving credentials or claiming
+    /// any concrete model is available. This is the safe first-run seed for a
+    /// non-refresh catalog request when no durable cache exists yet.
+    #[must_use]
+    pub fn placeholder(config: &Config) -> ModelCatalogSnapshot {
+        let discoveries = config
+            .providers
+            .keys()
+            .map(|provider| {
+                (
+                    provider.clone(),
+                    discovery_candidate(provider),
+                    false,
+                    Err("live model catalog has not been loaded".to_owned()),
+                )
+            })
+            .collect();
+        project_model_catalog(config, &PricingTable::default(), discoveries)
+    }
 }
 
 #[async_trait]
@@ -87,6 +107,16 @@ impl ModelCatalogSource for ProviderModelCatalogSource {
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         self.factory
             .discover_model_catalog(&self.config)
+            .await
+            .map_err(|error| ModelCatalogError(error.to_string()))
+    }
+
+    async fn discover_provider(
+        &self,
+        provider: &str,
+    ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        self.factory
+            .discover_provider_model_catalog(&self.config, provider)
             .await
             .map_err(|error| ModelCatalogError(error.to_string()))
     }
@@ -1905,6 +1935,57 @@ where
             .await;
 
         Ok(project_model_catalog(config, &self.pricing, discoveries))
+    }
+
+    /// Discovers one configured provider in isolation. This is the catalog
+    /// counterpart to provider activation: credential resolution and network
+    /// access are bounded to the selected provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized configuration error when the provider is unknown;
+    /// provider authentication and discovery failures remain visible in the
+    /// returned provider row.
+    pub async fn discover_provider_model_catalog(
+        &self,
+        config: &Config,
+        provider: &str,
+    ) -> Result<ModelCatalogSnapshot, ProviderFactoryError> {
+        let provider_config = config
+            .providers
+            .get(provider)
+            .cloned()
+            .ok_or_else(|| ProviderFactoryError::new(provider, "provider is not configured"))?;
+        let mut isolated = config.clone();
+        isolated.providers = BTreeMap::from([(provider.to_owned(), provider_config)]);
+        isolated.models.aliases.retain(|_, candidates| {
+            candidates.retain(|candidate| {
+                candidate
+                    .split_once('/')
+                    .is_some_and(|(owner, model)| owner == provider && !model.is_empty())
+            });
+            !candidates.is_empty()
+        });
+        if isolated.models.aliases.is_empty() {
+            let candidate = discovery_candidate(provider);
+            isolated.models.aliases = BTreeMap::from([("__catalog".to_owned(), vec![candidate])]);
+            "__catalog".clone_into(&mut isolated.models.default);
+            isolated.models.thinking.clear();
+        } else {
+            if !isolated
+                .models
+                .aliases
+                .contains_key(&isolated.models.default)
+                && let Some(first) = isolated.models.aliases.keys().next()
+            {
+                isolated.models.default.clone_from(first);
+            }
+            isolated
+                .models
+                .thinking
+                .retain(|alias, _| isolated.models.aliases.contains_key(alias));
+        }
+        self.discover_model_catalog(&isolated).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3810,6 +3891,36 @@ mod native_search_tests {
                 .all(|provider| provider.name != "my_plugin"),
             "an alias file cannot invent a provider or concrete model row"
         );
+    }
+
+    #[test]
+    fn first_run_placeholder_has_provider_inventory_but_no_model_rows() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "github_copilot".to_owned(),
+            ProviderConfig {
+                kind: "github_copilot".to_owned(),
+                ..ProviderConfig::default()
+            },
+        );
+        config.models.default = "fast".to_owned();
+        config.models.aliases = BTreeMap::from([(
+            "fast".to_owned(),
+            vec!["github_copilot/a-configured-route-is-not-a-catalog".to_owned()],
+        )]);
+
+        let catalog = ProviderModelCatalogSource::placeholder(&config);
+
+        assert!(catalog.models.is_empty());
+        let provider = catalog
+            .providers
+            .iter()
+            .find(|provider| provider.name == "github_copilot")
+            .expect("configured provider row");
+        assert!(provider.configured);
+        assert!(!provider.authenticated);
+        assert!(!provider.reachable);
+        assert_eq!(provider.model_count, 0);
     }
 
     #[test]

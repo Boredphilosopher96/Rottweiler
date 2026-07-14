@@ -19,6 +19,19 @@ pub struct ModelCatalogError(pub String);
 #[async_trait]
 pub trait ModelCatalogSource: Send + Sync + 'static {
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError>;
+
+    /// Discovers one exact provider without requiring callers to compose or
+    /// authenticate unrelated providers. Sources with a provider-aware
+    /// boundary should override this method; the default preserves backwards
+    /// compatibility for simple and test sources.
+    async fn discover_provider(
+        &self,
+        provider: &str,
+    ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let mut snapshot = self.discover().await?;
+        retain_provider(&mut snapshot, provider);
+        Ok(snapshot)
+    }
 }
 
 struct CachedSnapshot {
@@ -105,15 +118,99 @@ impl CachedModelCatalog {
         });
         Ok(snapshot)
     }
+
+    /// Refreshes one provider and merges its live rows into the cached
+    /// provider-neutral snapshot. This is used after an authentication flow so
+    /// validating one newly connected provider never requires credential
+    /// access for every configured provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized discovery error when the selected provider cannot
+    /// be refreshed.
+    pub async fn refresh_provider(
+        &self,
+        provider: &str,
+    ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let mut cached = self.snapshot.lock().await;
+        let now = self.clock.now();
+        let mut update = self.source.discover_provider(provider).await?;
+        retain_provider(&mut update, provider);
+        let mut snapshot = match cached.as_ref() {
+            Some(existing) => merge_provider(existing.snapshot.clone(), update, provider),
+            None => update,
+        };
+        snapshot.cached = false;
+        *cached = Some(CachedSnapshot {
+            discovered_at: now,
+            snapshot: snapshot.clone(),
+        });
+        Ok(snapshot)
+    }
+}
+
+fn candidate_provider(candidate: &str) -> Option<&str> {
+    candidate.split_once('/').map(|(provider, _)| provider)
+}
+
+fn retain_provider(snapshot: &mut ModelCatalogSnapshot, provider: &str) {
+    snapshot.providers.retain(|row| row.name == provider);
+    snapshot.models.retain(|model| model.provider == provider);
+    snapshot.aliases.retain_mut(|alias| {
+        alias
+            .candidates
+            .retain(|candidate| candidate_provider(candidate) == Some(provider));
+        !alias.candidates.is_empty()
+    });
+}
+
+fn merge_provider(
+    mut base: ModelCatalogSnapshot,
+    mut update: ModelCatalogSnapshot,
+    provider: &str,
+) -> ModelCatalogSnapshot {
+    base.providers.retain(|row| row.name != provider);
+    base.providers.append(&mut update.providers);
+    base.providers
+        .sort_by(|left, right| left.name.cmp(&right.name));
+
+    base.models.retain(|model| model.provider != provider);
+    base.models.append(&mut update.models);
+    base.models.sort_by(|left, right| left.id.cmp(&right.id));
+
+    for alias in &mut base.aliases {
+        alias
+            .candidates
+            .retain(|candidate| candidate_provider(candidate) != Some(provider));
+        if let Some(position) = update
+            .aliases
+            .iter()
+            .position(|updated| updated.alias == alias.alias)
+        {
+            let updated = update.aliases.remove(position);
+            alias.candidates.extend(updated.candidates);
+            alias.current |= updated.current;
+        }
+    }
+    base.aliases.retain(|alias| !alias.candidates.is_empty());
+    base.aliases.append(&mut update.aliases);
+    base.aliases
+        .sort_by(|left, right| left.alias.0.cmp(&right.alias.0));
+    base.truncated |= update.truncated;
+    base
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     use rw_providers::Clock;
+    use rw_types::{ProviderAuthKind, ProviderDescriptor, ProviderNextAction};
 
     use super::*;
 
@@ -172,5 +269,85 @@ mod tests {
 
         assert!(!catalog.get(true).await.expect("explicit refresh").cached);
         assert_eq!(source.0.load(Ordering::SeqCst), 1);
+    }
+
+    struct ProviderSource {
+        full_discoveries: AtomicUsize,
+        provider_discoveries: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ModelCatalogSource for ProviderSource {
+        async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            self.full_discoveries.fetch_add(1, Ordering::SeqCst);
+            Ok(snapshot(vec![provider("unrelated", true, 99)]))
+        }
+
+        async fn discover_provider(
+            &self,
+            provider_name: &str,
+        ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            self.provider_discoveries
+                .lock()
+                .expect("provider discovery log")
+                .push(provider_name.to_owned());
+            Ok(snapshot(vec![provider(provider_name, true, 7)]))
+        }
+    }
+
+    fn provider(name: &str, reachable: bool, model_count: u32) -> ProviderDescriptor {
+        ProviderDescriptor {
+            name: name.to_owned(),
+            auth_kind: ProviderAuthKind::ApiKey,
+            next_action: ProviderNextAction::SelectModels,
+            configured: true,
+            authenticated: reachable,
+            reachable,
+            model_count,
+            status: None,
+        }
+    }
+
+    fn snapshot(providers: Vec<ProviderDescriptor>) -> ModelCatalogSnapshot {
+        ModelCatalogSnapshot {
+            aliases: Vec::new(),
+            models: Vec::new(),
+            providers,
+            cached: false,
+            truncated: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_refresh_is_scoped_and_preserves_unrelated_cached_rows() {
+        let source = Arc::new(ProviderSource {
+            full_discoveries: AtomicUsize::new(0),
+            provider_discoveries: StdMutex::new(Vec::new()),
+        });
+        let seed = snapshot(vec![
+            provider("anthropic", true, 2),
+            provider("github_copilot", false, 0),
+        ]);
+        let catalog = CachedModelCatalog::with_initial(source.clone(), Some(seed));
+
+        let refreshed = catalog
+            .refresh_provider("github_copilot")
+            .await
+            .expect("provider-specific refresh");
+
+        assert_eq!(source.full_discoveries.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *source
+                .provider_discoveries
+                .lock()
+                .expect("provider discovery log"),
+            vec!["github_copilot"]
+        );
+        assert_eq!(refreshed.providers.len(), 2);
+        assert_eq!(refreshed.providers[0].name, "anthropic");
+        assert_eq!(refreshed.providers[0].model_count, 2);
+        assert_eq!(refreshed.providers[1].name, "github_copilot");
+        assert_eq!(refreshed.providers[1].model_count, 7);
+        assert!(!refreshed.cached);
     }
 }

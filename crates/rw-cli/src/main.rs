@@ -500,17 +500,17 @@ enum ConfigCommand {
 
 #[derive(Debug, Subcommand)]
 enum ModelsCommand {
-    /// List concrete models from each configured provider's live catalog.
+    /// List cached concrete models; use --refresh for live provider discovery.
     List {
-        /// Bypass the short process-local discovery cache.
+        /// Contact configured providers and update the private cache.
         #[arg(long)]
         refresh: bool,
     },
-    /// Show one exact live `provider/model` record.
+    /// Show one exact cached `provider/model` record.
     Show {
         /// Concrete provider-qualified model id.
         id: String,
-        /// Bypass the short process-local discovery cache.
+        /// Contact configured providers and update the private cache.
         #[arg(long)]
         refresh: bool,
     },

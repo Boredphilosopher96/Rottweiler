@@ -1023,7 +1023,7 @@ impl EngineHost {
             drop(provider_mutation_guard);
             let catalog_ready = match session.model_catalog() {
                 Some(catalog) => catalog
-                    .get(true)
+                    .refresh_provider(&provider)
                     .await
                     .is_ok_and(|catalog| provider_catalog_is_ready(&catalog, &provider)),
                 None => false,
@@ -1072,7 +1072,7 @@ impl EngineHost {
             .model_catalog()
             .ok_or_else(|| HostError::Query("provider model catalog is unavailable".to_owned()))?;
         let catalog = catalog
-            .get(true)
+            .refresh_provider(provider)
             .await
             .map_err(|_| HostError::Query("provider model catalog refresh failed".to_owned()))?;
         if !provider_catalog_is_ready(&catalog, provider) {
@@ -3206,21 +3206,16 @@ impl EngineHost {
                 .as_deref()
                 .filter(|model| model.contains('/'))
         });
-        let mut refreshed_catalog = if let Ok(session) = self.ready_session(&owner.session_id).await
-            && let Some(catalog) = session.model_catalog()
-        {
-            catalog.get(true).await.ok()
-        } else {
-            None
-        };
-        if refreshed_catalog.is_none() {
-            refreshed_catalog = self
-                .queries
-                .model_catalog(true, selected, resolved)
-                .await
-                .ok();
-        }
-        let mut catalog = refreshed_catalog?;
+        // Authentication is a provider-scoped action. Refreshing the global
+        // catalog here would resolve unrelated credentials (and can trigger
+        // unrelated macOS Keychain prompts), so readiness must use the live
+        // session's provider-aware catalog boundary exclusively.
+        let session = self.ready_session(&owner.session_id).await.ok()?;
+        let provider_catalog = session.model_catalog()?;
+        let mut catalog = provider_catalog
+            .refresh_provider(&owner.provider)
+            .await
+            .ok()?;
         let provider_ready = provider_catalog_is_ready(&catalog, &owner.provider);
         overlay_model_catalog_current(&mut catalog, selected, resolved);
         self.emit_many(

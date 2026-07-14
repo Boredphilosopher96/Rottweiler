@@ -316,16 +316,18 @@ impl CliSessionFactory {
         } else {
             PricingTable::default()
         };
-        let live_source: Arc<dyn ModelCatalogSource> =
-            Arc::new(ProviderModelCatalogSource::system(
-                options.credentials_path.clone(),
-                pricing,
-                options.config.clone(),
-            ));
+        let live_source = ProviderModelCatalogSource::system(
+            options.credentials_path.clone(),
+            pricing,
+            options.config.clone(),
+        );
         let catalog_cache_path = options.storage_root.join("model-catalog.json");
-        let initial_catalog = load_model_catalog_cache(&catalog_cache_path).ok().flatten();
+        let initial_catalog = load_model_catalog_cache(&catalog_cache_path)
+            .ok()
+            .flatten()
+            .or_else(|| Some(ProviderModelCatalogSource::placeholder(&options.config)));
         let source: Arc<dyn ModelCatalogSource> = Arc::new(PersistingModelCatalogSource {
-            inner: live_source,
+            inner: Arc::new(live_source),
             cache_path: catalog_cache_path,
         });
         let factory = Self {

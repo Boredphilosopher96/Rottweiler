@@ -63,6 +63,7 @@ use rw_core::{
     load_instruction_stack, load_nested_instruction_stack, project_session_events,
 };
 use rw_store::{
+    catalog_cache::{load_model_catalog_cache, store_model_catalog_cache},
     checkpoint::{CheckpointStore, OpaqueMutation, RewindHandle},
     config::ConfigLoader,
     credentials::{CredentialManager, CredentialReference},
@@ -132,15 +133,31 @@ pub(crate) async fn discover_model_catalog(refresh: bool) -> Result<ModelCatalog
         eprintln!("warning: {}", warning.message());
     }
     let pricing = load_effective_pricing_table().await?;
+    let cache_path = credentials_path
+        .parent()
+        .ok_or_else(|| miette!("configuration root has no parent"))?
+        .join("model-catalog.json");
+    let initial_catalog = load_model_catalog_cache(&cache_path)
+        .ok()
+        .flatten()
+        .or_else(|| Some(ProviderModelCatalogSource::placeholder(&effective.config)));
     let source = Arc::new(ProviderModelCatalogSource::system(
         credentials_path,
         pricing,
         effective.config,
     ));
-    CachedModelCatalog::new(source)
+    let snapshot = CachedModelCatalog::with_initial(source, initial_catalog)
         .get(refresh)
         .await
-        .map_err(|error| miette!(error.to_string()))
+        .map_err(|error| miette!(error.to_string()))?;
+    if refresh
+        && let Some(storage_root) = cache_path.parent()
+        && initialize_private_storage_root(storage_root).is_ok()
+        && store_model_catalog_cache(&cache_path, &snapshot).is_err()
+    {
+        eprintln!("warning: refreshed models could not be cached securely");
+    }
+    Ok(snapshot)
 }
 
 pub(crate) fn initialize_private_storage_root(path: &Path) -> io::Result<()> {
@@ -2589,10 +2606,18 @@ pub(crate) async fn compose_hosted_actor(
                 built_tools.websearch.clone(),
             );
             let source: Arc<dyn ModelCatalogSource> = model.clone();
+            let initial_catalog =
+                load_model_catalog_cache(&options.storage_root.join("model-catalog.json"))
+                    .ok()
+                    .flatten()
+                    .or_else(|| Some(ProviderModelCatalogSource::placeholder(&options.config)));
             (
                 model,
                 redactor,
-                Some(Arc::new(CachedModelCatalog::new(source))),
+                Some(Arc::new(CachedModelCatalog::with_initial(
+                    source,
+                    initial_catalog,
+                ))),
             )
         }
         HostedProviderMode::DeterministicReplay {
@@ -6126,6 +6151,29 @@ impl ModelCatalogSource for ReloadingHostedCatalogSource {
             .await
             .map_err(|error| ModelCatalogError(error.to_string()))
     }
+
+    async fn discover_provider(
+        &self,
+        provider: &str,
+    ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        let user_config_path = self.user_config_path.clone();
+        let project_config_path = self.project_config_path.clone();
+        let base_config = self.base_config.clone();
+        let config = tokio::task::spawn_blocking(move || {
+            ConfigLoader::new(user_config_path, project_config_path)
+                .load()
+                .map(|loaded| merge_reloaded_provider_config(base_config, loaded.config))
+        })
+        .await
+        .map_err(|_| ModelCatalogError("provider configuration reload failed".to_owned()))?
+        .map_err(|_| {
+            ModelCatalogError("effective provider configuration is unavailable".to_owned())
+        })?;
+        self.factory
+            .discover_provider_model_catalog(&config, provider)
+            .await
+            .map_err(|error| ModelCatalogError(error.to_string()))
+    }
 }
 
 fn merge_reloaded_provider_config(mut base: Config, loaded: Config) -> Config {
@@ -6193,6 +6241,64 @@ fn prepare_isolated_provider_activation_config(
     Ok(config)
 }
 
+fn prepare_isolated_model_initialization_config(
+    mut config: Config,
+    alias: &str,
+) -> std::result::Result<Config, AgentLoopError> {
+    let alias = alias.trim();
+    if alias.is_empty() {
+        return Err(AgentLoopError::InvalidConfiguration(
+            "model alias must not be empty".to_owned(),
+        ));
+    }
+
+    let (route_alias, candidates) = if let Some(candidates) = config.models.aliases.get(alias) {
+        if candidates.is_empty() {
+            return Err(AgentLoopError::InvalidConfiguration(format!(
+                "model alias {alias:?} has no configured routes"
+            )));
+        }
+        (alias.to_owned(), candidates.clone())
+    } else if let Some((provider, model)) = alias.split_once('/') {
+        if provider.is_empty() || model.is_empty() {
+            return Err(AgentLoopError::InvalidConfiguration(format!(
+                "model selection {alias:?} must use provider/model syntax"
+            )));
+        }
+        ("__selected_model".to_owned(), vec![alias.to_owned()])
+    } else {
+        return Err(AgentLoopError::InvalidConfiguration(format!(
+            "model alias {alias:?} is not configured"
+        )));
+    };
+
+    let mut providers = std::collections::BTreeSet::new();
+    for candidate in &candidates {
+        let (provider, model) = candidate.split_once('/').ok_or_else(|| {
+            AgentLoopError::InvalidConfiguration(format!(
+                "model candidate {candidate:?} must use provider/model syntax"
+            ))
+        })?;
+        if provider.is_empty() || model.is_empty() {
+            return Err(AgentLoopError::InvalidConfiguration(format!(
+                "model candidate {candidate:?} must use provider/model syntax"
+            )));
+        }
+        providers.insert(provider.to_owned());
+    }
+
+    config
+        .providers
+        .retain(|provider, _| providers.contains(provider));
+    config.models.aliases = BTreeMap::from([(route_alias.clone(), candidates)]);
+    config.models.default.clone_from(&route_alias);
+    config
+        .models
+        .thinking
+        .retain(|configured_alias, _| configured_alias == &route_alias);
+    Ok(config)
+}
+
 fn provider_activation_candidate() -> &'static str {
     "catalog-discovery"
 }
@@ -6207,7 +6313,7 @@ struct ActivatedHostedProvider {
 type HostedProviderActivator =
     dyn Fn(&str) -> std::result::Result<ActivatedHostedProvider, AgentLoopError> + Send + Sync;
 type HostedRuntimeInitializer =
-    dyn Fn() -> std::result::Result<ActivatedHostedProvider, AgentLoopError> + Send + Sync;
+    dyn Fn(&str) -> std::result::Result<ActivatedHostedProvider, AgentLoopError> + Send + Sync;
 
 fn live_provider_activator(
     factory: ProviderFactory,
@@ -6288,7 +6394,7 @@ fn lazy_live_provider_model(
     let initialize_project_config_path = project_config_path.clone();
     let initialize_redactor = redactor.clone();
     let initialize_searcher = searcher.clone();
-    let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move || {
+    let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move |alias| {
         let loaded = ConfigLoader::new(
             initialize_user_config_path.clone(),
             initialize_project_config_path.clone(),
@@ -6301,9 +6407,10 @@ fn lazy_live_provider_model(
         })?
         .config;
         let config = merge_reloaded_provider_config(initialize_base_config.clone(), loaded);
+        let isolated = prepare_isolated_model_initialization_config(config, alias)?;
         let runtime = Arc::new(
             initialize_factory
-                .build(&config)
+                .build(&isolated)
                 .map_err(|error| AgentLoopError::Provider(error.to_string()))?,
         );
         let pre_runtime = Arc::clone(&runtime);
@@ -6529,17 +6636,18 @@ impl RecomposableHostedModel {
         // indistinguishable from the historical false "activation failed"
         // state. If this future is cancelled, the private result owns no live
         // session state and therefore cannot commit late.
-        let mut initialized = tokio::task::spawn_blocking(move || initialize())
+        let alias_owned = alias.to_owned();
+        let mut initialized = tokio::task::spawn_blocking(move || initialize(&alias_owned))
             .await
             .map_err(|_| AgentLoopError::Provider("provider initialization failed".to_owned()))??;
+        if let Some(pre_commit) = initialized.pre_commit.take() {
+            pre_commit();
+        }
         initialized.replacement_model.prepare_model(alias).await?;
         if !initialized.replacement_model.has_model_alias(alias) {
             return Err(AgentLoopError::Provider(format!(
                 "model {alias:?} is not available from the initialized provider runtime"
             )));
-        }
-        if let Some(pre_commit) = initialized.pre_commit.take() {
-            pre_commit();
         }
         {
             let mut current = self
@@ -6567,6 +6675,13 @@ impl RecomposableHostedModel {
 impl ModelCatalogSource for RecomposableHostedModel {
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
         self.catalog.discover().await
+    }
+
+    async fn discover_provider(
+        &self,
+        provider: &str,
+    ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+        self.catalog.discover_provider(provider).await
     }
 }
 
@@ -12300,7 +12415,14 @@ mod tests {
 
     struct ExistingRouteModel;
 
+    struct RejectingPrepareModel(Arc<Mutex<Vec<&'static str>>>);
+
     struct QuickCatalogSource(bool);
+
+    struct ScopedCatalogSource {
+        full_discoveries: AtomicUsize,
+        provider_discoveries: Mutex<Vec<String>>,
+    }
 
     #[async_trait]
     impl ModelCatalogSource for QuickCatalogSource {
@@ -12311,6 +12433,37 @@ mod tests {
                 providers: Vec::new(),
                 cached: false,
                 truncated: self.0,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ModelCatalogSource for ScopedCatalogSource {
+        async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            self.full_discoveries.fetch_add(1, Ordering::AcqRel);
+            Ok(ModelCatalogSnapshot {
+                aliases: Vec::new(),
+                models: Vec::new(),
+                providers: Vec::new(),
+                cached: false,
+                truncated: false,
+            })
+        }
+
+        async fn discover_provider(
+            &self,
+            provider: &str,
+        ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
+            self.provider_discoveries
+                .lock()
+                .expect("provider discovery log")
+                .push(provider.to_owned());
+            Ok(ModelCatalogSnapshot {
+                aliases: Vec::new(),
+                models: Vec::new(),
+                providers: Vec::new(),
+                cached: false,
+                truncated: true,
             })
         }
     }
@@ -12385,6 +12538,24 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl ModelDriver for RejectingPrepareModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> std::result::Result<BoxEventStream, AgentLoopError> {
+            Ok(Box::pin(futures_util::stream::empty()))
+        }
+
+        async fn prepare_model(&self, _alias: &str) -> std::result::Result<(), AgentLoopError> {
+            self.0.lock().expect("callback log").push("prepare");
+            Err(AgentLoopError::Provider(
+                "sanitized preparation failure".to_owned(),
+            ))
+        }
+    }
+
     fn quick_connect_request() -> ProviderRequest {
         ProviderRequest {
             model: "ignored".to_owned(),
@@ -12443,10 +12614,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hosted_model_forwards_provider_scoped_catalog_discovery() {
+        let source = Arc::new(ScopedCatalogSource {
+            full_discoveries: AtomicUsize::new(0),
+            provider_discoveries: Mutex::new(Vec::new()),
+        });
+        let catalog: Arc<dyn ModelCatalogSource> = source.clone();
+        let model = RecomposableHostedModel::new_with_active_callback(
+            unavailable_hosted_model("fast"),
+            catalog,
+            unused_hosted_activator(),
+            None,
+        );
+
+        let discovered = model
+            .discover_provider("github_copilot")
+            .await
+            .expect("provider-scoped discovery");
+
+        assert!(discovered.truncated);
+        assert_eq!(source.full_discoveries.load(Ordering::Acquire), 0);
+        assert_eq!(
+            *source
+                .provider_discoveries
+                .lock()
+                .expect("provider discovery log"),
+            vec!["github_copilot"]
+        );
+    }
+
+    #[tokio::test]
     async fn hosted_model_initialization_is_idle_until_first_prepare_and_streams_afterward() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let initialize_calls = Arc::clone(&calls);
-        let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move || {
+        let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move |alias| {
+            assert_eq!(alias, "openai/live-model");
             initialize_calls.fetch_add(1, Ordering::AcqRel);
             Ok(ActivatedHostedProvider {
                 replacement_model: Arc::new(QuickConnectedModel),
@@ -12489,7 +12691,8 @@ mod tests {
     async fn concurrent_first_prepares_initialize_once_and_failed_initialization_is_retryable() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let initialize_calls = Arc::clone(&calls);
-        let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move || {
+        let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move |alias| {
+            assert_eq!(alias, "openai/live-model");
             let attempt = initialize_calls.fetch_add(1, Ordering::AcqRel);
             if attempt == 0 {
                 return Err(AgentLoopError::Provider(
@@ -12518,6 +12721,41 @@ mod tests {
         first.expect("retry should initialize");
         second.expect("concurrent waiter should observe initialized runtime");
         assert_eq!(calls.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn first_use_registers_redaction_before_model_preparation() {
+        let callbacks = Arc::new(Mutex::new(Vec::new()));
+        let initialize_callbacks = Arc::clone(&callbacks);
+        let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move |alias| {
+            assert_eq!(alias, "openai/live-model");
+            let pre_callbacks = Arc::clone(&initialize_callbacks);
+            Ok(ActivatedHostedProvider {
+                replacement_model: Arc::new(RejectingPrepareModel(Arc::clone(
+                    &initialize_callbacks,
+                ))),
+                pre_commit: Some(Arc::new(move || {
+                    pre_callbacks.lock().expect("callback log").push("redact");
+                })),
+                post_commit: None,
+            })
+        });
+        let model = RecomposableHostedModel::new_lazy(
+            unavailable_hosted_model("openai/live-model"),
+            Arc::new(QuickCatalogSource(false)),
+            unused_hosted_activator(),
+            initialize,
+        );
+
+        let error = model
+            .prepare_model("openai/live-model")
+            .await
+            .expect_err("preparation should fail");
+        assert!(error.to_string().contains("sanitized preparation failure"));
+        assert_eq!(
+            *callbacks.lock().expect("callback log"),
+            vec!["redact", "prepare"]
+        );
     }
 
     #[tokio::test]
@@ -12778,6 +13016,100 @@ mod tests {
             vec!["github_copilot"]
         );
         assert!(recovery.models.thinking.is_empty());
+    }
+
+    #[test]
+    fn isolated_model_initialization_retains_only_selected_alias_routes() {
+        let mut config = Config::default();
+        for provider in ["openai", "anthropic", "github_copilot"] {
+            config.providers.insert(
+                provider.to_owned(),
+                ProviderConfig {
+                    kind: provider.to_owned(),
+                    ..ProviderConfig::default()
+                },
+            );
+        }
+        config.models.default = "other".to_owned();
+        config.models.aliases = BTreeMap::from([
+            (
+                "fast".to_owned(),
+                vec!["openai/gpt-5-mini".to_owned(), "anthropic/haiku".to_owned()],
+            ),
+            (
+                "other".to_owned(),
+                vec!["github_copilot/gpt-4.1".to_owned()],
+            ),
+        ]);
+        config.models.thinking = BTreeMap::from([
+            ("fast".to_owned(), rw_core::ThinkingLevel::Low),
+            ("other".to_owned(), rw_core::ThinkingLevel::High),
+        ]);
+
+        let isolated = prepare_isolated_model_initialization_config(config, "fast")
+            .expect("selected alias should isolate");
+
+        assert_eq!(isolated.models.default, "fast");
+        assert_eq!(
+            isolated.models.aliases,
+            BTreeMap::from([(
+                "fast".to_owned(),
+                vec!["openai/gpt-5-mini".to_owned(), "anthropic/haiku".to_owned()]
+            )])
+        );
+        assert_eq!(
+            isolated.providers.keys().cloned().collect::<Vec<_>>(),
+            vec!["anthropic".to_owned(), "openai".to_owned()]
+        );
+        assert_eq!(
+            isolated.models.thinking,
+            BTreeMap::from([("fast".to_owned(), rw_core::ThinkingLevel::Low)])
+        );
+    }
+
+    #[test]
+    fn isolated_model_initialization_builds_only_concrete_provider_route() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "github_copilot".to_owned(),
+            ProviderConfig {
+                kind: "github_copilot".to_owned(),
+                ..ProviderConfig::default()
+            },
+        );
+        config.providers.insert(
+            "openai".to_owned(),
+            ProviderConfig {
+                kind: "openai".to_owned(),
+                ..ProviderConfig::default()
+            },
+        );
+        config
+            .models
+            .aliases
+            .insert("fast".to_owned(), vec!["openai/gpt-5-mini".to_owned()]);
+        config
+            .models
+            .thinking
+            .insert("fast".to_owned(), rw_core::ThinkingLevel::Low);
+
+        let isolated =
+            prepare_isolated_model_initialization_config(config, "github_copilot/gpt-4.1")
+                .expect("concrete model should isolate");
+
+        assert_eq!(isolated.models.default, "__selected_model");
+        assert_eq!(
+            isolated.models.aliases,
+            BTreeMap::from([(
+                "__selected_model".to_owned(),
+                vec!["github_copilot/gpt-4.1".to_owned()]
+            )])
+        );
+        assert_eq!(
+            isolated.providers.keys().collect::<Vec<_>>(),
+            vec!["github_copilot"]
+        );
+        assert!(isolated.models.thinking.is_empty());
     }
 
     #[test]
