@@ -40,6 +40,9 @@ async function main(): Promise<void> {
   const renderer = await openTui.createCliRenderer({
     exitOnCtrlC: true,
     targetFps: 60,
+    // Extended keyboard events keep macOS Command+Arrow distinct from Ctrl+E,
+    // so terminal navigation can never masquerade as the external-editor key.
+    useKittyKeyboard: { disambiguate: true, alternateKeys: true },
     onDestroy: () => {
       // Closing the renderer must release the SSE/runtime handles so a normal
       // Ctrl+C can let the process end naturally. Never force exit 0 here:

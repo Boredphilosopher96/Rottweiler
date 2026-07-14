@@ -7176,6 +7176,24 @@ async fn handle_actor_command(
                     attachments,
                     ..
                 } => {
+                    if attachments.iter().any(|attachment| {
+                        matches!(&attachment.data, AttachmentData::InlineBase64 { .. })
+                            && matches!(
+                                attachment.media_type.as_str(),
+                                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+                            )
+                    }) && let Err(error) = config.model.prepare_model(&state.model_alias).await
+                    {
+                        let outcome = protocol_rejection(
+                            "model_unavailable",
+                            format!(
+                                "the selected model could not be prepared for image attachments: {error}"
+                            ),
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        return;
+                    }
                     if let Err(message) = prepare_user_message(
                         content,
                         attachments,
@@ -13984,6 +14002,41 @@ mod tests {
     }
 
     struct AliasVisionModel;
+
+    #[derive(Default)]
+    struct DeferredVisionModel {
+        prepared: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ModelDriver for DeferredVisionModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: ProviderRequest,
+        ) -> Result<BoxEventStream, AgentLoopError> {
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(ProviderEvent::MessageStart {
+                    model: "vision/model".to_owned(),
+                }),
+                Ok(ProviderEvent::TextDelta {
+                    text: "image received".to_owned(),
+                }),
+                Ok(ProviderEvent::Finished {
+                    reason: FinishReason::Stop,
+                }),
+            ])))
+        }
+
+        async fn prepare_model(&self, _alias: &str) -> Result<(), AgentLoopError> {
+            self.prepared.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn supports_vision(&self, _alias: &str) -> bool {
+            self.prepared.load(Ordering::Acquire)
+        }
+    }
 
     impl ModelDriver for AliasVisionModel {
         fn stream(
@@ -24297,6 +24350,55 @@ mod tests {
                 .expect_err("traversal source path must fail before acceptance")
                 .contains("workspace-relative")
         );
+    }
+
+    #[tokio::test]
+    async fn first_image_message_prepares_lazy_model_before_vision_validation() {
+        let root = TempDir::new().expect("tempdir");
+        let model = Arc::new(DeferredVisionModel::default());
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            model.clone(),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let session_id = SessionId("fixture-session".to_owned());
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::AttachSession {
+                    meta: protocol_meta("driver", "attach-driver"),
+                    session_id: session_id.clone(),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                })
+                .await
+                .expect("attach"),
+            CommandOutcome::Accepted
+        );
+        assert!(!model.prepared.load(Ordering::Acquire));
+        let image = Attachment {
+            name: "screen.png".to_owned(),
+            source_path: None,
+            media_type: "image/png".to_owned(),
+            data: AttachmentData::InlineBase64 {
+                data: "iVBORw0KGgo=".to_owned(),
+            },
+        };
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SendMessage {
+                    meta: protocol_meta("driver", "first-image"),
+                    session_id,
+                    content: "inspect this image".to_owned(),
+                    attachments: vec![image],
+                })
+                .await
+                .expect("image message"),
+            CommandOutcome::Accepted
+        );
+        assert!(model.prepared.load(Ordering::Acquire));
     }
 
     #[tokio::test]

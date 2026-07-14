@@ -437,7 +437,7 @@ export function createInitialState(): RottweilerState {
     context: null,
     cost: null,
     promptDump: null,
-    mode: null,
+    mode: "execute",
     pendingPlan: null,
     approvedPlan: null,
     model: null,

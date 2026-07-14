@@ -49,7 +49,7 @@ export class ComposerRenderable extends BoxRenderable {
       id: "composer",
       width: "100%",
       height: 4,
-      minHeight: 3,
+      minHeight: 4,
       maxHeight: 9,
       flexShrink: 0,
       flexDirection: "column",
@@ -76,7 +76,7 @@ export class ComposerRenderable extends BoxRenderable {
       width: "100%",
       flexGrow: 1,
       flexShrink: 1,
-      minHeight: 1,
+      minHeight: 2,
       maxHeight: 5,
       initialValue: "",
       placeholder: "Message Rottweiler · @ files · ctrl+v image · ctrl+e $EDITOR",
@@ -372,6 +372,7 @@ export class ComposerRenderable extends BoxRenderable {
 
   #refreshHeight(): void {
     const terminalLimit = Math.max(3, Math.min(9, this.ctx.height - 3))
+    const compactTerminal = this.ctx.height <= 8
     const editorWidth = Math.max(
       1,
       this.editor.width > 0
@@ -381,9 +382,11 @@ export class ComposerRenderable extends BoxRenderable {
           : this.ctx.width - 4,
     )
     const wrappedRows = estimateWrappedRows(this.editor.plainText, editorWidth)
+    const minimumEditorRows = compactTerminal || terminalLimit < 4 ? 1 : 2
+    this.editor.minHeight = minimumEditorRows
     const editorRows = Math.min(
       5,
-      Math.max(1, this.editor.lineCount, this.editor.virtualLineCount, wrappedRows),
+      Math.max(minimumEditorRows, this.editor.lineCount, this.editor.virtualLineCount, wrappedRows),
     )
     const fixedExtras =
       (this.attachmentsText.visible ? 1 : 0) + (this.queueText.visible ? 1 : 0)
@@ -393,7 +396,12 @@ export class ComposerRenderable extends BoxRenderable {
     const imageVisible = imageRows > 0 && terminalLimit - 2 - fixedExtras - 1 >= imageRows
     if (this.#imagePreview !== null) this.#imagePreview.visible = imageVisible
     const extras = fixedExtras + (imageVisible ? imageRows : 0)
-    const nextHeight = Math.min(terminalLimit, Math.max(3, 2 + editorRows + extras))
+    const minimumDockRows = compactTerminal ? 3 : 4
+    this.minHeight = minimumDockRows
+    const nextHeight = Math.min(
+      terminalLimit,
+      Math.max(minimumDockRows, 2 + editorRows + extras),
+    )
     const heightChanged = this.#dockHeight !== nextHeight
     this.#dockHeight = nextHeight
     this.height = nextHeight

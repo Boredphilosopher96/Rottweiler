@@ -1085,7 +1085,7 @@ describe("OpenTUI engine runtime", () => {
       },
       mode: "stale-mode",
     })
-    expect(app.state.mode).toBeNull()
+    expect(app.state.mode).toBe("execute")
     await client.subscriptions[0]?.onEvent({
       type: "subagent_progress",
       parent_session_id: "session-old",

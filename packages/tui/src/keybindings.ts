@@ -189,7 +189,7 @@ const SAFETY_PANEL_KEYS = new Set([
   "return",
   "escape",
 ])
-const MODIFIER_ORDER = ["ctrl", "meta", "alt", "shift"] as const
+const MODIFIER_ORDER = ["ctrl", "meta", "super", "hyper", "alt", "shift"] as const
 const MODIFIERS = new Set<string>(MODIFIER_ORDER)
 const NAMED_KEYS = new Set([
   "backspace",
@@ -333,6 +333,8 @@ export function keyStrokeFromEvent(event: KeyEvent): string {
   const modifiers = [
     ...(event.ctrl ? ["ctrl"] : []),
     ...(event.meta ? ["meta"] : []),
+    ...(event.super ? ["super"] : []),
+    ...(event.hyper ? ["hyper"] : []),
     ...(event.option ? ["alt"] : []),
     ...(event.shift ? ["shift"] : []),
   ]

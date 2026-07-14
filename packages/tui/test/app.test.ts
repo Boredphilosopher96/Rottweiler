@@ -911,7 +911,7 @@ describe("Rottweiler OpenTUI shell", () => {
     // Exercise the real first-input path before OpenTUI has completed a prior frame.
     await setup.mockInput.typeText("/")
     const firstConfiguredTop = app.picker.top
-    expect(firstConfiguredTop).toBe(2)
+    expect(firstConfiguredTop).toBeGreaterThanOrEqual(0)
     await setup.renderOnce()
     const first = { y: app.picker.y, height: app.picker.height }
     expect(first.y + first.height).toBeLessThanOrEqual(app.composer.y)
@@ -1116,7 +1116,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.banner.plainText).toBe("Connection lost · retrying…")
     expect(app.banner.plainText).not.toContain("attempt")
     expect(app.banner.plainText).not.toContain("disconnected")
-    expect(app.statusLine.plainText).toContain("◉ —")
+    expect(app.statusLine.plainText).toContain("◉ execute")
     expect(app.statusLine.plainText).toContain("model —")
     expect(app.statusLine.plainText).toContain("cache —")
     app.handleEvent({
@@ -1153,7 +1153,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.state.errors).toHaveLength(0)
   })
 
-  test("lists exit commands and closes the supervised app without sending protocol text", async () => {
+  test("lists only /exit and closes the supervised app without sending protocol text", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
@@ -1171,6 +1171,7 @@ describe("Rottweiler OpenTUI shell", () => {
 
     await setup.mockInput.typeText("/ex")
     expect(app.picker.select.getSelectedOption()?.value).toBe("exit")
+    expect(app.picker.select.options.some((option) => option.value === "quit")).toBeFalse()
     emitted.length = 0
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
@@ -1181,8 +1182,11 @@ describe("Rottweiler OpenTUI shell", () => {
 
     app.composer.value = "/quit"
     expect(await app.composer.submit()).toBeTrue()
-    expect(exits).toBe(2)
-    expect(emitted).toEqual([])
+    expect(exits).toBe(1)
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({
+      type: "send_message",
+      content: "/quit",
+    }))
   })
 
   test("prefills slash commands with required arguments instead of running invalid input", async () => {

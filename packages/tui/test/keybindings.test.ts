@@ -82,6 +82,100 @@ focus_next = []
   })
 })
 
+describe("standard TUI keyboard safety", () => {
+  let renderer: TestRenderer | undefined
+
+  afterEach(() => {
+    renderer?.destroy()
+    renderer = undefined
+  })
+
+  test("uses double Escape to interrupt an active response", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        turns: { active: { turnId: "active", status: "running", usage: null, cost: null } },
+      },
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(commands).toHaveLength(0)
+    expect(app.banner.plainText).toContain("Esc again")
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(commands.at(-1)).toMatchObject({ type: "interrupt" })
+  })
+
+  test("surfaces a rejected double-Escape interrupt", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        turns: { active: { turnId: "active", status: "running", usage: null, cost: null } },
+      },
+      onCommand(command) {
+        if (command.type !== "interrupt") return { type: "accepted" }
+        return {
+          type: "rejected",
+          error: {
+            category: "protocol",
+            code: "interrupt_rejected",
+            message: "The response could not be stopped.",
+            retryable: true,
+          },
+        }
+      },
+    })
+    renderer.root.add(app)
+
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.state.errors.at(-1)?.code).toBe("interrupt_rejected")
+  })
+
+  test("keeps Cmd+Left/Right in the composer and reserves Ctrl+E for the editor", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    let editorCalls = 0
+    const app = createRottweilerApp(renderer, {
+      editor: {
+        async compose(draft) {
+          editorCalls += 1
+          return draft
+        },
+      },
+    })
+    renderer.root.add(app)
+    app.composer.value = "rottweiler"
+    app.composer.editor.cursorOffset = 0
+
+    setup.mockInput.pressArrow("right", { super: true })
+    expect(app.composer.editor.cursorOffset).toBe(new TextEncoder().encode("rottweiler").length)
+    expect(editorCalls).toBe(0)
+    setup.mockInput.pressArrow("left", { super: true })
+    expect(app.composer.editor.cursorOffset).toBe(0)
+    setup.mockInput.pressArrow("right", { meta: true })
+    expect(app.composer.editor.cursorOffset).toBe(new TextEncoder().encode("rottweiler").length)
+    setup.mockInput.pressArrow("left", { meta: true })
+    expect(app.composer.editor.cursorOffset).toBe(0)
+    setup.mockInput.pressKey("e", { ctrl: true })
+    await Bun.sleep(0)
+    expect(editorCalls).toBe(1)
+  })
+})
+
 describe("Vim TUI interaction", () => {
   let renderer: TestRenderer | undefined
 
@@ -112,6 +206,75 @@ describe("Vim TUI interaction", () => {
     setup.mockInput.pressKey("x")
     expect(app.composer.value).toBe("houn")
     expect(app.statusLine.plainText).toContain("NORMAL · composer")
+  })
+
+  test("leaves insert mode before double Escape interrupts", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      keybindings: { preset: "vim" },
+      initialState: {
+        ...createInitialState(),
+        turns: { active: { turnId: "active", status: "running", usage: null, cost: null } },
+      },
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    setup.mockInput.pressKey("i")
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.statusLine.plainText).toContain("NORMAL")
+    expect(app.banner.plainText).toContain("Esc again")
+    expect(commands).toHaveLength(0)
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(commands.at(-1)).toMatchObject({ type: "interrupt" })
+  })
+
+  test("keeps double Escape available while a safety panel owns focus", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 28, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        turns: { active: { turnId: "active", status: "running", usage: null, cost: null } },
+        tools: {
+          approval: {
+            toolCallId: "approval",
+            turnId: "active",
+            name: "bash",
+            args: { command: "cargo test" },
+            status: "awaiting_approval",
+            capabilities: ["execute"],
+            rationale: "Run tests",
+            diff: null,
+            chunks: [],
+            output: null,
+            isError: null,
+            callIndex: 0,
+          },
+        },
+      },
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    expect(app.interactionPanel.capturesInput).toBeTrue()
+
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(app.banner.plainText).toContain("Esc again")
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    expect(commands.at(-1)).toMatchObject({ type: "interrupt" })
   })
 
   test("uses two-stage Escape and normal navigation inside fuzzy pickers", async () => {

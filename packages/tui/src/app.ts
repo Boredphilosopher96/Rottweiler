@@ -21,6 +21,7 @@ import {
 } from "./components"
 import {
   compileKeybindings,
+  keyStrokeFromEvent,
   type CompiledKeybindings,
   type InputMode,
   type KeybindingAction,
@@ -174,7 +175,6 @@ const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
   { name: "trust", description: "Inspect or change folder trust", usage: "/trust [status|grant|revoke]" },
   { name: "add-dir", description: "Append a live workspace root", usage: "/add-dir <path>" },
   { name: "exit", description: "Close Rottweiler", usage: "/exit" },
-  { name: "quit", description: "Close Rottweiler", usage: "/quit" },
 ]
 
 interface PaletteAction {
@@ -276,6 +276,8 @@ export class RottweilerApp extends BoxRenderable {
   #pluginNotificationTimer: ReturnType<typeof setTimeout> | null = null
   #sessionSearchTimer: ReturnType<typeof setTimeout> | null = null
   #runtimeServicesTimer: ReturnType<typeof setTimeout> | null = null
+  #interruptEscapeTimer: ReturnType<typeof setTimeout> | null = null
+  #interruptEscapeArmed = false
   #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
   #pendingModelSwitchRequests = new Set<string>()
@@ -293,6 +295,7 @@ export class RottweilerApp extends BoxRenderable {
   }
   #onTerminalBlur = () => {
     this.#terminalFocused = false
+    this.#clearInterruptEscape()
   }
   #onTerminalThemeMode = (mode: ThemeMode) => {
     this.#systemThemeMode = mode
@@ -310,6 +313,44 @@ export class RottweilerApp extends BoxRenderable {
   }
   #onGlobalKey = (key: KeyEvent) => {
     const focusOwner = this.#visibleFocusOwner()
+    const plainEscape = keyStrokeFromEvent(key) === "escape"
+    if (!plainEscape && this.#interruptEscapeArmed) this.#clearInterruptEscape()
+    if (
+      plainEscape &&
+      !this.picker.visible &&
+      !this.#reviewOpen &&
+      this.#isInterruptible()
+    ) {
+      // In Vim mode the first Escape still leaves insert mode, but it also
+      // counts as the first half of the universal double-Escape interrupt.
+      if (this.#inputMode === "insert") this.#setInputMode("normal")
+      if (this.#interruptEscapeArmed) {
+        this.#clearInterruptEscape()
+        void this.#interruptActiveResponse()
+      } else {
+        this.#armInterruptEscape()
+      }
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (
+      focusOwner === "composer" &&
+      !this.picker.visible &&
+      !this.#reviewOpen &&
+      (key.super || key.meta) &&
+      !key.ctrl &&
+      !key.option &&
+      !key.hyper &&
+      !key.shift &&
+      (key.name === "left" || key.name === "right")
+    ) {
+      if (key.name === "left") this.composer.editor.gotoLineStart()
+      else this.composer.editor.gotoLineTextEnd()
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
     if (
       focusOwner === "composer" &&
       !this.picker.visible &&
@@ -1018,6 +1059,12 @@ export class RottweilerApp extends BoxRenderable {
     )
     this.statusLine.update(state)
     this.banner.update(state)
+    if (!this.#isInterruptible()) this.#clearInterruptEscape(false)
+    if (this.#interruptEscapeArmed) {
+      this.banner.visible = true
+      this.banner.fg = this.#theme.warning
+      this.banner.content = "Press Esc again to stop the active response"
+    }
     if (this.#pickerKind !== null) {
       this.#refreshPicker()
     }
@@ -1329,6 +1376,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearPluginNotificationTimer()
     this.#clearSessionSearchTimer()
     this.#clearRuntimeServicesTimer()
+    this.#clearInterruptEscape(false)
     this.ctx.off(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     this.ctx.off(CliRenderEvents.BLUR, this.#onTerminalBlur)
     this.ctx.off(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
@@ -2560,11 +2608,12 @@ export class RottweilerApp extends BoxRenderable {
   #positionPicker(anchored: boolean): void {
     if (anchored) {
       const statusHeight = Math.max(1, this.statusLine.height || 1)
+      // Composer growth happens in the same input tick as anchored picker
+      // refresh. Its previous Yoga y-coordinate can therefore be one frame
+      // stale; derive the dock boundary from the current measured height.
       const composerTop = Math.max(
         0,
-        this.composer.y > 0
-          ? this.composer.y
-          : this.ctx.height - statusHeight - 3,
+        this.ctx.height - statusHeight - this.composer.dockHeight,
       )
       // Hidden absolute renderables have no measured height before their first
       // frame. Position from the picker's configured anchored height instead
@@ -3308,6 +3357,47 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
+  #isInterruptible(): boolean {
+    return this.#state.compaction.active ||
+      Object.values(this.#state.turns).some((turn) => turn.status === "running")
+  }
+
+  #armInterruptEscape(): void {
+    this.#clearInterruptEscape(false)
+    this.#interruptEscapeArmed = true
+    this.banner.visible = true
+    this.banner.fg = this.#theme.warning
+    this.banner.content = "Press Esc again to stop the active response"
+    this.#interruptEscapeTimer = setTimeout(() => this.#clearInterruptEscape(), 900)
+  }
+
+  #clearInterruptEscape(refresh = true): void {
+    if (this.#interruptEscapeTimer !== null) {
+      clearTimeout(this.#interruptEscapeTimer)
+      this.#interruptEscapeTimer = null
+    }
+    if (!this.#interruptEscapeArmed) return
+    this.#interruptEscapeArmed = false
+    if (refresh && !this.#destroyed) this.banner.update(this.#state)
+  }
+
+  async #interruptActiveResponse(): Promise<void> {
+    const outcome = await this.#emit({
+      type: "interrupt",
+      meta: this.#meta(),
+      session_id: this.#sessionId,
+    })
+    if (outcome === null) {
+      this.#projectClientError(
+        "interrupt_unavailable",
+        "Couldn't stop the active response because the engine connection is unavailable.",
+        true,
+      )
+      return
+    }
+    this.#projectRejection(outcome)
+  }
+
   #schedulePluginNotificationDismissal(
     notification: RottweilerState["pluginNotifications"][number] | undefined,
   ): void {
@@ -3437,7 +3527,7 @@ type SessionAction =
 function parseSessionAction(content: string): SessionAction | null {
   const tokens = content.trim().split(/\s+/)
   const command = tokens[0]
-  if (command === "/exit" || command === "/quit") {
+  if (command === "/exit") {
     return tokens.length === 1
       ? { type: "exit" }
       : { type: "invalid", message: `usage: ${command}` }
