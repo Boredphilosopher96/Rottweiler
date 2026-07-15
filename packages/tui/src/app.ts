@@ -118,6 +118,8 @@ export interface RottweilerAppOptions {
   readonly keybindings?: KeybindingConfiguration
   /** Injectable frame scheduler used to coalesce presentation-only stream deltas. */
   readonly presentationFrame?: PresentationFrameScheduler
+  /** Host platform used for terminal compatibility decoding. Injectable for production-path tests. */
+  readonly platform?: NodeJS.Platform
 }
 
 export interface PresentationFrameScheduler {
@@ -470,7 +472,7 @@ export class RottweilerApp extends BoxRenderable {
       return
     }
     const legacyMacNavigation = focusOwner === "composer"
-      ? legacyMacNavigationAction(key)
+      ? legacyMacNavigationAction(key, this.#options.platform ?? process.platform)
       : null
     if (
       legacyMacNavigation !== null &&

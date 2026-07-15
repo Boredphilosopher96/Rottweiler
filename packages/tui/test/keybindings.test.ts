@@ -176,6 +176,7 @@ describe("standard TUI keyboard safety", () => {
     renderer = setup.renderer
     let editorCalls = 0
     const app = createRottweilerApp(renderer, {
+      platform: "darwin",
       editor: {
         async compose(draft) {
           editorCalls += 1
@@ -209,6 +210,7 @@ describe("standard TUI keyboard safety", () => {
     renderer = setup.renderer
     let editorCalls = 0
     const app = createRottweilerApp(renderer, {
+      platform: "darwin",
       editor: {
         async compose(draft) {
           editorCalls += 1
