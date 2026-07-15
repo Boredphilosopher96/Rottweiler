@@ -2028,6 +2028,29 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
+        "mode": {
+          "description": "Session-local override. `None` restores the configured policy.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "permission_mode_changed"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
         "artifact": {
           "$ref": "#/$defs/PlanArtifact"
         },

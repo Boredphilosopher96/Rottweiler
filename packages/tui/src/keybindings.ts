@@ -34,6 +34,7 @@ export type KeybindingAction =
   | "open_model_picker"
   | "open_review"
   | "open_session_picker"
+  | "open_subagent_picker"
   | "page_down"
   | "page_up"
   | "paste_image"
@@ -113,6 +114,7 @@ const ACTIONS: readonly KeybindingAction[] = [
   "open_model_picker",
   "open_review",
   "open_session_picker",
+  "open_subagent_picker",
   "page_down",
   "page_up",
   "paste_image",
@@ -131,6 +133,7 @@ const STANDARD_DEFAULTS = {
     open_model_picker: ["ctrl+m"],
     open_mode_picker: ["ctrl+o"],
     open_session_picker: ["ctrl+s"],
+    open_subagent_picker: ["ctrl+g"],
     paste_image: ["ctrl+v"],
   },
   standard: {
@@ -153,6 +156,7 @@ const VIM_DEFAULTS = {
     open_model_picker: ["ctrl+m"],
     open_mode_picker: ["ctrl+o"],
     open_session_picker: ["ctrl+s"],
+    open_subagent_picker: ["ctrl+g"],
     paste_image: ["ctrl+v"],
   },
   vim_insert: {

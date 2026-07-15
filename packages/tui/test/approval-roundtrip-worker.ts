@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises"
 
+import { parseKeypress } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
@@ -26,7 +27,9 @@ try {
   await waitFor(() => app.interactionPanel.visible)
   await setup.renderOnce()
   const waitingBanner = app.banner.plainText
-  app.interactionPanel.select.selectCurrent()
+  const enter = parseKeypress("\n", { useKittyKeyboard: true })
+  if (enter === null) throw new Error("could not parse terminal line-feed")
+  setup.renderer.keyInput.processParsedKey(enter)
   await waitFor(() => app.state.turns["turn-approval"]?.status === "completed")
   await setup.renderOnce()
   await writeFile(reportFile, JSON.stringify({

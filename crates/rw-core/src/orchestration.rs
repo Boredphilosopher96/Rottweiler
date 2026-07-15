@@ -17,6 +17,7 @@ use rw_tools::{
     WorkspaceBinding, WorktreeIsolation, WorktreeLease, WorktreeLeaseRecord,
     validate_mcp_virtual_tool,
 };
+#[cfg(test)]
 use rw_types::config::PermissionDecision;
 use rw_types::{
     Block, Cost, DiffArtifact, DiffArtifactRef, EngineEvent, Role, SessionId, SessionMode,
@@ -428,7 +429,6 @@ struct SessionRecord {
     state: SessionState,
     result: Option<watch::Receiver<Option<Result<SubagentResult, String>>>>,
     isolation: SubagentIsolation,
-    capabilities: CapabilityManifest,
     parent_session_id: SessionId,
     latest_durable_artifact_id: Option<String>,
     close_completed: bool,
@@ -782,7 +782,6 @@ impl SubagentOrchestrator {
                     state: SessionState::Active,
                     result: Some(result_rx),
                     isolation: request.isolation,
-                    capabilities,
                     parent_session_id: parent_session_id.clone(),
                     latest_durable_artifact_id: None,
                     close_completed: false,
@@ -1301,7 +1300,6 @@ impl SubagentOrchestrator {
                     state: SessionState::Inactive,
                     result: None,
                     isolation: SubagentIsolation::Worktree,
-                    capabilities: CapabilityManifest::default(),
                     parent_session_id,
                     latest_durable_artifact_id: None,
                     close_completed: false,
@@ -1419,7 +1417,6 @@ impl SubagentOrchestrator {
                     state: SessionState::Inactive,
                     result: None,
                     isolation: record.isolation,
-                    capabilities: current_capabilities,
                     parent_session_id: record.parent_session_id,
                     latest_durable_artifact_id,
                     close_completed: false,
@@ -1734,9 +1731,11 @@ impl SpawnAgentTool {
         agents: Arc<AgentRegistry>,
         model: Arc<dyn ModelDriver>,
     ) -> Self {
-        // The control operation itself is read-only and can launch concurrently.
-        // Every child tool remains subject to the child's ordinary permission gate.
-        let capabilities = CapabilityManifest::new([ToolCapability::ReadFilesystem]);
+        // Spawning, resuming, interrupting, and closing a child are control-plane
+        // operations. They do not exercise the child's tool authority. The child
+        // receives a fork of the parent's effective permission gate and each tool
+        // call is authorized there, exactly once.
+        let capabilities = CapabilityManifest::default();
         Self {
             orchestrator,
             agents,
@@ -1904,42 +1903,22 @@ impl Tool for SpawnAgentTool {
         let action = normalize_spawn_agent_input(input)?;
         match action {
             NormalizedSpawnAgentAction::FollowUp { subagent_id, .. } => {
-                let existing = self
-                    .orchestrator
+                self.orchestrator
                     .inner
                     .sessions
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .get(&subagent_id)
-                    .map(|record| record.capabilities.clone())
                     .ok_or_else(|| ToolError::InvalidInput("unknown child session".to_owned()))?;
-                let mut capabilities = existing.capabilities().to_vec();
-                capabilities.push(ToolCapability::Execute);
-                Ok(CapabilityManifest::new(capabilities))
+                Ok(CapabilityManifest::default())
             }
             NormalizedSpawnAgentAction::Cancel { .. }
             | NormalizedSpawnAgentAction::Close { .. } => Ok(self.capabilities.clone()),
             NormalizedSpawnAgentAction::Spawn { agent, .. } => {
-                let agent = self
-                    .agents
+                self.agents
                     .load(&agent)
                     .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-                let tools = restricted_registry(
-                    &self.orchestrator.tool_registry(),
-                    &agent.tools,
-                    match agent.permission_mode {
-                        AgentPermissionMode::Discuss => SubagentPermissionMode::Discuss,
-                        AgentPermissionMode::Plan => SubagentPermissionMode::Plan,
-                        AgentPermissionMode::Execute => SubagentPermissionMode::Execute,
-                    },
-                )
-                .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-                let mut capabilities =
-                    vec![ToolCapability::ReadFilesystem, ToolCapability::Execute];
-                for descriptor in tools.descriptors() {
-                    capabilities.extend(descriptor.capabilities.capabilities().iter().cloned());
-                }
-                Ok(CapabilityManifest::new(capabilities))
+                Ok(CapabilityManifest::default())
             }
         }
     }
@@ -2343,7 +2322,6 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
         config.additional_workspace_roots.clear();
         config.model_alias.clone_from(&launch.request.model);
         config.tools = Arc::new(bind_child_tools(&config.tools, &launch.tools)?);
-        config.permissions = autonomous_child_permissions(&launch.workspace_root);
         apply_child_policy(
             &mut config,
             &launch.request.model,
@@ -2372,10 +2350,6 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
         config.session_id = session_id.clone();
         config.workspace_root = workspace_root.to_path_buf();
         config.additional_workspace_roots.clear();
-        // Child sessions are deliberately non-interactive. The exact tool
-        // allowlist selected at spawn/recovery is the authorization boundary;
-        // a recovered child must never pause on a parent-only approval prompt.
-        config.permissions = autonomous_child_permissions(workspace_root);
         if let Some(allowed_tools) = allowed_tools {
             config.tools = Arc::new(bind_child_tools(&config.tools, allowed_tools)?);
         }
@@ -2390,13 +2364,6 @@ impl SubagentSessionFactory for ActorSubagentSessionFactory {
             .map_err(|error| OrchestrationError::Session(error.to_string()))?;
         Ok(Some(Arc::new(ActorSubagentSession { handle })))
     }
-}
-
-fn autonomous_child_permissions(workspace_root: &Path) -> Arc<crate::PermissionGate> {
-    Arc::new(
-        crate::PermissionGate::new(PermissionDecision::Allow)
-            .with_workspace_roots([workspace_root]),
-    )
 }
 
 fn apply_child_policy(
@@ -2422,7 +2389,7 @@ fn apply_child_policy(
             "Child permission mode: plan. Use only read-only tools and return a structured plan."
         }
         SubagentPermissionMode::Execute => {
-            "Child permission mode: execute. Work autonomously within the exact tool grant selected by the parent; do not request interactive approval."
+            "Child permission mode: execute. Use the exact tool grant selected by the parent and the parent session's effective permission policy."
         }
     };
     if let Some(system_prompt) = system_prompt.filter(|prompt| !prompt.trim().is_empty()) {
@@ -3222,14 +3189,6 @@ mod tests {
     }
 
     #[test]
-    fn fresh_and_recovered_children_share_the_autonomous_permission_invariant() {
-        let workspace = tempfile::tempdir().expect("workspace");
-        let permissions = autonomous_child_permissions(workspace.path());
-        assert_eq!(permissions.snapshot().default, PermissionDecision::Allow);
-        assert!(permissions.snapshot().runtime_mode.is_none());
-    }
-
-    #[test]
     fn non_execute_children_filter_mutations_and_reject_interaction() {
         let mut tools = ToolRegistry::new();
         tools.register(Arc::new(MutatingTool)).expect("register");
@@ -3343,7 +3302,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn yolo_spawn_inherits_selected_live_model_for_multiple_builtin_children() {
+    async fn spawn_control_never_prompts_and_inherits_selected_live_model_for_builtin_children() {
         let workspace = tempfile::tempdir().expect("workspace");
         let factory = Arc::new(FakeFactory::default());
         let launches = Arc::clone(&factory.launches);
@@ -3365,8 +3324,6 @@ mod tests {
             rules: Vec::new(),
         })
         .with_workspace_roots([workspace.path()]);
-        gate.set_runtime_mode(Some(crate::HeadlessPermissionMode::Yolo))
-            .expect("interactive session switches to YOLO");
         let approver = RejectingApprover(AtomicUsize::new(0));
 
         for (agent, isolation) in [("explore", "shared"), ("general", "shared")] {
@@ -3381,6 +3338,10 @@ mod tests {
                 .expect("spawn capabilities")
                 .capabilities()
                 .to_vec();
+            assert!(
+                capabilities.is_empty(),
+                "the parent control call must not claim the child's tool authority"
+            );
             let permission = crate::PermissionRequest {
                 id: format!("spawn-{agent}"),
                 tool_name: "spawn_agent".to_owned(),
@@ -3391,7 +3352,7 @@ mod tests {
             assert_eq!(
                 gate.authorize(permission, &approver).await,
                 crate::PermissionOutcome::Allowed,
-                "YOLO must bypass the parent approval modal"
+                "subagent control must bypass the parent approval modal"
             );
             tool.execute(&context, input)
                 .await

@@ -1132,6 +1132,29 @@ fn load_bounded_subagent_replay(
     })
 }
 
+async fn load_bounded_subagent_replay_retry(
+    storage_root: &Path,
+    child_session_id: &SessionId,
+    after_sequence: Option<SequenceId>,
+) -> Result<SubagentReplay, HostError> {
+    const READY_TIMEOUT: Duration = Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
+    let mut delay = Duration::from_millis(10);
+    loop {
+        match load_bounded_subagent_replay(storage_root, child_session_id, after_sequence) {
+            Ok(replay) => return Ok(replay),
+            Err(HostError::Persistence(message))
+                if message == "child session replay is unavailable"
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_millis(100));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[async_trait]
 impl SubagentObserver for HostedSubagentObserver {
     async fn spawned(
@@ -1205,11 +1228,12 @@ impl HostSubagentService for HostedSubagentController {
             .orchestrator
             .descriptor_for_parent(parent_session_id, subagent_id)
             .map_err(|error| HostError::Protocol(error.to_string()))?;
-        load_bounded_subagent_replay(
+        load_bounded_subagent_replay_retry(
             &self.storage_root,
             &descriptor.child_session_id,
             after_sequence,
         )
+        .await
     }
 
     async fn continue_child(
@@ -12455,8 +12479,20 @@ mod tests {
         DiagnosticSeverity, FinishReason, PermissionDecision, PluginManifest, Range, Role,
         ToolCallId, ToolCapability, ToolCommandOutcome, TurnMeta, WebSearchResult, WebSearchSource,
     };
-    use rw_core::{Cost, ProviderConfig, TurnId};
+    use rw_core::{
+        Cost, PermissionApprover, PermissionOutcome, PermissionRequest, ProviderConfig, TurnId,
+    };
     use tempfile::{TempDir, tempdir};
+
+    struct RejectingPermissionApprover(AtomicUsize);
+
+    #[async_trait]
+    impl PermissionApprover for RejectingPermissionApprover {
+        async fn decide(&self, _request: PermissionRequest) -> ApprovalDecision {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            ApprovalDecision::Deny
+        }
+    }
 
     #[test]
     fn subagent_replay_is_cursor_bounded_and_validates_child_identity() {
@@ -12517,6 +12553,37 @@ mod tests {
             .expect("append invalid event");
         drop(invalid);
         assert!(load_bounded_subagent_replay(invalid_storage.path(), &child, None).is_err());
+    }
+
+    #[tokio::test]
+    async fn subagent_replay_waits_for_a_delayed_durable_child_log() {
+        let storage = TempDir::new().expect("storage");
+        let root = storage.path().to_path_buf();
+        let child = SessionId("delayed-child-replay".to_owned());
+        let writer_child = child.clone();
+        let writer_root = root.clone();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let mut log = SessionEventLog::open(&writer_root, &writer_child.0).expect("child log");
+            log.append(EngineEvent::SessionCreated {
+                meta: EventMeta {
+                    protocol_version: SESSION_EVENT_VERSION,
+                    session_id: writer_child,
+                    sequence_id: SequenceId(0),
+                    emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                    caused_by: None,
+                },
+                driver_client_id: rw_core::ClientId("child-driver".to_owned()),
+            })
+            .expect("append child event");
+        });
+
+        let replay = load_bounded_subagent_replay_retry(&root, &child, None)
+            .await
+            .expect("replay waits for log readiness");
+        writer.await.expect("writer");
+        assert_eq!(replay.events.len(), 1);
+        assert_eq!(replay.through_sequence, Some(SequenceId(0)));
     }
 
     #[test]
@@ -18592,7 +18659,7 @@ mod tests {
             ExecutionLease::acquire(private.join("execution.lock")).expect("execution lease"),
         );
         let approvals = private.join("approvals.json");
-        let permissions = Arc::new(
+        let configured_permissions = Arc::new(
             PermissionGate::from_config(rw_core::PermissionConfig::default())
                 .with_workspace_roots([&primary])
                 .with_project_approval_file(approvals),
@@ -18634,6 +18701,49 @@ mod tests {
             pending_instruction_roots: Mutex::new(HashMap::new()),
             root_authorization: WorkspaceRootAuthorization::LocalUnrestricted,
         };
+
+        // Model a real restart: YOLO is durable in the parent event log, the
+        // resumed parent actor reapplies it to its configured gate, and the
+        // subsequently recovered child is rebound from that effective gate.
+        let parent_session = SessionId("recovered-permission-parent".to_owned());
+        let mut parent_log =
+            SessionEventLog::open(&private, &parent_session.0).expect("parent event log");
+        parent_log
+            .append(EngineEvent::PermissionModeChanged {
+                meta: EventMeta {
+                    protocol_version: SESSION_EVENT_VERSION,
+                    session_id: parent_session.clone(),
+                    sequence_id: SequenceId(0),
+                    emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                    caused_by: None,
+                },
+                mode: Some("yolo".to_owned()),
+            })
+            .expect("persist parent yolo mode");
+        drop(parent_log);
+        let resumed_parent = controller
+            .child_config(
+                &private,
+                &parent_session,
+                &primary,
+                "fast",
+                Arc::new(CapturingModel {
+                    request: Arc::new(Mutex::new(None)),
+                }),
+                Arc::new(rw_core::NoopSecretRedactor),
+                configured_permissions.as_ref(),
+                4,
+            )
+            .expect("rebuild parent runtime after restart");
+        let resumed_parent_permissions = Arc::clone(&resumed_parent.permissions);
+        let resumed_parent_actor =
+            SessionActor::spawn(resumed_parent).expect("resume parent actor");
+        assert_eq!(
+            resumed_parent_permissions.snapshot().runtime_mode,
+            Some(rw_core::HeadlessPermissionMode::Yolo),
+            "the restarted parent must restore its durable YOLO mode"
+        );
+
         let child = controller
             .child_config(
                 &private,
@@ -18644,11 +18754,42 @@ mod tests {
                     request: Arc::new(Mutex::new(None)),
                 }),
                 Arc::new(rw_core::NoopSecretRedactor),
-                permissions.as_ref(),
+                resumed_parent_permissions.as_ref(),
                 4,
             )
             .expect("lease-root child runtime");
         assert_eq!(child.workspace_root, added);
+        assert_eq!(
+            child.permissions.snapshot().runtime_mode,
+            Some(rw_core::HeadlessPermissionMode::Yolo),
+            "fresh child inherits the parent's effective permission mode"
+        );
+        let rejecting_approver = RejectingPermissionApprover(AtomicUsize::new(0));
+        assert_eq!(
+            child
+                .permissions
+                .authorize(
+                    PermissionRequest {
+                        id: "recovered-child-write".to_owned(),
+                        tool_name: "write".to_owned(),
+                        arguments: serde_json::json!({
+                            "path": "child-write.txt",
+                            "content": "allowed without another prompt\n",
+                        }),
+                        capabilities: vec![ToolCapability::WriteFilesystem],
+                        approval_diff: None,
+                    },
+                    &rejecting_approver,
+                )
+                .await,
+            PermissionOutcome::Allowed,
+            "the recovered child must inherit write authority from the parent"
+        );
+        assert_eq!(
+            rejecting_approver.0.load(Ordering::SeqCst),
+            0,
+            "inherited YOLO authority must not invoke the approval UI"
+        );
         assert!(child.additional_workspace_roots.is_empty());
         assert!(
             child
@@ -18673,7 +18814,7 @@ mod tests {
                     request: Arc::new(Mutex::new(None)),
                 }),
                 Arc::new(rw_core::NoopSecretRedactor),
-                permissions.as_ref(),
+                resumed_parent_permissions.as_ref(),
                 4,
             )
             .expect("trusted child runtime");
@@ -18684,6 +18825,7 @@ mod tests {
                 .any(|command| command.name() == "child-only"),
             "an independently trusted child must load its project extensions"
         );
+        drop(resumed_parent_actor);
         let child_context = ToolContext::new(&added).expect("child tool context");
         let symbols = child
             .tools
@@ -18719,7 +18861,7 @@ mod tests {
             std::slice::from_ref(&primary),
             0,
             1,
-            permissions,
+            Arc::clone(&resumed_parent_permissions),
         )
         .await
         .expect("prepare generation");

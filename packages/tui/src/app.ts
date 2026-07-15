@@ -461,11 +461,12 @@ export class RottweilerApp extends BoxRenderable {
       !key.option &&
       !key.hyper &&
       !key.shift &&
-      (key.name === "return" || key.name === "kpenter")
+      (key.name === "return" || key.name === "kpenter" || key.name === "linefeed")
     ) {
       // SelectRenderable handles Return internally but does not normalize the
-      // keypad Enter event on every terminal. Own both shapes at the global
-      // priority layer so the focused safety choice is committed exactly once.
+      // keypad Enter or raw line-feed event on every terminal. Own all shapes
+      // at the global priority layer so the focused safety choice is committed
+      // exactly once.
       this.interactionPanel.select.selectCurrent()
       key.preventDefault()
       key.stopPropagation()
@@ -618,6 +619,9 @@ export class RottweilerApp extends BoxRenderable {
         ? {}
         : { treeSitterClient: this.#treeSitterClient }),
       onInteraction: () => this.#restoreFocusAfterTranscriptInteraction(),
+      onOpenSubagent: (subagentId) => {
+        void this.#enterSubagent(subagentId)
+      },
     })
     this.contextPanel = new ContextPanelRenderable(this.ctx, theme, {
       onOpenDiff: (path) => this.#openChangedFileDiff(path),
@@ -981,7 +985,7 @@ export class RottweilerApp extends BoxRenderable {
       const childEvent = childEngineEvent(progress.event, progress.child_session_id)
       if (this.#subagentReplayRequests.has(progress.subagent_id)) {
         this.#bufferSubagentProgress(progress)
-      } else if (progress.subagent_id === this.#activeSubagentId && childEvent !== null) {
+      } else if (childEvent !== null) {
         if (
           this.#subagentReplayOverflow.has(progress.subagent_id) ||
           (this.#subagentLiveBuffers.get(progress.subagent_id)?.length ?? 0) > 0
@@ -1836,6 +1840,10 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (action === "open_session_picker") {
       this.openSessionPicker()
+      return true
+    }
+    if (action === "open_subagent_picker") {
+      this.openSubagentPicker()
       return true
     }
     if (this.#state.replay.active) {
@@ -3229,18 +3237,28 @@ export class RottweilerApp extends BoxRenderable {
   async #enterSubagent(subagentId: string): Promise<void> {
     const descriptor = this.#subagentDescriptor(subagentId)
     if (descriptor === undefined) return
+    const needsDurablePrefix = this.#subagentHistoryNotices.has(subagentId)
     this.#saveComposerDraft()
     this.#activeSubagentId = subagentId
     this.#restoreComposerDraft(subagentId)
     this.#subagentErrorBaseline = this.#state.errors.at(-1)
-    this.#subagentStates.set(subagentId, initialSubagentState(this.#state, descriptor))
+    if (needsDurablePrefix || !this.#subagentStates.has(subagentId)) {
+      this.#subagentStates.set(subagentId, initialSubagentState(this.#state, descriptor))
+    }
     this.#subagentReplayTails.delete(subagentId)
-    this.#subagentHistoryNotices.delete(subagentId)
+    if (needsDurablePrefix) {
+      this.#subagentHistoryNotices.delete(subagentId)
+      this.#clearSubagentLiveBuffer(subagentId)
+      this.#subagentReplayOverflow.delete(subagentId)
+      this.#subagentReplayGap.delete(subagentId)
+    }
     this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
     this.setState(this.#state)
     this.#focusForInputMode()
 
-    await this.#requestSubagentReplay(subagentId, null)
+    if (needsDurablePrefix || this.#lastAppliedSubagentSequence(subagentId) === null) {
+      await this.#requestSubagentReplay(subagentId, null)
+    }
   }
 
   async #requestSubagentReplay(
@@ -3395,7 +3413,7 @@ export class RottweilerApp extends BoxRenderable {
     if (last !== null && sequence <= last) return
     const request = this.#subagentReplayRequests.get(subagentId)
     if (last === null && request?.afterSequence === null) {
-      this.#subagentReplayOmittedPrefixStarts.set(subagentId, sequence)
+      if (sequence > 0n) this.#subagentReplayOmittedPrefixStarts.set(subagentId, sequence)
       this.#applySubagentEvent(subagentId, event)
       return
     }
@@ -3419,7 +3437,15 @@ export class RottweilerApp extends BoxRenderable {
     ) return
     const last = parseSequence(this.#lastAppliedSubagentSequence(progress.subagent_id))
     if (last !== null && eventSequence <= last) return
-    if (eventSequence !== (last ?? 0n) + 1n) {
+    if (last === null) {
+      if (eventSequence > 0n) {
+        this.#subagentHistoryNotices.set(progress.subagent_id, eventSequence)
+      }
+      this.#applySubagentEvent(progress.subagent_id, event)
+      return
+    }
+    const expected = last + 1n
+    if (eventSequence !== expected) {
       this.#bufferSubagentProgress(progress)
       if (!this.#subagentReplayRequests.has(progress.subagent_id)) {
         void this.#requestSubagentReplay(progress.subagent_id, last?.toString() ?? null)
@@ -3507,7 +3533,7 @@ export class RottweilerApp extends BoxRenderable {
             : descriptor.activity === "running"
               ? "running · read-only; interrupt to reply"
               : descriptor.activity
-        } · Esc returns to parent · Ctrl+P actions`
+        } · Esc parent · Ctrl+G tree · Ctrl+P actions`
   }
 
   async #interruptSubagent(subagentId: string): Promise<void> {

@@ -860,6 +860,9 @@ enum PendingEvent {
     ModeChanged {
         mode: SessionMode,
     },
+    PermissionModeChanged {
+        mode: Option<crate::HeadlessPermissionMode>,
+    },
     PlanSubmitted {
         artifact: PlanArtifact,
     },
@@ -930,6 +933,27 @@ fn parse_session_mode(mode: &str) -> Option<SessionMode> {
         "plan" => Some(SessionMode::Plan),
         "execute" => Some(SessionMode::Execute),
         _ => None,
+    }
+}
+
+fn permission_mode_name(mode: crate::HeadlessPermissionMode) -> &'static str {
+    match mode {
+        crate::HeadlessPermissionMode::Strict => "strict",
+        crate::HeadlessPermissionMode::AutoSafe => "auto-safe",
+        crate::HeadlessPermissionMode::Yolo => "yolo",
+    }
+}
+
+fn parse_permission_mode(
+    mode: &str,
+) -> Result<crate::HeadlessPermissionMode, SessionProjectionError> {
+    match mode {
+        "strict" => Ok(crate::HeadlessPermissionMode::Strict),
+        "auto-safe" => Ok(crate::HeadlessPermissionMode::AutoSafe),
+        "yolo" => Ok(crate::HeadlessPermissionMode::Yolo),
+        _ => Err(SessionProjectionError::InvalidPermissionMode(
+            mode.to_owned(),
+        )),
     }
 }
 
@@ -1462,6 +1486,10 @@ impl PendingEvent {
                 meta,
                 mode: ModeId(session_mode_name(mode).to_owned()),
             },
+            Self::PermissionModeChanged { mode } => EngineEvent::PermissionModeChanged {
+                meta,
+                mode: mode.map(permission_mode_name).map(str::to_owned),
+            },
             Self::PlanSubmitted { artifact } => EngineEvent::PlanSubmitted { meta, artifact },
             Self::PlanReviewed {
                 artifact,
@@ -1604,6 +1632,7 @@ pub struct SessionSnapshot {
     pub provider: Option<String>,
     pub thinking: ThinkingLevel,
     pub mode: SessionMode,
+    pub permission_mode: Option<crate::HeadlessPermissionMode>,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
     pub plan_gate_active: bool,
@@ -1638,6 +1667,7 @@ pub struct SessionRecoveredState {
     pub provider: Option<String>,
     pub thinking: Option<ThinkingLevel>,
     pub mode: SessionMode,
+    pub permission_mode: Option<crate::HeadlessPermissionMode>,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
     pub plan_gate_active: bool,
@@ -1697,6 +1727,8 @@ pub enum SessionProjectionError {
     InvalidShellTransition(String),
     #[error("unknown built-in mode id `{0}` in durable session")]
     InvalidMode(String),
+    #[error("unknown permission mode id `{0}` in durable session")]
+    InvalidPermissionMode(String),
     #[error("invalid durable workspace-root generation")]
     InvalidWorkspaceGeneration,
 }
@@ -2153,6 +2185,9 @@ fn recovered_pending_event(
             mode: parse_session_mode(&mode.0)
                 .ok_or_else(|| SessionProjectionError::InvalidMode(mode.0.clone()))?,
         },
+        EngineEvent::PermissionModeChanged { mode, .. } => PendingEvent::PermissionModeChanged {
+            mode: mode.as_deref().map(parse_permission_mode).transpose()?,
+        },
         EngineEvent::PlanSubmitted { artifact, .. } => PendingEvent::PlanSubmitted {
             artifact: artifact.clone(),
         },
@@ -2236,6 +2271,7 @@ pub fn project_session_events(
     let mut selected_provider = None;
     let mut selected_thinking = None;
     let mut mode = SessionMode::Execute;
+    let mut permission_mode = None;
     let mut pending_plan = None;
     let mut approved_plan = None;
     let mut plan_gate_active = false;
@@ -2620,6 +2656,9 @@ pub fn project_session_events(
                     plan_gate_active = true;
                 }
             }
+            PendingEvent::PermissionModeChanged { mode: changed } => {
+                permission_mode = *changed;
+            }
             PendingEvent::PlanSubmitted { artifact } => {
                 pending_plan = Some(artifact.clone());
             }
@@ -2762,6 +2801,7 @@ pub fn project_session_events(
         provider: selected_provider,
         thinking: selected_thinking,
         mode,
+        permission_mode,
         pending_plan,
         approved_plan,
         plan_gate_active,
@@ -2856,6 +2896,31 @@ async fn apply_mode_change(
         state.pending_plan = None;
         state.approved_plan = None;
         state.plan_gate_active = true;
+    }
+    Ok(())
+}
+
+async fn apply_permission_mode_change(
+    state: &mut ActorState,
+    events: &broadcast::Sender<RoutedEvent>,
+    config: &SessionActorConfig,
+    mode: Option<crate::HeadlessPermissionMode>,
+) -> Result<(), AgentLoopError> {
+    let previous = config.permissions.snapshot().runtime_mode;
+    config
+        .permissions
+        .set_runtime_mode(mode)
+        .map_err(AgentLoopError::InvalidConfiguration)?;
+    if let Err(error) = emit_batch(
+        state,
+        events,
+        &config.event_sink,
+        vec![PendingEvent::PermissionModeChanged { mode }],
+    )
+    .await
+    {
+        let _ = config.permissions.set_runtime_mode(previous);
+        return Err(error);
     }
     Ok(())
 }
@@ -4431,6 +4496,12 @@ impl SessionActor {
             return Err(AgentLoopError::InvalidConfiguration(
                 "model alias must not be empty".to_owned(),
             ));
+        }
+        if config.recovered.permission_mode.is_some() {
+            config
+                .permissions
+                .set_runtime_mode(config.recovered.permission_mode)
+                .map_err(AgentLoopError::InvalidConfiguration)?;
         }
         if config.max_turns == 0
             || config.identical_tool_failure_limit == 0
@@ -9120,9 +9191,10 @@ async fn handle_actor_command(
                                 }
                             }
                             SessionCommandAction::SetPermissionMode { mode } => {
-                                if let Err(message) = config.permissions.set_runtime_mode(mode) {
-                                    let _ = respond
-                                        .send(Err(AgentLoopError::InvalidConfiguration(message)));
+                                if let Err(error) =
+                                    apply_permission_mode_change(state, events, config, mode).await
+                                {
+                                    let _ = respond.send(Err(error));
                                     return;
                                 }
                                 output.message =
@@ -9598,6 +9670,7 @@ async fn handle_actor_command(
                 provider: state.provider.clone(),
                 thinking: state.thinking,
                 mode: state.mode,
+                permission_mode: config.permissions.snapshot().runtime_mode,
                 pending_plan: state.pending_plan.clone(),
                 approved_plan: state.approved_plan.clone(),
                 plan_gate_active: state.plan_gate_active,
@@ -17423,6 +17496,32 @@ mod tests {
         let handle = SessionActor::spawn(actor_config).expect("actor");
         let mut events = handle.subscribe();
         handle
+            .send_message("/permissions mode yolo")
+            .await
+            .expect("switch permission mode");
+        let mode_changed = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionModeChanged { .. })
+        })
+        .await;
+        assert!(matches!(
+            mode_changed.kind,
+            PendingEvent::PermissionModeChanged {
+                mode: Some(crate::HeadlessPermissionMode::Yolo)
+            }
+        ));
+        next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "permissions")
+        })
+        .await;
+        assert_eq!(
+            handle
+                .snapshot()
+                .await
+                .expect("yolo snapshot")
+                .permission_mode,
+            Some(crate::HeadlessPermissionMode::Yolo)
+        );
+        handle
             .send_message("/permissions approvals")
             .await
             .expect("list approvals");
@@ -24659,6 +24758,36 @@ mod tests {
         assert_eq!(resumed.mode, SessionMode::Discuss);
         assert!(resumed.plan_gate_active);
         assert!(resumed.approved_plan.is_none());
+    }
+
+    #[tokio::test]
+    async fn permission_mode_projects_and_is_reapplied_when_a_session_resumes() {
+        let durable = vec![wire_event(
+            0,
+            PendingEvent::PermissionModeChanged {
+                mode: Some(crate::HeadlessPermissionMode::Yolo),
+            },
+        )];
+        let recovered = project_session_events(&durable).expect("project permission mode");
+        assert_eq!(
+            recovered.permission_mode,
+            Some(crate::HeadlessPermissionMode::Yolo)
+        );
+
+        let root = TempDir::new().expect("workspace");
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(ScriptedModel::new([])),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Ask,
+            HookDispatcher::new(),
+        );
+        actor_config.recovered = recovered;
+        let handle = SessionActor::spawn(actor_config).expect("resume actor");
+        assert_eq!(
+            handle.snapshot().await.expect("snapshot").permission_mode,
+            Some(crate::HeadlessPermissionMode::Yolo)
+        );
     }
 
     #[tokio::test]

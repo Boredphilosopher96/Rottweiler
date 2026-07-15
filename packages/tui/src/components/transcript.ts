@@ -14,6 +14,8 @@ import {
   formatCost,
   filetypeForPath,
   getScrollAcceleration,
+  minimalUnifiedDiff,
+  splitDiffVisualRows,
   presentTool,
   presentableUnifiedDiff,
   terminalMarkdown,
@@ -32,6 +34,7 @@ export interface TranscriptRenderableOptions {
   readonly syntaxStyle: SyntaxStyle
   readonly treeSitterClient?: TreeSitterClient
   readonly onInteraction?: () => void
+  readonly onOpenSubagent?: (subagentId: string) => void
 }
 
 const MAX_VISIBLE_SUBAGENTS = 8
@@ -382,11 +385,15 @@ export class ToolBlockRenderable extends BoxRenderable {
       this.diff = null
     }
     if (proposal === null) return
-    const rows = Math.min(12, Math.max(4, proposal.unifiedDiff.split("\n").length))
+    const inlineDiff = minimalUnifiedDiff(proposal.path, proposal.unifiedDiff)
+    // The diff is changed-lines-only, so give it its natural height. The
+    // transcript remains the sole vertical scroll owner; the inline diff never
+    // traps the wheel in a nested viewport.
+    const rows = splitDiffVisualRows(inlineDiff)
     const filetype = filetypeForPath(proposal.path)
     this.diff = this.#rendering === undefined
       ? new TextRenderable(this.ctx, {
-          content: boundedLines(proposal.unifiedDiff, rows),
+          content: inlineDiff,
           fg: this.#theme.foreground,
           height: rows,
           wrapMode: "none",
@@ -396,13 +403,14 @@ export class ToolBlockRenderable extends BoxRenderable {
           id: `tool-diff-${tool.toolCallId}`,
           width: "100%",
           height: rows,
-          diff: proposal.unifiedDiff,
+          diff: inlineDiff,
           ...(filetype === undefined ? {} : { filetype }),
           syntaxStyle: this.#rendering.syntaxStyle,
           ...(this.#rendering.treeSitterClient === undefined
             ? {}
             : { treeSitterClient: this.#rendering.treeSitterClient }),
-          view: "unified",
+          view: "split",
+          syncScroll: false,
           wrapMode: "none",
           showLineNumbers: true,
           addedBg: this.#theme.added,
@@ -546,9 +554,14 @@ export class SubagentPanelRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly rows = new Map<string, TextRenderable>()
   readonly #theme: RottweilerTheme
+  readonly #onOpenSubagent: ((subagentId: string) => void) | undefined
   #rowOrder: readonly string[] = []
 
-  constructor(ctx: RenderContext, theme: RottweilerTheme) {
+  constructor(
+    ctx: RenderContext,
+    theme: RottweilerTheme,
+    onOpenSubagent?: (subagentId: string) => void,
+  ) {
     super(ctx, {
       id: "subagent-progress",
       width: "100%",
@@ -564,6 +577,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
       visible: false,
     })
     this.#theme = theme
+    this.#onOpenSubagent = onOpenSubagent
     this.header = new TextRenderable(ctx, {
       content: "",
       fg: theme.accentStrong,
@@ -613,6 +627,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
       const branch = index === subagents.length - 1 ? "└─" : "├─"
       const detail = subagentDetail(subagent)
       row.content = `${branch} ${glyph} ${singleLine(subagent.task, 72)}${detail === "" ? "" : ` · ${detail}`}`
+      row.onMouseDown = () => this.#onOpenSubagent?.(subagent.subagentId)
       row.fg =
         subagent.status === "failed"
           ? this.#theme.danger
@@ -682,6 +697,7 @@ class TurnCardRenderable extends BoxRenderable {
     onToolExpansionChange: (toolCallId: string, expanded: boolean) => void,
     onReasoningExpansionChange: (expanded: boolean) => void,
     onInteraction: (() => void) | undefined,
+    onOpenSubagent: ((subagentId: string) => void) | undefined,
     treeSitterClient?: TreeSitterClient,
   ) {
     const shell = entry.presentation === "shell_result" ? entry.shell : undefined
@@ -853,7 +869,7 @@ class TurnCardRenderable extends BoxRenderable {
       ))
     }
     if (subagents.length > 0) {
-      const panel = new SubagentPanelRenderable(ctx, theme)
+      const panel = new SubagentPanelRenderable(ctx, theme, onOpenSubagent)
       panel.update(subagents, subagentTotal)
       this.add(panel)
     }
@@ -885,6 +901,7 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #syntaxStyle: SyntaxStyle
   readonly #treeSitterClient: TreeSitterClient | undefined
   readonly #onInteraction: (() => void) | undefined
+  readonly #onOpenSubagent: ((subagentId: string) => void) | undefined
   readonly #toolExpansion = new Map<string, boolean>()
   readonly #tailToolCards = new Map<string, ToolBlockRenderable>()
   readonly #reasoningExpansion = new Map<string, boolean>()
@@ -914,6 +931,7 @@ export class TranscriptRenderable extends BoxRenderable {
     this.#syntaxStyle = options.syntaxStyle
     this.#treeSitterClient = options.treeSitterClient
     this.#onInteraction = options.onInteraction
+    this.#onOpenSubagent = options.onOpenSubagent
     this.scroller = new ScrollBoxRenderable(ctx, {
       id: "transcript-scroll",
       width: "100%",
@@ -989,7 +1007,7 @@ export class TranscriptRenderable extends BoxRenderable {
       width: "100%",
       flexDirection: "column",
     })
-    this.subagentPanel = new SubagentPanelRenderable(ctx, theme)
+    this.subagentPanel = new SubagentPanelRenderable(ctx, theme, this.#onOpenSubagent)
     this.streamingCard.add(this.#tailHeader)
     this.streamingCard.add(this.#tailReasoning)
     this.streamingCard.add(this.streamingMarkdown)
@@ -1141,7 +1159,9 @@ export class TranscriptRenderable extends BoxRenderable {
         ? Object.values(state.tools).filter((tool) => tool.turnId === entry.agentTurn)
         : []
       const turnSubagents = subagentEntryKeys.has(key)
-        ? subagentsForTurn(state, entry.agentTurn)
+        ? subagentsForTurn(state, entry.agentTurn).filter(
+            (subagent) => subagent.status !== "running",
+          )
         : []
       const visibleSubagents = boundedSubagents(turnSubagents)
       const detail = entry.turn.role === "assistant" &&
@@ -1183,6 +1203,7 @@ export class TranscriptRenderable extends BoxRenderable {
         (toolCallId, expanded) => this.#rememberToolExpansion(toolCallId, expanded),
         (expanded) => this.#rememberReasoningExpansion(key, expanded),
         this.#onInteraction,
+        this.#onOpenSubagent,
         this.#treeSitterClient,
       )
       this.scroller.insertBefore(card, reference)

@@ -103,10 +103,10 @@ struct PermissionMemory {
 /// and exact invocation approvals remembered at session or project scope.
 pub struct PermissionGate {
     policy: PermissionPolicy,
-    runtime_mode: RwLock<Option<HeadlessPermissionMode>>,
+    runtime_mode: Arc<RwLock<Option<HeadlessPermissionMode>>>,
     restrictive_rules: Option<Vec<PermissionRule>>,
     memory: RwLock<PermissionMemory>,
-    session_rules: RwLock<Vec<PermissionRule>>,
+    session_rules: Arc<RwLock<Vec<PermissionRule>>>,
     project_store: Option<Arc<ProjectApprovalStore>>,
     command_safety: Arc<CommandSafetyClassifier>,
 }
@@ -135,10 +135,10 @@ impl PermissionGate {
     pub fn from_config(config: PermissionConfig) -> Self {
         Self {
             policy: PermissionPolicy::Configured(config),
-            runtime_mode: RwLock::new(None),
+            runtime_mode: Arc::new(RwLock::new(None)),
             restrictive_rules: None,
             memory: RwLock::new(PermissionMemory::default()),
-            session_rules: RwLock::new(Vec::new()),
+            session_rules: Arc::new(RwLock::new(Vec::new())),
             project_store: None,
             command_safety: Arc::new(CommandSafetyClassifier::default()),
         }
@@ -157,10 +157,10 @@ impl PermissionGate {
     pub fn for_headless_mode(mode: HeadlessPermissionMode) -> Self {
         Self {
             policy: PermissionPolicy::Headless(mode),
-            runtime_mode: RwLock::new(None),
+            runtime_mode: Arc::new(RwLock::new(None)),
             restrictive_rules: None,
             memory: RwLock::new(PermissionMemory::default()),
-            session_rules: RwLock::new(Vec::new()),
+            session_rules: Arc::new(RwLock::new(Vec::new())),
             project_store: None,
             command_safety: Arc::new(CommandSafetyClassifier::default()),
         }
@@ -324,9 +324,11 @@ impl PermissionGate {
     }
 
     /// Prepares a replacement gate for an atomic live-root generation swap.
-    /// Policy and session rules are copied, while remembered session approvals
-    /// are omitted. Project approvals remain untouched in the shared ledger
-    /// and cannot match the replacement's new namespace.
+    /// Policy overlays and session rules remain shared with the parent gate so
+    /// delegated sessions observe live mode changes. Remembered invocation
+    /// approvals are omitted because their workspace namespace changed. Project
+    /// approvals remain untouched in the shared ledger and cannot match the
+    /// replacement's new namespace.
     /// The current gate's policy, rules, namespace, generation, and session
     /// approvals are never mutated.
     ///
@@ -348,7 +350,7 @@ impl PermissionGate {
         let generation = lock_read(&self.memory).generation.saturating_add(1);
         Ok(Self {
             policy: self.policy.clone(),
-            runtime_mode: RwLock::new(*lock_read(&self.runtime_mode)),
+            runtime_mode: Arc::clone(&self.runtime_mode),
             restrictive_rules: self.restrictive_rules.clone(),
             memory: RwLock::new(PermissionMemory {
                 workspace_namespace: workspace_namespace(&roots),
@@ -362,7 +364,7 @@ impl PermissionGate {
                 generation,
                 session_allows: BTreeSet::new(),
             }),
-            session_rules: RwLock::new(lock_read(&self.session_rules).clone()),
+            session_rules: Arc::clone(&self.session_rules),
             project_store: self.project_store.clone(),
             command_safety: Arc::clone(&self.command_safety),
         })
@@ -389,7 +391,7 @@ impl PermissionGate {
         let memory = lock_read(&self.memory);
         Ok(Self {
             policy: self.policy.clone(),
-            runtime_mode: RwLock::new(*lock_read(&self.runtime_mode)),
+            runtime_mode: Arc::clone(&self.runtime_mode),
             restrictive_rules: Some(restrictive_rules),
             memory: RwLock::new(PermissionMemory {
                 workspace_roots: memory.workspace_roots.clone(),
@@ -398,7 +400,7 @@ impl PermissionGate {
                 generation: memory.generation,
                 session_allows: memory.session_allows.clone(),
             }),
-            session_rules: RwLock::new(lock_read(&self.session_rules).clone()),
+            session_rules: Arc::clone(&self.session_rules),
             project_store: self.project_store.clone(),
             command_safety: Arc::clone(&self.command_safety),
         })
@@ -3757,16 +3759,25 @@ mod tests {
             rules: Vec::new(),
         })
         .with_workspace_roots([parent.path()]);
-        gate.set_runtime_mode(Some(HeadlessPermissionMode::Yolo))
-            .expect("interactive yolo");
-
         let child_gate = gate
             .fork_for_workspace_roots([child.path()])
             .expect("child permission generation");
+        gate.set_runtime_mode(Some(HeadlessPermissionMode::Yolo))
+            .expect("interactive yolo");
         assert_eq!(
             child_gate.snapshot().runtime_mode,
             Some(HeadlessPermissionMode::Yolo),
-            "a delegated child must inherit the active session permission overlay"
+            "an existing child must observe later parent permission-mode changes"
+        );
+        gate.add_session_rule(PermissionRule {
+            pattern: "bash(cargo test*)".to_owned(),
+            action: PermissionDecision::Allow,
+        })
+        .expect("parent session rule");
+        assert_eq!(
+            child_gate.snapshot().session_rules,
+            gate.snapshot().session_rules,
+            "an existing child must observe later parent session-rule changes"
         );
 
         let approver = CountingDeny(AtomicUsize::new(0));
@@ -3779,12 +3790,7 @@ mod tests {
                 "agent": "general",
                 "isolation": "shared",
             }),
-            capabilities: vec![
-                ToolCapability::ReadFilesystem,
-                ToolCapability::WriteFilesystem,
-                ToolCapability::Execute,
-                ToolCapability::Network,
-            ],
+            capabilities: Vec::new(),
             approval_diff: None,
         };
         assert_eq!(

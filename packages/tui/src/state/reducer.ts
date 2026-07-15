@@ -89,6 +89,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "subagent_progress",
   "tool_output_pruned",
   "mode_changed",
+  "permission_mode_changed",
   "plan_submitted",
   "plan_reviewed",
   "model_changed",
@@ -1096,6 +1097,10 @@ function applyKnownEvent(
       return event.mode === "plan"
         ? { ...state, mode: event.mode, pendingPlan: null, approvedPlan: null }
         : { ...state, mode: event.mode }
+    case "permission_mode_changed":
+      // The durable override is reflected by the typed permissions projection;
+      // replay only needs to advance the cursor here.
+      return state
     case "plan_submitted":
       return { ...state, pendingPlan: event.artifact }
     case "plan_reviewed":

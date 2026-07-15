@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { CustomSpeedScroll, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, presentableUnifiedDiff, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { CustomSpeedScroll, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, minimalUnifiedDiff, presentableUnifiedDiff, splitDiffVisualRows, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 import { embeddedParserConfigurations } from "../src/tree-sitter-runtime"
 
 describe("bounded retained rendering", () => {
@@ -69,6 +69,54 @@ describe("bounded retained rendering", () => {
       "",
     ].join("\n"))
     expect(rendered).not.toContain("Error parsing diff")
+  })
+
+  test("creates truthful changed-lines-only hunks for inline split diffs", () => {
+    const rendered = minimalUnifiedDiff("src/main.rs", [
+      "--- a/src/main.rs",
+      "+++ b/src/main.rs",
+      "@@ -10,7 +10,7 @@",
+      " unchanged before",
+      "-old one",
+      "+new one",
+      " unchanged gap",
+      " unchanged gap two",
+      "-old two",
+      "+new two",
+      " unchanged after",
+    ].join("\n"))
+    expect(rendered).toBe([
+      "--- a/src/main.rs",
+      "+++ b/src/main.rs",
+      "@@ -11,1 +11,1 @@",
+      "-old one",
+      "+new one",
+      "@@ -14,1 +14,1 @@",
+      "-old two",
+      "+new two",
+      "",
+    ].join("\n"))
+    expect(rendered).not.toContain("unchanged")
+  })
+
+  test("anchors pure inline insertions and deletions on the preceding unchanged line", () => {
+    expect(minimalUnifiedDiff(
+      "src/insert.rs",
+      "--- a/src/insert.rs\n+++ b/src/insert.rs\n@@ -1,2 +1,3 @@\n keep\n+inserted\n tail\n",
+    )).toContain("@@ -1,0 +2,1 @@")
+    expect(minimalUnifiedDiff(
+      "src/delete.rs",
+      "--- a/src/delete.rs\n+++ b/src/delete.rs\n@@ -1,3 +1,2 @@\n keep\n-deleted\n tail\n",
+    )).toContain("@@ -2,1 +1,0 @@")
+  })
+
+  test("measures paired split-diff rows instead of unified wire lines", () => {
+    expect(splitDiffVisualRows(
+      "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -4,1 +4,1 @@\n-old\n+new\n",
+    )).toBe(1)
+    expect(splitDiffVisualRows(
+      "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -4,2 +4,1 @@\n-old one\n-old two\n+new\n@@ -20,0 +19,1 @@\n+later\n",
+    )).toBe(3)
   })
 
   test("uses OpenCode-compatible fixed scroll speed when configured", () => {

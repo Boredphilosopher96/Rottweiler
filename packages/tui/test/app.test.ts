@@ -1782,6 +1782,27 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.state.subagentOrder).not.toContain("child-one")
   })
 
+  test("opens the child-agent tree from the global Ctrl+G binding", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 20, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    setup.mockInput.pressKey("g", { ctrl: true })
+    await Bun.sleep(0)
+    expect(app.picker.title).toContain("Child agents")
+    expect(emitted.at(-1)).toMatchObject({
+      type: "list_subagents",
+      session_id: "parent-session",
+    })
+  })
+
   test("uses Escape to return to the parent and double Escape to interrupt a running child", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
@@ -2372,6 +2393,141 @@ describe("Rottweiler OpenTUI shell", () => {
       "Buffered before failure. Still retained.",
     )
     replayResolvers[1]?.({ type: "accepted" })
+  })
+
+  test("replays a durable prefix before inspecting a child first observed mid-stream", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "parent-session",
+      requestId: () => `request-${++request}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openSubagentPicker()
+    const list = emitted.find((command) => command.type === "list_subagents")!
+    app.handleEvent({
+      type: "subagents_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "parent-session",
+      subagents: [{
+        subagent_id: "child-late",
+        child_session_id: "child-session",
+        task: "Inspect complete history",
+        agent: "reviewer",
+        model: "fast",
+        isolation: "shared",
+        activity: "running",
+      }],
+    })
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-late",
+      child_session_id: "child-session",
+      child_sequence: "2",
+      event: {
+        type: "text_delta",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "child-session",
+          sequence_id: "2",
+          emitted_at: "2026-01-01T00:00:02Z",
+        },
+        turn_id: "child-turn",
+        text: "late activity",
+      },
+    })
+
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    const replay = emitted.filter((command) => command.type === "replay_subagent").at(-1)!
+    expect(replay).toMatchObject({ subagent_id: "child-late", after_sequence: null })
+    expect(app.visibleState.streamingTail).toBeNull()
+
+    app.handleEvent({
+      type: "subagent_replay_batch",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: replay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-late",
+      child_session_id: "child-session",
+      events: [
+        {
+          child_sequence: "0",
+          event: {
+            type: "turn_started",
+            meta: {
+              protocol_version: PROTOCOL_VERSION,
+              session_id: "child-session",
+              sequence_id: "0",
+              emitted_at: "2026-01-01T00:00:00Z",
+            },
+            turn_id: "child-turn",
+          },
+        },
+        {
+          child_sequence: "1",
+          event: {
+            type: "text_delta",
+            meta: {
+              protocol_version: PROTOCOL_VERSION,
+              session_id: "child-session",
+              sequence_id: "1",
+              emitted_at: "2026-01-01T00:00:01Z",
+            },
+            turn_id: "child-turn",
+            text: "durable prefix; ",
+          },
+        },
+        {
+          child_sequence: "2",
+          event: {
+            type: "text_delta",
+            meta: {
+              protocol_version: PROTOCOL_VERSION,
+              session_id: "child-session",
+              sequence_id: "2",
+              emitted_at: "2026-01-01T00:00:02Z",
+            },
+            turn_id: "child-turn",
+            text: "late activity",
+          },
+        },
+      ],
+    })
+    app.handleEvent({
+      type: "subagent_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: replay.meta.request_id,
+        emitted_at: "2026-01-01T00:00:03Z",
+      },
+      session_id: "parent-session",
+      subagent_id: "child-late",
+      through_sequence: "2",
+      next_cursor: null,
+      tail_sequence: "2",
+      has_more: false,
+      events_before_page: "0",
+      truncated: false,
+    })
+    expect(app.visibleState.streamingTail?.text).toBe("durable prefix; late activity")
   })
 
   test("ignores a stale replay rejection without deleting the newer replay correlation", async () => {

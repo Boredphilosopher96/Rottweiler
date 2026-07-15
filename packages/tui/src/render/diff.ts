@@ -100,6 +100,97 @@ export function presentableUnifiedDiff(path: string, source: string): string {
   return `${lines.join("\n")}\n`
 }
 
+/**
+ * Produce a valid changed-lines-only diff for the inline transcript card.
+ * Context gaps become separate hunks so line numbers remain truthful after
+ * removing unchanged lines. Full review surfaces continue to use
+ * `presentableUnifiedDiff`.
+ */
+export function minimalUnifiedDiff(path: string, source: string): string {
+  const normalized = presentableUnifiedDiff(path, source)
+  const lines = normalized.trimEnd().split("\n")
+  const headers = lines.filter((line) => line.startsWith("--- ") || line.startsWith("+++ "))
+  const output = headers.slice(0, 2)
+  let index = 0
+  while (index < lines.length) {
+    const header = lines[index] ?? ""
+    const parsed = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@(.*)$/.exec(header)
+    if (parsed === null) {
+      index += 1
+      continue
+    }
+    let oldLine = Number.parseInt(parsed[1] ?? "1", 10)
+    let newLine = Number.parseInt(parsed[2] ?? "1", 10)
+    const suffix = parsed[3] ?? ""
+    index += 1
+    let group: string[] = []
+    let groupOldStart = oldLine
+    let groupNewStart = newLine
+    const flush = () => {
+      if (group.length === 0) return
+      const oldCount = group.filter((line) => line.startsWith("-")).length
+      const newCount = group.filter((line) => line.startsWith("+")).length
+      // Unified-diff zero-count ranges are anchored on the preceding line.
+      // A pure insertion before old line N is `-(N-1),0`; deletion is the
+      // symmetric `+(N-1),0`. Replacements retain their actual first line.
+      const oldStart = oldCount === 0 ? Math.max(0, groupOldStart - 1) : groupOldStart
+      const newStart = newCount === 0 ? Math.max(0, groupNewStart - 1) : groupNewStart
+      output.push(
+        `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${suffix}`,
+        ...group,
+      )
+      group = []
+    }
+    while (index < lines.length && !(lines[index] ?? "").startsWith("@@")) {
+      const line = lines[index] ?? ""
+      if (line.startsWith("--- ") && (lines[index + 1] ?? "").startsWith("+++ ")) break
+      if (line.startsWith(" ") || (!line.startsWith("+") && !line.startsWith("-") && !line.startsWith("\\"))) {
+        flush()
+        oldLine += 1
+        newLine += 1
+      } else {
+        if (group.length === 0) {
+          groupOldStart = oldLine
+          groupNewStart = newLine
+        }
+        if (line.startsWith("-")) oldLine += 1
+        else if (line.startsWith("+")) newLine += 1
+        if (!line.startsWith("\\") || group.length > 0) group.push(line)
+      }
+      index += 1
+    }
+    flush()
+  }
+  return output.length > 2 ? `${output.join("\n")}\n` : normalized
+}
+
+/** Number of terminal rows occupied by OpenTUI's side-by-side diff view. */
+export function splitDiffVisualRows(source: string): number {
+  const lines = source.trimEnd().split("\n")
+  let rows = 0
+  let removed = 0
+  let added = 0
+  const flush = () => {
+    rows += Math.max(removed, added)
+    removed = 0
+    added = 0
+  }
+  for (const line of lines) {
+    if (line.startsWith("@@")) {
+      flush()
+    } else if (line.startsWith("-") && !line.startsWith("--- ")) {
+      removed += 1
+    } else if (line.startsWith("+") && !line.startsWith("+++ ")) {
+      added += 1
+    } else if (!line.startsWith("--- ") && !line.startsWith("+++ ") && !line.startsWith("\\")) {
+      flush()
+      rows += 1
+    }
+  }
+  flush()
+  return Math.max(1, rows)
+}
+
 function hasFileHeaders(lines: readonly string[]): boolean {
   return lines.some((line, index) =>
     line.startsWith("--- ") && (lines[index + 1] ?? "").startsWith("+++ "),

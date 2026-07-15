@@ -8,7 +8,7 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ContextPanelRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, ToolBlockRenderable, fuzzyScore } from "../src/components"
+import { ContextPanelRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, ToolBlockRenderable, fuzzyScore } from "../src/components"
 import {
   PROTOCOL_VERSION,
   type ClientCommand,
@@ -753,6 +753,8 @@ describe("M4 retained components", () => {
     expect(editCard?.diff).toBeInstanceOf(DiffRenderable)
     expect(editCard?.header.plainText).toContain("Edit file")
     expect((editCard?.diff as DiffRenderable).filetype).toBe("rust")
+    expect((editCard?.diff as DiffRenderable).view).toBe("split")
+    expect((editCard?.diff as DiffRenderable).height).toBe(1)
     expect((editCard?.diff as DiffRenderable).diff).toContain("+new")
     expect(editCard?.diff?.visible).toBeTrue()
     expect(setup.captureCharFrame()).toContain("+ new")
@@ -1052,6 +1054,19 @@ describe("M4 retained components", () => {
         decision: "allow_once",
       }),
     ])
+
+    commands.length = 0
+    const linefeed = parseKeypress("\n", { useKittyKeyboard: true })!
+    expect(linefeed.name).toBe("linefeed")
+    setup.renderer.keyInput.processParsedKey(linefeed)
+    await Bun.sleep(0)
+    expect(commands.filter((command) => command.type === "approve_tool")).toEqual([
+      expect.objectContaining({
+        type: "approve_tool",
+        tool_call_id: "click-approval",
+        decision: "allow_once",
+      }),
+    ])
   })
 
   test("makes unsandboxed bash approvals conspicuous with the exact command", async () => {
@@ -1287,6 +1302,7 @@ describe("M4 retained components", () => {
 
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Subagents · 1 running · 2 total")
+    expect(frame.match(/Subagents ·/g)).toHaveLength(1)
     expect(frame).toContain("Inspect provider boundaries · using tool · read")
     expect(frame).toContain("Add orchestration tests · Added deterministic coverage")
     expect(app.transcript.subagentPanel.rows.size).toBe(2)
@@ -1338,6 +1354,33 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
     expect(app.transcript.subagentPanel.rows.size).toBe(8)
     expect(app.transcript.subagentPanel.header.plainText).toContain("20 total")
+  })
+
+  test("opens an exact child transcript from a clicked tree row", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 12, useThread: false })
+    renderer = setup.renderer
+    const opened: string[] = []
+    const panel = new SubagentPanelRenderable(renderer, kennelTheme, (subagentId) => {
+      opened.push(subagentId)
+    })
+    panel.update([{
+      projectionId: "child-row",
+      subagentId: "child-exact",
+      parentTurnId: "1",
+      task: "Inspect the provider layer",
+      status: "running",
+      childSessionId: "child-session",
+      lastChildSequence: "3",
+      activity: "reading files",
+      summary: null,
+      touchedFileCount: 0,
+      diffArtifactId: null,
+    }])
+    renderer.root.add(panel)
+    await setup.renderOnce()
+    const row = panel.rows.get("child-row")!
+    await setup.mockMouse.click(row.x + 2, row.y)
+    expect(opened).toEqual(["child-exact"])
   })
 
   test("renders cumulative review and routes exact per-file accept or revert commands", async () => {

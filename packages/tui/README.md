@@ -20,7 +20,10 @@ This is the foundation for M4 golden-screen and latency tests.
 
 The standard preset preserves the shipped shortcuts (`ctrl+p` commands,
 `ctrl+m` models, `ctrl+o` modes, `ctrl+s` sessions, `ctrl+r` review,
-`shift+tab` agent mode, `ctrl+e` external editor). Set the TUI-only
+`ctrl+g` child-agent tree, `shift+tab` agent mode, `ctrl+e` external editor).
+The child tree supports keyboard or mouse drill-in, live transcript inspection,
+Escape back to the parent, and follow-up/interrupt/close actions from `ctrl+p`.
+Set the TUI-only
 `keybindings.toml` section to use Vim mode and override bindings by action:
 
 ```toml

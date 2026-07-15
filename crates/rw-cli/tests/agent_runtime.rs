@@ -174,6 +174,75 @@ fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
 }
 
 #[test]
+fn subagent_control_plane_never_requests_permission_under_strict_policy() {
+    let root = tempdir().expect("root");
+    let run = TestRun::new(&root, "strict-subagent-control");
+    let script = root.path().join("strict-subagent-control.json");
+    write_script(
+        &script,
+        vec![
+            vec![
+                ProviderEvent::ToolCallStart {
+                    id: "spawn-child".to_owned(),
+                    name: "spawn_agent".to_owned(),
+                },
+                ProviderEvent::ToolCallEnd {
+                    id: "spawn-child".to_owned(),
+                    arguments: json!({
+                        "task": "inspect without invoking tools",
+                        "agent": "explore",
+                        "isolation": "shared"
+                    }),
+                },
+                ProviderEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                },
+            ],
+            text_events("child inspection complete"),
+            text_events("parent received the child result"),
+        ],
+    );
+
+    let output = base_command(&run.workspace, &run.home)
+        .args([
+            "-p",
+            "start one child and report its result",
+            "--permission-mode",
+            "strict",
+            "--output-format",
+            "stream-json",
+            "--in-memory-replay-script",
+            script.to_str().expect("script"),
+        ])
+        .output()
+        .expect("rw binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}\nstdout: {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let events = parse_stream(&output.stdout);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::SubagentSpawned { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::SubagentFinished { .. }))
+            .count(),
+        1
+    );
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    assert!(!rendered.contains("approval needed"));
+    assert!(!rendered.contains("permission denied"));
+}
+
+#[test]
 fn binary_records_then_replays_a_complete_offline_tool_turn() {
     if probe_sandbox().support != SandboxSupport::Enforced {
         eprintln!("skipping live record/replay acceptance: sandbox enforcement is unavailable");

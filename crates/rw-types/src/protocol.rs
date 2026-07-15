@@ -2096,6 +2096,11 @@ pub enum EngineEvent {
         meta: EventMeta,
         mode: ModeId,
     },
+    PermissionModeChanged {
+        meta: EventMeta,
+        /// Session-local override. `None` restores the configured policy.
+        mode: Option<String>,
+    },
     PlanSubmitted {
         meta: EventMeta,
         artifact: PlanArtifact,
@@ -2246,6 +2251,7 @@ impl EngineEvent {
             | Self::SubagentFinished { meta, .. }
             | Self::ToolOutputPruned { meta, .. }
             | Self::ModeChanged { meta, .. }
+            | Self::PermissionModeChanged { meta, .. }
             | Self::PlanSubmitted { meta, .. }
             | Self::PlanReviewed { meta, .. }
             | Self::ModelChanged { meta, .. }
@@ -2331,6 +2337,7 @@ impl EngineEvent {
             | Self::SubagentFinished { meta, .. }
             | Self::ToolOutputPruned { meta, .. }
             | Self::ModeChanged { meta, .. }
+            | Self::PermissionModeChanged { meta, .. }
             | Self::PlanSubmitted { meta, .. }
             | Self::PlanReviewed { meta, .. }
             | Self::ModelChanged { meta, .. }
