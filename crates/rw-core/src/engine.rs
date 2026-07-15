@@ -17587,6 +17587,24 @@ mod tests {
         })
         .await;
         assert_eq!(permissions.snapshot().session_rules.len(), 1);
+        handle
+            .send_message("/permissions mode strict")
+            .await
+            .expect("restore strict permission mode");
+        let mode_changed = next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::PermissionModeChanged { .. })
+        })
+        .await;
+        assert!(matches!(
+            mode_changed.kind,
+            PendingEvent::PermissionModeChanged {
+                mode: Some(crate::HeadlessPermissionMode::Strict)
+            }
+        ));
+        next_matching(&mut events, |kind| {
+            matches!(kind, PendingEvent::CommandFinished { name, .. } if name == "permissions")
+        })
+        .await;
         assert_eq!(
             permissions
                 .authorize(
