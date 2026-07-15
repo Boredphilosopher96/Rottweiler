@@ -628,6 +628,10 @@ export class TuiEngineRuntime {
 
   async #requestInitialProjections(sessionId: string, signal: AbortSignal): Promise<void> {
     const commands: ClientCommand[] = [
+      // The active session descriptor is the durable source of the selected
+      // model. Request it during startup so the status bar is correct before
+      // the user ever opens /sessions or /models.
+      { type: "list_sessions", meta: this.#meta() },
       { type: "get_context", meta: this.#meta(), session_id: sessionId },
       { type: "get_cost", meta: this.#meta(), session_id: sessionId },
       {

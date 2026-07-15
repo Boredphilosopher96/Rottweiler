@@ -752,6 +752,7 @@ describe("OpenTUI engine runtime", () => {
       "resume_session",
       "resume_session",
       "take_driver",
+      "list_sessions",
       "get_context",
       "get_cost",
       "get_workspace_status",
@@ -803,6 +804,7 @@ describe("OpenTUI engine runtime", () => {
       "resume_session",
       "resume_session",
       "take_driver",
+      "list_sessions",
       "get_context",
       "get_cost",
       "get_workspace_status",
@@ -923,6 +925,7 @@ describe("OpenTUI engine runtime", () => {
     expect(commandTypes[0]).toBe("resume_session")
     expect(commandTypes.indexOf("take_driver")).toBeLessThan(commandTypes.indexOf("send_message"))
     for (const expected of [
+      "list_sessions",
       "get_context",
       "get_cost",
       "get_workspace_status",
@@ -1004,6 +1007,7 @@ describe("OpenTUI engine runtime", () => {
     expect(client.commands.map((command) => command.type)).toEqual([
       "resume_session",
       "take_driver",
+      "list_sessions",
       "get_context",
       "get_cost",
       "get_workspace_status",

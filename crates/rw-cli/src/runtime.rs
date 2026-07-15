@@ -1987,11 +1987,14 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         let mut agents = compose_agent_registry(&extension_catalog)
             .map_err(|error| miette!("agent registry could not compose: {error}"))?;
         for definition in agents.definitions() {
-            if !model.has_model_alias(definition.model()) {
+            let Some(explicit_model) = definition.model() else {
+                continue;
+            };
+            if !model.has_model_alias(explicit_model) {
                 return Err(miette!(
                     "agent {:?} selects unknown model alias {:?}",
                     definition.name(),
-                    definition.model()
+                    explicit_model
                 ));
             }
         }
@@ -2759,11 +2762,14 @@ pub(crate) async fn compose_hosted_actor(
     let mut agents = compose_agent_registry(&extension_catalog)
         .map_err(|error| miette!("agent registry could not compose: {error}"))?;
     for definition in agents.definitions() {
-        if !model.has_model_alias(definition.model()) {
+        let Some(explicit_model) = definition.model() else {
+            continue;
+        };
+        if !model.has_model_alias(explicit_model) {
             return Err(miette!(
                 "agent {:?} selects unknown model alias {:?}",
                 definition.name(),
-                definition.model()
+                explicit_model
             ));
         }
     }
@@ -6685,6 +6691,51 @@ impl RecomposableHostedModel {
             .clone()
     }
 
+    fn commit_selection(&self, prepared: PreparedHostedSelection) {
+        if let Some(provider) = &prepared.provider {
+            self.standby
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(provider);
+        }
+        let previous = {
+            let mut current = self
+                .model
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::replace(&mut *current, Arc::clone(&prepared.replacement_model))
+        };
+        let previous_post_commit = {
+            let mut active = self
+                .active_post_commit
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::replace(&mut *active, prepared.post_commit.clone())
+        };
+        if !Arc::ptr_eq(&previous, &prepared.replacement_model) {
+            let mut retained = self
+                .retained
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !retained
+                .iter()
+                .any(|known| Arc::ptr_eq(&known.model, &previous))
+            {
+                retained.push(RetainedHostedSelection {
+                    model: previous,
+                    post_commit: previous_post_commit,
+                });
+            }
+            retained.retain(|known| !Arc::ptr_eq(&known.model, &prepared.replacement_model));
+        }
+        if let Some(post_commit) = prepared.post_commit {
+            post_commit();
+        }
+        if prepared.completes_initialization {
+            self.initial_load_pending.store(false, Ordering::Release);
+        }
+    }
+
     async fn stage_standby_model(
         &self,
         alias: &str,
@@ -6759,25 +6810,28 @@ impl RecomposableHostedModel {
                 "model {alias:?} is not available from the initialized provider runtime"
             )));
         }
-        self.prepared
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                alias.to_owned(),
-                PreparedHostedSelection {
-                    provider: None,
-                    replacement_model: initialized.replacement_model,
-                    post_commit: initialized.post_commit,
-                    completes_initialization: true,
-                },
-            );
+        let prepared = PreparedHostedSelection {
+            provider: None,
+            replacement_model: initialized.replacement_model,
+            post_commit: initialized.post_commit,
+            completes_initialization: true,
+        };
         if self.initial_alias.as_deref() == Some(alias) {
             // The session's initial selection is already durable before the
             // lazy provider runtime exists. Ordinary turns prepare that same
             // alias without a ModelChanged event, so it is safe and necessary
-            // to activate here. A different alias remains staged until the
-            // model-switch event commits.
-            self.commit_prepared_model(alias);
+            // to activate here. Commit directly instead of briefly publishing
+            // the selection in `prepared`: a concurrent first-turn prepare
+            // must never observe a staged selection and stream through the
+            // unavailable placeholder before this activation completes.
+            self.commit_selection(prepared);
+        } else {
+            // A different alias is a model switch and remains staged until the
+            // durable ModelChanged event commits.
+            self.prepared
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(alias.to_owned(), prepared);
         }
         Ok(true)
     }
@@ -6863,15 +6917,6 @@ impl ModelDriver for RecomposableHostedModel {
     }
 
     async fn prepare_model(&self, alias: &str) -> std::result::Result<(), AgentLoopError> {
-        if self.initial_load_pending.load(Ordering::Acquire)
-            && self
-                .prepared
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .contains_key(alias)
-        {
-            return Ok(());
-        }
         self.prepared
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6925,48 +6970,7 @@ impl ModelDriver for RecomposableHostedModel {
         let Some(prepared) = prepared else {
             return;
         };
-        if let Some(provider) = &prepared.provider {
-            self.standby
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .remove(provider);
-        }
-        let previous = {
-            let mut current = self
-                .model
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::replace(&mut *current, Arc::clone(&prepared.replacement_model))
-        };
-        let previous_post_commit = {
-            let mut active = self
-                .active_post_commit
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            std::mem::replace(&mut *active, prepared.post_commit.clone())
-        };
-        if !Arc::ptr_eq(&previous, &prepared.replacement_model) {
-            let mut retained = self
-                .retained
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !retained
-                .iter()
-                .any(|known| Arc::ptr_eq(&known.model, &previous))
-            {
-                retained.push(RetainedHostedSelection {
-                    model: previous,
-                    post_commit: previous_post_commit,
-                });
-            }
-            retained.retain(|known| !Arc::ptr_eq(&known.model, &prepared.replacement_model));
-        }
-        if let Some(post_commit) = prepared.post_commit {
-            post_commit();
-        }
-        if prepared.completes_initialization {
-            self.initial_load_pending.store(false, Ordering::Release);
-        }
+        self.commit_selection(prepared);
     }
 
     fn discard_prepared_model(&self, alias: &str) {
@@ -12943,6 +12947,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn staged_first_load_cannot_be_mistaken_for_the_active_runtime() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let initialize_calls = Arc::clone(&calls);
+        let initialize: Arc<HostedRuntimeInitializer> = Arc::new(move |alias| {
+            assert_eq!(alias, "openai/live-model");
+            initialize_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(ActivatedHostedProvider {
+                replacement_model: Arc::new(QuickConnectedModel),
+                pre_commit: None,
+                post_commit: None,
+            })
+        });
+        let model = RecomposableHostedModel::new_lazy(
+            unavailable_hosted_model("openai/live-model"),
+            "openai/live-model".to_owned(),
+            Arc::new(QuickCatalogSource(false)),
+            unused_hosted_activator(),
+            initialize,
+        );
+        model.prepared.write().expect("prepared selections").insert(
+            "openai/live-model".to_owned(),
+            PreparedHostedSelection {
+                provider: None,
+                replacement_model: Arc::new(QuickConnectedModel),
+                post_commit: None,
+                completes_initialization: true,
+            },
+        );
+
+        model
+            .prepare_model("openai/live-model")
+            .await
+            .expect("a staged selection must not short-circuit initial activation");
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        let events = model
+            .stream("openai/live-model", quick_connect_request())
+            .expect("the first turn must use the active connected runtime")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().any(|event| {
+            matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "quick-connect-ok")
+        }));
+    }
+
+    #[tokio::test]
     async fn concurrent_first_prepares_initialize_once_and_failed_initialization_is_retryable() {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let initialize_calls = Arc::clone(&calls);
@@ -12977,6 +13026,16 @@ mod tests {
         first.expect("retry should initialize");
         second.expect("concurrent waiter should observe initialized runtime");
         assert_eq!(calls.load(Ordering::Acquire), 2);
+        for _ in 0..2 {
+            let events = model
+                .stream("openai/live-model", quick_connect_request())
+                .expect("every concurrent first-turn waiter must see the connected runtime")
+                .collect::<Vec<_>>()
+                .await;
+            assert!(events.iter().any(|event| {
+                matches!(event, Ok(ProviderEvent::TextDelta { text }) if text == "quick-connect-ok")
+            }));
+        }
     }
 
     struct FailModelChangedSink {

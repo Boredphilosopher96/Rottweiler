@@ -54,6 +54,7 @@ export class ComposerRenderable extends BoxRenderable {
   #historyIndex: number | null = null
   #historyDraft = ""
   #restoringHistory = false
+  #pendingHistoryRestore: string | null = null
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, options: ComposerOptions) {
     super(ctx, {
@@ -166,6 +167,10 @@ export class ComposerRenderable extends BoxRenderable {
     const value = this.#historyIndex === null
       ? this.#historyDraft
       : (this.#history[this.#historyIndex] ?? "")
+    // OpenTUI may publish Textarea change notifications after setText returns.
+    // Retain the exact restored value so that deferred notification cannot
+    // reset the history cursor before the user presses Down.
+    this.#pendingHistoryRestore = value
     this.#restoringHistory = true
     try {
       this.editor.setText(value)
@@ -435,13 +440,15 @@ export class ComposerRenderable extends BoxRenderable {
   }
 
   #contentChanged(): void {
-    const restoringHistory = this.#restoringHistory
+    const value = this.editor.plainText
+    const restoringHistory =
+      this.#restoringHistory || this.#pendingHistoryRestore === value
     if (!restoringHistory) {
+      this.#pendingHistoryRestore = null
       this.#historyIndex = null
       this.#historyDraft = ""
     }
     this.#refreshHeight()
-    const value = this.editor.plainText
     this.setShellMode(value.startsWith("!"))
     // Recalling a slash command must not open autocomplete and steal the next
     // Down key. The recalled draft becomes ordinary editable input on the
@@ -458,6 +465,7 @@ export class ComposerRenderable extends BoxRenderable {
     if (this.#history.length > 256) this.#history.splice(0, this.#history.length - 256)
     this.#historyIndex = null
     this.#historyDraft = ""
+    this.#pendingHistoryRestore = null
   }
 
   #refreshAttachments(): void {

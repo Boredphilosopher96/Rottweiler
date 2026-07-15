@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { CliRenderEvents, CodeRenderable, DiffRenderable } from "@opentui/core"
+import { CliRenderEvents, CodeRenderable, DiffRenderable, parseKeypress } from "@opentui/core"
 import {
   createTestRenderer,
   MockTreeSitterClient,
@@ -159,6 +159,86 @@ describe("M4 retained components", () => {
     expect(rendered).toContain("[redacted]")
     expect(rendered).not.toContain("must-not-render")
     expect(rendered.length).toBeLessThanOrEqual(120)
+  })
+
+  test("expands a successful file edit and shows its diff by default", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    const card = new ToolBlockRenderable(renderer, kennelTheme, {
+      toolCallId: "edit-expanded",
+      turnId: "1",
+      name: "edit",
+      args: { path: "src/main.rs" },
+      status: "finished",
+      capabilities: ["write_filesystem"],
+      rationale: "Apply the requested change",
+      diff: {
+        proposal_id: "proposal",
+        path: "src/main.rs",
+        unified_diff: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old();\n+new();\n",
+        arguments_hash: "arguments",
+        base_hash: "base",
+        diff_hash: "diff",
+        truncated: false,
+      },
+      chunks: [],
+      output: { type: "text", text: "1 change applied" },
+      isError: false,
+      callIndex: 0,
+    })
+    renderer.root.add(card)
+    await setup.renderOnce()
+
+    expect(card.header.plainText).toStartWith("⌄ ✓ Edit file")
+    expect(card.diff).not.toBeNull()
+    expect(card.diff?.visible).toBeTrue()
+  })
+
+  test("expands a live edit when its completed diff arrives", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    const running = {
+      toolCallId: "edit-live-expanded",
+      turnId: "1",
+      name: "edit",
+      args: { path: "src/live.rs" },
+      status: "running" as const,
+      capabilities: ["write_filesystem" as const],
+      rationale: "Apply the requested change",
+      diff: null,
+      chunks: [],
+      output: null,
+      isError: null,
+      callIndex: 0,
+    }
+    const card = new ToolBlockRenderable(renderer, kennelTheme, running)
+    renderer.root.add(card)
+    await setup.renderOnce()
+    expect(card.header.plainText).toStartWith("› ◌ Edit file")
+
+    card.update({
+      ...running,
+      status: "finished",
+      diff: {
+        proposal_id: "proposal-live",
+        path: "src/live.rs",
+        unified_diff: "--- a/src/live.rs\n+++ b/src/live.rs\n@@ -1 +1 @@\n-old();\n+new();\n",
+        arguments_hash: "arguments",
+        base_hash: "base",
+        diff_hash: "diff",
+        truncated: false,
+      },
+      output: { type: "text", text: "1 change applied" },
+      isError: false,
+    })
+    await setup.renderOnce()
+
+    expect(card.header.plainText).toStartWith("⌄ ✓ Edit file")
+    expect(card.diff?.visible).toBeTrue()
+    const renderedDiff = card.diff instanceof DiffRenderable
+      ? card.diff.diff
+      : card.diff?.plainText
+    expect(renderedDiff).toContain("+new();")
   })
 
   test("keeps the newest live tool progress and lets header drags select without toggling", async () => {
@@ -674,16 +754,16 @@ describe("M4 retained components", () => {
     expect(editCard?.header.plainText).toContain("Edit file")
     expect((editCard?.diff as DiffRenderable).filetype).toBe("rust")
     expect((editCard?.diff as DiffRenderable).diff).toContain("+new")
-    expect(editCard?.diff?.visible).toBeFalse()
-    expect(setup.captureCharFrame()).not.toContain("+new")
-    editCard?.toggle()
-    await setup.renderOnce()
     expect(editCard?.diff?.visible).toBeTrue()
     expect(setup.captureCharFrame()).toContain("+ new")
     expect(editCard?.body.plainText).toContain("File · src/main.rs")
     expect(editCard?.body.plainText).toContain("1 change applied")
     expect(editCard?.body.plainText).not.toContain("Error parsing diff")
     expect(setup.captureCharFrame()).not.toContain("Removed line count did not match")
+    editCard?.toggle()
+    await setup.renderOnce()
+    expect(editCard?.diff?.visible).toBeFalse()
+    expect(setup.captureCharFrame()).not.toContain("+ new")
 
     const retainedCommand = bashCard?.command
     app.setState({
@@ -906,7 +986,7 @@ describe("M4 retained components", () => {
     )
   })
 
-  test("commits the exact clicked permission choice once and keeps keyboard activation", async () => {
+  test("commits clicked and focused-keyboard permission choices exactly once", async () => {
     const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
     renderer = setup.renderer
     const commands: ClientCommand[] = []
@@ -949,12 +1029,27 @@ describe("M4 retained components", () => {
 
     commands.length = 0
     app.interactionPanel.select.setSelectedIndex(2)
-    app.interactionPanel.select.selectCurrent()
+    app.interactionPanel.select.focus()
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
     expect(commands.filter((command) => command.type === "approve_tool")).toEqual([
       expect.objectContaining({
         type: "approve_tool",
         tool_call_id: "click-approval",
         decision: "allow_project",
+      }),
+    ])
+
+    commands.length = 0
+    app.interactionPanel.select.setSelectedIndex(0)
+    const keypadEnter = parseKeypress("\u001b[57414u", { useKittyKeyboard: true })!
+    setup.renderer.keyInput.processParsedKey(keypadEnter)
+    await Bun.sleep(0)
+    expect(commands.filter((command) => command.type === "approve_tool")).toEqual([
+      expect.objectContaining({
+        type: "approve_tool",
+        tool_call_id: "click-approval",
+        decision: "allow_once",
       }),
     ])
   })

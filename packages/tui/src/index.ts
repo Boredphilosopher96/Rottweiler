@@ -1,4 +1,5 @@
 import { writeStartupSplash } from "./startup"
+import { enhancedKeyboardOptions } from "./keybindings"
 
 type RuntimeBootstrap =
   | {
@@ -42,10 +43,7 @@ async function main(): Promise<void> {
     targetFps: 60,
     // Extended keyboard events keep macOS Command+Arrow distinct from Ctrl+E,
     // so terminal navigation can never masquerade as the external-editor key.
-    // Use OpenTUI's proven Kitty negotiation unchanged. Extra flag combinations
-    // caused some macOS terminals to fall back to legacy Ctrl-A/Ctrl-E bytes,
-    // making Command+Right indistinguishable from the editor shortcut.
-    useKittyKeyboard: {},
+    useKittyKeyboard: enhancedKeyboardOptions,
     onDestroy: () => {
       // Closing the renderer must release the SSE/runtime handles so a normal
       // Ctrl+C can let the process end naturally. Never force exit 0 here:

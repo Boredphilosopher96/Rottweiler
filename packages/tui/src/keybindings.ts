@@ -62,6 +62,16 @@ export interface CompiledKeybindings {
   bindings(context: KeybindingContext): ReadonlyMap<string, KeybindingAction>
 }
 
+/**
+ * Ask supporting terminals to encode every physical key as an extended event.
+ *
+ * `disambiguate` alone does not stop every macOS terminal from applying its
+ * Cocoa Command+Right -> Ctrl+E compatibility mapping before forwarding input.
+ * Reporting all keys as escape sequences preserves the physical Super+Right
+ * modifier, while physical Ctrl+E remains an unambiguous Kitty event.
+ */
+export const enhancedKeyboardOptions = Object.freeze({ allKeysAsEscapes: true })
+
 export class KeybindingConfigurationError extends Error {
   readonly issues: readonly string[]
 
@@ -123,7 +133,15 @@ const STANDARD_DEFAULTS = {
     open_session_picker: ["ctrl+s"],
     paste_image: ["ctrl+v"],
   },
-  standard: { close_overlay: ["escape"], open_external_editor: ["ctrl+e"] },
+  standard: {
+    close_overlay: ["escape"],
+    open_external_editor: ["ctrl+e"],
+    // OpenTUI reports Command as `super` under Kitty keyboard and as `meta`
+    // under some older CSI-u implementations. Own both shapes before the
+    // textarea can reinterpret either one.
+    line_start: ["super+left", "meta+left"],
+    line_end: ["super+right", "meta+right"],
+  },
   review: { close_overlay: ["escape"] },
 } satisfies Partial<Record<KeybindingContext, Partial<Record<KeybindingAction, readonly string[]>>>>
 
@@ -339,6 +357,43 @@ export function keyStrokeFromEvent(event: KeyEvent): string {
     ...(event.shift ? ["shift"] : []),
   ]
   return [...modifiers, name].join("+")
+}
+
+/**
+ * Legacy macOS terminals encode Command+Left/Right as the same raw Ctrl+A/E
+ * bytes produced by physical Control+A/E. There is no modifier bit left to
+ * inspect at that point. Prefer safe cursor navigation for that ambiguous raw
+ * shape; terminals that accepted enhanced keyboard negotiation still report a
+ * physical Ctrl+E with `source: "kitty"`, so it continues to open $EDITOR.
+ */
+export function legacyMacNavigationAction(
+  event: Pick<
+    KeyEvent,
+    | "ctrl"
+    | "meta"
+    | "super"
+    | "hyper"
+    | "option"
+    | "shift"
+    | "name"
+    | "raw"
+    | "source"
+  >,
+  platform: NodeJS.Platform = process.platform,
+): Extract<KeybindingAction, "line_start" | "line_end"> | null {
+  if (platform !== "darwin" || event.source !== "raw") return null
+  if (
+    event.ctrl &&
+    !event.meta &&
+    !event.super &&
+    !event.hyper &&
+    !event.option &&
+    !event.shift
+  ) {
+    if (event.name === "a" && event.raw === "\u0001") return "line_start"
+    if (event.name === "e" && event.raw === "\u0005") return "line_end"
+  }
+  return null
 }
 
 function validateConfigurationShape(configuration: KeybindingConfiguration, issues: string[]): void {

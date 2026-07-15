@@ -111,6 +111,7 @@ pub(crate) struct OrchestratedWorkflowExecutor {
     agents: Arc<AgentRegistry>,
     parent_session_id: SessionId,
     workspace_root: PathBuf,
+    parent_model_alias: String,
     observer: Arc<dyn SubagentObserver>,
     lifecycle_order: Arc<WorkflowLifecycleOrder>,
     cancellation: CancellationToken,
@@ -189,11 +190,15 @@ impl Tool for WorkflowTool {
             ToolError::InvalidInput("workflow requires engine lifecycle routing".to_owned())
         })?;
         let observer: Arc<dyn SubagentObserver> = Arc::new(WorkflowObserver { events });
+        let parent_model_alias = context.model_alias().ok_or_else(|| {
+            ToolError::InvalidInput("workflow requires the parent turn's selected model".to_owned())
+        })?;
         let executor = OrchestratedWorkflowExecutor::new(
             self.orchestrator.clone(),
             Arc::clone(&self.agents),
             parent_session_id,
             context.workspace_root().to_owned(),
+            parent_model_alias.to_owned(),
             observer,
             context.cancellation.clone(),
         );
@@ -444,6 +449,7 @@ impl OrchestratedWorkflowExecutor {
         agents: Arc<AgentRegistry>,
         parent_session_id: SessionId,
         workspace_root: PathBuf,
+        parent_model_alias: String,
         observer: Arc<dyn SubagentObserver>,
         cancellation: CancellationToken,
     ) -> Self {
@@ -452,6 +458,7 @@ impl OrchestratedWorkflowExecutor {
             agents,
             parent_session_id,
             workspace_root,
+            parent_model_alias,
             observer,
             lifecycle_order: Arc::new(WorkflowLifecycleOrder::default()),
             cancellation,
@@ -482,7 +489,12 @@ impl WorkflowStepExecutor for OrchestratedWorkflowExecutor {
                     .agents
                     .load(name)
                     .map_err(|error| WorkflowStepExecutionError::new(error.to_string()))?;
-                SubagentRequest::from_loaded_agent(framed_input, agent, self.workspace_root.clone())
+                SubagentRequest::from_loaded_agent(
+                    framed_input,
+                    agent,
+                    self.parent_model_alias.clone(),
+                    self.workspace_root.clone(),
+                )
             }
             WorkflowStepTarget::Command(name) => {
                 let agent = self
@@ -492,6 +504,7 @@ impl WorkflowStepExecutor for OrchestratedWorkflowExecutor {
                 SubagentRequest::from_loaded_agent(
                     format!("/{name} {framed_input}"),
                     agent,
+                    self.parent_model_alias.clone(),
                     self.workspace_root.clone(),
                 )
             }
@@ -1062,6 +1075,7 @@ needs = ["impl", "tests"]
             Arc::new(agents),
             SessionId("headless-parent".to_owned()),
             project,
+            "selected-model".to_owned(),
             observer.clone(),
             CancellationToken::default(),
         );
@@ -1211,6 +1225,7 @@ needs = ["impl", "tests"]
             Arc::new(agents),
             SessionId("headless-parent".to_owned()),
             project.clone(),
+            "selected-model".to_owned(),
             Arc::new(ReplayObserver::default()),
             CancellationToken::default(),
         );
@@ -1299,6 +1314,7 @@ needs = ["impl", "tests"]
             Arc::new(agents),
             SessionId("parent".to_owned()),
             project,
+            "selected-model".to_owned(),
             Arc::new(ReplayObserver::default()),
             CancellationToken::default(),
         );
@@ -1363,6 +1379,7 @@ needs = ["impl", "tests"]
                 Arc::clone(&agents),
                 SessionId("parent".to_owned()),
                 project.clone(),
+                "selected-model".to_owned(),
                 Arc::new(ReplayObserver::default()),
                 CancellationToken::default(),
             );

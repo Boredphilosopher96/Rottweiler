@@ -4959,6 +4959,27 @@ mod tests {
     }
 
     #[test]
+    fn fresh_factory_uses_the_persisted_project_model_without_catalog_interaction() {
+        let root = tempdir().expect("root");
+        let workspace = private_test_directory(&root.path().join("workspace"));
+        let first = factory(root.path(), &workspace);
+        first
+            .settings_loader_for(&workspace)
+            .persist_tui_project_model("openai_codex/gpt-5.6-sol")
+            .expect("persist selected model");
+        drop(first);
+
+        let restarted = factory(root.path(), &workspace);
+        assert_eq!(
+            restarted
+                .requested_model_for_compose(&workspace, None, false)
+                .expect("load the restart selection")
+                .as_deref(),
+            Some("openai_codex/gpt-5.6-sol")
+        );
+    }
+
+    #[test]
     fn resume_ignores_a_corrupt_project_model_preference() {
         let root = tempdir().expect("root");
         let workspace = private_test_directory(&root.path().join("workspace"));

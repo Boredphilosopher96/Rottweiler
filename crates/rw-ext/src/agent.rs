@@ -21,7 +21,10 @@ pub enum AgentPromptSource {
 pub struct AgentDefinition {
     name: String,
     description: String,
-    model: String,
+    /// An explicit declarative model alias. Built-in agents leave this unset
+    /// so each launch inherits the parent turn's currently selected live
+    /// model instead of depending on a synthetic alias.
+    model: Option<String>,
     tools: Vec<String>,
     permission_mode: AgentPermissionMode,
     max_turns: usize,
@@ -33,7 +36,6 @@ impl AgentDefinition {
     pub fn embedded(
         name: impl Into<String>,
         description: impl Into<String>,
-        model: impl Into<String>,
         tools: Vec<String>,
         permission_mode: AgentPermissionMode,
         max_turns: usize,
@@ -42,7 +44,7 @@ impl AgentDefinition {
         Self {
             name: name.into(),
             description: description.into(),
-            model: model.into(),
+            model: None,
             tools,
             permission_mode,
             max_turns,
@@ -55,7 +57,7 @@ impl AgentDefinition {
         Self {
             name: agent.name().to_owned(),
             description: agent.description().to_owned(),
-            model: agent.model().to_owned(),
+            model: Some(agent.model().to_owned()),
             tools: agent.tools().to_vec(),
             permission_mode: agent.permission_mode(),
             max_turns: agent.max_turns(),
@@ -74,8 +76,8 @@ impl AgentDefinition {
     }
 
     #[must_use]
-    pub fn model(&self) -> &str {
-        &self.model
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
     }
 
     #[must_use]
@@ -120,7 +122,9 @@ impl AgentDefinition {
 pub struct LoadedAgent {
     pub name: String,
     pub description: String,
-    pub model: String,
+    /// `None` means inherit the exact model selected for the parent turn.
+    /// Declarative agents retain their explicit alias in `Some`.
+    pub model: Option<String>,
     pub tools: Vec<String>,
     pub permission_mode: AgentPermissionMode,
     pub max_turns: usize,
@@ -187,10 +191,13 @@ impl AgentRegistry {
     ) -> Result<(), AgentRegistryError> {
         let aliases = aliases.into_iter().collect::<BTreeSet<_>>();
         for definition in self.definitions.values() {
-            if !aliases.contains(definition.model()) {
+            let Some(model) = definition.model() else {
+                continue;
+            };
+            if !aliases.contains(model) {
                 return Err(AgentRegistryError::UnknownModelAlias {
                     agent: definition.name.clone(),
-                    model: definition.model.clone(),
+                    model: model.to_owned(),
                 });
             }
         }
@@ -275,7 +282,6 @@ fn builtin_agents() -> [AgentDefinition; 3] {
         AgentDefinition::embedded(
             "explore",
             "Read-only repository exploration",
-            "fast",
             vec![
                 "read".to_owned(),
                 "grep".to_owned(),
@@ -289,7 +295,6 @@ fn builtin_agents() -> [AgentDefinition; 3] {
         AgentDefinition::embedded(
             "plan",
             "Evidence-based implementation planning",
-            "fast",
             vec![
                 "read".to_owned(),
                 "grep".to_owned(),
@@ -303,7 +308,6 @@ fn builtin_agents() -> [AgentDefinition; 3] {
         AgentDefinition::embedded(
             "general",
             "General delegated coding work",
-            "fast",
             [
                 "read",
                 "write",
@@ -340,7 +344,12 @@ fn validate_definition(definition: &AgentDefinition) -> Result<(), AgentRegistry
         && definition.name.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
         });
-    if !name_valid || definition.description.trim().is_empty() || definition.model.trim().is_empty()
+    if !name_valid
+        || definition.description.trim().is_empty()
+        || definition
+            .model
+            .as_ref()
+            .is_some_and(|model| model.trim().is_empty())
     {
         return Err(AgentRegistryError::Invalid {
             name: definition.name.clone(),
@@ -405,15 +414,34 @@ mod tests {
     }
 
     #[test]
-    fn unknown_model_alias_fails_registry_validation() {
-        let catalog = ExtensionCatalog::default();
+    fn builtins_inherit_model_and_explicit_declarative_aliases_are_validated() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = project.join(".agents/agents/custom.md");
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        std::fs::write(
+            path,
+            "---\nname: custom\ndescription: custom\nmodel: explicit-model\ntools: [read]\npermission-mode: discuss\n---\nCustom prompt.",
+        )
+        .expect("agent");
+        let catalog = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
+        )
+        .expect("catalog");
         let registry = compose_agent_registry(&catalog).expect("registry");
+
+        assert_eq!(registry.load("general").expect("general").model, None);
 
         let error = registry
             .validate_model_aliases(["default"])
-            .expect_err("fast is not configured");
+            .expect_err("explicit model is not configured");
 
-        assert!(error.to_string().contains("unknown model alias `fast`"));
+        assert!(
+            error
+                .to_string()
+                .contains("unknown model alias `explicit-model`")
+        );
     }
 
     #[test]

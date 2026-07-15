@@ -5940,6 +5940,34 @@ describe("Rottweiler OpenTUI shell", () => {
     })
   })
 
+  test("projects the persisted model from the active session before the model picker opens", async () => {
+    const setup = await createTestRenderer({ width: 96, height: 14, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { sessionId: "session-restarted" })
+    renderer.root.add(app)
+
+    app.handleEvent({
+      type: "sessions_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "restart-client",
+        request_id: "restart-session",
+      },
+      sessions: [{
+        session_id: "session-restarted",
+        title: "Restarted session",
+        workspace_name: "Rottweiler",
+        model: "openai_codex/gpt-5.6-sol",
+        driver_client_id: "restart-client",
+        shell_active: false,
+      }],
+    })
+
+    expect(app.state.model).toBe("openai_codex/gpt-5.6-sol")
+    expect(app.state.provider).toBe("openai_codex")
+    expect(app.statusLine.plainText).toContain("openai_codex/gpt-5.6-sol")
+  })
+
   test("routes /review and /fork through typed protocol commands", async () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer

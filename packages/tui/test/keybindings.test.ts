@@ -7,6 +7,8 @@ import type { ClientCommand } from "../src/protocol"
 import {
   KeybindingConfigurationError,
   compileKeybindings,
+  enhancedKeyboardOptions,
+  legacyMacNavigationAction,
   parseKeybindingToml,
   type KeybindingConfiguration,
 } from "../src/keybindings"
@@ -91,15 +93,27 @@ describe("standard TUI keyboard safety", () => {
     renderer = undefined
   })
 
-  test("decodes macOS Command arrows separately from a physical Ctrl+E", () => {
+  test("decodes enhanced macOS Command arrows separately from a physical Ctrl+E", () => {
     const commandRight = parseKeypress("\u001b[1;9C", { useKittyKeyboard: true })
     const commandLeft = parseKeypress("\u001b[1;9D", { useKittyKeyboard: true })
-    const controlE = parseKeypress("\u0005", { useKittyKeyboard: true })
+    const controlE = parseKeypress("\u001b[101;5u", { useKittyKeyboard: true })
 
+    expect(enhancedKeyboardOptions).toEqual({ allKeysAsEscapes: true })
     expect(commandRight).toMatchObject({ name: "right", super: true, ctrl: false })
     expect(commandLeft).toMatchObject({ name: "left", super: true, ctrl: false })
-    expect(controlE).toMatchObject({ name: "e", ctrl: true })
+    expect(controlE).toMatchObject({ name: "e", ctrl: true, source: "kitty" })
     expect(controlE?.super).not.toBe(true)
+  })
+
+  test("treats ambiguous legacy macOS Ctrl+A/E bytes as Command-arrow navigation", () => {
+    const legacyCommandLeft = parseKeypress("\u0001", { useKittyKeyboard: true })!
+    const legacyCommandRight = parseKeypress("\u0005", { useKittyKeyboard: true })!
+    const enhancedControlE = parseKeypress("\u001b[101;5u", { useKittyKeyboard: true })!
+
+    expect(legacyMacNavigationAction(legacyCommandLeft, "darwin")).toBe("line_start")
+    expect(legacyMacNavigationAction(legacyCommandRight, "darwin")).toBe("line_end")
+    expect(legacyMacNavigationAction(enhancedControlE, "darwin")).toBeNull()
+    expect(legacyMacNavigationAction(legacyCommandRight, "linux")).toBeNull()
   })
 
   test("uses double Escape to interrupt an active response", async () => {
@@ -173,18 +187,45 @@ describe("standard TUI keyboard safety", () => {
     app.composer.value = "rottweiler"
     app.composer.editor.cursorOffset = 0
 
-    setup.mockInput.pressArrow("right", { super: true })
+    const commandRight = parseKeypress("\u001b[1;9C", { useKittyKeyboard: true })!
+    const commandLeft = parseKeypress("\u001b[1;9D", { useKittyKeyboard: true })!
+    const controlE = parseKeypress("\u001b[101;5u", { useKittyKeyboard: true })!
+    setup.renderer.keyInput.processParsedKey(commandRight)
     expect(app.composer.editor.cursorOffset).toBe(new TextEncoder().encode("rottweiler").length)
     expect(editorCalls).toBe(0)
-    setup.mockInput.pressArrow("left", { super: true })
+    setup.renderer.keyInput.processParsedKey(commandLeft)
     expect(app.composer.editor.cursorOffset).toBe(0)
     setup.mockInput.pressArrow("right", { meta: true })
     expect(app.composer.editor.cursorOffset).toBe(new TextEncoder().encode("rottweiler").length)
     setup.mockInput.pressArrow("left", { meta: true })
     expect(app.composer.editor.cursorOffset).toBe(0)
-    setup.mockInput.pressKey("e", { ctrl: true })
+    setup.renderer.keyInput.processParsedKey(controlE)
     await Bun.sleep(0)
     expect(editorCalls).toBe(1)
+  })
+
+  test("never opens the editor for the legacy macOS Command+Right byte", async () => {
+    const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
+    renderer = setup.renderer
+    let editorCalls = 0
+    const app = createRottweilerApp(renderer, {
+      editor: {
+        async compose(draft) {
+          editorCalls += 1
+          return draft
+        },
+      },
+    })
+    renderer.root.add(app)
+    app.composer.value = "rottweiler"
+    app.composer.editor.cursorOffset = 0
+
+    const legacyCommandRight = parseKeypress("\u0005", { useKittyKeyboard: true })!
+    setup.renderer.keyInput.processParsedKey(legacyCommandRight)
+    await Bun.sleep(0)
+
+    expect(app.composer.editor.cursorOffset).toBe(new TextEncoder().encode("rottweiler").length)
+    expect(editorCalls).toBe(0)
   })
 
   test("cycles accepted prompt history without stealing multiline cursor movement", async () => {
@@ -243,6 +284,10 @@ describe("standard TUI keyboard safety", () => {
     setup.mockInput.pressArrow("up")
     expect(app.composer.value).toBe("/status")
     expect(app.picker.visible).toBeFalse()
+    // Production OpenTUI can publish a deferred/duplicate content notification
+    // after programmatic history restoration. It must not erase the cursor and
+    // trap Down on the recalled command.
+    app.composer.editor.setText(app.composer.value)
     setup.mockInput.pressArrow("down")
     expect(app.composer.value).toBe("/cost")
     expect(app.picker.visible).toBeFalse()

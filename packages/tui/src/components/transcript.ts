@@ -192,6 +192,7 @@ export class ToolBlockRenderable extends BoxRenderable {
   #theme: RottweilerTheme
   #onExpansionChange: ((expanded: boolean) => void) | undefined
   #rendering: TranscriptRenderableOptions | undefined
+  #userSetExpansion: boolean
 
   constructor(
     ctx: RenderContext,
@@ -216,7 +217,12 @@ export class ToolBlockRenderable extends BoxRenderable {
     })
     this.#theme = theme
     this.#tool = tool
-    this.#collapsed = expanded === undefined ? tool.status !== "awaiting_approval" : !expanded
+    const successfulFileEdit =
+      tool.status === "finished" && tool.isError !== true && tool.diff !== null
+    this.#collapsed = expanded === undefined
+      ? tool.status !== "awaiting_approval" && !successfulFileEdit
+      : !expanded
+    this.#userSetExpansion = expanded !== undefined
     this.#onExpansionChange = onExpansionChange
     this.#rendering = rendering
     this.header = new TextRenderable(ctx, {
@@ -252,8 +258,22 @@ export class ToolBlockRenderable extends BoxRenderable {
 
   update(tool: ToolProjection): void {
     const previousStatus = this.#tool.status
+    const previousDiff = this.#tool.diff
     this.#tool = tool
     if (tool.status === "awaiting_approval" && previousStatus !== "awaiting_approval") {
+      this.#collapsed = false
+      this.body.visible = true
+    }
+    if (
+      !this.#userSetExpansion &&
+      tool.status === "finished" &&
+      tool.isError !== true &&
+      tool.diff !== null &&
+      (previousStatus !== "finished" || previousDiff === null)
+    ) {
+      // Live cards are created while a tool is still running, before its diff
+      // exists. Expand on the completion transition instead of relying only
+      // on constructor state, while preserving an explicit user collapse.
       this.#collapsed = false
       this.body.visible = true
     }
@@ -394,6 +414,7 @@ export class ToolBlockRenderable extends BoxRenderable {
   }
 
   toggle(): void {
+    this.#userSetExpansion = true
     this.#collapsed = !this.#collapsed
     this.body.visible = !this.#collapsed
     this.update(this.#tool)

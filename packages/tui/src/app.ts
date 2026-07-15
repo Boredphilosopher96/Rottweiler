@@ -23,6 +23,7 @@ import {
 import {
   compileKeybindings,
   keyStrokeFromEvent,
+  legacyMacNavigationAction,
   type CompiledKeybindings,
   type InputMode,
   type KeybindingAction,
@@ -446,6 +447,35 @@ export class RottweilerApp extends BoxRenderable {
       this.composer.navigateHistory(key.name === "up" ? "previous" : "next")
     ) {
       if (this.#pickerAnchored) this.closePicker()
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    if (
+      focusOwner === "interaction" &&
+      !key.ctrl &&
+      !key.meta &&
+      !key.super &&
+      !key.option &&
+      !key.hyper &&
+      !key.shift &&
+      (key.name === "return" || key.name === "kpenter")
+    ) {
+      // SelectRenderable handles Return internally but does not normalize the
+      // keypad Enter event on every terminal. Own both shapes at the global
+      // priority layer so the focused safety choice is committed exactly once.
+      this.interactionPanel.select.selectCurrent()
+      key.preventDefault()
+      key.stopPropagation()
+      return
+    }
+    const legacyMacNavigation = focusOwner === "composer"
+      ? legacyMacNavigationAction(key)
+      : null
+    if (
+      legacyMacNavigation !== null &&
+      this.#handleKeybindingAction(legacyMacNavigation)
+    ) {
       key.preventDefault()
       key.stopPropagation()
       return
@@ -1080,7 +1110,20 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (event.type === "workspace_files_found") this.#clearProjectionError("files")
     const previous = this.#state
-    const next = reduceRottweilerState(previous, engineEvent(event))
+    let next = reduceRottweilerState(previous, engineEvent(event))
+    if (event.type === "sessions_listed" && Array.isArray(eventRecord.sessions)) {
+      const active = eventRecord.sessions.find(
+        (session) => isRecord(session) && session.session_id === this.#sessionId,
+      )
+      if (isRecord(active) && typeof active.model === "string") {
+        const separator = active.model.indexOf("/")
+        next = {
+          ...next,
+          model: active.model,
+          provider: separator > 0 ? active.model.slice(0, separator) : null,
+        }
+      }
+    }
     // Advance protocol state immediately so reconnect cursors and durable handoff
     // observe every accepted event even when its presentation waits for a frame.
     this.#state = next

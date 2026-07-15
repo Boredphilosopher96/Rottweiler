@@ -95,12 +95,13 @@ impl SubagentRequest {
     pub fn from_loaded_agent(
         task: impl Into<String>,
         agent: LoadedAgent,
+        inherited_model: impl Into<String>,
         workspace_root: PathBuf,
     ) -> Self {
         Self {
             task: task.into(),
             agent: agent.name,
-            model: agent.model,
+            model: agent.model.unwrap_or_else(|| inherited_model.into()),
             tools: agent.tools,
             system_prompt: Some(agent.system_prompt),
             permission_mode: match agent.permission_mode {
@@ -2017,15 +2018,21 @@ impl Tool for SpawnAgentTool {
                     .agents
                     .load(&agent_name)
                     .map_err(|error| ToolError::InvalidInput(error.to_string()))?;
-                if !self.model.has_model_alias(&loaded.model) {
+                let inherited_model = context.model_alias().ok_or_else(|| {
+                    ToolError::InvalidInput(
+                        "spawn_agent requires the parent turn's selected model".to_owned(),
+                    )
+                })?;
+                let resolved_model = loaded.model.as_deref().unwrap_or(inherited_model);
+                if !self.model.has_model_alias(resolved_model) {
                     return Err(ToolError::InvalidInput(format!(
-                        "agent `{agent_name}` selects unconfigured model alias `{}`",
-                        loaded.model
+                        "agent `{agent_name}` selects unconfigured model alias `{resolved_model}`"
                     )));
                 }
                 let request = SubagentRequest::from_loaded_agent(
                     task,
                     loaded,
+                    inherited_model,
                     context.workspace_root().to_path_buf(),
                 );
                 let request = SubagentRequest {
@@ -2574,6 +2581,54 @@ mod tests {
 
     use super::*;
 
+    struct SelectedModel;
+
+    impl ModelDriver for SelectedModel {
+        fn stream(
+            &self,
+            _alias: &str,
+            _request: rw_providers::ProviderRequest,
+        ) -> Result<rw_providers::BoxEventStream, AgentLoopError> {
+            Err(AgentLoopError::Provider(
+                "selected-model fixture must not stream".to_owned(),
+            ))
+        }
+
+        fn has_model_alias(&self, alias: &str) -> bool {
+            alias == "openai_codex/gpt-5.6-sol"
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSubagentSink {
+        lifecycles: Mutex<Vec<SubagentLifecycleEvent>>,
+    }
+
+    #[async_trait]
+    impl SubagentEventSink for RecordingSubagentSink {
+        async fn lifecycle(&self, event: SubagentLifecycleEvent) -> Result<(), ToolError> {
+            self.lifecycles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event);
+            Ok(())
+        }
+
+        async fn progress(&self, _event: SubagentProgressEvent) -> Result<(), ToolError> {
+            Ok(())
+        }
+    }
+
+    struct RejectingApprover(AtomicUsize);
+
+    #[async_trait]
+    impl crate::PermissionApprover for RejectingApprover {
+        async fn decide(&self, _request: crate::PermissionRequest) -> rw_types::ApprovalDecision {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            rw_types::ApprovalDecision::Deny
+        }
+    }
+
     #[derive(Default)]
     struct FakeFactory {
         active: Arc<AtomicUsize>,
@@ -2582,6 +2637,7 @@ mod tests {
         hang_cancel: bool,
         closed_artifacts: Arc<Mutex<Vec<Option<String>>>>,
         fail_close: bool,
+        launches: Arc<Mutex<Vec<SubagentRequest>>>,
     }
 
     struct FakeSession {
@@ -2614,6 +2670,10 @@ mod tests {
             &self,
             launch: SubagentLaunch,
         ) -> Result<Arc<dyn SubagentSession>, OrchestrationError> {
+            self.launches
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(launch.request.clone());
             Ok(Arc::new(FakeSession {
                 session_id: launch.handle.session_id,
                 active: Arc::clone(&self.active),
@@ -3280,6 +3340,84 @@ mod tests {
             orchestrator.wait(handle).await.expect("result");
         }
         assert_eq!(factory.peak.load(Ordering::Acquire), 4);
+    }
+
+    #[tokio::test]
+    async fn yolo_spawn_inherits_selected_live_model_for_multiple_builtin_children() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let factory = Arc::new(FakeFactory::default());
+        let launches = Arc::clone(&factory.launches);
+        let orchestrator = orchestrator(SubagentLimits::default(), factory);
+        let mut agents = rw_ext::compose_agent_registry(&rw_ext::ExtensionCatalog::default())
+            .expect("built-in agents");
+        agents
+            .resolve_tool_names(std::iter::empty())
+            .expect("built-in tools filter to the available registry");
+        let tool = SpawnAgentTool::new(orchestrator, Arc::new(agents), Arc::new(SelectedModel));
+        let sink = Arc::new(RecordingSubagentSink::default());
+        let context = ToolContext::new(workspace.path())
+            .expect("tool context")
+            .with_session_id(SessionId("parent".to_owned()))
+            .with_model_alias("openai_codex/gpt-5.6-sol")
+            .with_subagent_event_sink(sink.clone());
+        let gate = crate::PermissionGate::from_config(crate::PermissionConfig {
+            default: PermissionDecision::Ask,
+            rules: Vec::new(),
+        })
+        .with_workspace_roots([workspace.path()]);
+        gate.set_runtime_mode(Some(crate::HeadlessPermissionMode::Yolo))
+            .expect("interactive session switches to YOLO");
+        let approver = RejectingApprover(AtomicUsize::new(0));
+
+        for (agent, isolation) in [("explore", "shared"), ("general", "shared")] {
+            let input = json!({
+                "action": "spawn",
+                "task": "delay:1",
+                "agent": agent,
+                "isolation": isolation,
+            });
+            let capabilities = tool
+                .invocation_capabilities(&input)
+                .expect("spawn capabilities")
+                .capabilities()
+                .to_vec();
+            let permission = crate::PermissionRequest {
+                id: format!("spawn-{agent}"),
+                tool_name: "spawn_agent".to_owned(),
+                arguments: input.clone(),
+                capabilities,
+                approval_diff: None,
+            };
+            assert_eq!(
+                gate.authorize(permission, &approver).await,
+                crate::PermissionOutcome::Allowed,
+                "YOLO must bypass the parent approval modal"
+            );
+            tool.execute(&context, input)
+                .await
+                .expect("built-in child uses parent model");
+        }
+
+        assert_eq!(approver.0.load(Ordering::SeqCst), 0);
+        let launches = launches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(launches.len(), 2);
+        assert_eq!(launches[0].agent, "explore");
+        assert_eq!(launches[1].agent, "general");
+        assert!(
+            launches
+                .iter()
+                .all(|launch| launch.model == "openai_codex/gpt-5.6-sol")
+        );
+        assert_eq!(
+            sink.lifecycles
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            4,
+            "each child emits spawned and finished lifecycle events"
+        );
     }
 
     #[tokio::test]
