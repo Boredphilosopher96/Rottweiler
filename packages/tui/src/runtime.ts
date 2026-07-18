@@ -17,9 +17,11 @@ import {
 } from "./state"
 import {
   EngineHttpSseClient,
+  durableSequenceId,
   isSessionForkedEvent,
   isRecord,
   type EngineSubscriptionOptions,
+  type EngineStreamRestartMode,
   type TransportConnectionUpdate,
   type WireEngineEvent,
 } from "./transport"
@@ -72,6 +74,7 @@ export interface RuntimeEngineClient {
     readonly warnings: readonly string[]
   }>
   activateProvider?(sessionId: string, provider: string, signal?: AbortSignal): Promise<void>
+  restartStream(mode?: EngineStreamRestartMode): boolean
   subscribe(options: EngineSubscriptionOptions): Promise<void>
 }
 
@@ -166,6 +169,7 @@ export class TuiEngineRuntime {
   #transitionController: AbortController | null = null
   #subscriptionController: AbortController | null = null
   #subscription: Promise<void> | null = null
+  #recoveringSequenceGap = false
   readonly #forkRequests = new Map<string, string>()
 
   constructor(
@@ -404,6 +408,7 @@ export class TuiEngineRuntime {
   async #activateSession(sessionId: string, resetProjection: boolean): Promise<void> {
     const generation = ++this.#sessionGeneration
     this.#driverReady = false
+    this.#recoveringSequenceGap = false
     this.#transitionController?.abort(
       new DOMException("session transition superseded", "AbortError"),
     )
@@ -527,7 +532,21 @@ export class TuiEngineRuntime {
                 // retry replays the same durable child instead of duplicating it.
               })
             }
+            const previousGap = bound.state.connection.gap
+            const previousSequence = bound.state.lastSequence
             bound.handleEvent(event)
+            const nextGap = bound.state.connection.gap
+            if (nextGap === null) {
+              this.#recoveringSequenceGap = false
+            } else if (previousGap === null) {
+              this.#recoveringSequenceGap = this.#client.restartStream("immediate")
+            } else if (
+              this.#recoveringSequenceGap &&
+              bound.state.lastSequence === previousSequence &&
+              durableSequenceId(event) === nextGap.received
+            ) {
+              this.#client.restartStream("backoff")
+            }
             if (bound.state.lastSequence !== null) {
               this.#handoff?.record(bound.state.lastSequence)
             }

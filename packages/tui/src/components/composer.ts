@@ -91,7 +91,7 @@ export class ComposerRenderable extends BoxRenderable {
       minHeight: 2,
       maxHeight: 5,
       initialValue: "",
-      placeholder: "Message Rottweiler · @ files · ctrl+v image · ctrl+e $EDITOR",
+      placeholder: "Message Rottweiler · @ files · Ctrl+V image · Ctrl+E $EDITOR",
       backgroundColor: theme.panel,
       textColor: theme.foreground,
       focusedBackgroundColor: theme.panelRaised,
@@ -211,7 +211,7 @@ export class ComposerRenderable extends BoxRenderable {
     this.focusedBorderColor = active ? this.#theme.warning : this.#theme.focus
     this.editor.placeholder = active
       ? "Shell command · Enter to run in foreground"
-      : "Message Rottweiler · @ files · ctrl+v image · ctrl+e $EDITOR"
+      : "Message Rottweiler · @ files · Ctrl+V image · Ctrl+E $EDITOR"
   }
 
   currentFileMention(): ComposerFileMention | null {

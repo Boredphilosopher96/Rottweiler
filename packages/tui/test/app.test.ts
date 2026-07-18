@@ -159,6 +159,34 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.banner.plainText).toBe("Copied to clipboard")
   })
 
+  test("scrolls the transcript with PageUp in standard mode without blurring the composer", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const transcript = Array.from({ length: 40 }, (_, index) => ({
+      sequenceId: String(index + 1),
+      agentTurn: String(index + 1),
+      turn: {
+        role: "assistant" as const,
+        blocks: [{ type: "text" as const, text: `Retained line ${index}` }],
+        meta: { synthetic: false, summary: false },
+      },
+    }))
+    const app = createRottweilerApp(renderer, {
+      initialState: { ...createInitialState(), transcript },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    app.transcript.scrollTo(app.transcript.scroller.scrollHeight)
+    app.composer.focus()
+    const before = app.transcript.scroller.scrollTop
+
+    setup.mockInput.pressKey("\x1b[5~")
+    await setup.renderOnce()
+
+    expect(app.transcript.scroller.scrollTop).toBeLessThan(before)
+    expect(app.composer.editor.focused).toBeTrue()
+  })
+
   test("does not clear a newer selection when an older clipboard write finishes", async () => {
     const setup = await createTestRenderer({ width: 88, height: 18, useThread: false })
     renderer = setup.renderer
@@ -395,7 +423,7 @@ describe("Rottweiler OpenTUI shell", () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Rottweiler")
     expect(frame).toContain("hello")
-    expect(frame).toContain("model none · ctrl+m")
+    expect(frame).toContain("model none · Ctrl+M")
 
     const cells = setup.captureSpans()
     expect(cells.cols).toBe(72)
@@ -1350,7 +1378,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.banner.plainText).not.toContain("attempt")
     expect(app.banner.plainText).not.toContain("disconnected")
     expect(app.statusLine.plainText).toContain("◉ execute")
-    expect(app.statusLine.plainText).toContain("model none · ctrl+m")
+    expect(app.statusLine.plainText).toContain("model none · Ctrl+M")
     expect(app.statusLine.plainText).toContain("cache —")
     app.handleEvent({
       type: "error",
@@ -1676,7 +1704,7 @@ describe("Rottweiler OpenTUI shell", () => {
     })
     expect(app.state.transcript).toEqual([])
     expect(app.visibleState.streamingTail?.text).toBe("Authentication uses a bounded token exchange.")
-    expect(app.banner.plainText).toContain("◉ CHILD AGENT · Audit authentication")
+    expect(app.banner.plainText).toContain("◉ child agent · Audit authentication")
     expect(app.banner.plainText).toContain("running · using tool · grep · token exchange · 1m23s")
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("reviewer · Streaming")
@@ -3806,7 +3834,7 @@ describe("Rottweiler OpenTUI shell", () => {
       truncated: true,
     })
     expect(app.visibleState.streamingTail?.text).toBe("Recent retained work.")
-    expect(app.banner.plainText).toContain("recent activity; 9 earlier events retained")
+    expect(app.banner.plainText).toContain("recent activity · 9 earlier events retained")
     expect(app.banner.plainText).not.toContain("data loss")
     expect(emitted.filter((command) => command.type === "replay_subagent")).toHaveLength(1)
   })
@@ -4044,6 +4072,77 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options).toHaveLength(0)
     app.picker.select.selectCurrent()
     expect(app.state.errors).toHaveLength(0)
+  })
+
+  test("presents loaded-empty file and session results as picker status", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    let request = 0
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      requestId: () => `empty-${++request}`,
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openFilePicker("missing")
+    const files = commands.at(-1)
+    if (files?.type !== "search_workspace_files") throw new Error("missing workspace search")
+    app.handleEvent({
+      type: "workspace_files_found",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: files.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      matches: [],
+      truncated: false,
+    })
+    expect(app.picker.status.plainText).toContain("No matching files")
+    expect(app.picker.select.visible).toBeFalse()
+
+    app.openSessionPicker()
+    const sessions = commands.at(-1)
+    if (sessions?.type !== "list_sessions") throw new Error("missing session list")
+    app.handleEvent({
+      type: "sessions_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: sessions.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      sessions: [],
+    })
+    expect(app.picker.status.plainText).toContain("No sessions found")
+    expect(app.picker.select.visible).toBeFalse()
+  })
+
+  test("retries MCP projection failures from the picker", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        commands.push(command)
+        if (command.type === "list_mcp_servers") return Promise.reject(new Error("MCP discovery timed out"))
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openMcpPicker()
+    await Bun.sleep(0)
+    expect(app.picker.select.options[0]?.value).toBe("mcp.error")
+    expect(app.picker.select.options[0]?.description).toContain("MCP discovery timed out")
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(commands.filter((command) => command.type === "list_mcp_servers")).toHaveLength(2)
   })
 
   test("clears a partial anchored trigger before opening a local slash action", async () => {
@@ -4490,6 +4589,19 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
     app.openMcpPicker()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({ type: "list_mcp_servers" }))
+    const list = emitted.at(-1)
+    if (list?.type !== "list_mcp_servers") throw new Error("missing MCP server list")
+    app.handleEvent({
+      type: "mcp_servers_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      servers: [],
+    })
     app.picker.select.selectCurrent()
     await setup.mockInput.typeText("docs.remote")
     setup.mockInput.pressEnter()

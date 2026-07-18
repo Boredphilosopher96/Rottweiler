@@ -52,6 +52,10 @@ export interface TerminalLifecycle {
   resume(): void
 }
 
+export interface KittyKeyboardRendererLifecycle extends TerminalLifecycle {
+  disableKittyKeyboard(): void
+}
+
 export interface ProcessExecutionOptions {
   readonly inheritTerminal?: boolean
   readonly maximumStdoutBytes?: number
@@ -114,6 +118,24 @@ export const systemProcessExecutor: ProcessExecutor = {
   run(executable, args, options = {}) {
     return executeProcess(executable, args, options)
   },
+}
+
+/** Releases terminal keyboard ownership before an inherited foreground process. */
+export function createTerminalHandover(
+  renderer: KittyKeyboardRendererLifecycle,
+): TerminalLifecycle {
+  return {
+    suspend() {
+      // OpenTUI's native resume restores its configured kitty flags. Pop the
+      // protocol while the native output channel is still active, before the
+      // renderer suspends that channel and gives stdin to the child.
+      renderer.disableKittyKeyboard()
+      renderer.suspend()
+    },
+    resume() {
+      renderer.resume()
+    },
+  }
 }
 
 export function createExternalEditorAdapter(

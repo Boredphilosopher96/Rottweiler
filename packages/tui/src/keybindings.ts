@@ -139,6 +139,10 @@ const STANDARD_DEFAULTS = {
   standard: {
     close_overlay: ["escape"],
     open_external_editor: ["ctrl+e"],
+    page_up: ["pageup"],
+    page_down: ["pagedown"],
+    view_top: ["shift+pageup"],
+    view_bottom: ["shift+pagedown"],
     // OpenTUI reports Command as `super` under Kitty keyboard and as `meta`
     // under some older CSI-u implementations. Own both shapes before the
     // textarea can reinterpret either one.

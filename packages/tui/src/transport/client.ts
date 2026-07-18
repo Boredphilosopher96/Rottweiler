@@ -33,6 +33,8 @@ export interface EngineTransportOptions {
 
 export type BootstrapTokenProvider = () => string | Promise<string>
 
+export type EngineStreamRestartMode = "immediate" | "backoff"
+
 export interface EngineSubscriptionOptions {
   readonly attach: AttachSessionCommand
   readonly signal: AbortSignal
@@ -41,6 +43,11 @@ export interface EngineSubscriptionOptions {
   readonly onReconnect?: () => void | Promise<void>
   readonly getLastSeenSequence?: () => string | null
   readonly requestId?: () => string
+}
+
+interface ActiveEventStream {
+  readonly controller: AbortController
+  restart: EngineStreamRestartMode | null
 }
 
 export class EngineHttpSseClient {
@@ -57,6 +64,7 @@ export class EngineHttpSseClient {
   readonly #fetch: typeof fetch
   #clientAuth: ClientAuth | null = null
   #clientAuthRequest: Promise<ClientAuth> | null = null
+  #activeEventStream: ActiveEventStream | null = null
 
   constructor(options: EngineTransportOptions) {
     if (options.socketPath.length === 0) {
@@ -160,6 +168,18 @@ export class EngineHttpSseClient {
     if (!response.ok) throw new EngineTransportError("provider activation failed", response.status)
   }
 
+  restartStream(mode: EngineStreamRestartMode = "immediate"): boolean {
+    const active = this.#activeEventStream
+    if (active === null || active.controller.signal.aborted) {
+      return false
+    }
+    active.restart = mode
+    active.controller.abort(
+      new DOMException("engine event stream restart requested", "AbortError"),
+    )
+    return true
+  }
+
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
     let attempt = 0
     let reconnecting = false
@@ -178,7 +198,12 @@ export class EngineHttpSseClient {
       })
 
       let receivedEvent = false
-      const eventStreamController = new AbortController()
+      const eventStream: ActiveEventStream = {
+        controller: new AbortController(),
+        restart: null,
+      }
+      const eventStreamController = eventStream.controller
+      this.#activeEventStream = eventStream
       const abortEventStream = () => eventStreamController.abort(options.signal.reason)
       options.signal.addEventListener("abort", abortEventStream, { once: true })
       try {
@@ -240,24 +265,34 @@ export class EngineHttpSseClient {
           if (sequence !== null) {
             lastSeen = options.getLastSeenSequence?.() ?? sequence
           }
+          if (eventStream.restart !== null) {
+            break
+          }
         }
         options.onConnection?.({ phase: "disconnected", attempt })
       } catch (error) {
-        if (options.signal.aborted || isAbortError(error)) {
+        if (options.signal.aborted || (eventStream.restart === null && isAbortError(error))) {
           break
         }
-        options.onConnection?.({
-          phase: "disconnected",
-          attempt,
-          error: transportErrorMessage(error),
-        })
-        // A bounded parser rejection is deterministic for the same replay
-        // cursor. Retrying would request the identical poison event forever.
-        if (error instanceof SseLimitError) {
-          throw error
+        if (eventStream.restart !== null) {
+          options.onConnection?.({ phase: "disconnected", attempt })
+        } else {
+          options.onConnection?.({
+            phase: "disconnected",
+            attempt,
+            error: transportErrorMessage(error),
+          })
+          // A bounded parser rejection is deterministic for the same replay
+          // cursor. Retrying would request the identical poison event forever.
+          if (error instanceof SseLimitError) {
+            throw error
+          }
         }
       } finally {
         options.signal.removeEventListener("abort", abortEventStream)
+        if (this.#activeEventStream === eventStream) {
+          this.#activeEventStream = null
+        }
         if (!eventStreamController.signal.aborted) {
           eventStreamController.abort(new Error("engine event stream attempt ended"))
         }
@@ -266,7 +301,14 @@ export class EngineHttpSseClient {
       if (options.signal.aborted) {
         break
       }
-      const delayAttempt = receivedEvent ? 0 : attempt
+      if (eventStream.restart === "immediate") {
+        attempt = 0
+        reconnecting = true
+        lastSeen = options.getLastSeenSequence?.() ?? lastSeen
+        continue
+      }
+      const gapBackoff = eventStream.restart === "backoff"
+      const delayAttempt = gapBackoff ? attempt : receivedEvent ? 0 : attempt
       try {
         await this.#scheduler.sleep(backoffDelay(this.#backoff, delayAttempt), options.signal)
       } catch (error) {
@@ -275,7 +317,7 @@ export class EngineHttpSseClient {
         }
         throw error
       }
-      attempt = receivedEvent ? 0 : attempt + 1
+      attempt = gapBackoff ? attempt + 1 : receivedEvent ? 0 : attempt + 1
       reconnecting = true
       lastSeen = options.getLastSeenSequence?.() ?? lastSeen
     }

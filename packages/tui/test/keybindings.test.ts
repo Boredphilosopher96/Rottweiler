@@ -22,6 +22,10 @@ describe("configurable TUI keybindings", () => {
     expect(standard.bindings("global").get("shift+tab")).toBe("cycle_agent_mode")
     expect(standard.bindings("global").get("ctrl+v")).toBe("paste_image")
     expect(standard.bindings("standard").get("ctrl+e")).toBe("open_external_editor")
+    expect(standard.bindings("standard").get("pageup")).toBe("page_up")
+    expect(standard.bindings("standard").get("pagedown")).toBe("page_down")
+    expect(standard.bindings("standard").get("shift+pageup")).toBe("view_top")
+    expect(standard.bindings("standard").get("shift+pagedown")).toBe("view_bottom")
 
     const rebound = compileKeybindings({
       bindings: { global: { open_command_picker: ["ctrl+k"], open_review: [] } },
@@ -40,6 +44,11 @@ describe("configurable TUI keybindings", () => {
             open_command_picker: "ctrl+x",
           },
         },
+      }),
+    ).toThrow(KeybindingConfigurationError)
+    expect(() =>
+      compileKeybindings({
+        bindings: { standard: { page_up: "pageup", page_down: "pageup" } },
       }),
     ).toThrow(KeybindingConfigurationError)
     expect(() =>

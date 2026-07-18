@@ -104,6 +104,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
   #onSecretSubmit: ((secret: string) => void) | undefined
   #onTextSubmit: ((value: string) => void) | undefined
   #textMaxBytes = 2048
+  #theme: RottweilerTheme
   #onKey = (key: KeyEvent) => {
     if (!this.visible) return
 
@@ -253,6 +254,7 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       visible: false,
       zIndex: 20,
     })
+    this.#theme = theme
     this.#onQuery = onQuery
     this.input = new InputRenderable(ctx, {
       id: "picker-query",
@@ -587,7 +589,21 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       }))
       .filter((entry) => entry.score !== null)
       .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || left.index - right.index)
-    this.#filtered = ranked.map((entry) => entry.item)
+    const noMatches = query.trim().length > 0 && ranked.length === 0
+    this.#filtered = noMatches
+      ? [{
+          id: "picker.no-matches",
+          label: `No matches for “${query.trim()}”`,
+          description: "",
+          value: null as T,
+          selectable: false,
+        }]
+      : ranked.map((entry) => entry.item)
+    const selected = pickerSelectionColors(this.#theme)
+    this.select.textColor = noMatches ? this.#theme.muted : this.#theme.foreground
+    this.select.selectedTextColor = noMatches ? this.#theme.muted : selected.foreground
+    this.select.selectedBackgroundColor = noMatches ? this.#theme.panelRaised : selected.background
+    this.select.showSelectionIndicator = !noMatches
     this.select.options = this.#filtered.map((item) => ({
       name: item.label,
       description: item.description,

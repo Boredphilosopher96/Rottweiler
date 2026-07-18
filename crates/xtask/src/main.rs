@@ -17,9 +17,9 @@ use rw_types::{
     ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities,
     ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor, ModelSwitchQuestion,
     PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
-    PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PlanStep,
-    PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge, ProviderAuthKind,
-    ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
+    PermissionModeDescriptor, PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact,
+    PlanDecision, PlanStep, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
+    ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
     QuestionResponseKind, RequestId, ReviewFileDecision, ReviewFileStatus, RewindTarget, Role,
     RuntimeServiceDescriptor, RuntimeServiceKind, SequenceId, SessionDescriptor, SessionId,
     SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
@@ -1767,6 +1767,7 @@ fn generate_typescript() -> String {
     declaration!(PromptTool);
     declaration!(PromptDump);
     declaration!(PermissionAction);
+    declaration!(PermissionModeDescriptor);
     declaration!(PermissionApprovalScope);
     declaration!(PermissionRuleDescriptor);
     declaration!(PermissionApprovalDescriptor);

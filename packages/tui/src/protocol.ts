@@ -30,6 +30,7 @@ export type {
   PermissionAction,
   PermissionApprovalDescriptor,
   PermissionApprovalScope,
+  PermissionModeDescriptor,
   PermissionRuleDescriptor,
   PermissionStateDescriptor,
   RuntimeServiceDescriptor,

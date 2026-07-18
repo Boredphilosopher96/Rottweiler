@@ -18,6 +18,7 @@ import { createInitialState, engineEvent, reduceRottweilerState } from "../src/s
 import {
   isSessionForkedEvent,
   type EngineSubscriptionOptions,
+  type EngineStreamRestartMode,
   type WireEngineEvent,
 } from "../src/transport"
 
@@ -67,6 +68,10 @@ class ScriptedClient implements RuntimeEngineClient {
     this.outcomes = [...outcomes]
   }
 
+  restartStream(): boolean {
+    return false
+  }
+
   async postCommand(command: ClientCommand): Promise<CommandOutcome> {
     this.commands.push(command)
     return this.outcomes.shift() ?? { type: "accepted" }
@@ -113,6 +118,10 @@ class BlockingPreparationClient implements RuntimeEngineClient {
     this.#releaseResume()
   }
 
+  restartStream(): boolean {
+    return false
+  }
+
   async postCommand(command: ClientCommand): Promise<CommandOutcome> {
     this.commands.push(command)
     if (command.type === "resume_session") {
@@ -132,6 +141,10 @@ class SwitchingClient implements RuntimeEngineClient {
   readonly subscriptions: EngineSubscriptionOptions[] = []
   readonly blockedResumes = new Map<string, () => void>()
   readonly rejectedSessions = new Set<string>()
+
+  restartStream(): boolean {
+    return false
+  }
 
   async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
     this.commands.push(command)
@@ -192,6 +205,10 @@ class DelayedConnectionClient implements RuntimeEngineClient {
     this.#markConnected = markConnected
   }
 
+  restartStream(): boolean {
+    return false
+  }
+
   async postCommand(command: ClientCommand): Promise<CommandOutcome> {
     this.commands.push(command)
     return { type: "accepted" }
@@ -219,6 +236,10 @@ class BlockingShutdownClient implements RuntimeEngineClient {
   readonly commands: ClientCommand[] = []
   shutdownAborted = false
 
+  restartStream(): boolean {
+    return false
+  }
+
   async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
     this.commands.push(command)
     await new Promise<void>((resolve) => {
@@ -236,6 +257,10 @@ class CorrelatedForkClient implements RuntimeEngineClient {
   readonly commands: ClientCommand[] = []
   readonly subscriptions: EngineSubscriptionOptions[] = []
   forkSignalAborted = false
+
+  restartStream(): boolean {
+    return false
+  }
 
   async postCommand(command: ClientCommand, signal?: AbortSignal): Promise<CommandOutcome> {
     this.commands.push(command)
@@ -274,6 +299,31 @@ class CorrelatedForkClient implements RuntimeEngineClient {
         options.signal.addEventListener("abort", () => resolve(), {
           once: true,
         })
+    })
+  }
+}
+
+class RestartRecordingClient implements RuntimeEngineClient {
+  readonly commands: ClientCommand[] = []
+  readonly restarts: EngineStreamRestartMode[] = []
+  subscription: EngineSubscriptionOptions | null = null
+
+  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+    this.commands.push(command)
+    return { type: "accepted" }
+  }
+
+  restartStream(mode: EngineStreamRestartMode = "immediate"): boolean {
+    this.restarts.push(mode)
+    return true
+  }
+
+  async subscribe(options: EngineSubscriptionOptions): Promise<void> {
+    this.subscription = options
+    options.onConnection?.({ phase: "connected", attempt: 0 })
+    await new Promise<void>((resolve) => {
+      if (options.signal.aborted) resolve()
+      else options.signal.addEventListener("abort", () => resolve(), { once: true })
     })
   }
 }
@@ -467,6 +517,57 @@ describe("OpenTUI engine runtime", () => {
       session_id: "session-runtime",
     })
     expect(client.commands.at(-1)?.type).toBe("get_context")
+  })
+
+  test("restarts gap recovery immediately and backs off when the replay is also gapped", async () => {
+    const client = new RestartRecordingClient()
+    const app = new TestApp()
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "session-runtime",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+      },
+      client,
+      new MemoryFiles(),
+    )
+    runtime.bind(app)
+    const running = runtime.start()
+    await waitFor(() => client.subscription !== null)
+    const emit = async (sequence: string, mode: "plan" | "default") => {
+      await client.subscription?.onEvent({
+        type: "mode_changed",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "session-runtime",
+          sequence_id: sequence,
+          emitted_at: "2026-07-17T00:00:00Z",
+        },
+        mode,
+      })
+    }
+
+    await emit("1", "plan")
+    await emit("3", "default")
+    expect(app.state.lastSequence).toBe("1")
+    expect(app.state.connection.gap).toEqual({ expected: "2", received: "3" })
+    expect(client.restarts).toEqual(["immediate"])
+
+    await emit("3", "default")
+    expect(client.restarts).toEqual(["immediate", "backoff"])
+
+    await emit("2", "default")
+    await emit("3", "default")
+    await emit("4", "plan")
+    expect(app.state.lastSequence).toBe("4")
+    expect(app.state.connection.gap).toBeNull()
+    expect(app.state.connection.phase).toBe("connected")
+
+    await runtime.stop()
+    await running
   })
 
   test("replay attaches as an observer without recovery, takeover, or projection writes", async () => {
@@ -854,6 +955,9 @@ describe("OpenTUI engine runtime", () => {
   test("keeps genuinely opening sessions retryable until runtime shutdown", async () => {
     const commands: ClientCommand[] = []
     const client: RuntimeEngineClient = {
+      restartStream() {
+        return false
+      },
       async postCommand(command) {
         commands.push(command)
         return {

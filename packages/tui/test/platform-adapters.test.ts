@@ -8,6 +8,7 @@ import {
   createExternalEditorAdapter,
   createExternalUrlAdapter,
   createImagePasteAdapter,
+  createTerminalHandover,
   createTextClipboardAdapter,
   parseCommandLine,
   type ProcessExecutionOptions,
@@ -47,6 +48,20 @@ describe("production TUI platform adapters", () => {
       await rm(temporaryDirectory, { recursive: true, force: true })
       temporaryDirectory = null
     }
+  })
+
+  test("disables enhanced keyboard input before suspending the renderer", () => {
+    const ordering: string[] = []
+    const terminal = createTerminalHandover({
+      disableKittyKeyboard: () => ordering.push("disableKittyKeyboard"),
+      suspend: () => ordering.push("suspend"),
+      resume: () => ordering.push("resume"),
+    })
+
+    terminal.suspend()
+    terminal.resume()
+
+    expect(ordering).toEqual(["disableKittyKeyboard", "suspend", "resume"])
   })
 
   test("runs $EDITOR without a shell, suspends the renderer, and reads the private buffer", async () => {

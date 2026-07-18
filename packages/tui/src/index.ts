@@ -88,6 +88,7 @@ async function main(): Promise<void> {
     createExternalEditorAdapter,
     createExternalUrlAdapter,
     createImagePasteAdapter,
+    createTerminalHandover,
     createTextClipboardAdapter,
   } = platform
   const { createEngineRuntimeFromEnvironment } = runtimeModule
@@ -143,10 +144,7 @@ async function main(): Promise<void> {
     // Markdown remains readable if a terminal cannot start a worker. OpenTUI
     // reports the parser failure; the application must stay usable.
   })
-  const terminalHandover = {
-    suspend: () => renderer.suspend(),
-    resume: () => renderer.resume(),
-  }
+  const terminalHandover = createTerminalHandover(renderer)
   const app = appModule.createRottweilerApp(renderer, {
     ...(configuredSession === undefined || configuredSession.length === 0
       ? {}

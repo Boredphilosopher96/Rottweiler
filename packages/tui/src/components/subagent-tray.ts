@@ -2,9 +2,11 @@ import { BoxRenderable, TextRenderable, type RenderContext } from "@opentui/core
 
 import type { RottweilerState, SubagentProjection } from "../state"
 import type { RottweilerTheme } from "../theme"
+import { truncateToCells } from "../render/text"
 import { subagentGlyph } from "./transcript"
 
 const MAX_TRAY_SUBAGENTS = 6
+const FALLBACK_TRAY_CONTENT_WIDTH = 96
 
 export class SubagentTrayRenderable extends BoxRenderable {
   readonly rows = new Map<string, TextRenderable>()
@@ -17,6 +19,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
   #total = 0
   #rowOrder: readonly string[] = []
   #elapsedTimer: ReturnType<typeof setInterval> | null = null
+  #lastRenderNowMs = Date.now()
 
   constructor(
     ctx: RenderContext,
@@ -40,6 +43,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
     this.#theme = theme
     this.#onOpenSubagent = onOpenSubagent
     this.#onElapsed = onElapsed
+    this.onSizeChange = () => this.#render(this.#lastRenderNowMs)
     this.more = new TextRenderable(ctx, {
       content: "",
       fg: theme.muted,
@@ -49,7 +53,7 @@ export class SubagentTrayRenderable extends BoxRenderable {
       wrapMode: "none",
     })
     this.footer = new TextRenderable(ctx, {
-      content: "ctrl+g inspect · click a row to open",
+      content: "Ctrl+G inspect · click a row to open",
       fg: theme.muted,
       height: 1,
       flexShrink: 0,
@@ -101,19 +105,28 @@ export class SubagentTrayRenderable extends BoxRenderable {
   }
 
   #render(nowMs: number): void {
+    this.#lastRenderNowMs = nowMs
+    const usableWidth = this.width <= 0
+      ? FALLBACK_TRAY_CONTENT_WIDTH
+      : Math.max(0, this.width - 4)
     for (const subagent of this.#subagents) {
       const row = this.rows.get(subagent.projectionId)
       if (row === undefined) continue
-      const activity = singleLine(subagent.activity ?? subagent.status.replaceAll("_", " "), 72)
+      const activity = truncateToCells(
+        (subagent.activity ?? subagent.status.replaceAll("_", " ")).replace(/\s+/g, " ").trim(),
+        72,
+      )
+      const task = truncateToCells(subagent.task.replace(/\s+/g, " ").trim(), 48)
       const elapsed = subagent.status === "running"
         ? formatSubagentElapsed(subagent.spawnedAtMs, nowMs)
         : null
-      row.content = `${subagentGlyph(subagent.status)} ${singleLine(subagent.task, 48)} · ${activity}${elapsed === null ? "" : ` · ${elapsed}`}`
+      const content = `${subagentGlyph(subagent.status)} ${task} · ${activity}${elapsed === null ? "" : ` · ${elapsed}`}`
+      row.content = truncateToCells(content, usableWidth)
     }
     const hidden = this.#total - this.#subagents.length
     this.more.visible = hidden > 0
     this.more.height = hidden > 0 ? 1 : 0
-    this.more.content = hidden > 0 ? `… ${hidden} more · ctrl+g` : ""
+    this.more.content = hidden > 0 ? `… ${hidden} more · Ctrl+G` : ""
     this.visible = this.#total > 0
     this.height = this.#total === 0 ? 0 : this.#subagents.length + (hidden > 0 ? 1 : 0) + 3
   }
@@ -183,9 +196,4 @@ function subagentColor(
   if (status === "completed") return theme.success
   if (status === "running") return theme.info
   return theme.warning
-}
-
-function singleLine(value: string, limit: number): string {
-  const compact = value.replace(/\s+/g, " ").trim()
-  return compact.length <= limit ? compact : `${compact.slice(0, Math.max(1, limit - 1))}…`
 }

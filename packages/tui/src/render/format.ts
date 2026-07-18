@@ -1,5 +1,14 @@
 import type { Cost, CostSnapshot, ToolOutput, Turn, Usage } from "../protocol"
 
+export const COMMAND_PREVIEW_MAX_LINES = 6
+
+/** Shared compact command preview for transcript and approval surfaces. */
+export function commandPreview(command: string, maximum = COMMAND_PREVIEW_MAX_LINES): string {
+  const lines = command.split("\n")
+  if (lines.length <= maximum) return command
+  return [...lines.slice(0, maximum), `… ${lines.length - maximum} more lines`].join("\n")
+}
+
 /** Markdown is preserved verbatim; unsupported diagram languages remain ordinary code fences. */
 export function terminalMarkdown(
   markdown: string,
@@ -248,17 +257,17 @@ function boundedSummaryRows(rows: readonly string[], noun: string, maximum = 24)
 function collectSummaryLines(value: unknown, lines: string[], prefix: string, depth: number): void {
   if (lines.length >= 32 || depth > 2) return
   if (!isRecord(value)) {
-    if (prefix !== "") lines.push(`${prefix}: ${displayScalar(value)}`)
+    if (prefix !== "") lines.push(`${prefix} · ${displayScalar(value)}`)
     return
   }
   for (const [key, nested] of Object.entries(value)) {
     if (isInternalField(key) || lines.length >= 32) continue
     const label = prefix === "" ? friendlyKey(key) : `${prefix} · ${friendlyKey(key)}`
     if (key === "unified_diff" && typeof nested === "string") {
-      lines.push(`${label}: [diff omitted · ${nested.length} chars]`)
+      lines.push(`${label} · [diff omitted · ${nested.length} chars]`)
     } else if (isRecord(nested)) collectSummaryLines(nested, lines, label, depth + 1)
-    else if (Array.isArray(nested)) lines.push(`${label}: ${nested.length} item${nested.length === 1 ? "" : "s"}`)
-    else lines.push(`${label}: ${sensitiveKey(key) ? "[redacted]" : displayScalar(nested)}`)
+    else if (Array.isArray(nested)) lines.push(`${label} · ${nested.length} item${nested.length === 1 ? "" : "s"}`)
+    else lines.push(`${label} · ${sensitiveKey(key) ? "[redacted]" : displayScalar(nested)}`)
   }
 }
 
@@ -283,7 +292,7 @@ function friendlyKey(key: string): string {
 }
 
 function friendlyEnumValue(value: string): string {
-  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+  return value.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())
 }
 
 function sensitiveKey(key: string): boolean {

@@ -9,9 +9,19 @@ import {
   type TreeSitterClient,
 } from "@opentui/core"
 
-import { filetypeForPath, formatPercent, formatSessionCost, formatTokenCount, formatToolArguments, presentableUnifiedDiff } from "../render"
+import {
+  commandPreview,
+  filetypeForPath,
+  formatPercent,
+  formatSessionCost,
+  formatTokenCount,
+  formatToolArguments,
+  presentError,
+  presentableUnifiedDiff,
+} from "../render"
 import type {
   ApprovalDecision,
+  PermissionModeDescriptor,
   PlanArtifact,
   PlanDecision,
   Question,
@@ -320,7 +330,7 @@ export class ReviewPanelRenderable extends BoxRenderable {
 function reviewGlyph(status: "pending" | "accepted" | "reverted"): string {
   switch (status) {
     case "pending":
-      return "◆"
+      return "○"
     case "accepted":
       return "✓"
     case "reverted":
@@ -464,12 +474,13 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#activeTool = null
     this.#activeQuestion = null
     this.#activePlan = null
+    this.borderColor = this.#theme.warning
     this.#removeDiff()
     this.visible = false
     this.height = 0
   }
 
-  #showTool(tool: ToolProjection, permissionMode: PermissionRuntimeMode | null): void {
+  #showTool(tool: ToolProjection, permissionMode: PermissionModeDescriptor | null): void {
     this.#activeTool = tool
     this.#activeQuestion = null
     this.#activePlan = null
@@ -483,7 +494,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.prompt.content = [
       subject.line,
       ...(bash === null ? [] : [approvalCommand(bash.command)]),
-      ...(subject.available ? [] : [`Arguments: ${formatToolArguments(tool.args)}`]),
+      ...(subject.available ? [] : [`arguments · ${formatToolArguments(tool.args)}`]),
       ...(truncated
         ? ["Diff exceeds the review limit. Approval is disabled until the complete change can be reviewed."]
         : tool.rationale === null || tool.rationale.trim() === ""
@@ -541,6 +552,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#activePlan = null
     this.#removeDiff()
     this.visible = true
+    this.borderColor = this.#theme.info
     this.title = " Rottweiler asks "
     const first = question.questions[0]
     const freeText = first?.response_kind === "text"
@@ -562,6 +574,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.#activePlan = plan
     this.#removeDiff()
     this.visible = true
+    this.borderColor = this.#theme.info
     this.select.visible = true
     this.title = " Plan approval required "
     this.prompt.content = `${plan.title}\n${plan.summary_md}\n${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`
@@ -715,13 +728,10 @@ function approvalSubject(
 }
 
 function approvalCommand(command: string): string {
-  const lines = command.split("\n")
-  const visible = lines.slice(0, 6)
-  const remaining = lines.length - visible.length
+  const visible = commandPreview(command).split("\n")
   return [
     `$ ${visible[0] ?? ""}`,
     ...visible.slice(1),
-    ...(remaining === 0 ? [] : [`… ${remaining} more lines`]),
   ].join("\n")
 }
 
@@ -763,7 +773,7 @@ export class ContextPanelRenderable extends BoxRenderable {
     })
     this.#callbacks = callbacks
     this.todoTitle = new TextRenderable(ctx, {
-      content: "Todos",
+      content: "Tasks",
       fg: theme.info,
       height: 1,
       flexShrink: 0,
@@ -877,7 +887,7 @@ export class ContextPanelRenderable extends BoxRenderable {
   update(state: RottweilerState): void {
     this.todos.options =
       state.todos.length === 0
-        ? [{ name: "No todos", description: "", value: "" }]
+        ? [{ name: "No tasks", description: "", value: "" }]
         : state.todos.map((todo) => ({
             name: `${todoGlyph(todo.status)} ${todo.content}`,
             description: todo.id,
@@ -905,7 +915,7 @@ export class ContextPanelRenderable extends BoxRenderable {
     this.runtimeServices.visible = activeServices.length > 0
     this.runtimeServices.height = activeServices.length === 0 ? 0 : Math.min(5, activeServices.length)
     this.runtimeServices.options = activeServices.map((service) => ({
-      name: `${runtimeServiceGlyph(service.kind)} ${runtimeServiceLabel(service.kind)} · ${service.name}`,
+      name: `${runtimeServiceLabel(service.kind)} · ${service.name}`,
       description: "",
       value: `${service.kind}:${service.name}`,
     }))
@@ -1014,12 +1024,6 @@ function mcpGlyph(state: "connecting" | "ready" | "stopping"): string {
   }
 }
 
-function runtimeServiceGlyph(kind: "lsp" | "linter" | "formatter"): string {
-  if (kind === "lsp") return "◆"
-  if (kind === "formatter") return "↯"
-  return "✓"
-}
-
 function runtimeServiceLabel(kind: "lsp" | "linter" | "formatter"): string {
   if (kind === "lsp") return "LSP"
   if (kind === "formatter") return "Format"
@@ -1031,7 +1035,7 @@ function todoGlyph(status: RottweilerState["todos"][number]["status"]): string {
     case "pending":
       return "○"
     case "in_progress":
-      return "◉"
+      return "◌"
     case "completed":
       return "✓"
     case "blocked":
@@ -1096,7 +1100,7 @@ export class StatusLineRenderable extends TextRenderable {
         : [`◉ ${state.mode ?? "—"}${permissionMode === null ? "" : ` · ${permissionMode}`}`]),
       ...(waitingApproval === undefined ? [] : [`approval · ${toolDisplayName(waitingApproval.name)}`]),
       state.model === null
-        ? "model none · ctrl+m"
+        ? "model none · Ctrl+M"
         : `model ${
             state.provider === null || state.model.includes("/")
               ? state.model
@@ -1146,9 +1150,10 @@ export class StateBannerRenderable extends TextRenderable {
       (tool) => tool.status === "awaiting_approval",
     )
     if (latestError !== undefined) {
+      const presentation = presentError(latestError)
       this.visible = true
-      this.fg = this.#theme.danger
-      this.content = userFacingError(latestError.category, latestError.code, latestError.message)
+      this.fg = this.#theme[presentation.severity]
+      this.content = presentation.text
     } else if (latestBudget !== undefined && latestBudget.level === "hard_cap") {
       this.visible = true
       this.fg = this.#theme.danger
@@ -1205,14 +1210,10 @@ function toolDisplayName(name: string): string {
   return KNOWN_TOOL_DISPLAY_NAMES[name] ?? humanLabel(name)
 }
 
-type PermissionRuntimeMode = "strict" | "auto-safe" | "yolo"
-
 function permissionRuntimeMode(
   permissions: RottweilerState["permissions"],
-): PermissionRuntimeMode | null {
-  if (permissions === null) return null
-  const mode = (permissions as unknown as { readonly runtime_mode?: unknown }).runtime_mode
-  return mode === "strict" || mode === "auto-safe" || mode === "yolo" ? mode : null
+): PermissionModeDescriptor | null {
+  return permissions?.runtime_mode ?? null
 }
 
 function connectionMessage(phase: RottweilerState["connection"]["phase"]): string {
@@ -1256,18 +1257,7 @@ function humanLabel(value: string): string {
 }
 
 function userFacingError(category: string, code: string, message: string): string {
-  if (/recovery|checkpoint|journal/i.test(code) || /fail-closed.*recovery|checkpoint journal/i.test(message)) {
-    return "Restoring this session · input will be available shortly"
-  }
-  if (/protocol/i.test(code) || /protocol failure|does not match/i.test(message)) {
-    return "Rottweiler lost sync with the engine · reconnecting"
-  }
-  if (/provider.*auth/i.test(code)) return "Sign-in could not be completed · try again"
-  if (category === "internal") return "Rottweiler hit an internal error · retry the action"
-  const friendly = message
-    .replaceAll("fail-closed", "temporarily unavailable")
-    .replace(/\b[a-z]+(?:_[a-z0-9]+)+\b/g, (value) => value.replaceAll("_", " "))
-  return `Error · ${friendly}`
+  return presentError({ category, code, message }).text
 }
 
 function questionOptions(question: Question | undefined) {

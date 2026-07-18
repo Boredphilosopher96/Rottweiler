@@ -60,6 +60,7 @@ import {
   type PermissionAction,
   type PermissionApprovalScope,
 } from "./protocol"
+import { presentError, sanitizeErrorFragment, truncateToCells } from "./render"
 import { setWorkspaceRoots } from "./render/tool-presentation"
 import {
   createInitialState,
@@ -70,6 +71,14 @@ import {
   type RottweilerState,
   type ToolProjection,
 } from "./state"
+import {
+  MAX_BUFFERED_SUBAGENT_LIVE_BYTES,
+  createSubagentReplayState,
+  transitionSubagentReplay,
+  type SubagentReplayEffect,
+  type SubagentReplayInput,
+  type SubagentReplayState,
+} from "./subagent-replay"
 import {
   createSyntaxStyle,
   kennelTheme,
@@ -159,17 +168,10 @@ type ProjectionKind = "commands" | "models" | "sessions" | "files" | "settings" 
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 const MAX_VISIBLE_SUBAGENTS = 256
 const MAX_SUBAGENT_ID_LENGTH = 256
-const MAX_BUFFERED_SUBAGENT_LIVE_EVENTS = 4_096
-const MAX_BUFFERED_SUBAGENT_LIVE_BYTES = 8 * 1_024 * 1_024
 
 interface ComposerDraft {
   readonly content: string
   readonly attachments: readonly Attachment[]
-}
-
-interface SubagentReplayRequest {
-  readonly requestId: string
-  readonly afterSequence: string | null
 }
 
 type CommandChoice = RottweilerState["commands"][number]
@@ -231,6 +233,7 @@ type ProviderAuthPickerAction =
 
 type McpPickerAction =
   | { readonly kind: "add" }
+  | { readonly kind: "retry" }
   | { readonly kind: "toggle"; readonly server: string; readonly enabled: boolean }
   | { readonly kind: "review"; readonly server: string }
   | { readonly kind: "approve"; readonly server: string; readonly fingerprint: string }
@@ -296,14 +299,7 @@ export class RottweilerApp extends BoxRenderable {
   #latestRuntimeServicesRequest: string | null = null
   #latestSubagentsRequest: string | null = null
   #subagentListError: string | null = null
-  #subagentReplayRequests = new Map<string, SubagentReplayRequest>()
-  #subagentReplayTails = new Map<string, string | null>()
-  #subagentHistoryNotices = new Map<string, bigint>()
-  #subagentReplayOmittedPrefixStarts = new Map<string, bigint>()
-  #subagentLiveBuffers = new Map<string, WireEngineEvent[]>()
-  #subagentLiveBufferBytes = new Map<string, number>()
-  #subagentReplayOverflow = new Set<string>()
-  #subagentReplayGap = new Set<string>()
+  #subagentReplays = new Map<string, SubagentReplayState<WireEngineEvent>>()
   #subagentDescriptors: readonly SubagentDescriptor[] = []
   #subagentStates = new Map<string, RottweilerState>()
   #activeSubagentReadOnly = false
@@ -820,14 +816,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#latestRuntimeServicesRequest = null
       this.#latestSubagentsRequest = null
       this.#subagentListError = null
-      this.#subagentReplayRequests.clear()
-      this.#subagentReplayTails.clear()
-      this.#subagentHistoryNotices.clear()
-      this.#subagentReplayOmittedPrefixStarts.clear()
-      this.#subagentLiveBuffers.clear()
-      this.#subagentLiveBufferBytes.clear()
-      this.#subagentReplayOverflow.clear()
-      this.#subagentReplayGap.clear()
+      this.#subagentReplays.clear()
       this.#subagentDescriptors = []
       this.#subagentStates.clear()
       this.#parentComposerDraft = { content: "", attachments: [] }
@@ -885,125 +874,42 @@ export class RottweilerApp extends BoxRenderable {
     if (event.type === "subagent_replay_batch") {
       const replay = event as Extract<EngineEvent, { type: "subagent_replay_batch" }>
       if (replay.session_id !== this.#sessionId) return
-      const request = this.#subagentReplayRequests.get(replay.subagent_id)
-      if (request === undefined || request.requestId !== commandRequestId) return
-      const descriptor = this.#subagentDescriptor(replay.subagent_id)
-      if (descriptor === undefined || descriptor.child_session_id !== replay.child_session_id) return
-      for (const item of replay.events) {
+      if (commandRequestId === null) return
+      const events = replay.events.flatMap((item) => {
         const childEvent = childEngineEvent(item.event, replay.child_session_id)
-        if (childEvent === null || durableSequenceId(childEvent) !== item.child_sequence) continue
-        this.#ingestReplayedSubagentEvent(replay.subagent_id, childEvent)
-      }
+        return childEvent === null
+          ? []
+          : [{
+              sequence: item.child_sequence,
+              eventSequence: durableSequenceId(childEvent),
+              event: childEvent,
+            }]
+      })
+      this.#transitionSubagentReplay(replay.subagent_id, {
+        type: "replayBatch",
+        requestId: commandRequestId,
+        childSessionId: replay.child_session_id,
+        events,
+      })
       return
     }
     if (event.type === "subagent_replay_completed") {
       const completed = event as Extract<EngineEvent, { type: "subagent_replay_completed" }>
       if (completed.session_id !== this.#sessionId) return
-      const request = this.#subagentReplayRequests.get(completed.subagent_id)
-      if (request === undefined || request.requestId !== commandRequestId) return
-      const eventsBeforePage = parseSequence(completed.events_before_page)
-      const omittedPrefixStart = this.#subagentReplayOmittedPrefixStarts.get(completed.subagent_id)
-      if (omittedPrefixStart !== undefined) {
-        this.#subagentReplayOmittedPrefixStarts.delete(completed.subagent_id)
-        if (
-          request.afterSequence !== null ||
-          !completed.truncated ||
-          eventsBeforePage === null ||
-          eventsBeforePage !== omittedPrefixStart
-        ) {
-          this.#restartSubagentReplay(
-            completed.subagent_id,
-            "The child transcript omitted an unverified durable prefix; restarting the initial replay.",
-            true,
-          )
-          return
-        }
-      }
-      const replayOverflowed = this.#subagentReplayOverflow.delete(completed.subagent_id)
-      const replayGapped = this.#subagentReplayGap.delete(completed.subagent_id)
-      if (replayOverflowed) {
-        this.#clearSubagentLiveBuffer(completed.subagent_id)
-        this.#restartSubagentReplay(
-          completed.subagent_id,
-          "Child transcript updates exceeded the safe live buffer; reloading from the durable cursor.",
-        )
-        return
-      }
-      if (replayGapped) {
-        this.#restartSubagentReplay(
-          completed.subagent_id,
-          "A child transcript page skipped durable events; reloading from the last verified cursor.",
-        )
-        return
-      }
-      const through = parseSequence(completed.through_sequence ?? null)
-      const applied = parseSequence(this.#lastAppliedSubagentSequence(completed.subagent_id))
-      if (through !== null && applied !== through) {
-        this.#restartSubagentReplay(
-          completed.subagent_id,
-          "The child transcript page did not reach its declared cursor; reloading from the last verified event.",
-        )
-        return
-      }
-      const tail = parseSequence(completed.tail_sequence ?? null)
-      const observedTail = tail?.toString() ?? null
-      if (!this.#subagentReplayTails.has(completed.subagent_id)) {
-        this.#subagentReplayTails.set(completed.subagent_id, observedTail)
-      } else if (this.#subagentReplayTails.get(completed.subagent_id) !== observedTail) {
-        this.#restartSubagentReplay(
-          completed.subagent_id,
-          "The durable child transcript changed while pages were loading; restarting from the verified cursor.",
-        )
-        return
-      }
-      if (
-        request.afterSequence === null &&
-        completed.truncated &&
-        eventsBeforePage !== null &&
-        eventsBeforePage > 0n
-      ) {
-        this.#subagentHistoryNotices.set(completed.subagent_id, eventsBeforePage)
-      }
-      if (completed.has_more) {
-        const nextCursor = parseSequence(completed.next_cursor ?? null)
-        const currentCursor = parseSequence(request.afterSequence)
-        const minimumCursor = currentCursor ?? 0n
-        if (
-          nextCursor === null ||
-          nextCursor <= minimumCursor ||
-          applied === null ||
-          nextCursor !== applied ||
-          tail === null ||
-          nextCursor >= tail
-        ) {
-          this.#restartSubagentReplay(
-            completed.subagent_id,
-            "The child transcript returned an invalid next-page cursor; reloading from the last verified event.",
-          )
-          return
-        }
-        void this.#requestSubagentReplay(completed.subagent_id, nextCursor.toString())
-        return
-      }
-      this.#subagentReplayRequests.delete(completed.subagent_id)
-      this.#subagentReplayTails.delete(completed.subagent_id)
-      if (applied !== tail) {
-        this.#restartSubagentReplay(
-          completed.subagent_id,
-          "The child transcript stopped before its durable tail; reloading from the last verified event.",
-        )
-        return
-      }
-      const buffered = this.#subagentLiveBuffers.get(completed.subagent_id) ?? []
-      this.#clearSubagentLiveBuffer(completed.subagent_id)
-      buffered
-        .map((progress) => ({ progress, sequence: subagentProgressSequence(progress) }))
-        .sort((left, right) => compareOptionalSequence(left.sequence, right.sequence))
-        .forEach(({ progress }) => {
-          if (progress.type !== "subagent_progress") return
-          const live = progress as Extract<EngineEvent, { type: "subagent_progress" }>
-          this.#ingestLiveSubagentProgress(live)
-        })
+      if (commandRequestId === null) return
+      const descriptor = this.#subagentDescriptor(completed.subagent_id)
+      if (descriptor === undefined) return
+      this.#transitionSubagentReplay(completed.subagent_id, {
+        type: "replayCompleted",
+        requestId: commandRequestId,
+        childSessionId: descriptor.child_session_id,
+        throughSequence: completed.through_sequence ?? null,
+        nextCursor: completed.next_cursor ?? null,
+        tailSequence: completed.tail_sequence ?? null,
+        hasMore: completed.has_more,
+        eventsBeforePage: completed.events_before_page,
+        truncated: completed.truncated,
+      })
       if (this.#activeSubagentId === completed.subagent_id) this.setState(this.#state)
       return
     }
@@ -1013,21 +919,15 @@ export class RottweilerApp extends BoxRenderable {
       const descriptor = this.#subagentDescriptor(progress.subagent_id)
       if (descriptor === undefined || descriptor.child_session_id !== progress.child_session_id) return
       const childEvent = childEngineEvent(progress.event, progress.child_session_id)
-      if (this.#subagentReplayRequests.has(progress.subagent_id)) {
-        this.#bufferSubagentProgress(progress)
-      } else if (childEvent !== null) {
-        if (
-          this.#subagentReplayOverflow.has(progress.subagent_id) ||
-          (this.#subagentLiveBuffers.get(progress.subagent_id)?.length ?? 0) > 0
-        ) {
-          this.#bufferSubagentProgress(progress)
-          void this.#requestSubagentReplay(
-            progress.subagent_id,
-            this.#lastAppliedSubagentSequence(progress.subagent_id),
-          )
-        } else {
-          this.#ingestLiveSubagentProgress(progress)
-        }
+      if (childEvent !== null) {
+        this.#transitionSubagentReplay(progress.subagent_id, {
+          type: "liveProgress",
+          childSessionId: progress.child_session_id,
+          childSequence: progress.child_sequence ?? null,
+          eventSequence: durableSequenceId(childEvent),
+          event: childEvent,
+          bytes: wireEventBytes(progress),
+        })
       }
       const existing = this.#state.subagents[progress.subagent_id]
       if (existing === undefined || existing.childSessionId !== progress.child_session_id) return
@@ -1144,7 +1044,10 @@ export class RottweilerApp extends BoxRenderable {
       this.#clearProjectionError("runtime_services")
       this.#latestRuntimeServicesRequest = null
     }
-    if (event.type === "workspace_files_found") this.#clearProjectionError("files")
+    if (event.type === "workspace_files_found") {
+      this.#clearProjectionError("files")
+      this.#pendingWorkspaceSearchRequest = null
+    }
     const previous = this.#state
     let next = reduceRottweilerState(previous, engineEvent(event))
     if (event.type === "sessions_listed" && Array.isArray(eventRecord.sessions)) {
@@ -1483,11 +1386,13 @@ export class RottweilerApp extends BoxRenderable {
       this.#refreshPicker()
     }
     if (
+      (state.connection.phase === "reconnecting" || state.connection.phase === "disconnected") &&
+      state.connection.phase !== previousConnectionPhase
+    ) this.#markSubagentReplayTransportLost()
+    else if (
       state.connection.phase === "connected" &&
       (previousConnectionPhase === "reconnecting" || previousConnectionPhase === "disconnected")
-    ) {
-      this.#recoverPendingSubagentReplays()
-    }
+    ) this.#recoverSubagentReplays()
   }
 
   openCommandPicker(): void {
@@ -1979,10 +1884,15 @@ export class RottweilerApp extends BoxRenderable {
         this.#scrollTranscript(1, "viewport")
         return true
       case "view_top":
-        this.#moveToBoundary(false)
+        if (this.#keybindings.preset === "standard") this.transcript.scrollTo(0)
+        else this.#moveToBoundary(false)
         return true
       case "view_bottom":
-        this.#moveToBoundary(true)
+        if (this.#keybindings.preset === "standard") {
+          this.transcript.scrollTo(this.transcript.scroller.scrollHeight)
+        } else {
+          this.#moveToBoundary(true)
+        }
         return true
       case "select_current":
         if (!this.picker.visible) return false
@@ -2233,6 +2143,14 @@ export class RottweilerApp extends BoxRenderable {
           this.#state.workspaceFiles.length === 0
         ) {
           this.#showPickerLoading("Workspace files", "Searching workspace files")
+          break
+        }
+        if (fileError === undefined && this.#state.workspaceFiles.length === 0) {
+          this.#showPickerStatus(
+            "Workspace files",
+            "No matching files",
+            "Try a different search.",
+          )
           break
         }
         const fileItems: PickerItem<RottweilerState["workspaceFiles"][number] | null>[] = [
@@ -2618,8 +2536,34 @@ export class RottweilerApp extends BoxRenderable {
         break
       case "mcp": {
         const review = this.#state.mcpApprovalReview
+        const mcpError = this.#projectionErrors.mcp
+        if (
+          mcpError === undefined &&
+          this.#latestMcpRequest !== null &&
+          this.#state.mcpServers.length === 0
+        ) {
+          this.#showPickerLoading("MCP connections", "Loading MCP connections")
+          break
+        }
         const items: PickerItem<McpPickerAction>[] = [
+          ...(mcpError === undefined
+            ? []
+            : [{
+                id: "mcp.error",
+                label: "Couldn't load MCP connections",
+                description: `${mcpError} · select to retry`,
+                value: { kind: "retry" as const },
+              }]),
           { id: "mcp.add", label: "Add remote HTTP server", description: "HTTPS only · registers live and starts disabled", value: { kind: "add" } },
+          ...(mcpError === undefined && review === null && this.#state.mcpServers.length === 0
+            ? [{
+                id: "mcp.empty",
+                label: "No MCP servers configured",
+                description: "Add a remote HTTP server to connect tools and resources.",
+                value: { kind: "add" as const },
+                selectable: false,
+              }]
+            : []),
           ...(review === null ? [] : [{
             id: `mcp.approve.${review.server}`,
             label: `Approve reviewed configuration · ${review.server}`,
@@ -2649,7 +2593,8 @@ export class RottweilerApp extends BoxRenderable {
           items,
           (item) => {
             const action = item.value
-            if (action.kind === "add") this.#openMcpNamePrompt()
+            if (action.kind === "retry") this.#command({ type: "list_mcp_servers" })
+            else if (action.kind === "add") this.#openMcpNamePrompt()
             else if (action.kind === "toggle") {
               this.#command({ type: "set_mcp_server_enabled", name: action.server, enabled: !action.enabled })
             } else if (action.kind === "review") {
@@ -2969,6 +2914,14 @@ export class RottweilerApp extends BoxRenderable {
           this.#showPickerLoading("Sessions", "Loading sessions")
           break
         }
+        if (sessionError === undefined && this.#state.sessions.length === 0) {
+          this.#showPickerStatus(
+            "Sessions",
+            "No sessions found",
+            "Start a conversation to create a session.",
+          )
+          break
+        }
         const sessionItems: PickerItem<RottweilerState["sessions"][number] | null>[] = [
           ...(sessionError === undefined
             ? []
@@ -3253,15 +3206,26 @@ export class RottweilerApp extends BoxRenderable {
     }).then((outcome) => {
       if (outcome?.type === "rejected" && this.#latestSubagentsRequest === meta.request_id) {
         this.#latestSubagentsRequest = null
-        this.#subagentListError = outcome.error.message
+        this.#subagentListError = presentError({
+          category: outcome.error.category,
+          code: outcome.error.code,
+          message: outcome.error.message,
+          requestId: meta.request_id,
+        }).text
         this.#projectRejection(outcome)
         if (this.#pickerKind === "agents") this.#refreshPicker()
       } else if (outcome == null && this.#latestSubagentsRequest === meta.request_id) {
         this.#latestSubagentsRequest = null
-        this.#subagentListError = "The engine connection is unavailable."
+        const presentation = presentError({
+          category: "protocol",
+          code: "subagents_unavailable",
+          message: "Couldn't load child agents because the engine connection is unavailable.",
+          requestId: meta.request_id,
+        })
+        this.#subagentListError = presentation.text
         this.#projectClientError(
           "subagents_unavailable",
-          "Couldn't load child agents because the engine connection is unavailable.",
+          presentation.text,
           true,
         )
         if (this.#pickerKind === "agents") this.#refreshPicker()
@@ -3269,8 +3233,14 @@ export class RottweilerApp extends BoxRenderable {
     }).catch((error) => {
       if (this.#latestSubagentsRequest !== meta.request_id) return
       this.#latestSubagentsRequest = null
-      this.#subagentListError = safeErrorMessage(error)
-      this.#projectClientError("subagents_failed", safeErrorMessage(error), true)
+      const presentation = presentError({
+        category: "protocol",
+        code: "subagents_failed",
+        message: safeErrorMessage(error),
+        requestId: meta.request_id,
+      })
+      this.#subagentListError = presentation.text
+      this.#projectClientError("subagents_failed", presentation.text, true)
       if (this.#pickerKind === "agents") this.#refreshPicker()
     })
   }
@@ -3278,36 +3248,29 @@ export class RottweilerApp extends BoxRenderable {
   async #enterSubagent(subagentId: string): Promise<void> {
     const descriptor = this.#subagentDescriptor(subagentId)
     if (descriptor === undefined) return
-    const needsDurablePrefix = this.#subagentHistoryNotices.has(subagentId)
     this.#saveComposerDraft()
     this.#activeSubagentId = subagentId
     this.#restoreComposerDraft(subagentId)
     this.#subagentErrorBaseline = this.#state.errors.at(-1)
-    if (needsDurablePrefix || !this.#subagentStates.has(subagentId)) {
+    if (!this.#subagentStates.has(subagentId)) {
       this.#subagentStates.set(subagentId, initialSubagentState(this.#state, descriptor))
     }
-    this.#subagentReplayTails.delete(subagentId)
-    if (needsDurablePrefix) {
-      this.#subagentHistoryNotices.delete(subagentId)
-      this.#clearSubagentLiveBuffer(subagentId)
-      this.#subagentReplayOverflow.delete(subagentId)
-      this.#subagentReplayGap.delete(subagentId)
-    }
-    this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
     this.setState(this.#state)
+    const effects = this.#transitionSubagentReplay(subagentId, {
+      type: "enter",
+      childSessionId: descriptor.child_session_id,
+    })
+    if (effects.some((effect) => effect.type === "resetProjection")) this.setState(this.#state)
     this.#focusForInputMode()
-
-    if (needsDurablePrefix || this.#lastAppliedSubagentSequence(subagentId) === null) {
-      await this.#requestSubagentReplay(subagentId, null)
-    }
   }
 
-  async #requestSubagentReplay(
+  async #requestSubagentReplayPage(
     subagentId: string,
     afterSequence: string | null,
   ): Promise<void> {
     const meta = this.#meta()
-    this.#subagentReplayRequests.set(subagentId, {
+    this.#transitionSubagentReplay(subagentId, {
+      type: "requestIssued",
       requestId: meta.request_id,
       afterSequence,
     })
@@ -3320,69 +3283,66 @@ export class RottweilerApp extends BoxRenderable {
         after_sequence: afterSequence,
       })
       if (outcome?.type === "rejected") {
-        if (this.#subagentReplayRequests.get(subagentId)?.requestId !== meta.request_id) return
-        this.#subagentReplayRequests.delete(subagentId)
-        this.#subagentReplayTails.delete(subagentId)
-        this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
-        this.#projectRejection(outcome)
+        const effects = this.#transitionSubagentReplay(subagentId, {
+          type: "rejected",
+          requestId: meta.request_id,
+          failure: "rejected",
+        })
+        if (effects.some((effect) => effect.type === "replayFailed")) this.#projectRejection(outcome)
       } else if (outcome == null) {
-        if (this.#subagentReplayRequests.get(subagentId)?.requestId !== meta.request_id) return
-        this.#subagentReplayRequests.delete(subagentId)
-        this.#subagentReplayTails.delete(subagentId)
-        this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
+        const effects = this.#transitionSubagentReplay(subagentId, {
+          type: "rejected",
+          requestId: meta.request_id,
+          failure: "unavailable",
+        })
+        if (effects.some((effect) => effect.type === "replayFailed")) {
+          const presentation = presentError({
+            category: "protocol",
+            code: "subagent_replay_unavailable",
+            message: "Couldn't load the child transcript because the engine connection is unavailable.",
+            requestId: meta.request_id,
+          })
+          this.#projectClientError(
+            "subagent_replay_unavailable",
+            presentation.text,
+            true,
+          )
+        }
+      }
+    } catch (error) {
+      const effects = this.#transitionSubagentReplay(subagentId, {
+        type: "rejected",
+        requestId: meta.request_id,
+        failure: "exception",
+      })
+      if (effects.some((effect) => effect.type === "replayFailed")) {
         this.#projectClientError(
-          "subagent_replay_unavailable",
-          "Couldn't load the child transcript because the engine connection is unavailable.",
+          "subagent_replay_failed",
+          presentError({
+            category: "protocol",
+            code: "subagent_replay_failed",
+            message: safeErrorMessage(error),
+            requestId: meta.request_id,
+          }).text,
           true,
         )
       }
-    } catch (error) {
-      if (this.#subagentReplayRequests.get(subagentId)?.requestId !== meta.request_id) return
-      this.#subagentReplayRequests.delete(subagentId)
-      this.#subagentReplayTails.delete(subagentId)
-      this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
-      this.#projectClientError("subagent_replay_failed", safeErrorMessage(error), true)
     }
   }
 
-  #restartSubagentReplay(subagentId: string, message: string, resetProjection = false): void {
-    this.#subagentReplayRequests.delete(subagentId)
-    this.#subagentReplayTails.delete(subagentId)
-    this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
-    if (resetProjection) {
-      const descriptor = this.#subagentDescriptor(subagentId)
-      if (descriptor !== undefined) {
-        this.#subagentStates.set(subagentId, initialSubagentState(this.#state, descriptor))
-      }
+  #markSubagentReplayTransportLost(): void {
+    for (const subagentId of this.#subagentReplays.keys()) {
+      this.#transitionSubagentReplay(subagentId, { type: "transportLost" })
     }
-    this.#projectClientError("subagent_replay_gap", message, true)
-    void this.#requestSubagentReplay(
-      subagentId,
-      resetProjection ? null : this.#lastAppliedSubagentSequence(subagentId),
-    )
   }
 
-  #recoverPendingSubagentReplays(): void {
-    const pendingSubagentIds = [...this.#subagentReplayRequests.keys()]
-    for (const subagentId of pendingSubagentIds) {
+  #recoverSubagentReplays(): void {
+    for (const subagentId of [...this.#subagentReplays.keys()]) {
       if (this.#subagentDescriptor(subagentId) === undefined) {
-        this.#subagentReplayRequests.delete(subagentId)
-        this.#subagentReplayTails.delete(subagentId)
-        this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
-        this.#clearSubagentLiveBuffer(subagentId)
-        this.#subagentReplayOverflow.delete(subagentId)
-        this.#subagentReplayGap.delete(subagentId)
+        this.#subagentReplays.delete(subagentId)
         continue
       }
-      const afterSequence = this.#lastAppliedSubagentSequence(subagentId)
-      // Replacing the request ID invalidates any late batches or completion
-      // from the dead transport generation. Buffered live progress remains
-      // bounded and is deduplicated against the durable replay on completion.
-      this.#subagentReplayRequests.delete(subagentId)
-      this.#subagentReplayTails.delete(subagentId)
-      this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
-      this.#subagentReplayGap.delete(subagentId)
-      void this.#requestSubagentReplay(subagentId, afterSequence)
+      this.#transitionSubagentReplay(subagentId, { type: "reconnected" })
     }
   }
 
@@ -3446,80 +3406,41 @@ export class RottweilerApp extends BoxRenderable {
     else this.#flushPresentationQueue()
   }
 
-  #ingestReplayedSubagentEvent(subagentId: string, event: WireEngineEvent): void {
-    if (this.#subagentReplayGap.has(subagentId)) return
-    const sequence = parseSequence(durableSequenceId(event))
-    if (sequence === null) return
-    const last = parseSequence(this.#lastAppliedSubagentSequence(subagentId))
-    if (last !== null && sequence <= last) return
-    const request = this.#subagentReplayRequests.get(subagentId)
-    if (last === null && request?.afterSequence === null) {
-      if (sequence > 0n) this.#subagentReplayOmittedPrefixStarts.set(subagentId, sequence)
-      this.#applySubagentEvent(subagentId, event)
-      return
-    }
-    if (sequence !== (last ?? 0n) + 1n) {
-      this.#subagentReplayGap.add(subagentId)
-      return
-    }
-    this.#applySubagentEvent(subagentId, event)
-  }
-
-  #ingestLiveSubagentProgress(
-    progress: Extract<EngineEvent, { type: "subagent_progress" }>,
-  ): void {
-    const event = childEngineEvent(progress.event, progress.child_session_id)
-    const eventSequence = event === null ? null : parseSequence(durableSequenceId(event))
-    const progressSequence = parseSequence(progress.child_sequence ?? null)
-    if (
-      event === null ||
-      eventSequence === null ||
-      (progressSequence !== null && progressSequence !== eventSequence)
-    ) return
-    const last = parseSequence(this.#lastAppliedSubagentSequence(progress.subagent_id))
-    if (last !== null && eventSequence <= last) return
-    if (last === null) {
-      if (eventSequence > 0n) {
-        this.#subagentHistoryNotices.set(progress.subagent_id, eventSequence)
+  #transitionSubagentReplay(
+    subagentId: string,
+    input: SubagentReplayInput<WireEngineEvent>,
+  ): readonly SubagentReplayEffect<WireEngineEvent>[] {
+    const descriptor = this.#subagentDescriptor(subagentId)
+    const current = this.#subagentReplays.get(subagentId) ?? createSubagentReplayState(
+      descriptor?.child_session_id ?? "",
+      this.#lastAppliedSubagentSequence(subagentId),
+    )
+    const transition = transitionSubagentReplay(current, input)
+    this.#subagentReplays.set(subagentId, transition.state)
+    for (const effect of transition.effects) {
+      switch (effect.type) {
+        case "requestPage":
+          void this.#requestSubagentReplayPage(subagentId, effect.afterSequence)
+          break
+        case "applyEvents":
+        case "drainBuffer":
+          for (const event of effect.events) this.#applySubagentEvent(subagentId, event)
+          break
+        case "resetProjection":
+          if (descriptor !== undefined) {
+            this.#subagentStates.set(subagentId, initialSubagentState(this.#state, descriptor))
+          }
+          break
+        case "noticeRestart":
+          this.#projectClientError("subagent_replay_gap", effect.reason, true)
+          break
+        case "bufferProgress":
+        case "replayFailed":
+        case "none":
+          break
       }
-      this.#applySubagentEvent(progress.subagent_id, event)
-      return
     }
-    const expected = last + 1n
-    if (eventSequence !== expected) {
-      this.#bufferSubagentProgress(progress)
-      if (!this.#subagentReplayRequests.has(progress.subagent_id)) {
-        void this.#requestSubagentReplay(progress.subagent_id, last?.toString() ?? null)
-      }
-      return
-    }
-    this.#applySubagentEvent(progress.subagent_id, event)
-  }
-
-  #bufferSubagentProgress(
-    progress: Extract<EngineEvent, { type: "subagent_progress" }>,
-  ): void {
-    const subagentId = progress.subagent_id
-    if (this.#subagentReplayOverflow.has(subagentId)) return
-    const buffered = this.#subagentLiveBuffers.get(subagentId) ?? []
-    const eventBytes = wireEventBytes(progress)
-    const bufferedBytes = this.#subagentLiveBufferBytes.get(subagentId) ?? 0
-    if (
-      buffered.length >= MAX_BUFFERED_SUBAGENT_LIVE_EVENTS ||
-      eventBytes > MAX_BUFFERED_SUBAGENT_LIVE_BYTES ||
-      bufferedBytes + eventBytes > MAX_BUFFERED_SUBAGENT_LIVE_BYTES
-    ) {
-      this.#subagentReplayOverflow.add(subagentId)
-      return
-    }
-    buffered.push(progress)
-    this.#subagentLiveBuffers.set(subagentId, buffered)
-    this.#subagentLiveBufferBytes.set(subagentId, bufferedBytes + eventBytes)
-  }
-
-  #clearSubagentLiveBuffer(subagentId: string): void {
-    this.#subagentLiveBuffers.delete(subagentId)
-    this.#subagentLiveBufferBytes.delete(subagentId)
+    return transition.effects
   }
 
   #lastAppliedSubagentSequence(subagentId: string): string | null {
@@ -3553,8 +3474,9 @@ export class RottweilerApp extends BoxRenderable {
     const descriptor = this.#subagentDescriptor(this.#activeSubagentId)
     if (descriptor === undefined) return
     const approval = Object.values(state.tools).some((tool) => tool.status === "awaiting_approval")
-    const replaying = this.#subagentReplayRequests.has(this.#activeSubagentId)
-    const retainedHistory = this.#subagentHistoryNotices.get(this.#activeSubagentId)
+    const replay = this.#subagentReplays.get(this.#activeSubagentId)
+    const replaying = replay?.status === "replaying"
+    const retainedHistory = replay?.historyTruncatedAt
     const latestError = this.#state.errors.at(-1)
     const hasErrorContext = latestError !== undefined && latestError !== this.#subagentErrorBaseline
     const projection = this.#state.subagents[this.#activeSubagentId] ?? Object.values(
@@ -3580,18 +3502,21 @@ export class RottweilerApp extends BoxRenderable {
         ? ["read-only", "interrupt to reply"]
         : []),
     ].join(" · ")
-    const context = hasErrorContext
-      ? latestError.message
+    const errorPresentation = hasErrorContext && latestError !== undefined
+      ? presentError(latestError)
+      : null
+    const context = errorPresentation !== null
+      ? errorPresentation.text
       : retainedHistory !== undefined && !replaying
-        ? `recent activity; ${retainedHistory.toString()} earlier events retained`
+        ? `recent activity · ${retainedHistory} earlier events retained`
         : null
     this.banner.visible = true
-    this.banner.fg = hasErrorContext
-      ? this.#theme.danger
+    this.banner.fg = errorPresentation !== null
+      ? this.#theme[errorPresentation.severity]
       : approval
         ? this.#theme.warning
         : this.#theme.info
-    this.banner.content = t`${fg(this.#theme.accentStrong)("◉ CHILD AGENT")} · ${descriptor.task} · ${detail}${context === null ? "" : ` · ${context}`} · Esc parent · Ctrl+G tree · Ctrl+P actions`
+    this.banner.content = t`${fg(this.#theme.accentStrong)("◉ child agent")} · ${descriptor.task} · ${detail}${context === null ? "" : ` · ${context}`} · Esc parent · Ctrl+G children · Ctrl+P palette`
   }
 
   async #interruptSubagent(subagentId: string): Promise<void> {
@@ -3604,14 +3529,27 @@ export class RottweilerApp extends BoxRenderable {
         subagent_id: subagentId,
       })
     } catch (error) {
-      this.#projectClientError("subagent_interrupt_failed", safeErrorMessage(error), true)
+      this.#projectClientError(
+        "subagent_interrupt_failed",
+        presentError({
+          category: "protocol",
+          code: "subagent_interrupt_failed",
+          message: safeErrorMessage(error),
+        }).text,
+        true,
+      )
       return
     }
     if (outcome?.type === "rejected") this.#projectRejection(outcome)
     else if (outcome == null) {
+      const presentation = presentError({
+        category: "protocol",
+        code: "subagent_interrupt_unavailable",
+        message: "Couldn't interrupt the child because the engine connection is unavailable.",
+      })
       this.#projectClientError(
         "subagent_interrupt_unavailable",
-        "Couldn't interrupt the child because the engine connection is unavailable.",
+        presentation.text,
         true,
       )
     }
@@ -3627,7 +3565,15 @@ export class RottweilerApp extends BoxRenderable {
         subagent_id: subagentId,
       })
     } catch (error) {
-      this.#projectClientError("subagent_close_failed", safeErrorMessage(error), true)
+      this.#projectClientError(
+        "subagent_close_failed",
+        presentError({
+          category: "protocol",
+          code: "subagent_close_failed",
+          message: safeErrorMessage(error),
+        }).text,
+        true,
+      )
       return
     }
     if (outcome?.type === "rejected") {
@@ -3635,9 +3581,14 @@ export class RottweilerApp extends BoxRenderable {
       return
     }
     if (outcome == null) {
+      const presentation = presentError({
+        category: "protocol",
+        code: "subagent_close_unavailable",
+        message: "Couldn't close the child because the engine connection is unavailable.",
+      })
       this.#projectClientError(
         "subagent_close_unavailable",
-        "Couldn't close the child because the engine connection is unavailable.",
+        presentation.text,
         true,
       )
       return
@@ -3652,13 +3603,8 @@ export class RottweilerApp extends BoxRenderable {
     this.#subagentDescriptors = this.#subagentDescriptors.filter(
       (subagent) => subagent.subagent_id !== subagentId,
     )
-    this.#subagentReplayRequests.delete(subagentId)
-    this.#subagentReplayTails.delete(subagentId)
-    this.#subagentHistoryNotices.delete(subagentId)
-    this.#subagentReplayOmittedPrefixStarts.delete(subagentId)
-    this.#clearSubagentLiveBuffer(subagentId)
-    this.#subagentReplayOverflow.delete(subagentId)
-    this.#subagentReplayGap.delete(subagentId)
+    this.#transitionSubagentReplay(subagentId, { type: "close" })
+    this.#subagentReplays.delete(subagentId)
     this.#subagentStates.delete(subagentId)
     this.#subagentComposerDrafts.delete(subagentId)
     this.setState(this.#state)
@@ -3771,16 +3717,27 @@ export class RottweilerApp extends BoxRenderable {
           content,
         })
       } catch (error) {
-        this.#projectClientError("subagent_continue_failed", safeErrorMessage(error), true)
+        this.#projectClientError(
+          "subagent_continue_failed",
+          presentError({
+            category: "protocol",
+            code: "subagent_continue_failed",
+            message: safeErrorMessage(error),
+          }).text,
+          true,
+        )
         return false
       }
       if (outcome?.type !== "accepted") {
         if (outcome?.type === "rejected") this.#projectRejection(outcome)
-        else this.#projectClientError(
-          "subagent_continue_unavailable",
-          "Couldn't continue the child because the engine connection is unavailable.",
-          true,
-        )
+        else {
+          const presentation = presentError({
+            category: "protocol",
+            code: "subagent_continue_unavailable",
+            message: "Couldn't continue the child because the engine connection is unavailable.",
+          })
+          this.#projectClientError("subagent_continue_unavailable", presentation.text, true)
+        }
         return false
       }
       this.#subagentErrorBaseline = this.#state.errors.at(-1)
@@ -3953,7 +3910,11 @@ export class RottweilerApp extends BoxRenderable {
     } catch (error) {
       this.#projectClientError(
         "tool_approval_failed",
-        `couldn't deliver the ${tool.name} approval decision: ${safeErrorMessage(error)}`,
+        presentError({
+          category: "protocol",
+          code: "tool_approval_failed",
+          message: safeErrorMessage(error),
+        }).text,
         true,
       )
     }
@@ -4348,7 +4309,16 @@ export class RottweilerApp extends BoxRenderable {
           if (type === "switch_model") {
             this.#pendingModelSwitchRequests.delete(requestId)
           }
-          this.#projectClientError(`${type}_unavailable`, message, true)
+          this.#projectClientError(
+            `${type}_unavailable`,
+            presentError({
+              category: "protocol",
+              code: `${type}_unavailable`,
+              message,
+              requestId,
+            }).text,
+            true,
+          )
         } else {
           this.#recordProjectionFailure(type, requestId, message)
         }
@@ -4359,7 +4329,16 @@ export class RottweilerApp extends BoxRenderable {
         if (type === "switch_model") {
           this.#pendingModelSwitchRequests.delete(requestId)
         }
-        this.#projectClientError(`${type}_failed`, message, true)
+        this.#projectClientError(
+          `${type}_failed`,
+          presentError({
+            category: "protocol",
+            code: `${type}_failed`,
+            message,
+            requestId,
+          }).text,
+          true,
+        )
       } else {
         this.#recordProjectionFailure(type, requestId, message)
       }
@@ -4387,9 +4366,13 @@ export class RottweilerApp extends BoxRenderable {
         this.setState({ ...this.#state, runtimeServices: [] })
       }
     }
-    this.#projectionErrors = { ...this.#projectionErrors, [kind]: message }
+    const fragment = sanitizeErrorFragment(message)
+    this.#projectionErrors = {
+      ...this.#projectionErrors,
+      [kind]: presentError({ message: fragment }).text,
+    }
     const label = kind === "runtime_services" ? "active services" : kind
-    this.#projectClientError(`${kind}_projection_failed`, `couldn't load ${label}: ${message}`, true)
+    this.#projectClientError(`${kind}_projection_failed`, `couldn't load ${label}: ${fragment}`, true)
   }
 
   #isCurrentProjectionRequest(kind: ProjectionKind, requestId: string): boolean {
@@ -4654,36 +4637,6 @@ function childEngineEvent(value: unknown, expectedSessionId: string): WireEngine
   return value
 }
 
-function subagentProgressSequence(event: WireEngineEvent): bigint | null {
-  if (event.type !== "subagent_progress") return null
-  const progress = event as Extract<EngineEvent, { type: "subagent_progress" }>
-  const nested = isRecord(progress.event) && isRecord(progress.event.meta)
-    ? progress.event.meta.sequence_id
-    : null
-  const sequence = progress.child_sequence ?? (typeof nested === "string" ? nested : null)
-  if (sequence === null || !/^\d+$/.test(sequence)) return null
-  try {
-    return BigInt(sequence)
-  } catch {
-    return null
-  }
-}
-
-function compareOptionalSequence(left: bigint | null, right: bigint | null): number {
-  if (left === null) return right === null ? 0 : 1
-  if (right === null) return -1
-  return left < right ? -1 : left > right ? 1 : 0
-}
-
-function parseSequence(value: string | null): bigint | null {
-  if (value === null || !/^(0|[1-9][0-9]*)$/.test(value)) return null
-  try {
-    return BigInt(value)
-  } catch {
-    return null
-  }
-}
-
 function wireEventBytes(event: WireEngineEvent): number {
   try {
     return new TextEncoder().encode(JSON.stringify(event)).byteLength
@@ -4697,7 +4650,7 @@ function boundedUiText(value: string, maximum: number): string {
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
     .replace(/\s+/g, " ")
     .trim()
-  return safe.length <= maximum ? safe : `${safe.slice(0, Math.max(0, maximum - 1))}…`
+  return truncateToCells(safe, maximum)
 }
 
 function mergeComposerDraft(

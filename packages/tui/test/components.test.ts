@@ -8,12 +8,15 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ContextPanelRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, formatElapsed, fuzzyScore } from "../src/components"
+import { ContextPanelRenderable, FuzzyPickerRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, formatElapsed, fuzzyScore } from "../src/components"
+import { stringCellWidth } from "../src/render"
 import {
   PROTOCOL_VERSION,
   type ClientCommand,
   type CommandOutcome,
   type EngineEvent,
+  type PermissionModeDescriptor,
+  type PermissionStateDescriptor,
 } from "../src/protocol"
 import { formatToolArguments } from "../src/render"
 import { createInitialState, type RottweilerState } from "../src/state"
@@ -36,7 +39,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
   }
 }
 
-function permissionState(runtimeMode: "strict" | "auto-safe" | "yolo") {
+function permissionState(runtimeMode: PermissionModeDescriptor): PermissionStateDescriptor {
   return {
     default: "ask" as const,
     effective_rules: [],
@@ -50,6 +53,28 @@ function permissionState(runtimeMode: "strict" | "auto-safe" | "yolo") {
 
 describe("M4 retained components", () => {
   let renderer: TestRenderer | undefined
+
+  test("shows a muted, non-selectable row when filtering has no matches", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const selected: string[] = []
+    const picker = new FuzzyPickerRenderable<string>(renderer, kennelTheme)
+    renderer.root.add(picker)
+    picker.open("Choices", [{ id: "alpha", label: "Alpha", description: "First", value: "alpha" }], (item) => {
+      selected.push(item.value)
+    })
+
+    await setup.mockInput.typeText("zzz")
+
+    expect(picker.select.options).toEqual([{
+      name: "No matches for “zzz”",
+      description: "",
+      value: "picker.no-matches",
+    }])
+    expect(picker.select.showSelectionIndicator).toBeFalse()
+    picker.select.selectCurrent()
+    expect(selected).toEqual([])
+  })
 
   test("keeps one tool card through streaming and commit while preserving expansion", async () => {
     const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
@@ -630,13 +655,13 @@ describe("M4 retained components", () => {
     const app = createRottweilerApp(renderer, {
       initialState: {
         ...createInitialState(),
-        permissions: permissionState("strict"),
+        permissions: permissionState("auto-safe"),
       },
     })
     renderer.root.add(app)
     await setup.renderOnce()
 
-    expect(app.statusLine.plainText).toContain("◉ execute · strict")
+    expect(app.statusLine.plainText).toContain("◉ execute · auto-safe")
     app.setState({ ...app.state, permissions: null })
     await setup.renderOnce()
     expect(app.statusLine.plainText).toContain("◉ execute")
@@ -803,6 +828,62 @@ describe("M4 retained components", () => {
     expect(setup.captureCharFrame()).toContain("**/*.rs")
   })
 
+  test("re-renders historical tool cards when the workspace-root generation changes", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    const tool = {
+      toolCallId: "workspace-root-tool",
+      turnId: "1",
+      name: "read",
+      args: { path: "/historical-root/src/main.rs" },
+      status: "finished" as const,
+      capabilities: ["read_filesystem" as const],
+      rationale: null,
+      diff: null,
+      chunks: [],
+      output: { type: "text" as const, text: "contents" },
+      isError: false,
+      callIndex: 0,
+    }
+    const initial: RottweilerState = {
+      ...createInitialState(),
+      transcript: [{
+        sequenceId: "1",
+        agentTurn: "1",
+        turn: {
+          role: "tool",
+          blocks: [{ type: "tool_result", id: tool.toolCallId, output: tool.output, is_error: false }],
+          meta: { synthetic: false, summary: false },
+        },
+      }],
+      tools: { [tool.toolCallId]: tool },
+    }
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    const previousCard = [...app.transcript.mountedCards.values()][0]
+    const previousTool = previousCard?.getChildren()
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    expect(previousTool?.header.plainText).toContain("/historical-root/src/main.rs")
+
+    app.setState({
+      ...initial,
+      workspaceRoots: {
+        generation: "1",
+        effectiveFromTurn: "0",
+        roots: ["/historical-root"],
+      },
+    })
+    await setup.renderOnce()
+
+    const updatedCard = [...app.transcript.mountedCards.values()][0]
+    const updatedTool = updatedCard?.getChildren()
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    expect(updatedCard).not.toBe(previousCard)
+    expect(updatedTool?.header.plainText).toContain("src/main.rs")
+  })
+
   test("renders bash commands and existing mutation diffs inline with syntax-aware renderables", async () => {
     const setup = await createTestRenderer({ width: 90, height: 30, useThread: false })
     renderer = setup.renderer
@@ -885,7 +966,7 @@ describe("M4 retained components", () => {
     expect(editCard?.diff?.visible).toBeTrue()
     expect(setup.captureCharFrame()).toContain("+ new")
     expect(setup.captureCharFrame()).toContain("src/main.rs · +1 −1")
-    expect(editCard?.body.plainText).toContain("File · src/main.rs")
+    expect(editCard?.body.plainText).toContain("file · src/main.rs")
     expect(editCard?.body.plainText).toContain("1 change applied")
     expect(editCard?.body.plainText).not.toContain("Error parsing diff")
     expect(setup.captureCharFrame()).not.toContain("Removed line count did not match")
@@ -955,7 +1036,7 @@ describe("M4 retained components", () => {
     expect(card.diff?.height).toBe(24)
     expect(card.height).toBe((card.body.height ?? 0) + 1 + (card.diff?.height ?? 0) + 2)
     expect(setup.captureCharFrame()).toContain("src/large.rs · +26 −26")
-    expect(setup.captureCharFrame()).toContain("… 6 more lines · ctrl+r to review")
+    expect(setup.captureCharFrame()).toContain("… 6 more lines · Ctrl+R to review")
   })
 
   test("sizes truncated inline diffs to their visible unified rows on narrow terminals", async () => {
@@ -1000,7 +1081,7 @@ describe("M4 retained components", () => {
     expect(card.diff?.height).toBe(24)
     expect(card.height).toBe((card.body.height ?? 0) + 1 + (card.diff?.height ?? 0) + 2)
     expect(setup.captureCharFrame()).toContain("src/large.rs · +26 −26")
-    expect(setup.captureCharFrame()).toContain("… 42 more lines · ctrl+r to review")
+    expect(setup.captureCharFrame()).toContain("… 42 more lines · Ctrl+R to review")
   })
 
   test("renders structured diagnostics instead of protected model framing", async () => {
@@ -1623,7 +1704,7 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
 
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("ctrl+g inspect · click a row to open")
+    expect(frame).toContain("Ctrl+G inspect · click a row to open")
     expect(frame).toContain("Inspect provider boundaries · using tool · read")
     expect(frame).toContain("1m23s")
     expect(app.subagentTray.rows.size).toBe(2)
@@ -1680,7 +1761,7 @@ describe("M4 retained components", () => {
     })
     await setup.renderOnce()
     expect(app.subagentTray.rows.size).toBe(6)
-    expect(app.subagentTray.more.plainText).toBe("… 14 more · ctrl+g")
+    expect(app.subagentTray.more.plainText).toBe("… 14 more · Ctrl+G")
   })
 
   test("opens an exact child transcript from a clicked tree row", async () => {
@@ -1783,8 +1864,41 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
     expect(tray.rows.size).toBe(6)
     expect([...tray.rows.keys()]).toEqual(Array.from({ length: 6 }, (_, index) => `child-${index}`))
-    expect(tray.more.plainText).toBe("… 3 more · ctrl+g")
-    expect(tray.footer.plainText).toBe("ctrl+g inspect · click a row to open")
+    expect(tray.more.plainText).toBe("… 3 more · Ctrl+G")
+    expect(tray.footer.plainText).toBe("Ctrl+G inspect · click a row to open")
+  })
+
+  test("bounds a composed subagent tray row to its measured content width", async () => {
+    const setup = await createTestRenderer({ width: 32, height: 12, useThread: false })
+    renderer = setup.renderer
+    const tray = new SubagentTrayRenderable(renderer, kennelTheme, () => {})
+    tray.update({
+      ...createInitialState(),
+      turns: { "1": { turnId: "1", status: "running", usage: null, cost: null } },
+      subagentOrder: ["child-wide"],
+      subagents: {
+        "child-wide": {
+          projectionId: "child-wide",
+          subagentId: "child-wide",
+          parentTurnId: "1",
+          task: "界".repeat(48),
+          spawnedAtMs: 1_000,
+          status: "running",
+          childSessionId: "child-session",
+          lastChildSequence: "3",
+          activity: "👨‍👩‍👧‍👦 reviewing the terminal layout with a long status",
+          summary: null,
+          touchedFileCount: 0,
+          diffArtifactId: null,
+        },
+      },
+    }, 84_000)
+    renderer.root.add(tray)
+    await setup.renderOnce()
+
+    const row = tray.rows.get("child-wide")!
+    expect(stringCellWidth(row.plainText)).toBeLessThanOrEqual(28)
+    expect(row.plainText.endsWith("…")).toBe(true)
   })
 
   test("renders cumulative review and routes exact per-file accept or revert commands", async () => {
@@ -1988,7 +2102,7 @@ describe("M4 retained components", () => {
       "linter:clippy-driver",
     ])
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("Todos")
+    expect(frame).toContain("Tasks")
     expect(frame).toContain("MCP")
     expect(frame).toContain("docs · 4 tools")
     expect(frame).not.toContain("disabled")

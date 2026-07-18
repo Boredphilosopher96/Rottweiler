@@ -684,6 +684,8 @@ function applyKnownEvent(
     case "subagent_spawned": {
       const existing = state.subagents[event.subagent_id]
       const parentTurnId = currentTurnId(state)
+      const parsedSpawnedAtMs = Date.parse(event.meta.emitted_at)
+      const spawnedAtMs = Number.isFinite(parsedSpawnedAtMs) ? parsedSpawnedAtMs : null
       let subagents = state.subagents
       let subagentOrder = state.subagentOrder
       if (existing !== undefined && existing.parentTurnId !== parentTurnId) {
@@ -708,7 +710,7 @@ function applyKnownEvent(
           subagentId: event.subagent_id,
           parentTurnId,
           task: boundedUtf8(event.task, MAX_SUBAGENT_TASK_BYTES),
-          spawnedAtMs: Date.now(),
+          spawnedAtMs,
           status: "running",
           childSessionId: event.child_session_id,
           lastChildSequence: existing?.lastChildSequence ?? null,

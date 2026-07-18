@@ -43,11 +43,11 @@ use rw_types::{
     ContextItemKind, ContextItemSnapshot, ContextItemState, ContextSnapshot, Cost, CostSnapshot,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, ImageRef, ModeId, ModelAlias,
     ModelContextTransfer, ModelSwitchQuestion, PROTOCOL_VERSION, PermissionAction,
-    PermissionApprovalDescriptor, PermissionApprovalScope, PermissionRuleDescriptor,
-    PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump, PromptTool, Question,
-    QuestionId, QuestionOption, QuestionResponseKind, RequestId, ReviewFileDecision,
-    ReviewFileStatus, RewindTarget, Role, SequenceId, SessionId, SessionMode, SessionReview,
-    ShellId, StoredAttachment, SubagentId, ToolCallId, ToolOutput, ToolOutputPart,
+    PermissionApprovalDescriptor, PermissionApprovalScope, PermissionModeDescriptor,
+    PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact, PlanDecision, PromptDump,
+    PromptTool, Question, QuestionId, QuestionOption, QuestionResponseKind, RequestId,
+    ReviewFileDecision, ReviewFileStatus, RewindTarget, Role, SequenceId, SessionId, SessionMode,
+    SessionReview, ShellId, StoredAttachment, SubagentId, ToolCallId, ToolOutput, ToolOutputPart,
     ToolOutputStream, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus, UnifiedDiff,
     UnrestorablePath, Usage,
 };
@@ -7001,6 +7001,16 @@ const fn permission_decision(action: PermissionAction) -> PermissionDecision {
     }
 }
 
+const fn permission_mode_descriptor(
+    mode: crate::HeadlessPermissionMode,
+) -> PermissionModeDescriptor {
+    match mode {
+        crate::HeadlessPermissionMode::Strict => PermissionModeDescriptor::Strict,
+        crate::HeadlessPermissionMode::AutoSafe => PermissionModeDescriptor::AutoSafe,
+        crate::HeadlessPermissionMode::Yolo => PermissionModeDescriptor::Yolo,
+    }
+}
+
 fn permission_rule_id(scope: &str, rule: &PermissionRule) -> String {
     let mut digest = blake3::Hasher::new();
     digest.update(b"rottweiler-permission-rule-row-v1\0");
@@ -7073,6 +7083,7 @@ fn permission_state(permissions: &PermissionGate) -> PermissionStateDescriptor {
     }
     PermissionStateDescriptor {
         default: permission_action(snapshot.default),
+        runtime_mode: snapshot.runtime_mode.map(permission_mode_descriptor),
         effective_rules,
         // Project configuration cannot grant permission authority. Remembered
         // project approvals are represented separately above.
@@ -21667,13 +21678,58 @@ mod tests {
         );
         let listed = next_permission_state(&mut observer_events).await;
         assert_eq!(listed.default, PermissionAction::Ask);
+        assert_eq!(listed.runtime_mode, None);
         assert_eq!(listed.effective_rules.len(), 1);
         assert!(listed.project_rules.is_empty());
         assert_eq!(listed.session_rules.len(), 1);
         assert_eq!(listed.approvals.len(), 1);
         assert_eq!(listed.approvals[0].scope, PermissionApprovalScope::Session);
         let encoded = serde_json::to_string(&listed).expect("permission inventory JSON");
+        assert!(!encoded.contains("runtime_mode"));
         assert!(!encoded.contains("secret-never-listed"));
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SendMessage {
+                    meta: protocol_meta("driver", "driver-mode"),
+                    session_id: session_id.clone(),
+                    content: "/permissions mode auto-safe".to_owned(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .expect("driver permission mode"),
+            CommandOutcome::Accepted
+        );
+        let mode_changed = next_matching(&mut driver_events, |kind| {
+            matches!(kind, PendingEvent::PermissionModeChanged { .. })
+        })
+        .await;
+        assert!(matches!(
+            mode_changed.kind,
+            PendingEvent::PermissionModeChanged {
+                mode: Some(crate::HeadlessPermissionMode::AutoSafe)
+            }
+        ));
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::ListPermissions {
+                    meta: protocol_meta("driver", "driver-list-mode"),
+                    session_id: session_id.clone(),
+                })
+                .await
+                .expect("driver list active mode"),
+            CommandOutcome::Accepted
+        );
+        let active_mode = next_permission_state(&mut driver_events).await;
+        assert_eq!(
+            active_mode.runtime_mode,
+            Some(PermissionModeDescriptor::AutoSafe)
+        );
+        assert!(
+            serde_json::to_string(&active_mode)
+                .expect("active permission inventory JSON")
+                .contains(r#""runtime_mode":"auto-safe""#)
+        );
 
         assert!(matches!(
             handle

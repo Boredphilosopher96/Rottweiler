@@ -139,9 +139,28 @@ describe("bounded retained rendering", () => {
     })
   })
 
-  test("always keeps the first hunk when it exceeds the visual row budget", () => {
-    const source = "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n"
-    expect(truncateUnifiedDiff(source, 1)).toEqual({ diff: source, hiddenLines: 0 })
+  test("truncates an oversized first hunk within the split-view row budget", () => {
+    const source = "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,3 +1,3 @@\n-old one\n+new one\n-old two\n+new two\n-old three\n+new three\n@@ -10,1 +10,1 @@\n-before\n+after\n"
+    const result = truncateUnifiedDiff(source, 1)
+
+    expect(result).toEqual({
+      diff: "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,1 +1,1 @@\n-old one\n+new one\n",
+      hiddenLines: 7,
+    })
+    expect(splitDiffVisualRows(result.diff)).toBe(1)
+    expect(diffStats(result.diff)).toEqual({ added: 1, removed: 1 })
+  })
+
+  test("truncates an oversized first hunk within the unified-view row budget", () => {
+    const source = "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -4,3 +4,3 @@\n-old one\n+new one\n-old two\n+new two\n-old three\n+new three\n@@ -20,1 +20,1 @@\n-before\n+after\n"
+    const result = truncateUnifiedDiff(source, 2, "unified")
+
+    expect(result).toEqual({
+      diff: "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -4,1 +4,1 @@\n-old one\n+new one\n",
+      hiddenLines: 7,
+    })
+    expect(splitDiffVisualRows(result.diff)).toBe(1)
+    expect(diffStats(result.diff)).toEqual({ added: 1, removed: 1 })
   })
 
   test("uses OpenCode-compatible fixed scroll speed when configured", () => {
@@ -283,7 +302,7 @@ describe("bounded retained rendering", () => {
         count: 3,
       },
     })
-    expect(structuredOnly).toBe("Count: 3")
+    expect(structuredOnly).toBe("Count · 3")
     expect(structuredOnly).not.toContain("tool_registry")
     expect(structuredOnly).not.toContain("tool_definitions")
     expect(structuredOnly).not.toContain("/private/repo")

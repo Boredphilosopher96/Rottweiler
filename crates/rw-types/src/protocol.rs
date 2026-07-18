@@ -296,6 +296,17 @@ pub enum PermissionAction {
     Deny,
 }
 
+/// Active session permission mode exposed without coupling clients to the
+/// engine's runtime policy type.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(rename_all = "kebab-case")]
+pub enum PermissionModeDescriptor {
+    Strict,
+    AutoSafe,
+    Yolo,
+}
+
 /// Scope of a remembered exact approval.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -328,6 +339,9 @@ pub struct PermissionApprovalDescriptor {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct PermissionStateDescriptor {
     pub default: PermissionAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub runtime_mode: Option<PermissionModeDescriptor>,
     /// Effective immutable rules assembled from trusted user configuration.
     pub effective_rules: Vec<PermissionRuleDescriptor>,
     /// Project rule authority is intentionally empty while project permission

@@ -5,6 +5,7 @@ import {
   toolPlainText,
   toolStructuredData,
 } from "./format"
+import { truncateToCells } from "./text"
 
 export interface ToolPresentation {
   readonly subject: string
@@ -63,8 +64,7 @@ export function presentTool(tool: ToolProjection): ToolPresentation {
   const text = toolPlainText(tool.output).trim()
   if (tool.isError === true) return presentFailure(tool, data, text)
   const presenter = PRESENTERS[tool.name] ?? (tool.name.startsWith("mcp__") ? presentMcp : presentGeneric)
-  const result = presenter(tool, data, text)
-  return withDiffNotice(tool, result)
+  return presenter(tool, data, text)
 }
 
 function presentRead(tool: ToolProjection, data: unknown, text: string): ToolPresentation {
@@ -94,8 +94,8 @@ function presentWrite(tool: ToolProjection, data: unknown): ToolPresentation {
   const bytes = integer(payload?.bytes)
   return {
     subject: path,
-    summary: bytes === null ? "File written" : `${formatBytes(bytes)} written`,
-    details: joinLines(path === "" ? "" : `File · ${path}`, bytes === null ? "File written" : `${formatBytes(bytes)} written`),
+    summary: bytes === null ? "Written" : `${formatBytes(bytes)} written`,
+    details: joinLines(path === "" ? "" : `file · ${path}`, bytes === null ? "Written" : `${formatBytes(bytes)} written`),
   }
 }
 
@@ -108,7 +108,7 @@ function presentEdit(tool: ToolProjection, data: unknown): ToolPresentation {
   return {
     subject: path,
     summary: noun,
-    details: joinLines(path === "" ? "" : `File · ${path}`, `${noun} applied`),
+    details: joinLines(path === "" ? "" : `file · ${path}`, `${noun} applied`),
   }
 }
 
@@ -263,15 +263,18 @@ function presentTodo(_tool: ToolProjection, data: unknown): ToolPresentation {
   })
   return {
     subject: "",
-    summary: `${rows.length} todo${rows.length === 1 ? "" : "s"}`,
-    details: rows.length === 0 ? "No todos." : boundedRows(rows, "todos"),
+    summary: `${rows.length} task${rows.length === 1 ? "" : "s"}`,
+    details: rows.length === 0 ? "No tasks." : boundedRows(rows, "tasks"),
   }
 }
 
 function presentAnswer(tool: ToolProjection, data: unknown): ToolPresentation {
   const answer = string(record(data)?.answer)
   const question = string(record(tool.args)?.question)
-  return { subject: question, summary: answer === "" ? "Answered" : singleLine(answer, 48), details: joinLines(question, answer) }
+  const summary = answer === ""
+    ? "Answered"
+    : truncateToCells(answer.replace(/\s+/g, " ").trim(), 48)
+  return { subject: question, summary, details: joinLines(question, answer) }
 }
 
 function presentPlan(tool: ToolProjection, data: unknown): ToolPresentation {
@@ -288,8 +291,8 @@ function presentBackground(tool: ToolProjection, data: unknown): ToolPresentatio
   const id = string(process?.process_id) || string(record(tool.args)?.process_id)
   const status = human(string(process?.status))
   const count = processes.length
-  const summary = count > 0 ? `${count} process${count === 1 ? "" : "es"}` : status || (tool.name === "background_kill" ? "Process stopped" : "Completed")
-  return { subject: id, summary, details: joinLines(id === "" ? "" : `Process · ${id}`, summary) }
+  const summary = count > 0 ? `${count} process${count === 1 ? "" : "es"}` : status || (tool.name === "background_kill" ? "Stopped" : "Completed")
+  return { subject: id, summary, details: joinLines(id === "" ? "" : `process · ${id}`, summary) }
 }
 
 function presentSubagent(tool: ToolProjection, data: unknown): ToolPresentation {
@@ -346,15 +349,6 @@ function presentFailure(tool: ToolProjection, _data: unknown, text: string): Too
   }
 }
 
-function withDiffNotice(tool: ToolProjection, presentation: ToolPresentation): ToolPresentation {
-  const diff = record(tool.diff)
-  const source = string(diff?.unified_diff)
-  if (source === "") return presentation
-  const lines = source.split("\n").length
-  if (lines <= 12) return presentation
-  return { ...presentation, details: joinLines(`Diff preview · showing 12 of ${lines} lines · ctrl+r to review`, presentation.details) }
-}
-
 function parseBashResult(text: string): { stdout: string; stderr: string } | null {
   const match = /^exit code:\s*[^\n]+\nstdout:\n([\s\S]*?)\nstderr:\n([\s\S]*)$/i.exec(text)
   return match === null ? null : { stdout: (match[1] ?? "").trimEnd(), stderr: (match[2] ?? "").trimEnd() }
@@ -386,16 +380,12 @@ function integer(value: unknown): number | null {
 }
 
 function human(value: string): string {
-  return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
+  return value.replaceAll("_", " ").replace(/^./, (letter) => letter.toUpperCase())
 }
 
 function firstLine(value: string, limit: number): string {
-  return singleLine(value.split("\n").find((line) => line.trim() !== "") ?? "", limit)
-}
-
-function singleLine(value: string, limit: number): string {
-  const compact = value.replace(/\s+/g, " ").trim()
-  return compact.length <= limit ? compact : `${compact.slice(0, Math.max(1, limit - 1))}…`
+  const line = value.split("\n").find((candidate) => candidate.trim() !== "") ?? ""
+  return truncateToCells(line.replace(/\s+/g, " ").trim(), limit)
 }
 
 function boundedRows(rows: readonly string[], noun: string, limit = 7): string {

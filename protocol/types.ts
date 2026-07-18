@@ -230,6 +230,8 @@ export type PromptDump = { turn_id: TurnId | null, model_alias: ModelAlias, turn
 
 export type PermissionAction = "ask" | "allow" | "deny";
 
+export type PermissionModeDescriptor = "strict" | "auto-safe" | "yolo";
+
 export type PermissionApprovalScope = "session" | "project";
 
 export type PermissionRuleDescriptor = {
@@ -240,7 +242,7 @@ id: string, pattern: string, action: PermissionAction, };
 
 export type PermissionApprovalDescriptor = { id: string, scope: PermissionApprovalScope, tool_name: string, summary: string, };
 
-export type PermissionStateDescriptor = { default: PermissionAction,
+export type PermissionStateDescriptor = { default: PermissionAction, runtime_mode?: PermissionModeDescriptor,
 /**
  * Effective immutable rules assembled from trusted user configuration.
  */

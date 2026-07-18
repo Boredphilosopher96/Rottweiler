@@ -11,6 +11,8 @@ import {
 } from "@opentui/core"
 
 import {
+  commandPreview,
+  COMMAND_PREVIEW_MAX_LINES,
   diffStats,
   displayPath,
   formatCost,
@@ -22,6 +24,7 @@ import {
   presentTool,
   presentableUnifiedDiff,
   terminalMarkdown,
+  truncateToCells,
   truncateUnifiedDiff,
   turnMarkdown,
   turnReasoningMarkdown,
@@ -197,7 +200,7 @@ function reasoningTitle(content: string): string {
       .replace(/^[\s#>-]+|[\s#>-]+$/g, "")
       .trim())
     .find(Boolean) ?? "Reasoning"
-  return singleLine(first, 72)
+  return truncateToCells(first.replace(/\s+/g, " ").trim(), 72)
 }
 
 function colorWithOpacity(color: string, opacity: number): string {
@@ -480,7 +483,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     container.add(this.diff)
     if (truncated !== null) {
       container.add(new TextRenderable(this.ctx, {
-        content: `… ${truncated.hiddenLines} more lines · ctrl+r to review`,
+        content: `… ${truncated.hiddenLines} more lines · Ctrl+R to review`,
         fg: this.#theme.muted,
         height: 1,
         flexShrink: 0,
@@ -520,7 +523,7 @@ function toolBodyContent(tool: ToolProjection): string {
         : ""
   const rationale = tool.rationale === null || tool.rationale.trim() === ""
     ? ""
-    : `Why · ${singleLine(tool.rationale, 160)}`
+    : `Why · ${truncateToCells(tool.rationale.replace(/\s+/g, " ").trim(), 160)}`
   return [rationale, output, activity]
     .filter(Boolean)
     .join("\n")
@@ -532,14 +535,11 @@ function bashCommand(tool: ToolProjection): string | null {
 }
 
 function visibleBashCommand(command: string): string {
-  const lines = command.split("\n")
-  const visible = lines.slice(0, 7)
-  if (lines.length > visible.length) visible.push(`# … ${lines.length - visible.length} more lines`)
-  return visible.join("\n")
+  return commandPreview(command)
 }
 
 function bashPrompt(command: string): string {
-  const visibleRows = Math.min(7, command.split("\n").length)
+  const visibleRows = Math.min(COMMAND_PREVIEW_MAX_LINES, command.split("\n").length)
   const prompts: string[] = Array.from({ length: visibleRows }, (_, index) => index === 0 ? "$" : ">")
   if (command.split("\n").length > visibleRows) prompts.push("·")
   return prompts.join("\n")
@@ -579,8 +579,8 @@ function toolBlockExpanded(
 
 function compactToolPresentation(tool: ToolProjection): { subject: string; summary: string } {
   const presentation = presentTool(tool)
-  const subject = singleLine(presentation.subject, 80)
-  const summary = singleLine(presentation.summary, 56)
+  const subject = truncateToCells(presentation.subject.replace(/\s+/g, " ").trim(), 80)
+  const summary = truncateToCells(presentation.summary.replace(/\s+/g, " ").trim(), 56)
   return subject !== "" && summary.includes(subject)
     ? { subject: "", summary }
     : { subject, summary }
@@ -682,7 +682,7 @@ export class SubagentPanelRenderable extends BoxRenderable {
     }
 
     const running = subagents.filter((subagent) => subagent.status === "running").length
-    this.header.content = `Subagents · ${running} running · ${total} total`
+    this.header.content = `Child agents · ${running} running · ${total} total`
     for (const [index, subagent] of subagents.entries()) {
       let row = this.rows.get(subagent.projectionId)
       if (row === undefined) {
@@ -698,7 +698,8 @@ export class SubagentPanelRenderable extends BoxRenderable {
       const glyph = subagentGlyph(subagent.status)
       const branch = index === subagents.length - 1 ? "└─" : "├─"
       const detail = subagentDetail(subagent)
-      row.content = `${branch} ${glyph} ${singleLine(subagent.task, 72)}${detail === "" ? "" : ` · ${detail}`}`
+      const task = truncateToCells(subagent.task.replace(/\s+/g, " ").trim(), 72)
+      row.content = `${branch} ${glyph} ${task}${detail === "" ? "" : ` · ${detail}`}`
       row.onMouseDown = () => this.#onOpenSubagent?.(subagent.subagentId)
       row.fg =
         subagent.status === "failed"
@@ -722,7 +723,10 @@ function subagentDetail(subagent: SubagentProjection): string {
   }
   const files = subagent.touchedFileCount === 0 ? "" : ` · ${subagent.touchedFileCount} files`
   const diff = subagent.diffArtifactId === null ? "" : " · diff ready"
-  return `${subagent.summary === null ? subagent.status.replaceAll("_", " ") : singleLine(subagent.summary, 72)}${files}${diff}`
+  const summary = subagent.summary === null
+    ? subagent.status.replaceAll("_", " ")
+    : truncateToCells(subagent.summary.replace(/\s+/g, " ").trim(), 72)
+  return `${summary}${files}${diff}`
 }
 
 export function subagentGlyph(status: SubagentProjection["status"]): string {
@@ -740,11 +744,6 @@ export function subagentGlyph(status: SubagentProjection["status"]): string {
     case "max_turns":
       return "◇"
   }
-}
-
-function singleLine(value: string, limit: number): string {
-  const compact = value.replace(/\s+/g, " ").trim()
-  return compact.length <= limit ? compact : `${compact.slice(0, Math.max(1, limit - 1))}…`
 }
 
 class TurnCardRenderable extends BoxRenderable {
@@ -801,6 +800,8 @@ class TurnCardRenderable extends BoxRenderable {
               ? theme.info
               : shell.status === 0
                 ? theme.success
+              : shell.status === null
+                ? theme.muted
                 : theme.danger,
           }),
       backgroundColor: shell !== undefined
@@ -824,7 +825,9 @@ class TurnCardRenderable extends BoxRenderable {
           ? theme.info
           : shell.status === 0
             ? theme.success
-            : theme.danger,
+            : shell.status === null
+              ? theme.muted
+              : theme.danger,
       height: toolOnly ? 0 : 1,
       flexShrink: 0,
       visible: shell !== undefined || (!toolOnly && markdown !== ""),
@@ -983,6 +986,7 @@ export class TranscriptRenderable extends BoxRenderable {
   #tools: RottweilerState["tools"] | null = null
   #turns: RottweilerState["turns"] | null = null
   #subagents: RottweilerState["subagents"] | null = null
+  #workspaceRoots: RottweilerState["workspaceRoots"] | null = null
   #agentName = "Rottweiler"
   #tailReasoningTurnId: string | null = null
   #compactionAttempt: number | null = null
@@ -1147,7 +1151,7 @@ export class TranscriptRenderable extends BoxRenderable {
 
   update(state: RottweilerState, agentName = "Rottweiler"): void {
     this.#state = state
-    this.#agentName = singleLine(agentName, 48) || "Child agent"
+    this.#agentName = truncateToCells(agentName.replace(/\s+/g, " ").trim(), 48) || "Child agent"
     const transcriptChanged = this.#transcript !== state.transcript
     if (transcriptChanged && state.streamingTail === null && this.#tailReasoningTurnId !== null) {
       const committed = [...state.transcript]
@@ -1164,12 +1168,16 @@ export class TranscriptRenderable extends BoxRenderable {
       state.transcript,
       state.streamingTail?.turnId ?? null,
     )
-    const cardProjectionChanged = historicalToolsChanged || this.#subagents !== state.subagents
+    const cardProjectionChanged =
+      historicalToolsChanged ||
+      this.#subagents !== state.subagents ||
+      this.#workspaceRoots !== state.workspaceRoots
     const turnProjectionChanged = this.#turns !== state.turns
     this.#transcript = state.transcript
     this.#tools = state.tools
     this.#turns = state.turns
     this.#subagents = state.subagents
+    this.#workspaceRoots = state.workspaceRoots
     if (transcriptChanged || cardProjectionChanged) {
       this.#presentableTranscript = presentableTranscript(state)
     }
@@ -1249,6 +1257,7 @@ export class TranscriptRenderable extends BoxRenderable {
         turnSubagents.length,
         tools.map((tool) => this.#toolExpansion.get(tool.toolCallId) === true),
         this.#reasoningExpansion.get(key) === true,
+        state.workspaceRoots?.generation ?? "",
       ])
       const retained = this.mountedCards.get(key)
       if (retained !== undefined && this.#cardSignatures.get(key) === signature) {

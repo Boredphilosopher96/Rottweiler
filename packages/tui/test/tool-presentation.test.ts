@@ -63,7 +63,7 @@ describe("typed tool presentation", () => {
     expect(toolOutputText(output)).not.toContain("rottweiler_untrusted")
   })
 
-  test("summarizes edits semantically and makes a clipped diff explicit", () => {
+  test("summarizes edits semantically without a redundant diff-preview notice", () => {
     const diff = ["--- a/src/main.ts", "+++ b/src/main.ts", "@@ -1,20 +1,20 @@", ...Array.from({ length: 20 }, (_, index) => `-${index}`)].join("\n")
     const presentation = presentTool(finished(
       "multi_edit",
@@ -84,7 +84,7 @@ describe("typed tool presentation", () => {
 
     expect(presentation.subject).toBe("src/main.ts")
     expect(presentation.summary).toBe("2 changes")
-    expect(presentation.details).toContain("Diff preview · showing 12 of 23 lines · ctrl+r to review")
+    expect(presentation.details).not.toContain("Diff preview")
     expect(presentation.details).not.toContain("details available")
     expect(presentation.details).not.toContain("Old=")
     expect(presentation.details).not.toContain("New=")

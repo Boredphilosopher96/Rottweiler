@@ -3990,6 +3990,16 @@
         "default": {
           "$ref": "#/$defs/PermissionAction"
         },
+        "runtime_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionModeDescriptor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "effective_rules": {
           "description": "Effective immutable rules assembled from trusted user configuration.",
           "type": "array",
@@ -4037,6 +4047,15 @@
         "ask",
         "allow",
         "deny"
+      ]
+    },
+    "PermissionModeDescriptor": {
+      "description": "Active session permission mode exposed without coupling clients to the\nengine's runtime policy type.",
+      "type": "string",
+      "enum": [
+        "strict",
+        "auto-safe",
+        "yolo"
       ]
     },
     "PermissionRuleDescriptor": {

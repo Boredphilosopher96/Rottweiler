@@ -235,13 +235,59 @@ export function truncateUnifiedDiff(
   for (const hunk of hunks) {
     const candidate = [...headers, ...included.flat(), ...hunk].join("\n")
     const rows = rowModel === "unified" ? unifiedDiffVisualRows(candidate) : splitDiffVisualRows(candidate)
-    if (included.length > 0 && rows > maxRows) break
+    if (rows > maxRows) {
+      if (included.length === 0) {
+        const retained = truncateFirstHunk(headers, hunk, maxRows, rowModel)
+        const hiddenLines = hunk.length - retained.length
+          + hunks.slice(1).reduce((count, laterHunk) => count + laterHunk.length, 0)
+        return {
+          diff: `${[...headers, ...retained].join("\n")}${source.endsWith("\n") ? "\n" : ""}`,
+          hiddenLines,
+        }
+      }
+      break
+    }
     included.push(hunk)
   }
   if (included.length === hunks.length) return { diff: source, hiddenLines: 0 }
 
   const hiddenLines = hunks.slice(included.length).reduce((count, hunk) => count + hunk.length, 0)
   return { diff: `${[...headers, ...included.flat()].join("\n")}${source.endsWith("\n") ? "\n" : ""}`, hiddenLines }
+}
+
+function truncateFirstHunk(
+  headers: readonly string[],
+  hunk: readonly string[],
+  maxRows: number,
+  rowModel: "split" | "unified",
+): string[] {
+  const retained = [hunk[0] ?? "@@ -1,0 +1,0 @@"]
+  for (const line of hunk.slice(1)) {
+    const candidate = [...headers, ...retained, line].join("\n")
+    const rows = rowModel === "unified" ? unifiedDiffVisualRows(candidate) : splitDiffVisualRows(candidate)
+    if (rows > maxRows) break
+    retained.push(line)
+  }
+  return rewriteHunkCounts(retained)
+}
+
+function rewriteHunkCounts(hunk: readonly string[]): string[] {
+  const header = hunk[0] ?? "@@ -1,0 +1,0 @@"
+  const parsed = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@(.*)$/.exec(header)
+  const oldStart = parsed?.[1] ?? "1"
+  const newStart = parsed?.[2] ?? "1"
+  const suffix = parsed?.[3] ?? ""
+  let oldCount = 0
+  let newCount = 0
+  for (const line of hunk.slice(1)) {
+    if (line.startsWith("+")) newCount += 1
+    else if (line.startsWith("-")) oldCount += 1
+    else if (!line.startsWith("\\")) {
+      oldCount += 1
+      newCount += 1
+    }
+  }
+  return [`@@ -${oldStart},${oldCount} +${newStart},${newCount} @@${suffix}`, ...hunk.slice(1)]
 }
 
 function hasFileHeaders(lines: readonly string[]): boolean {

@@ -50,6 +50,47 @@ async function waitFor(
   }
 }
 
+function createPlannedFetch(
+  plans: readonly { readonly chunks: readonly Uint8Array[] }[],
+): {
+  readonly fetch: typeof fetch
+  readonly requests: string[]
+  readonly commands: ClientCommand[]
+  cancelledStreams: number
+} {
+  const remaining = [...plans]
+  const harness = {
+    requests: [] as string[],
+    commands: [] as ClientCommand[],
+    cancelledStreams: 0,
+    fetch: undefined as unknown as typeof fetch,
+  }
+  harness.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input))
+    harness.requests.push(`${url.pathname}${url.search}`)
+    if (url.pathname === "/v1/connect") {
+      return Response.json({ client_id: "mock-client", token: "mock-token" }, { status: 201 })
+    }
+    if (url.pathname === "/v1/command") {
+      harness.commands.push(JSON.parse(String(init?.body)) as ClientCommand)
+      return Response.json({ type: "accepted" }, { status: 202 })
+    }
+    const plan = remaining.shift() ?? { chunks: [] }
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of plan.chunks) controller.enqueue(chunk)
+        },
+        cancel() {
+          harness.cancelledStreams += 1
+        },
+      }),
+      { headers: { "Content-Type": "text/event-stream" } },
+    )
+  }) as typeof fetch
+  return harness
+}
+
 describe("authenticated UDS engine transport", () => {
   let engine: AuthenticatedMockEngine | undefined
 
@@ -254,6 +295,161 @@ describe("authenticated UDS engine transport", () => {
       "?session_id=session-transport&last_seen_sequence=1",
     ])
     expect(delays).toEqual([1])
+  })
+
+  test("aborts a gapped attempt and immediately resumes from the last verified cursor", async () => {
+    const events = {
+      one: { type: "mode_changed", meta: durableMeta("1"), mode: "plan" },
+      two: { type: "model_changed", meta: durableMeta("2"), model: "slow" },
+      three: { type: "mode_changed", meta: durableMeta("3"), mode: "default" },
+      four: { type: "model_changed", meta: durableMeta("4"), model: "fast" },
+    } satisfies Record<string, EngineEvent>
+    const harness = createPlannedFetch([
+      {
+        chunks: [encodeSseJson(events.one), encodeSseJson(events.three)],
+      },
+      {
+        chunks: [
+          encodeSseJson(events.two),
+          encodeSseJson(events.three),
+          encodeSseJson(events.four),
+        ],
+      },
+    ])
+    const delays: number[] = []
+    const client = new EngineHttpSseClient({
+      socketPath: "/private/mock-engine.sock",
+      bootstrapToken: "mock-bootstrap",
+      fetch: harness.fetch,
+      backoff: { initialDelayMs: 5, maximumDelayMs: 20, multiplier: 2 },
+      scheduler: {
+        async sleep(delayMs) {
+          delays.push(delayMs)
+        },
+      },
+    })
+    const controller = new AbortController()
+    let state = createInitialState()
+    const accepted: string[] = []
+
+    await client.subscribe({
+      attach,
+      signal: controller.signal,
+      getLastSeenSequence: () => state.lastSequence,
+      onEvent(event) {
+        const previousGap = state.connection.gap
+        const previousSequence = state.lastSequence
+        state = reduceRottweilerState(state, engineEvent(event))
+        if (state.lastSequence !== previousSequence && state.lastSequence !== null) {
+          accepted.push(state.lastSequence)
+        }
+        if (previousGap === null && state.connection.gap !== null) {
+          client.restartStream("immediate")
+        }
+        if (state.lastSequence === "4") controller.abort()
+      },
+    })
+
+    expect(accepted).toEqual(["1", "2", "3", "4"])
+    expect(state.connection.gap).toBeNull()
+    expect(state.mode).toBe("default")
+    expect(state.model).toBe("fast")
+    const attaches = harness.commands.filter(
+      (command): command is Extract<ClientCommand, { type: "attach_session" }> =>
+        command.type === "attach_session",
+    )
+    expect(attaches.map((command) => command.last_seen_sequence)).toEqual([null, "1"])
+    expect(
+      harness.requests.filter((request) => request.startsWith("/v1/events")),
+    ).toEqual([
+      "/v1/events?session_id=session-transport",
+      "/v1/events?session_id=session-transport&last_seen_sequence=1",
+    ])
+    expect(delays).toEqual([])
+    expect(harness.cancelledStreams).toBe(2)
+  })
+
+  test("backs off when an immediate gap replay is itself gapped", async () => {
+    const one = {
+      type: "mode_changed",
+      meta: durableMeta("1"),
+      mode: "plan",
+    } satisfies EngineEvent
+    const two = {
+      type: "model_changed",
+      meta: durableMeta("2"),
+      model: "slow",
+    } satisfies EngineEvent
+    const three = {
+      type: "mode_changed",
+      meta: durableMeta("3"),
+      mode: "default",
+    } satisfies EngineEvent
+    const four = {
+      type: "model_changed",
+      meta: durableMeta("4"),
+      model: "fast",
+    } satisfies EngineEvent
+    const harness = createPlannedFetch([
+      { chunks: [encodeSseJson(one), encodeSseJson(three)] },
+      { chunks: [encodeSseJson(three)] },
+      {
+        chunks: [encodeSseJson(two), encodeSseJson(three), encodeSseJson(four)],
+      },
+    ])
+    const delays: number[] = []
+    const reconnectAttempts: number[] = []
+    const client = new EngineHttpSseClient({
+      socketPath: "/private/mock-engine.sock",
+      bootstrapToken: "mock-bootstrap",
+      fetch: harness.fetch,
+      backoff: { initialDelayMs: 5, maximumDelayMs: 20, multiplier: 2 },
+      scheduler: {
+        async sleep(delayMs) {
+          delays.push(delayMs)
+        },
+      },
+    })
+    const controller = new AbortController()
+    let state = createInitialState()
+    let recoveringGap = false
+
+    await client.subscribe({
+      attach,
+      signal: controller.signal,
+      getLastSeenSequence: () => state.lastSequence,
+      onConnection(update) {
+        if (update.phase === "reconnecting") reconnectAttempts.push(update.attempt)
+      },
+      onEvent(event) {
+        const previousGap = state.connection.gap
+        const previousSequence = state.lastSequence
+        state = reduceRottweilerState(state, engineEvent(event))
+        const nextGap = state.connection.gap
+        if (nextGap === null) {
+          recoveringGap = false
+        } else if (previousGap === null) {
+          recoveringGap = client.restartStream("immediate")
+        } else if (
+          recoveringGap &&
+          state.lastSequence === previousSequence &&
+          durableSequenceId(event) === nextGap.received
+        ) {
+          client.restartStream("backoff")
+        }
+        if (state.lastSequence === "4") controller.abort()
+      },
+    })
+
+    expect(state.lastSequence).toBe("4")
+    expect(state.connection.gap).toBeNull()
+    expect(delays).toEqual([5])
+    expect(reconnectAttempts).toEqual([0, 1])
+    const attaches = harness.commands.filter(
+      (command): command is Extract<ClientCommand, { type: "attach_session" }> =>
+        command.type === "attach_session",
+    )
+    expect(attaches.map((command) => command.last_seen_sequence)).toEqual([null, "1", "1"])
   })
 
   test("advances past a committed event larger than 64 KiB without reconnecting", async () => {

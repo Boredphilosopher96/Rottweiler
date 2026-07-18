@@ -874,7 +874,6 @@ describe("pure TUI state reducer", () => {
   })
 
   test("coalesces connection-scoped child progress without advancing the parent cursor", () => {
-    const spawnedAfterMs = Date.now()
     let state = reduce(createInitialState(), {
       type: "subagent_spawned",
       meta: meta("1"),
@@ -883,8 +882,7 @@ describe("pure TUI state reducer", () => {
       task: "Inspect orchestration",
     })
     const spawnedAtMs = state.subagents.child?.spawnedAtMs
-    expect(spawnedAtMs).not.toBeNull()
-    expect(spawnedAtMs ?? 0).toBeGreaterThanOrEqual(spawnedAfterMs)
+    expect(spawnedAtMs).toBe(Date.parse("2026-01-01T00:00:00Z"))
     state = reduce(state, {
       type: "subagent_progress",
       parent_session_id: "session-state",
@@ -1147,16 +1145,19 @@ describe("pure TUI state reducer", () => {
     const retained = JSON.stringify(state)
     expect(retained).not.toContain("UNRETAINED-DIFF")
     expect(retained.length).toBeLessThan(300_000)
-    const withoutSpawnTimes = (value: RottweilerState): RottweilerState => ({
-      ...value,
-      subagents: Object.fromEntries(
-        Object.entries(value.subagents).map(([id, subagent]) => [
-          id,
-          { ...subagent, spawnedAtMs: null },
-        ]),
-      ),
+    expect(replay()).toEqual(state)
+  })
+
+  test("uses null when a subagent spawn event has an invalid emitted_at timestamp", () => {
+    const state = reduce(createInitialState(), {
+      type: "subagent_spawned",
+      meta: { ...meta("1"), emitted_at: "not-a-timestamp" },
+      subagent_id: "child",
+      child_session_id: "session-child",
+      task: "Inspect timestamp handling",
     })
-    expect(withoutSpawnTimes(replay())).toEqual(withoutSpawnTimes(state))
+
+    expect(state.subagents.child?.spawnedAtMs).toBeNull()
   })
 
   test("preserves every typed terminal subagent status", () => {
