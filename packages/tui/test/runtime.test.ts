@@ -752,6 +752,7 @@ describe("OpenTUI engine runtime", () => {
       "resume_session",
       "resume_session",
       "take_driver",
+      "list_models",
       "list_sessions",
       "get_context",
       "get_cost",
@@ -759,6 +760,7 @@ describe("OpenTUI engine runtime", () => {
       "list_settings",
       "list_mcp_servers",
       "list_runtime_services",
+      "list_permissions",
       "list_commands",
     ])
     expect(client.subscription?.attach.role).toBe("driver")
@@ -804,6 +806,7 @@ describe("OpenTUI engine runtime", () => {
       "resume_session",
       "resume_session",
       "take_driver",
+      "list_models",
       "list_sessions",
       "get_context",
       "get_cost",
@@ -811,6 +814,7 @@ describe("OpenTUI engine runtime", () => {
       "list_settings",
       "list_mcp_servers",
       "list_runtime_services",
+      "list_permissions",
       "list_commands",
     ])
   })
@@ -932,12 +936,13 @@ describe("OpenTUI engine runtime", () => {
       "list_settings",
       "list_mcp_servers",
       "list_runtime_services",
+      "list_permissions",
       "list_commands",
       "send_message",
     ] satisfies ClientCommand["type"][]) expect(commandTypes).toContain(expected)
   })
 
-  test("keeps live model discovery on demand instead of blocking startup submissions", async () => {
+  test("requests the cached model catalog without blocking startup submissions", async () => {
     const client = new ScriptedClient()
     const runtime = new TuiEngineRuntime(
       {
@@ -955,7 +960,15 @@ describe("OpenTUI engine runtime", () => {
 
     await runtime.start()
     await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
-    expect(client.commands.some((command) => command.type === "list_models")).toBeFalse()
+    expect(client.commands).toContainEqual({
+      type: "list_models",
+      refresh: false,
+      meta: expect.objectContaining({
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-runtime",
+      }),
+      session_id: "session-slow-catalog",
+    })
     expect(
       await runtime.sendCommand({
         type: "send_message",
@@ -1007,6 +1020,7 @@ describe("OpenTUI engine runtime", () => {
     expect(client.commands.map((command) => command.type)).toEqual([
       "resume_session",
       "take_driver",
+      "list_models",
       "list_sessions",
       "get_context",
       "get_cost",
@@ -1014,6 +1028,7 @@ describe("OpenTUI engine runtime", () => {
       "list_settings",
       "list_mcp_servers",
       "list_runtime_services",
+      "list_permissions",
       "list_commands",
     ])
     await runtime.stop()

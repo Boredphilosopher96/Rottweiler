@@ -197,6 +197,62 @@ describe("pure TUI state reducer", () => {
     expect(state.provider).toBe("openai")
   })
 
+  test("projects the active session model when no model is set", () => {
+    const withDriver = reduce(createInitialState(), {
+      type: "driver_changed",
+      meta: meta("1"),
+      driver_client_id: "active-client",
+    })
+    const state = reduce(withDriver, {
+      type: "sessions_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client",
+        request_id: "sessions",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      sessions: [
+        {
+          session_id: "other-session",
+          workspace_name: "Rottweiler",
+          model: "other-model",
+          driver_client_id: "other-client",
+          shell_active: false,
+        },
+        {
+          session_id: "active-session",
+          workspace_name: "Rottweiler",
+          model: "active-model",
+          driver_client_id: "active-client",
+          shell_active: false,
+        },
+      ],
+    })
+    expect(state.model).toBe("active-model")
+  })
+
+  test("does not infer an active session without a driver client", () => {
+    const state = reduce(createInitialState(), {
+      type: "sessions_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client",
+        request_id: "sessions",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      sessions: [
+        {
+          session_id: "session",
+          workspace_name: "Rottweiler",
+          model: "model",
+          driver_client_id: null,
+          shell_active: false,
+        },
+      ],
+    })
+    expect(state.model).toBeNull()
+  })
+
   test("model catalog refresh does not overwrite a newer durable model event", () => {
     const durable = reduce(createInitialState(), {
       type: "model_changed",
@@ -818,6 +874,7 @@ describe("pure TUI state reducer", () => {
   })
 
   test("coalesces connection-scoped child progress without advancing the parent cursor", () => {
+    const spawnedAfterMs = Date.now()
     let state = reduce(createInitialState(), {
       type: "subagent_spawned",
       meta: meta("1"),
@@ -825,6 +882,9 @@ describe("pure TUI state reducer", () => {
       child_session_id: "session-child",
       task: "Inspect orchestration",
     })
+    const spawnedAtMs = state.subagents.child?.spawnedAtMs
+    expect(spawnedAtMs).not.toBeNull()
+    expect(spawnedAtMs ?? 0).toBeGreaterThanOrEqual(spawnedAfterMs)
     state = reduce(state, {
       type: "subagent_progress",
       parent_session_id: "session-state",
@@ -837,6 +897,7 @@ describe("pure TUI state reducer", () => {
     expect(state.subagents.child).toMatchObject({
       childSessionId: "session-child",
       activity: "using tool · grep",
+      spawnedAtMs,
       status: "running",
     })
 
@@ -891,6 +952,80 @@ describe("pure TUI state reducer", () => {
     })
     expect(state.protocol.invalidEvents).toBe(2)
     expect(state.subagentOrder).toEqual(["child"])
+  })
+
+  test("projects bounded subagent tool arguments without trusting malformed args", () => {
+    let state = reduce(createInitialState(), {
+      type: "subagent_spawned",
+      meta: meta("1"),
+      subagent_id: "child",
+      child_session_id: "session-child",
+      task: "Inspect tools",
+    })
+    const spawnedAtMs = state.subagents.child?.spawnedAtMs
+    const cases = [
+      {
+        name: "bash",
+        args: { command: "bun test\n  test/state-reducer.test.ts --only" },
+        expected: "using tool · bash · bun test test/state-reducer.test.ts --only",
+      },
+      {
+        name: "read",
+        args: { path: "/Users/example/Rottweiler/packages/tui/src/components/transcript.ts" },
+        expected: "using tool · read · components/transcript.ts",
+      },
+      {
+        name: "write",
+        args: { file_path: "packages/tui/src/state/model.ts" },
+        expected: "using tool · write · state/model.ts",
+      },
+      {
+        name: "edit",
+        args: { filePath: "packages/tui/src/app.ts" },
+        expected: "using tool · edit · src/app.ts",
+      },
+      {
+        name: "grep",
+        args: { pattern: "subagent_(spawned|finished)" },
+        expected: "using tool · grep · subagent_(spawned|finished)",
+      },
+      {
+        name: "glob",
+        args: { pattern: "packages/tui/**/*.test.ts" },
+        expected: "using tool · glob · packages/tui/**/*.test.ts",
+      },
+      {
+        name: "bash",
+        args: ["not", "an", "object"],
+        expected: "using tool · bash",
+      },
+    ] as const
+    for (const [index, item] of cases.entries()) {
+      state = reduce(state, {
+        type: "subagent_progress",
+        parent_session_id: "session-state",
+        subagent_id: "child",
+        child_session_id: "session-child",
+        child_sequence: String(index + 1),
+        event: { type: "tool_call_started", name: item.name, args: item.args },
+      })
+      expect(state.subagents.child?.activity).toBe(item.expected)
+    }
+    state = reduce(state, {
+      type: "subagent_progress",
+      parent_session_id: "session-state",
+      subagent_id: "child",
+      child_session_id: "session-child",
+      child_sequence: "8",
+      event: {
+        type: "tool_call_started",
+        name: "bash",
+        args: { command: `${"x".repeat(100)}\nsecret-second-line` },
+      },
+    })
+    expect(state.subagents.child?.activity?.length ?? 0).toBeLessThanOrEqual(72)
+    expect(state.subagents.child?.activity).not.toContain("\n")
+    expect(state.subagents.child?.spawnedAtMs).toBe(spawnedAtMs)
   })
 
   test("extracts a bounded terminal summary without retaining a multi-megabyte diff", () => {
@@ -1012,7 +1147,16 @@ describe("pure TUI state reducer", () => {
     const retained = JSON.stringify(state)
     expect(retained).not.toContain("UNRETAINED-DIFF")
     expect(retained.length).toBeLessThan(300_000)
-    expect(replay()).toEqual(state)
+    const withoutSpawnTimes = (value: RottweilerState): RottweilerState => ({
+      ...value,
+      subagents: Object.fromEntries(
+        Object.entries(value.subagents).map(([id, subagent]) => [
+          id,
+          { ...subagent, spawnedAtMs: null },
+        ]),
+      ),
+    })
+    expect(withoutSpawnTimes(replay())).toEqual(withoutSpawnTimes(state))
   })
 
   test("preserves every typed terminal subagent status", () => {

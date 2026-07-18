@@ -340,8 +340,15 @@ function applyKnownEvent(
         ),
       }
     case "sessions_listed":
+      const activeSession =
+        state.driverClientId === null
+          ? undefined
+          : event.sessions.find((session) => session.driver_client_id === state.driverClientId)
       return {
         ...state,
+        ...(state.model !== null || activeSession === undefined
+          ? {}
+          : { model: activeSession.model }),
         sessions: event.sessions.map((session) => ({
           sessionId: session.session_id,
           ...(session.title ? { title: session.title } : {}),
@@ -701,6 +708,7 @@ function applyKnownEvent(
           subagentId: event.subagent_id,
           parentTurnId,
           task: boundedUtf8(event.task, MAX_SUBAGENT_TASK_BYTES),
+          spawnedAtMs: Date.now(),
           status: "running",
           childSessionId: event.child_session_id,
           lastChildSequence: existing?.lastChildSequence ?? null,
@@ -742,6 +750,7 @@ function applyKnownEvent(
             subagentId: event.subagent_id,
             parentTurnId: existing.parentTurnId,
             task: existing.task,
+            spawnedAtMs: existing.spawnedAtMs,
             status: existing.status,
             childSessionId: event.child_session_id,
             lastChildSequence: childSequence ?? existing.lastChildSequence,
@@ -763,6 +772,7 @@ function applyKnownEvent(
           subagentId: event.subagent_id,
           parentTurnId: existing?.parentTurnId ?? currentTurnId(state),
           task: boundedUtf8(existing?.task ?? event.subagent_id, MAX_SUBAGENT_TASK_BYTES),
+          spawnedAtMs: existing?.spawnedAtMs ?? null,
           status: terminal.status,
           childSessionId: existing?.childSessionId ?? terminal.childSessionId,
           lastChildSequence: existing?.lastChildSequence ?? null,
@@ -1862,8 +1872,12 @@ function subagentActivity(event: unknown): string {
       return "thinking"
     case "text_delta":
       return "writing response"
-    case "tool_call_started":
-      return typeof event.name === "string" ? `using tool · ${event.name}` : "using tool"
+    case "tool_call_started": {
+      if (typeof event.name !== "string") return "using tool"
+      const toolName = compactActivityValue(event.name, 24) ?? "tool"
+      const detail = safeSubagentToolDetail(event.name, event.args)
+      return boundedActivity(`using tool · ${toolName}${detail === null ? "" : ` · ${detail}`}`)
+    }
     case "tool_approval_needed":
       return typeof event.name === "string"
         ? `awaiting approval · ${event.name}`
@@ -1883,6 +1897,62 @@ function subagentActivity(event: unknown): string {
     default:
       return event.type.replaceAll("_", " ")
   }
+}
+
+function safeSubagentToolDetail(name: string, args: unknown): string | null {
+  try {
+    return subagentToolDetail(name, args)
+  } catch {
+    return null
+  }
+}
+
+function subagentToolDetail(name: string, args: unknown): string | null {
+  if (!isRecord(args)) return null
+  const normalized = name.toLowerCase()
+  if (normalized === "bash" || normalized === "shell") {
+    return compactActivityValue(firstString(args, ["command", "cmd"]), 48)
+  }
+  if (normalized === "read" || normalized === "write" || normalized === "edit") {
+    const path = firstString(args, ["path", "file_path", "filePath"])
+    return path === null ? null : compactSubagentPath(path, 48)
+  }
+  if (normalized === "grep" || normalized === "glob") {
+    return compactActivityValue(firstString(args, ["pattern", "query", "regex"]), 48)
+  }
+  return null
+}
+
+function firstString(
+  record: Readonly<Record<string, unknown>>,
+  keys: readonly string[],
+): string | null {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === "string") return value
+  }
+  return null
+}
+
+function compactSubagentPath(value: string, limit: number): string | null {
+  const compact = value.replaceAll("\\", "/").replace(/\s+/g, " ").trim()
+  if (compact === "") return null
+  const parts = compact.split("/").filter(Boolean)
+  const tail = parts.length <= 2 ? parts.join("/") : parts.slice(-2).join("/")
+  if (tail.length <= limit) return tail
+  return `…${tail.slice(-(limit - 1))}`
+}
+
+function compactActivityValue(value: string | null, limit: number): string | null {
+  if (value === null) return null
+  const compact = value.replace(/\s+/g, " ").trim()
+  if (compact === "") return null
+  return compact.length <= limit ? compact : `${compact.slice(0, limit - 1)}…`
+}
+
+function boundedActivity(value: string): string {
+  const compact = value.replace(/\s+/g, " ").trim()
+  return compact.length <= 72 ? compact : `${compact.slice(0, 71)}…`
 }
 
 function responseAck(

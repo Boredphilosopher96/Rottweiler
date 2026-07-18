@@ -142,6 +142,7 @@ export interface SubagentProjection {
   readonly subagentId: string
   readonly parentTurnId: string
   readonly task: string
+  readonly spawnedAtMs: number | null
   readonly status: SubagentStatus
   readonly childSessionId: string | null
   readonly lastChildSequence: string | null

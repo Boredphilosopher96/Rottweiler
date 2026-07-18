@@ -191,6 +191,59 @@ export function splitDiffVisualRows(source: string): number {
   return Math.max(1, rows)
 }
 
+/** Number of terminal rows occupied by OpenTUI's unified diff view. */
+export function unifiedDiffVisualRows(source: string): number {
+  let rows = 0
+  for (const line of source.trimEnd().split("\n")) {
+    if (!line.startsWith("--- ") && !line.startsWith("+++ ") && !line.startsWith("@@") && !line.startsWith("\\")) {
+      rows += 1
+    }
+  }
+  return Math.max(1, rows)
+}
+
+export function diffStats(source: string): { added: number; removed: number } {
+  let added = 0
+  let removed = 0
+  for (const line of source.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++ ")) added += 1
+    else if (line.startsWith("-") && !line.startsWith("--- ")) removed += 1
+  }
+  return { added, removed }
+}
+
+export function truncateUnifiedDiff(
+  source: string,
+  maxRows: number,
+  rowModel: "split" | "unified" = "split",
+): { diff: string; hiddenLines: number } {
+  const lines = source.trimEnd().split("\n")
+  const firstHunk = lines.findIndex((line) => line.startsWith("@@"))
+  if (firstHunk < 0) return { diff: source, hiddenLines: 0 }
+
+  const headers = lines.slice(0, firstHunk)
+  const hunks: string[][] = []
+  let index = firstHunk
+  while (index < lines.length) {
+    const end = lines.findIndex((line, offset) => offset > index && line.startsWith("@@"))
+    const next = end < 0 ? lines.length : end
+    hunks.push(lines.slice(index, next))
+    index = next
+  }
+
+  const included: string[][] = []
+  for (const hunk of hunks) {
+    const candidate = [...headers, ...included.flat(), ...hunk].join("\n")
+    const rows = rowModel === "unified" ? unifiedDiffVisualRows(candidate) : splitDiffVisualRows(candidate)
+    if (included.length > 0 && rows > maxRows) break
+    included.push(hunk)
+  }
+  if (included.length === hunks.length) return { diff: source, hiddenLines: 0 }
+
+  const hiddenLines = hunks.slice(included.length).reduce((count, hunk) => count + hunk.length, 0)
+  return { diff: `${[...headers, ...included.flat()].join("\n")}${source.endsWith("\n") ? "\n" : ""}`, hiddenLines }
+}
+
 function hasFileHeaders(lines: readonly string[]): boolean {
   return lines.some((line, index) =>
     line.startsWith("--- ") && (lines[index + 1] ?? "").startsWith("+++ "),

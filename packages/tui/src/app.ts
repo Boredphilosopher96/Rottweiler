@@ -2,6 +2,8 @@ import {
   BoxRenderable,
   CliRenderEvents,
   SelectRenderableEvents,
+  fg,
+  t,
   type KeyEvent,
   type RenderContext,
   type Selection,
@@ -17,7 +19,9 @@ import {
   ReviewPanelRenderable,
   StateBannerRenderable,
   StatusLineRenderable,
+  SubagentTrayRenderable,
   TranscriptRenderable,
+  formatSubagentElapsed,
   type PickerItem,
 } from "./components"
 import {
@@ -56,6 +60,7 @@ import {
   type PermissionAction,
   type PermissionApprovalScope,
 } from "./protocol"
+import { setWorkspaceRoots } from "./render/tool-presentation"
 import {
   createInitialState,
   enterReplayMode,
@@ -238,10 +243,12 @@ export class RottweilerApp extends BoxRenderable {
   picker!: FuzzyPickerRenderable<unknown>
   composer!: ComposerRenderable
   statusLine!: StatusLineRenderable
+  subagentTray!: SubagentTrayRenderable
   banner!: StateBannerRenderable
   main!: BoxRenderable
 
   #state: RottweilerState
+  #workspaceRoots: RottweilerState["workspaceRoots"] | undefined
   #options: Required<
     Pick<
       RottweilerAppOptions,
@@ -633,7 +640,21 @@ export class RottweilerApp extends BoxRenderable {
       theme,
       this.#syntaxStyle,
       {
-        onApproval: (tool, decision) => this.#approve(tool, decision),
+        onApproval: (tool, action) => {
+          if (action === "allow_tool_session") {
+            this.#command({
+              type: "add_session_permission_rule",
+              pattern: `${tool.name}(*)`,
+              action: "allow",
+            })
+            this.#approve(tool, "allow_once")
+          } else if (action === "auto_safe_mode") {
+            void this.#sendMessage("/permissions mode auto-safe", [])
+            this.#approve(tool, "allow_once")
+          } else {
+            this.#approve(tool, action)
+          }
+        },
         onAnswer: (question, values) => this.#answer(question, values),
         onPlanReview: (decision) => this.#reviewPlan(decision),
       },
@@ -649,6 +670,14 @@ export class RottweilerApp extends BoxRenderable {
         onClose: () => this.#closeReview(),
       },
       this.#treeSitterClient,
+    )
+    this.subagentTray = new SubagentTrayRenderable(
+      this.ctx,
+      theme,
+      (subagentId) => void this.#enterSubagent(subagentId),
+      () => {
+        if (this.#activeSubagentId !== null) this.#updateSubagentBanner(this.#presentedState())
+      },
     )
     const picker = new FuzzyPickerRenderable(this.ctx, theme, (query) => {
       if (this.picker !== picker) return
@@ -722,6 +751,7 @@ export class RottweilerApp extends BoxRenderable {
     this.add(this.main)
     this.add(this.reviewPanel)
     this.add(this.interactionPanel)
+    this.add(this.subagentTray)
     this.add(this.composer)
     this.add(this.statusLine)
     this.add(this.picker)
@@ -1382,6 +1412,10 @@ export class RottweilerApp extends BoxRenderable {
     }
     const previousConnectionPhase = this.#state.connection.phase
     const previousFocusOwner = this.#visibleFocusOwner()
+    if (state.workspaceRoots !== this.#workspaceRoots) {
+      this.#workspaceRoots = state.workspaceRoots
+      setWorkspaceRoots(state.workspaceRoots?.roots ?? [])
+    }
     this.#state = state
     if (state.providerAuth.pending === null) {
       this.#providerAuthActionInFlight = false
@@ -1389,7 +1423,14 @@ export class RottweilerApp extends BoxRenderable {
     }
     const presented = this.#presentedState()
     const viewingSubagent = this.#activeSubagentId !== null
-    this.transcript.update(presented)
+    const childDescriptor = this.#activeSubagentId === null
+      ? undefined
+      : this.#subagentDescriptor(this.#activeSubagentId)
+    this.transcript.update(
+      presented,
+      viewingSubagent ? childDescriptor?.agent || "Child agent" : "Rottweiler",
+    )
+    this.subagentTray.update(state)
     this.contextPanel.update(state)
     this.contextPanel.visible =
       !viewingSubagent &&
@@ -3515,25 +3556,42 @@ export class RottweilerApp extends BoxRenderable {
     const replaying = this.#subagentReplayRequests.has(this.#activeSubagentId)
     const retainedHistory = this.#subagentHistoryNotices.get(this.#activeSubagentId)
     const latestError = this.#state.errors.at(-1)
+    const hasErrorContext = latestError !== undefined && latestError !== this.#subagentErrorBaseline
+    const projection = this.#state.subagents[this.#activeSubagentId] ?? Object.values(
+      this.#state.subagents,
+    ).findLast((subagent) => subagent.subagentId === this.#activeSubagentId)
+    const status = projection?.status.replaceAll("_", " ") ?? descriptor.activity
+    const elapsed = projection?.status === "running"
+      ? formatSubagentElapsed(projection.spawnedAtMs)
+      : null
+    const activity = replaying
+      ? "loading transcript"
+      : approval
+        ? "approval requested by child"
+        : projection?.activity ?? descriptor.activity
+    const activitySegment = activity.trim()
+    const detail = [
+      status,
+      ...(activitySegment === "" || activitySegment.toLowerCase() === status.trim().toLowerCase()
+        ? []
+        : [activitySegment]),
+      ...(elapsed === null ? [] : [elapsed]),
+      ...(status.toLowerCase() === "running" && !replaying && !approval && !hasErrorContext
+        ? ["read-only", "interrupt to reply"]
+        : []),
+    ].join(" · ")
+    const context = hasErrorContext
+      ? latestError.message
+      : retainedHistory !== undefined && !replaying
+        ? `recent activity; ${retainedHistory.toString()} earlier events retained`
+        : null
     this.banner.visible = true
-    this.banner.fg = latestError !== undefined && latestError !== this.#subagentErrorBaseline
+    this.banner.fg = hasErrorContext
       ? this.#theme.danger
       : approval
         ? this.#theme.warning
         : this.#theme.info
-    this.banner.content = latestError !== undefined && latestError !== this.#subagentErrorBaseline
-      ? `Child · ${descriptor.task} · ${latestError.message}`
-      : approval
-      ? `Child · ${descriptor.task} · approval requested by child · Esc returns to parent`
-      : retainedHistory !== undefined && !replaying
-      ? `Child · ${descriptor.task} · Showing recent activity; ${retainedHistory.toString()} earlier events retained · Esc returns to parent`
-      : `Child · ${descriptor.task} · ${
-          replaying
-            ? "loading transcript"
-            : descriptor.activity === "running"
-              ? "running · read-only; interrupt to reply"
-              : descriptor.activity
-        } · Esc parent · Ctrl+G tree · Ctrl+P actions`
+    this.banner.content = t`${fg(this.#theme.accentStrong)("◉ CHILD AGENT")} · ${descriptor.task} · ${detail}${context === null ? "" : ` · ${context}`} · Esc parent · Ctrl+G tree · Ctrl+P actions`
   }
 
   async #interruptSubagent(subagentId: string): Promise<void> {

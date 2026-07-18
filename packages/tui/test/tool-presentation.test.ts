@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { presentTool, toolOutputText } from "../src/render"
+import { displayPath, presentTool, setWorkspaceRoots, toolOutputText } from "../src/render"
 import type { ToolProjection } from "../src/state"
 import type { JsonValue } from "../../../protocol/types"
 
@@ -84,7 +84,7 @@ describe("typed tool presentation", () => {
 
     expect(presentation.subject).toBe("src/main.ts")
     expect(presentation.summary).toBe("2 changes")
-    expect(presentation.details).toContain("Diff preview · showing 12 of 23 lines · open /review for the full diff")
+    expect(presentation.details).toContain("Diff preview · showing 12 of 23 lines · ctrl+r to review")
     expect(presentation.details).not.toContain("details available")
     expect(presentation.details).not.toContain("Old=")
     expect(presentation.details).not.toContain("New=")
@@ -101,7 +101,7 @@ describe("typed tool presentation", () => {
       }),
     ))
 
-    expect(presentation.summary).toBe("Exit 0")
+    expect(presentation.summary).toBe("Completed")
     expect(presentation.details).toBe("Output\nok\nError output\nwarning")
     expect(presentation.details).not.toContain("exit_code")
 
@@ -116,6 +116,25 @@ describe("typed tool presentation", () => {
     })
     expect(streaming.details).toContain("Output\nchecking")
     expect(streaming.details).toContain("Error output\nwarning")
+  })
+
+  test("uses concise bash summaries for zero and non-zero exit codes", () => {
+    expect(presentTool(finished("bash", {}, mixed("", { exit_code: 0 }))).summary).toBe("Completed")
+    expect(presentTool(finished("bash", {}, mixed("", { exit_code: 17 }))).summary).toBe("exit 17")
+  })
+
+  test("displays paths relative to the longest matching workspace root", () => {
+    setWorkspaceRoots(["/workspace", "/workspace/project"])
+    expect(displayPath("/workspace/project/src/main.ts")).toBe("src/main.ts")
+    expect(displayPath("/outside/main.ts")).toBe("/outside/main.ts")
+
+    const presentation = presentTool(finished("read", { path: "/workspace/project/src/main.ts" }, mixed("", {
+      path: "/workspace/project/src/main.ts",
+      total_lines: 1,
+    })))
+    expect(presentation.subject).toBe("src/main.ts")
+    expect(presentation.details).toContain("File · src/main.ts")
+    setWorkspaceRoots([])
   })
 
   test("uses production read metadata without dumping file contents into the activity card", () => {

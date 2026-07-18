@@ -395,7 +395,7 @@ describe("Rottweiler OpenTUI shell", () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Rottweiler")
     expect(frame).toContain("hello")
-    expect(frame).toContain("model —")
+    expect(frame).toContain("model none · ctrl+m")
 
     const cells = setup.captureSpans()
     expect(cells.cols).toBe(72)
@@ -1350,7 +1350,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.banner.plainText).not.toContain("attempt")
     expect(app.banner.plainText).not.toContain("disconnected")
     expect(app.statusLine.plainText).toContain("◉ execute")
-    expect(app.statusLine.plainText).toContain("model —")
+    expect(app.statusLine.plainText).toContain("model none · ctrl+m")
     expect(app.statusLine.plainText).toContain("cache —")
     app.handleEvent({
       type: "error",
@@ -1485,6 +1485,34 @@ describe("Rottweiler OpenTUI shell", () => {
     const app = createRottweilerApp(renderer, {
       sessionId: "parent-session",
       requestId: () => `request-${++request}`,
+      initialState: {
+        ...createInitialState(),
+        turns: {
+          "parent-turn": {
+            turnId: "parent-turn",
+            status: "running",
+            usage: null,
+            cost: null,
+          },
+        },
+        subagentOrder: ["child-one"],
+        subagents: {
+          "child-one": {
+            projectionId: "child-one",
+            subagentId: "child-one",
+            parentTurnId: "parent-turn",
+            task: "Audit authentication",
+            spawnedAtMs: Date.now() - 83_000,
+            status: "running",
+            childSessionId: "child-session",
+            lastChildSequence: null,
+            activity: "using tool · grep · token exchange",
+            summary: null,
+            touchedFileCount: 0,
+            diffArtifactId: null,
+          },
+        },
+      },
       onCommand(command) {
         emitted.push(command)
         return { type: "accepted" }
@@ -1625,9 +1653,33 @@ describe("Rottweiler OpenTUI shell", () => {
       events_before_page: "1",
       truncated: true,
     })
+    app.handleEvent({
+      type: "subagent_progress",
+      parent_session_id: "parent-session",
+      subagent_id: "child-one",
+      child_session_id: "child-session",
+      child_sequence: "3",
+      event: {
+        type: "tool_call_started",
+        meta: {
+          protocol_version: PROTOCOL_VERSION,
+          session_id: "different-child-session",
+          sequence_id: "3",
+          emitted_at: "2026-01-01T00:00:03Z",
+        },
+        turn_id: "child-turn",
+        tool_call_id: "grep-auth",
+        name: "grep",
+        args: { pattern: "token exchange" },
+        call_index: 0,
+      },
+    })
     expect(app.state.transcript).toEqual([])
     expect(app.visibleState.streamingTail?.text).toBe("Authentication uses a bounded token exchange.")
-    expect(app.banner.plainText).toContain("Child · Audit authentication")
+    expect(app.banner.plainText).toContain("◉ CHILD AGENT · Audit authentication")
+    expect(app.banner.plainText).toContain("running · using tool · grep · token exchange · 1m23s")
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("reviewer · Streaming")
     expect(app.contextPanel.visible).toBeFalse()
 
     app.handleEvent({
@@ -2015,7 +2067,8 @@ describe("Rottweiler OpenTUI shell", () => {
     await Bun.sleep(0)
     expect(app.activeSubagentId).toBe("child-read-only")
     expect(app.composer.visible).toBeFalse()
-    expect(app.banner.plainText).toContain("read-only; interrupt to reply")
+    expect(app.banner.plainText).toContain("running · read-only · interrupt to reply · Esc parent")
+    expect(app.banner.plainText).not.toContain("running · running")
 
     app.composer.value = "This must not race the active child"
     expect(await app.composer.submit()).toBeFalse()
@@ -3753,7 +3806,7 @@ describe("Rottweiler OpenTUI shell", () => {
       truncated: true,
     })
     expect(app.visibleState.streamingTail?.text).toBe("Recent retained work.")
-    expect(app.banner.plainText).toContain("Showing recent activity; 9 earlier events retained")
+    expect(app.banner.plainText).toContain("recent activity; 9 earlier events retained")
     expect(app.banner.plainText).not.toContain("data loss")
     expect(emitted.filter((command) => command.type === "replay_subagent")).toHaveLength(1)
   })

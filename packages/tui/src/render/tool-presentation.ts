@@ -14,6 +14,20 @@ export interface ToolPresentation {
 
 type Presenter = (tool: ToolProjection, data: unknown, text: string) => ToolPresentation
 
+let workspaceRoots: readonly string[] = []
+
+export function setWorkspaceRoots(roots: readonly string[]): void {
+  workspaceRoots = [...roots]
+}
+
+export function displayPath(path: string): string {
+  const root = workspaceRoots
+    .map((candidate) => candidate.replace(/[\\/]+$/, ""))
+    .filter((candidate) => candidate !== "" && (path.startsWith(`${candidate}/`) || path.startsWith(`${candidate}\\`)))
+    .sort((left, right) => right.length - left.length)[0]
+  return root === undefined ? path : path.slice(root.length + 1)
+}
+
 const PRESENTERS: Readonly<Record<string, Presenter>> = {
   read: presentRead,
   write: presentWrite,
@@ -55,7 +69,7 @@ export function presentTool(tool: ToolProjection): ToolPresentation {
 
 function presentRead(tool: ToolProjection, data: unknown, text: string): ToolPresentation {
   const payload = record(data)
-  const path = string(payload?.path) || pathArgument(tool)
+  const path = displayPath(string(payload?.path) || pathArgument(tool))
   const total = integer(payload?.total_lines) ?? (text === "" ? null : text.split("\n").length)
   const start = integer(payload?.start_line)
   const bytes = integer(payload?.bytes)
@@ -76,7 +90,7 @@ function presentRead(tool: ToolProjection, data: unknown, text: string): ToolPre
 
 function presentWrite(tool: ToolProjection, data: unknown): ToolPresentation {
   const payload = record(data)
-  const path = string(payload?.path) || pathArgument(tool)
+  const path = displayPath(string(payload?.path) || pathArgument(tool))
   const bytes = integer(payload?.bytes)
   return {
     subject: path,
@@ -87,7 +101,7 @@ function presentWrite(tool: ToolProjection, data: unknown): ToolPresentation {
 
 function presentEdit(tool: ToolProjection, data: unknown): ToolPresentation {
   const payload = record(data)
-  const path = string(payload?.path) || pathArgument(tool)
+  const path = displayPath(string(payload?.path) || pathArgument(tool))
   const args = record(tool.args)
   const count = integer(payload?.edits) ?? (Array.isArray(args?.edits) ? args.edits.length : 1)
   const noun = `${count} change${count === 1 ? "" : "s"}`
@@ -106,11 +120,11 @@ function presentList(tool: ToolProjection, data: unknown, text: string): ToolPre
     const path = string(item?.path)
     if (path === "") return []
     const kind = human(string(item?.kind) || "item")
-    return [`${kind} · ${path}`]
+    return [`${kind} · ${displayPath(path)}`]
   })
-  const rows = structuredRows.length > 0 ? structuredRows : text.split("\n").map((line) => line.trim()).filter(Boolean)
+  const rows = structuredRows.length > 0 ? structuredRows : text.split("\n").map((line) => displayPath(line.trim())).filter(Boolean)
   const count = integer(payload?.count) ?? rows.length
-  const path = pathArgument(tool) || "."
+  const path = displayPath(pathArgument(tool) || ".")
   return {
     subject: path,
     summary: count === 0 ? "No entries" : `${count} item${count === 1 ? "" : "s"}`,
@@ -126,16 +140,16 @@ function presentSearch(tool: ToolProjection, data: unknown, text: string): ToolP
       ? payload.matches
       : []
   const structuredRows = values.flatMap((value) => {
-    if (typeof value === "string") return [value]
+    if (typeof value === "string") return [displayPath(value)]
     const item = record(value)
     if (item === null) return []
     const path = string(item.path)
     const location = integer(item.line) ?? integer(record(item.location)?.line)
     const label = string(item.text) || string(item.name)
     if (path === "" && label === "") return []
-    return [`${path}${location === null ? "" : `:${location}`} ${label}`.trim()]
+    return [`${displayPath(path)}${location === null ? "" : `:${location}`} ${label}`.trim()]
   })
-  const rows = structuredRows.length > 0 ? structuredRows : text.split("\n").map((line) => line.trim()).filter(Boolean)
+  const rows = structuredRows.length > 0 ? structuredRows : text.split("\n").map((line) => displayPath(line.trim())).filter(Boolean)
   const count = integer(payload?.count) ?? rows.length
   const subject = searchSubject(tool)
   const empty = tool.name === "glob" ? "No matching files" : "No matches"
@@ -152,7 +166,7 @@ function presentDiagnostics(tool: ToolProjection, data: unknown): ToolPresentati
   const rows = diagnostics.flatMap((value) => {
     const item = record(value)
     if (item === null) return []
-    const path = string(item.path) || pathArgument(tool)
+    const path = displayPath(string(item.path) || pathArgument(tool))
     const start = record(record(item.range)?.start)
     const line = integer(start?.line)
     const character = integer(start?.character)
@@ -163,7 +177,7 @@ function presentDiagnostics(tool: ToolProjection, data: unknown): ToolPresentati
   })
   const count = rows.length
   return {
-    subject: pathArgument(tool),
+    subject: displayPath(pathArgument(tool)),
     summary: count === 0 ? "No diagnostics" : `${count} diagnostic${count === 1 ? "" : "s"}`,
     details: count === 0 ? "No diagnostics." : boundedRows(rows, "diagnostics"),
   }
@@ -176,14 +190,14 @@ function presentLocations(tool: ToolProjection, data: unknown): ToolPresentation
   const rows = values.flatMap((value) => {
     const item = record(value)
     if (item === null) return []
-    const path = string(item.path)
+    const path = displayPath(string(item.path))
     const start = record(record(item.range)?.start)
     const line = integer(start?.line)
     const character = integer(start?.character)
     return path === "" ? [] : [`${path}${line === null ? "" : `:${line + 1}:${(character ?? 0) + 1}`}`]
   })
   return {
-    subject: pathArgument(tool),
+    subject: displayPath(pathArgument(tool)),
     summary: rows.length === 0 ? `No ${key}` : `${rows.length} ${key}`,
     details: rows.length === 0 ? `No ${key}.` : boundedRows(rows, key),
   }
@@ -202,7 +216,7 @@ function presentBash(tool: ToolProjection, data: unknown, text: string): ToolPre
       ) || "Completed with no output."
   return {
     subject: "",
-    summary: exitCode === null ? "Completed" : `Exit ${exitCode}`,
+    summary: exitCode === null || exitCode === 0 ? "Completed" : `exit ${exitCode}`,
     details,
   }
 }
@@ -338,7 +352,7 @@ function withDiffNotice(tool: ToolProjection, presentation: ToolPresentation): T
   if (source === "") return presentation
   const lines = source.split("\n").length
   if (lines <= 12) return presentation
-  return { ...presentation, details: joinLines(`Diff preview · showing 12 of ${lines} lines · open /review for the full diff`, presentation.details) }
+  return { ...presentation, details: joinLines(`Diff preview · showing 12 of ${lines} lines · ctrl+r to review`, presentation.details) }
 }
 
 function parseBashResult(text: string): { stdout: string; stderr: string } | null {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { CliRenderEvents, CodeRenderable, DiffRenderable, parseKeypress } from "@opentui/core"
+import { CliRenderEvents, CodeRenderable, DiffRenderable, parseKeypress, SyntaxStyle } from "@opentui/core"
 import {
   createTestRenderer,
   MockTreeSitterClient,
@@ -8,7 +8,7 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ContextPanelRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, ToolBlockRenderable, fuzzyScore } from "../src/components"
+import { ContextPanelRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, formatElapsed, fuzzyScore } from "../src/components"
 import {
   PROTOCOL_VERSION,
   type ClientCommand,
@@ -33,6 +33,18 @@ async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<voi
   while (!predicate()) {
     if (performance.now() >= deadline) throw new Error("timed out waiting for component state")
     await Bun.sleep(5)
+  }
+}
+
+function permissionState(runtimeMode: "strict" | "auto-safe" | "yolo") {
+  return {
+    default: "ask" as const,
+    effective_rules: [],
+    project_rules: [],
+    session_rules: [],
+    approvals: [],
+    truncated: false,
+    runtime_mode: runtimeMode,
   }
 }
 
@@ -159,6 +171,100 @@ describe("M4 retained components", () => {
     expect(rendered).toContain("[redacted]")
     expect(rendered).not.toContain("must-not-render")
     expect(rendered.length).toBeLessThanOrEqual(120)
+  })
+
+  test("formats elapsed reasoning durations", () => {
+    expect(formatElapsed(0)).toBe("briefly")
+    expect(formatElapsed(999)).toBe("briefly")
+    expect(formatElapsed(12_000)).toBe("12s")
+    expect(formatElapsed(83_000)).toBe("1m23s")
+  })
+
+  test("freezes a live reasoning duration when streaming ends", async () => {
+    const originalNow = Date.now
+    let now = 1_000
+    Date.now = () => now
+    try {
+      const setup = await createTestRenderer({ width: 86, height: 16, useThread: false })
+      renderer = setup.renderer
+      const initial = {
+        ...createInitialState(),
+        streamingTail: {
+          turnId: "1",
+          text: "",
+          thinking: "Inspecting the workspace",
+          citations: [],
+          toolCallIds: [],
+          finished: null,
+        },
+      } satisfies RottweilerState
+      const app = createRottweilerApp(renderer, { initialState: initial })
+      renderer.root.add(app)
+      await setup.renderOnce()
+      const reasoning = app.transcript.streamingCard
+        .getChildren()
+        .find((child): child is ReasoningBlockRenderable => child instanceof ReasoningBlockRenderable)
+
+      now = 13_000
+      reasoning?.update(initial.streamingTail.thinking, false, 86)
+      expect(reasoning?.header.plainText).toBe("⌄ Thought for 12s · Inspecting the workspace")
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
+  test("shows elapsed time only for running tools after three seconds", async () => {
+    const originalNow = Date.now
+    let now = 1_000
+    Date.now = () => now
+    try {
+      const tool = {
+        toolCallId: "elapsed-tool",
+        turnId: "1",
+        name: "read",
+        args: { path: "src/main.rs" },
+        status: "running" as const,
+        capabilities: ["read_filesystem" as const],
+        rationale: null,
+        diff: null,
+        chunks: [],
+        output: null,
+        isError: null,
+        callIndex: 0,
+      }
+      const setup = await createTestRenderer({ width: 86, height: 16, useThread: false })
+      renderer = setup.renderer
+      const card = new ToolBlockRenderable(renderer, kennelTheme, tool)
+      expect(card.header.plainText).not.toContain("1s")
+      now = 5_000
+      card.update(tool)
+      expect(card.header.plainText).toEndWith(" · 4s")
+    } finally {
+      Date.now = originalNow
+    }
+  })
+
+  test("does not repeat a collapsed tool subject in its summary", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 16, useThread: false })
+    renderer = setup.renderer
+    const card = new ToolBlockRenderable(renderer, kennelTheme, {
+      toolCallId: "dedupe-tool",
+      turnId: "1",
+      name: "custom_tool",
+      args: { path: "src/main.rs" },
+      status: "finished",
+      capabilities: [],
+      rationale: null,
+      diff: null,
+      chunks: [],
+      output: { type: "text", text: "Path=src/main.rs" },
+      isError: false,
+      callIndex: 0,
+    })
+    renderer.root.add(card)
+    await setup.renderOnce()
+
+    expect(card.header.plainText).toBe("› ✓ Custom tool · Path=src/main.rs")
   })
 
   test("expands a successful file edit and shows its diff by default", async () => {
@@ -518,6 +624,25 @@ describe("M4 retained components", () => {
     expect(app.statusLine.plainText).toContain("ctx 5.0k/100k (5%)")
   })
 
+  test("shows the active permission mode beside the agent mode without unknown-state noise", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        permissions: permissionState("strict"),
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.statusLine.plainText).toContain("◉ execute · strict")
+    app.setState({ ...app.state, permissions: null })
+    await setup.renderOnce()
+    expect(app.statusLine.plainText).toContain("◉ execute")
+    expect(app.statusLine.plainText).not.toContain("execute ·")
+  })
+
   test("keeps committed reasoning compact and expands its Markdown without stealing composer focus", async () => {
     const setup = await createTestRenderer({ width: 86, height: 22, useThread: false })
     renderer = setup.renderer
@@ -545,7 +670,7 @@ describe("M4 retained components", () => {
     const card = [...app.transcript.mountedCards.values()][0]
     const reasoning = card?.reasoning
     expect(reasoning).toBeInstanceOf(ReasoningBlockRenderable)
-    expect(reasoning?.header.plainText).toBe("› Thought: Inspecting workspace")
+    expect(reasoning?.header.plainText).toBe("› Thought · Inspecting workspace")
     expect(reasoning?.body.visible).toBeFalse()
     expect(setup.captureCharFrame()).not.toContain("Read `Cargo.toml` next.")
     expect(setup.captureCharFrame()).not.toContain("REDACTED")
@@ -558,7 +683,7 @@ describe("M4 retained components", () => {
     const expanded = [...app.transcript.mountedCards.values()][0]?.reasoning
     expect([...app.transcript.mountedCards.values()][0]).toBe(card)
     expect(expanded).toBe(reasoning)
-    expect(expanded?.header.plainText).toBe("⌄ Thought: Inspecting workspace")
+    expect(expanded?.header.plainText).toBe("⌄ Thought · Inspecting workspace")
     expect(expanded?.body.visible).toBeTrue()
     expect(expanded?.body.content).toContain("Read `Cargo.toml` next.")
     await setup.mockMouse.click(app.composer.editor.x + 2, app.composer.editor.y)
@@ -586,7 +711,7 @@ describe("M4 retained components", () => {
     const live = app.transcript.streamingCard
       .getChildren()
       .find((child): child is ReasoningBlockRenderable => child instanceof ReasoningBlockRenderable)
-    expect(live?.header.plainText).toBe("⌄ Thinking: Inspecting project")
+    expect(live?.header.plainText).toBe("◌ Thinking… · Inspecting project")
     expect(live?.body.visible).toBeTrue()
     expect(setup.captureCharFrame()).toContain("Reading manifests now.")
 
@@ -606,7 +731,7 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
 
     const committed = [...app.transcript.mountedCards.values()][0]?.reasoning
-    expect(committed?.header.plainText).toBe("⌄ Thought: Inspecting project")
+    expect(committed?.header.plainText).toBe("⌄ Thought · Inspecting project")
     expect(committed?.body.visible).toBeTrue()
   })
 
@@ -643,7 +768,7 @@ describe("M4 retained components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("Running tools")
-    expect(setup.captureCharFrame()).toContain("⌄ Thinking: checking the workspace")
+    expect(setup.captureCharFrame()).toContain("◌ Thinking… · checking the workspace")
     expect(setup.captureCharFrame()).toContain("checking the workspace")
     expect(setup.captureCharFrame()).toContain("Find files")
     expect(setup.captureCharFrame()).toContain("**/*.rs")
@@ -679,7 +804,7 @@ describe("M4 retained components", () => {
   })
 
   test("renders bash commands and existing mutation diffs inline with syntax-aware renderables", async () => {
-    const setup = await createTestRenderer({ width: 100, height: 30, useThread: false })
+    const setup = await createTestRenderer({ width: 90, height: 30, useThread: false })
     renderer = setup.renderer
     treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
     treeSitter.setMockResult({ highlights: [] })
@@ -701,13 +826,13 @@ describe("M4 retained components", () => {
       toolCallId: "edit-inline",
       turnId: "1",
       name: "edit",
-      args: { path: "src/main.rs" },
+      args: { path: "/workspace/src/main.rs" },
       status: "finished" as const,
       capabilities: ["write_filesystem" as const],
       rationale: null,
       diff: {
         proposal_id: "proposal-inline",
-        path: "src/main.rs",
+        path: "/workspace/src/main.rs",
         unified_diff: "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n",
         arguments_hash: "args",
         base_hash: "base",
@@ -721,6 +846,7 @@ describe("M4 retained components", () => {
     }
     const initial: RottweilerState = {
       ...createInitialState(),
+      workspaceRoots: { generation: "1", effectiveFromTurn: "0", roots: ["/workspace"] },
       tools: { [bash.toolCallId]: bash, [edit.toolCallId]: edit },
       streamingTail: {
         turnId: "1",
@@ -753,11 +879,12 @@ describe("M4 retained components", () => {
     expect(editCard?.diff).toBeInstanceOf(DiffRenderable)
     expect(editCard?.header.plainText).toContain("Edit file")
     expect((editCard?.diff as DiffRenderable).filetype).toBe("rust")
-    expect((editCard?.diff as DiffRenderable).view).toBe("split")
-    expect((editCard?.diff as DiffRenderable).height).toBe(1)
+    expect((editCard?.diff as DiffRenderable).view).toBe("unified")
+    expect((editCard?.diff as DiffRenderable).height).toBe(2)
     expect((editCard?.diff as DiffRenderable).diff).toContain("+new")
     expect(editCard?.diff?.visible).toBeTrue()
     expect(setup.captureCharFrame()).toContain("+ new")
+    expect(setup.captureCharFrame()).toContain("src/main.rs · +1 −1")
     expect(editCard?.body.plainText).toContain("File · src/main.rs")
     expect(editCard?.body.plainText).toContain("1 change applied")
     expect(editCard?.body.plainText).not.toContain("Error parsing diff")
@@ -786,6 +913,94 @@ describe("M4 retained components", () => {
     expect(updatedBashCard).toBe(bashCard)
     expect(updatedBashCard?.command).toBe(retainedCommand)
     expect(setup.captureCharFrame()).not.toContain("$ cargo test --workspace")
+  })
+
+  test("caps inline diffs with stats and a review footer", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 36, useThread: false })
+    renderer = setup.renderer
+    const unifiedDiff = [
+      "--- a/src/large.rs",
+      "+++ b/src/large.rs",
+      ...Array.from({ length: 26 }, (_, index) => [
+        `@@ -${index + 1},1 +${index + 1},1 @@`,
+        `-old-${index + 1}`,
+        `+new-${index + 1}`,
+      ].join("\n")),
+    ].join("\n") + "\n"
+    const card = new ToolBlockRenderable(renderer, kennelTheme, {
+      toolCallId: "edit-large-inline",
+      turnId: "1",
+      name: "edit",
+      args: { path: "src/large.rs" },
+      status: "finished",
+      capabilities: ["write_filesystem"],
+      rationale: null,
+      diff: {
+        proposal_id: "proposal-large",
+        path: "src/large.rs",
+        unified_diff: unifiedDiff,
+        arguments_hash: "arguments",
+        base_hash: "base",
+        diff_hash: "diff",
+        truncated: false,
+      },
+      chunks: [],
+      output: { type: "text", text: "26 changes applied" },
+      isError: false,
+      callIndex: 0,
+    })
+    renderer.root.add(card)
+    await setup.renderOnce()
+
+    expect(card.diff?.height).toBe(24)
+    expect(card.height).toBe((card.body.height ?? 0) + 1 + (card.diff?.height ?? 0) + 2)
+    expect(setup.captureCharFrame()).toContain("src/large.rs · +26 −26")
+    expect(setup.captureCharFrame()).toContain("… 6 more lines · ctrl+r to review")
+  })
+
+  test("sizes truncated inline diffs to their visible unified rows on narrow terminals", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 56, useThread: false })
+    renderer = setup.renderer
+    const unifiedDiff = [
+      "--- a/src/large.rs",
+      "+++ b/src/large.rs",
+      ...Array.from({ length: 26 }, (_, index) => [
+        `@@ -${index + 1},1 +${index + 1},1 @@`,
+        `-old-${index + 1}`,
+        `+new-${index + 1}`,
+      ].join("\n")),
+    ].join("\n") + "\n"
+    const card = new ToolBlockRenderable(renderer, kennelTheme, {
+      toolCallId: "edit-large-inline-narrow",
+      turnId: "1",
+      name: "edit",
+      args: { path: "src/large.rs" },
+      status: "finished",
+      capabilities: ["write_filesystem"],
+      rationale: null,
+      diff: {
+        proposal_id: "proposal-large-narrow",
+        path: "src/large.rs",
+        unified_diff: unifiedDiff,
+        arguments_hash: "arguments",
+        base_hash: "base",
+        diff_hash: "diff",
+        truncated: false,
+      },
+      chunks: [],
+      output: { type: "text", text: "26 changes applied" },
+      isError: false,
+      callIndex: 0,
+    }, undefined, undefined, { syntaxStyle: SyntaxStyle.create() })
+    renderer.root.add(card)
+    await setup.renderOnce()
+
+    expect(card.diff).toBeInstanceOf(DiffRenderable)
+    expect((card.diff as DiffRenderable).view).toBe("unified")
+    expect(card.diff?.height).toBe(24)
+    expect(card.height).toBe((card.body.height ?? 0) + 1 + (card.diff?.height ?? 0) + 2)
+    expect(setup.captureCharFrame()).toContain("src/large.rs · +26 −26")
+    expect(setup.captureCharFrame()).toContain("… 42 more lines · ctrl+r to review")
   })
 
   test("renders structured diagnostics instead of protected model framing", async () => {
@@ -946,7 +1161,8 @@ describe("M4 retained components", () => {
     })
     renderer.root.add(app)
     await setup.renderOnce()
-    expect(app.interactionPanel.prompt.plainText).toContain("src/main.rs")
+    expect(app.interactionPanel.prompt.plainText).toContain("Edit file src/main.rs")
+    expect(app.interactionPanel.prompt.plainText).not.toContain("Arguments:")
     app.interactionPanel.select.selectCurrent()
 
     expect(commands).toContainEqual({
@@ -1069,7 +1285,102 @@ describe("M4 retained components", () => {
     ])
   })
 
-  test("makes unsandboxed bash approvals conspicuous with the exact command", async () => {
+  test("offers session-wide tool rules and auto-safe mode as approval escape hatches", async () => {
+    const setup = await createTestRenderer({ width: 112, height: 28, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const tool = {
+      toolCallId: "escape-hatch",
+      turnId: "1",
+      name: "bash",
+      args: { command: "cargo test" },
+      status: "awaiting_approval" as const,
+      capabilities: ["execute" as const],
+      rationale: "Run focused tests",
+      diff: null,
+      chunks: [],
+      output: null,
+      isError: null,
+      callIndex: 0,
+    }
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        permissions: permissionState("strict"),
+        tools: { [tool.toolCallId]: tool },
+      },
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.interactionPanel.select.options.map((option) => option.value)).toEqual([
+      "allow_once",
+      "allow_session",
+      "allow_project",
+      "allow_tool_session",
+      "auto_safe_mode",
+      "deny",
+    ])
+    const always = app.interactionPanel.select.options.findIndex(
+      (option) => option.value === "allow_tool_session",
+    )
+    expect(app.interactionPanel.select.options[always]).toMatchObject({
+      name: "Always allow Terminal command",
+      description: "This session · any arguments",
+    })
+    app.interactionPanel.select.setSelectedIndex(always)
+    app.interactionPanel.select.selectCurrent()
+    expect(commands).toEqual([
+      expect.objectContaining({
+        type: "add_session_permission_rule",
+        pattern: "bash(*)",
+        action: "allow",
+      }),
+      expect.objectContaining({
+        type: "approve_tool",
+        tool_call_id: "escape-hatch",
+        decision: "allow_once",
+      }),
+    ])
+
+    commands.length = 0
+    const autoSafe = app.interactionPanel.select.options.findIndex(
+      (option) => option.value === "auto_safe_mode",
+    )
+    app.interactionPanel.select.setSelectedIndex(autoSafe)
+    app.interactionPanel.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(commands).toEqual([
+      expect.objectContaining({
+        type: "send_message",
+        content: "/permissions mode auto-safe",
+        attachments: [],
+      }),
+      expect.objectContaining({
+        type: "approve_tool",
+        tool_call_id: "escape-hatch",
+        decision: "allow_once",
+      }),
+    ])
+
+    app.setState({ ...app.state, permissions: permissionState("auto-safe") })
+    await setup.renderOnce()
+    expect(app.interactionPanel.select.options.map((option) => option.value))
+      .not.toContain("auto_safe_mode")
+    expect(app.interactionPanel.select.options.map((option) => option.value))
+      .toContain("allow_tool_session")
+
+    app.setState({ ...app.state, permissions: null })
+    await setup.renderOnce()
+    expect(app.interactionPanel.select.options.map((option) => option.value))
+      .toContain("auto_safe_mode")
+  })
+
+  test("makes unsandboxed bash approvals conspicuous and bounds multiline commands", async () => {
     const setup = await createTestRenderer({ width: 112, height: 24, useThread: false })
     renderer = setup.renderer
     const state: RottweilerState = {
@@ -1079,7 +1390,10 @@ describe("M4 retained components", () => {
           toolCallId: "bash",
           turnId: "1",
           name: "bash",
-          args: { command: "docker build .", sandbox: "unsandboxed" },
+          args: {
+            command: "docker build .\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8",
+            sandbox: "unsandboxed",
+          },
           status: "awaiting_approval",
           capabilities: ["execute", "write_filesystem", "network"],
           rationale: "UNSANDBOXED EXECUTION: this command bypasses native isolation",
@@ -1102,7 +1416,12 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
 
     expect(app.interactionPanel.title).toContain("UNSANDBOXED")
+    expect(app.interactionPanel.prompt.plainText).toContain("Run terminal command")
     expect(app.interactionPanel.prompt.plainText).toContain("$ docker build .")
+    expect(app.interactionPanel.prompt.plainText).toContain("line 6")
+    expect(app.interactionPanel.prompt.plainText).toContain("… 2 more lines")
+    expect(app.interactionPanel.prompt.plainText).not.toContain("line 7")
+    expect(app.interactionPanel.prompt.plainText).not.toContain("Arguments:")
     expect(app.interactionPanel.prompt.plainText).toContain("UNSANDBOXED EXECUTION")
   })
 
@@ -1148,7 +1467,8 @@ describe("M4 retained components", () => {
 
     expect(app.banner.plainText).toContain("Waiting for approval · Terminal command")
     expect(app.statusLine.plainText).toContain("approval · Terminal command")
-    expect(app.interactionPanel.prompt.plainText).toContain("wants to run a command")
+    expect(app.interactionPanel.prompt.plainText).toContain("Run terminal command")
+    expect(app.interactionPanel.prompt.plainText).not.toContain("Arguments:")
     expect(app.interactionPanel.prompt.plainText).not.toContain("execute")
 
     app.interactionPanel.select.selectCurrent()
@@ -1273,6 +1593,7 @@ describe("M4 retained components", () => {
           subagentId: "explore",
           parentTurnId: "1",
           task: "Inspect provider boundaries",
+          spawnedAtMs: Date.now() - 83_000,
           status: "running",
           childSessionId: "session-explore",
           lastChildSequence: "4",
@@ -1286,6 +1607,7 @@ describe("M4 retained components", () => {
           subagentId: "tests",
           parentTurnId: "1",
           task: "Add orchestration tests",
+          spawnedAtMs: Date.now() - 120_000,
           status: "completed",
           childSessionId: "session-tests",
           lastChildSequence: "8",
@@ -1301,11 +1623,15 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
 
     const frame = setup.captureCharFrame()
-    expect(frame).toContain("Subagents · 1 running · 2 total")
-    expect(frame.match(/Subagents ·/g)).toHaveLength(1)
+    expect(frame).toContain("ctrl+g inspect · click a row to open")
     expect(frame).toContain("Inspect provider boundaries · using tool · read")
-    expect(frame).toContain("Add orchestration tests · Added deterministic coverage")
-    expect(app.transcript.subagentPanel.rows.size).toBe(2)
+    expect(frame).toContain("1m23s")
+    expect(app.subagentTray.rows.size).toBe(2)
+    expect(
+      app.transcript.streamingCard
+        .getChildren()
+        .some((child) => child instanceof SubagentPanelRenderable),
+    ).toBeFalse()
 
     app.setState({
       ...initial,
@@ -1335,6 +1661,7 @@ describe("M4 retained components", () => {
           subagentId: `child-${index}`,
           parentTurnId: "2",
           task: `Bounded child ${index}`,
+          spawnedAtMs: Date.now() - index * 1_000,
           status: index < 4 ? ("running" as const) : ("completed" as const),
           childSessionId: `session-${index}`,
           lastChildSequence: String(index),
@@ -1352,8 +1679,8 @@ describe("M4 retained components", () => {
       subagents: many,
     })
     await setup.renderOnce()
-    expect(app.transcript.subagentPanel.rows.size).toBe(8)
-    expect(app.transcript.subagentPanel.header.plainText).toContain("20 total")
+    expect(app.subagentTray.rows.size).toBe(6)
+    expect(app.subagentTray.more.plainText).toBe("… 14 more · ctrl+g")
   })
 
   test("opens an exact child transcript from a clicked tree row", async () => {
@@ -1368,6 +1695,7 @@ describe("M4 retained components", () => {
       subagentId: "child-exact",
       parentTurnId: "1",
       task: "Inspect the provider layer",
+      spawnedAtMs: Date.now(),
       status: "running",
       childSessionId: "child-session",
       lastChildSequence: "3",
@@ -1381,6 +1709,82 @@ describe("M4 retained components", () => {
     const row = panel.rows.get("child-row")!
     await setup.mockMouse.click(row.x + 2, row.y)
     expect(opened).toEqual(["child-exact"])
+  })
+
+  test("opens an exact child transcript from a clicked tray row", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 12, useThread: false })
+    renderer = setup.renderer
+    const opened: string[] = []
+    const tray = new SubagentTrayRenderable(renderer, kennelTheme, (subagentId) => {
+      opened.push(subagentId)
+    })
+    const state: RottweilerState = {
+      ...createInitialState(),
+      turns: {
+        "1": { turnId: "1", status: "running", usage: null, cost: null },
+      },
+      subagentOrder: ["child-row"],
+      subagents: {
+        "child-row": {
+          projectionId: "child-row",
+          subagentId: "child-exact",
+          parentTurnId: "1",
+          task: "Inspect the provider layer",
+          spawnedAtMs: 1_000,
+          status: "running",
+          childSessionId: "child-session",
+          lastChildSequence: "3",
+          activity: "using tool · read · components/transcript.ts",
+          summary: null,
+          touchedFileCount: 0,
+          diffArtifactId: null,
+        },
+      },
+    }
+    tray.update(state, 84_000)
+    renderer.root.add(tray)
+    await setup.renderOnce()
+    expect(tray.rows.get("child-row")?.plainText).toContain("1m23s")
+    const row = tray.rows.get("child-row")!
+    await setup.mockMouse.click(row.x + 2, row.y)
+    expect(opened).toEqual(["child-exact"])
+  })
+
+  test("bounds the persistent subagent tray and keeps running children visible", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 14, useThread: false })
+    renderer = setup.renderer
+    const tray = new SubagentTrayRenderable(renderer, kennelTheme, () => {})
+    const subagents: RottweilerState["subagents"] = Object.fromEntries(
+      Array.from({ length: 9 }, (_, index) => [
+        `child-${index}`,
+        {
+          projectionId: `child-${index}`,
+          subagentId: `child-${index}`,
+          parentTurnId: "1",
+          task: `Inspect child ${index}`,
+          spawnedAtMs: 1_000,
+          status: index < 7 ? ("running" as const) : ("completed" as const),
+          childSessionId: `session-${index}`,
+          lastChildSequence: String(index),
+          activity: index < 7 ? "working" : "finished",
+          summary: null,
+          touchedFileCount: 0,
+          diffArtifactId: null,
+        },
+      ]),
+    )
+    tray.update({
+      ...createInitialState(),
+      turns: { "1": { turnId: "1", status: "running", usage: null, cost: null } },
+      subagentOrder: Object.keys(subagents),
+      subagents,
+    }, 84_000)
+    renderer.root.add(tray)
+    await setup.renderOnce()
+    expect(tray.rows.size).toBe(6)
+    expect([...tray.rows.keys()]).toEqual(Array.from({ length: 6 }, (_, index) => `child-${index}`))
+    expect(tray.more.plainText).toBe("… 3 more · ctrl+g")
+    expect(tray.footer.plainText).toBe("ctrl+g inspect · click a row to open")
   })
 
   test("renders cumulative review and routes exact per-file accept or revert commands", async () => {

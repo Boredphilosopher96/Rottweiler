@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { CustomSpeedScroll, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, minimalUnifiedDiff, presentableUnifiedDiff, splitDiffVisualRows, toolOutputText, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { CustomSpeedScroll, diffStats, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, minimalUnifiedDiff, presentableUnifiedDiff, splitDiffVisualRows, toolOutputText, truncateUnifiedDiff, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 import { embeddedParserConfigurations } from "../src/tree-sitter-runtime"
 
 describe("bounded retained rendering", () => {
@@ -117,6 +117,31 @@ describe("bounded retained rendering", () => {
     expect(splitDiffVisualRows(
       "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -4,2 +4,1 @@\n-old one\n-old two\n+new\n@@ -20,0 +19,1 @@\n+later\n",
     )).toBe(3)
+  })
+
+  test("counts changed lines without treating diff metadata as changes", () => {
+    expect(diffStats("--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,2 +1,2 @@\n-old\n+new\n\\ No newline at end of file\n keep\n")).toEqual({ added: 1, removed: 1 })
+  })
+
+  test("truncates unified diffs at hunk boundaries and reports hidden body lines", () => {
+    const source = "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n@@ -10,1 +10,1 @@\n-before\n+after\n"
+    expect(truncateUnifiedDiff(source, 1)).toEqual({
+      diff: "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+      hiddenLines: 3,
+    })
+  })
+
+  test("truncates unified diffs with unified-view rows", () => {
+    const source = "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n@@ -10,1 +10,1 @@\n-before\n+after\n"
+    expect(truncateUnifiedDiff(source, 2, "unified")).toEqual({
+      diff: "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+      hiddenLines: 3,
+    })
+  })
+
+  test("always keeps the first hunk when it exceeds the visual row budget", () => {
+    const source = "--- a/src/main.ts\n+++ b/src/main.ts\n@@ -1,2 +1,2 @@\n-old one\n-old two\n+new one\n+new two\n"
+    expect(truncateUnifiedDiff(source, 1)).toEqual({ diff: source, hiddenLines: 0 })
   })
 
   test("uses OpenCode-compatible fixed scroll speed when configured", () => {

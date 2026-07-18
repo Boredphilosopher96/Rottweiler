@@ -21,10 +21,15 @@ import type { QuestionProjection, RottweilerState, ToolProjection } from "../sta
 import type { RottweilerTheme } from "../theme"
 
 export interface InteractionCallbacks {
-  readonly onApproval: (tool: ToolProjection, decision: ApprovalDecision) => void
+  readonly onApproval: (tool: ToolProjection, action: InteractionApprovalAction) => void
   readonly onAnswer: (question: QuestionProjection, values: readonly string[]) => void
   readonly onPlanReview: (decision: PlanDecision) => void
 }
+
+export type InteractionApprovalAction =
+  | ApprovalDecision
+  | "allow_tool_session"
+  | "auto_safe_mode"
 
 export type ReviewFileDecision = "accept" | "revert"
 
@@ -449,7 +454,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
       return
     }
     if (tool !== undefined) {
-      this.#showTool(tool)
+      this.#showTool(tool, permissionRuntimeMode(state.permissions))
       return
     }
     if (question !== undefined) {
@@ -464,7 +469,7 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.height = 0
   }
 
-  #showTool(tool: ToolProjection): void {
+  #showTool(tool: ToolProjection, permissionMode: PermissionRuntimeMode | null): void {
     this.#activeTool = tool
     this.#activeQuestion = null
     this.#activePlan = null
@@ -474,19 +479,27 @@ export class InteractionPanelRenderable extends BoxRenderable {
     this.title = bash?.unsandboxed === true ? " UNSANDBOXED approval required " : " Permission required "
     const diff = readUnifiedDiff(tool.diff)
     const truncated = diff?.truncated === true
-    const command = bash === null ? "" : `\n$ ${bash.command}`
-    const argumentsSummary = formatToolArguments(tool.args)
-    this.prompt.content = `${toolDisplayName(tool.name)} wants to ${tool.capabilities.map(capabilityLabel).join(", ") || "continue"}${command}\nArguments: ${argumentsSummary}\n${
-      truncated
-        ? "Diff exceeds the review limit. Approval is disabled until the complete change can be reviewed."
-        : (tool.rationale ?? "Review this action.")
-    }`
+    const subject = approvalSubject(tool, bash)
+    this.prompt.content = [
+      subject.line,
+      ...(bash === null ? [] : [approvalCommand(bash.command)]),
+      ...(subject.available ? [] : [`Arguments: ${formatToolArguments(tool.args)}`]),
+      ...(truncated
+        ? ["Diff exceeds the review limit. Approval is disabled until the complete change can be reviewed."]
+        : tool.rationale === null || tool.rationale.trim() === ""
+          ? []
+          : [tool.rationale]),
+    ].join("\n")
     this.select.options = truncated
       ? [{ name: "Deny", description: "A truncated change cannot be approved", value: "deny" }]
       : [
           { name: "Allow once", description: "Run only this invocation", value: "allow_once" },
           { name: "Allow session", description: "Remember for this session", value: "allow_session" },
           { name: "Allow project", description: "Remember this exact invocation in this project", value: "allow_project" },
+          { name: `Always allow ${toolDisplayName(tool.name)}`, description: "This session · any arguments", value: "allow_tool_session" },
+          ...(permissionMode === "auto-safe" || permissionMode === "yolo"
+            ? []
+            : [{ name: "Stop asking for safe actions", description: "Switch this session to auto-safe mode", value: "auto_safe_mode" }]),
           { name: "Deny", description: "Do not run the tool", value: "deny" },
         ]
     this.select.setSelectedIndex(0)
@@ -569,11 +582,17 @@ export class InteractionPanelRenderable extends BoxRenderable {
     }
     if (this.#activeTool !== null) {
       const selected = this.select.options[index]?.value
-      const requested: ApprovalDecision =
-        selected === "allow_once" || selected === "allow_session" || selected === "allow_project" ? selected : "deny"
-      const decision: ApprovalDecision =
+      const requested: InteractionApprovalAction =
+        selected === "allow_once" ||
+        selected === "allow_session" ||
+        selected === "allow_project" ||
+        selected === "allow_tool_session" ||
+        selected === "auto_safe_mode"
+          ? selected
+          : "deny"
+      const action: InteractionApprovalAction =
         this.#activeTool.diff?.truncated === true ? "deny" : requested
-      this.#callbacks.onApproval(this.#activeTool, decision)
+      this.#callbacks.onApproval(this.#activeTool, action)
       return
     }
     if (this.#activeQuestion !== null) {
@@ -670,6 +689,40 @@ function bashApproval(tool: ToolProjection): { readonly command: string; readonl
     return null
   }
   return { command: args.command, unsandboxed: args.sandbox === "unsandboxed" }
+}
+
+function approvalSubject(
+  tool: ToolProjection,
+  bash: ReturnType<typeof bashApproval>,
+): { readonly line: string; readonly available: boolean } {
+  if (bash !== null) return { line: "Run terminal command", available: true }
+  const args =
+    tool.args !== null && typeof tool.args === "object" && !Array.isArray(tool.args)
+      ? tool.args as Record<string, unknown>
+      : null
+  const primary = ["path", "file_path", "filePath", "command", "pattern", "query"]
+    .map((key) => args?.[key])
+    .find((value): value is string => typeof value === "string" && value.trim() !== "")
+    ?.trim()
+  const known = KNOWN_TOOL_DISPLAY_NAMES[tool.name]
+  if (known !== undefined) {
+    return { line: `${known}${primary === undefined ? "" : ` ${primary}`}`, available: true }
+  }
+  if (primary !== undefined) {
+    return { line: `${toolDisplayName(tool.name)} ${primary}`, available: true }
+  }
+  return { line: toolDisplayName(tool.name), available: false }
+}
+
+function approvalCommand(command: string): string {
+  const lines = command.split("\n")
+  const visible = lines.slice(0, 6)
+  const remaining = lines.length - visible.length
+  return [
+    `$ ${visible[0] ?? ""}`,
+    ...visible.slice(1),
+    ...(remaining === 0 ? [] : [`… ${remaining} more lines`]),
+  ].join("\n")
 }
 
 export interface ContextPanelCallbacks {
@@ -1019,6 +1072,7 @@ export class StatusLineRenderable extends TextRenderable {
     const waitingApproval = Object.values(state.tools).find(
       (tool) => tool.status === "awaiting_approval",
     )
+    const permissionMode = permissionRuntimeMode(state.permissions)
     const context =
       state.context === null
         ? "ctx —"
@@ -1037,13 +1091,17 @@ export class StatusLineRenderable extends TextRenderable {
             }`,
           ]),
       ...(state.replay.active ? ["◉ replay"] : []),
-      ...(state.replay.active ? [] : [`◉ ${state.mode ?? "—"}`]),
+      ...(state.replay.active
+        ? []
+        : [`◉ ${state.mode ?? "—"}${permissionMode === null ? "" : ` · ${permissionMode}`}`]),
       ...(waitingApproval === undefined ? [] : [`approval · ${toolDisplayName(waitingApproval.name)}`]),
-      `model ${
-        state.provider === null || state.model?.includes("/") === true
-          ? (state.model ?? "—")
-          : `${state.provider}/${state.model ?? "—"}`
-      }`,
+      state.model === null
+        ? "model none · ctrl+m"
+        : `model ${
+            state.provider === null || state.model.includes("/")
+              ? state.model
+              : `${state.provider}/${state.model}`
+          }`,
       context,
       formatSessionCost(state.cost, state.context?.used_tokens ?? null),
       cache,
@@ -1128,32 +1186,33 @@ export class StateBannerRenderable extends TextRenderable {
   }
 }
 
-function toolDisplayName(name: string): string {
-  const known: Record<string, string> = {
-    bash: "Terminal command",
-    glob: "Find files",
-    grep: "Search files",
-    ls: "List files",
-    read: "Read file",
-    write: "Write file",
-    edit: "Edit file",
-    multi_edit: "Edit files",
-    webfetch: "Open web page",
-    websearch: "Search the web",
-    ask_user: "Ask a question",
-    todo: "Update tasks",
-  }
-  return known[name] ?? humanLabel(name)
+const KNOWN_TOOL_DISPLAY_NAMES: Readonly<Record<string, string>> = {
+  bash: "Terminal command",
+  glob: "Find files",
+  grep: "Search files",
+  ls: "List files",
+  read: "Read file",
+  write: "Write file",
+  edit: "Edit file",
+  multi_edit: "Edit files",
+  webfetch: "Open web page",
+  websearch: "Search the web",
+  ask_user: "Ask a question",
+  todo: "Update tasks",
 }
 
-function capabilityLabel(capability: string): string {
-  switch (capability) {
-    case "read_filesystem": return "read files"
-    case "write_filesystem": return "change files"
-    case "network": return "access the network"
-    case "execute": return "run a command"
-    default: return "use additional access"
-  }
+function toolDisplayName(name: string): string {
+  return KNOWN_TOOL_DISPLAY_NAMES[name] ?? humanLabel(name)
+}
+
+type PermissionRuntimeMode = "strict" | "auto-safe" | "yolo"
+
+function permissionRuntimeMode(
+  permissions: RottweilerState["permissions"],
+): PermissionRuntimeMode | null {
+  if (permissions === null) return null
+  const mode = (permissions as unknown as { readonly runtime_mode?: unknown }).runtime_mode
+  return mode === "strict" || mode === "auto-safe" || mode === "yolo" ? mode : null
 }
 
 function connectionMessage(phase: RottweilerState["connection"]["phase"]): string {

@@ -11,14 +11,18 @@ import {
 } from "@opentui/core"
 
 import {
+  diffStats,
+  displayPath,
   formatCost,
   filetypeForPath,
   getScrollAcceleration,
   minimalUnifiedDiff,
   splitDiffVisualRows,
+  unifiedDiffVisualRows,
   presentTool,
   presentableUnifiedDiff,
   terminalMarkdown,
+  truncateUnifiedDiff,
   turnMarkdown,
   turnReasoningMarkdown,
 } from "../render"
@@ -49,6 +53,8 @@ export class ReasoningBlockRenderable extends BoxRenderable {
   #content = ""
   #expanded = false
   #streaming = false
+  #startedAt: number | null = null
+  #elapsedMs: number | null = null
   #width = 80
   readonly #onExpansionChange: (expanded: boolean) => void
   readonly #onInteraction: (() => void) | undefined
@@ -81,7 +87,7 @@ export class ReasoningBlockRenderable extends BoxRenderable {
     this.#onInteraction = options.onInteraction
     this.header = new TextRenderable(ctx, {
       content: "",
-      fg: theme.warning,
+      fg: theme.muted,
       height: 1,
       flexShrink: 0,
       wrapMode: "none",
@@ -114,7 +120,13 @@ export class ReasoningBlockRenderable extends BoxRenderable {
   }
 
   update(content: string, streaming = this.#streaming, width = this.#width): void {
+    if (!streaming && this.#streaming && this.#startedAt !== null && this.#elapsedMs === null) {
+      this.#elapsedMs = Date.now() - this.#startedAt
+    }
     this.#content = presentableReasoning(content)
+    if (streaming && this.#content !== "" && this.#startedAt === null) {
+      this.#startedAt = Date.now()
+    }
     this.#streaming = streaming
     this.#width = width
     this.visible = this.#content !== ""
@@ -149,12 +161,27 @@ export class ReasoningBlockRenderable extends BoxRenderable {
       this.body.visible = false
       return
     }
-    const state = this.#streaming ? "Thinking" : "Thought"
-    const indicator = this.#streaming && !this.#expanded ? "◌" : this.#expanded ? "⌄" : "›"
-    this.header.content = `${indicator} ${state}: ${reasoningTitle(this.#content)}`
+    const indicator = this.#streaming ? "◌" : this.#expanded ? "⌄" : "›"
+    const state = this.#streaming
+      ? "Thinking…"
+      : this.#elapsedMs === null
+        ? "Thought"
+        : `Thought for ${formatElapsed(this.#elapsedMs)}`
+    this.header.content = `${indicator} ${state} · ${reasoningTitle(this.#content)}`
     this.body.visible = this.#expanded
     this.body.content = this.#expanded ? this.#content : ""
   }
+}
+
+export function formatElapsed(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1_000))
+  if (totalSeconds === 0) return "briefly"
+  const hours = Math.floor(totalSeconds / 3_600)
+  const minutes = Math.floor((totalSeconds % 3_600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}h${minutes.toString().padStart(2, "0")}m${seconds.toString().padStart(2, "0")}s`
+  if (minutes > 0) return `${minutes}m${seconds.toString().padStart(2, "0")}s`
+  return `${seconds}s`
 }
 
 function presentableReasoning(content: string): string {
@@ -188,6 +215,7 @@ export class ToolBlockRenderable extends BoxRenderable {
   diff: DiffRenderable | TextRenderable | null = null
   commandPrompt: TextRenderable | null = null
   #commandContainer: BoxRenderable | null = null
+  #diffContainer: BoxRenderable | null = null
   #commandSignature = ""
   #diffSignature = ""
   #collapsed: boolean
@@ -196,6 +224,7 @@ export class ToolBlockRenderable extends BoxRenderable {
   #onExpansionChange: ((expanded: boolean) => void) | undefined
   #rendering: TranscriptRenderableOptions | undefined
   #userSetExpansion: boolean
+  readonly #startedAt = Date.now()
 
   constructor(
     ctx: RenderContext,
@@ -284,12 +313,16 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#syncDiff(tool)
     const glyph = tool.status === "awaiting_approval" ? "?" : tool.status === "running" ? "◌" : tool.isError === true ? "✕" : "✓"
     const approval = tool.status === "awaiting_approval" ? " · approval needed" : ""
-    const args = this.command === null ? compactToolArguments(tool) : ""
+    const compact = compactToolPresentation(tool)
+    const args = this.command === null ? compact.subject : ""
     const result =
       tool.status === "finished" && this.#collapsed
-        ? compactToolResult(tool)
+        ? compact.summary
         : ""
-    this.header.content = `${this.#collapsed ? "›" : "⌄"} ${glyph} ${toolDisplayName(tool.name)}${args === "" ? "" : ` · ${args}`}${approval}${result === "" ? "" : ` · ${result}`}`
+    const elapsed = tool.status === "running" && Date.now() - this.#startedAt >= 3_000
+      ? ` · ${formatElapsed(Date.now() - this.#startedAt)}`
+      : ""
+    this.header.content = `${this.#collapsed ? "›" : "⌄"} ${glyph} ${toolDisplayName(tool.name)}${args === "" ? "" : ` · ${args}`}${approval}${result === "" ? "" : ` · ${result}`}${elapsed}`
     this.header.fg =
       tool.status === "awaiting_approval"
         ? this.#theme.warning
@@ -299,6 +332,7 @@ export class ToolBlockRenderable extends BoxRenderable {
             ? this.#theme.success
             : this.#theme.info
     if (this.#commandContainer !== null) this.#commandContainer.visible = !this.#collapsed
+    if (this.#diffContainer !== null) this.#diffContainer.visible = !this.#collapsed
     if (this.diff !== null) this.diff.visible = !this.#collapsed
     if (this.#collapsed) {
       this.body.content = ""
@@ -312,7 +346,7 @@ export class ToolBlockRenderable extends BoxRenderable {
       : boundedLines(body, 8)
     const bodyRows = Math.min(8, Math.max(1, this.body.plainText.split("\n").length))
     this.body.height = bodyRows
-    this.height = bodyRows + 1 + (this.#commandContainer?.height ?? 0) + (this.diff?.height ?? 0)
+    this.height = bodyRows + 1 + (this.#commandContainer?.height ?? 0) + (this.#diffContainer?.height ?? 0)
   }
 
   #syncCommand(tool: ToolProjection): void {
@@ -371,7 +405,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     container.add(this.commandPrompt)
     container.add(this.command)
     this.#commandContainer = container
-    this.insertBefore(container, this.diff ?? this.body)
+    this.insertBefore(container, this.#diffContainer ?? this.body)
   }
 
   #syncDiff(tool: ToolProjection): void {
@@ -379,21 +413,46 @@ export class ToolBlockRenderable extends BoxRenderable {
     const signature = proposal === null ? "" : `${proposal.path}\u0000${proposal.unifiedDiff}`
     if (signature === this.#diffSignature) return
     this.#diffSignature = signature
-    if (this.diff !== null) {
-      this.remove(this.diff)
-      this.diff.destroyRecursively()
+    if (this.#diffContainer !== null) {
+      this.remove(this.#diffContainer)
+      this.#diffContainer.destroyRecursively()
+      this.#diffContainer = null
       this.diff = null
     }
     if (proposal === null) return
     const inlineDiff = minimalUnifiedDiff(proposal.path, proposal.unifiedDiff)
+    const view = (this.width || this.ctx.width) < 100 ? "unified" : "split"
     // The diff is changed-lines-only, so give it its natural height. The
     // transcript remains the sole vertical scroll owner; the inline diff never
     // traps the wheel in a nested viewport.
-    const rows = splitDiffVisualRows(inlineDiff)
+    const inlineRows = view === "unified" ? unifiedDiffVisualRows(inlineDiff) : splitDiffVisualRows(inlineDiff)
+    const truncated = inlineRows > 24
+      ? truncateUnifiedDiff(inlineDiff, 24, view)
+      : null
+    const visibleDiff = truncated?.diff ?? inlineDiff
     const filetype = filetypeForPath(proposal.path)
+    const stats = diffStats(inlineDiff)
+    const rows = view === "unified"
+      ? unifiedDiffVisualRows(visibleDiff)
+      : splitDiffVisualRows(visibleDiff)
+    const container = new BoxRenderable(this.ctx, {
+      id: `tool-diff-row-${tool.toolCallId}`,
+      width: "100%",
+      height: rows + 1 + (truncated === null ? 0 : 1),
+      flexDirection: "column",
+      flexShrink: 0,
+    })
+    container.add(new TextRenderable(this.ctx, {
+      content: `${displayPath(proposal.path)} · +${stats.added} −${stats.removed}`,
+      fg: this.#theme.muted,
+      height: 1,
+      flexShrink: 0,
+      wrapMode: "none",
+      selectable: true,
+    }))
     this.diff = this.#rendering === undefined
       ? new TextRenderable(this.ctx, {
-          content: inlineDiff,
+          content: visibleDiff,
           fg: this.#theme.foreground,
           height: rows,
           wrapMode: "none",
@@ -403,13 +462,13 @@ export class ToolBlockRenderable extends BoxRenderable {
           id: `tool-diff-${tool.toolCallId}`,
           width: "100%",
           height: rows,
-          diff: inlineDiff,
+          diff: visibleDiff,
           ...(filetype === undefined ? {} : { filetype }),
           syntaxStyle: this.#rendering.syntaxStyle,
           ...(this.#rendering.treeSitterClient === undefined
             ? {}
             : { treeSitterClient: this.#rendering.treeSitterClient }),
-          view: "split",
+          view,
           syncScroll: false,
           wrapMode: "none",
           showLineNumbers: true,
@@ -418,7 +477,19 @@ export class ToolBlockRenderable extends BoxRenderable {
           contextBg: this.#theme.panel,
         })
     this.diff.selectable = true
-    this.insertBefore(this.diff, this.body)
+    container.add(this.diff)
+    if (truncated !== null) {
+      container.add(new TextRenderable(this.ctx, {
+        content: `… ${truncated.hiddenLines} more lines · ctrl+r to review`,
+        fg: this.#theme.muted,
+        height: 1,
+        flexShrink: 0,
+        wrapMode: "none",
+        selectable: true,
+      }))
+    }
+    this.#diffContainer = container
+    this.insertBefore(container, this.body)
   }
 
   toggle(): void {
@@ -449,7 +520,7 @@ function toolBodyContent(tool: ToolProjection): string {
         : ""
   const rationale = tool.rationale === null || tool.rationale.trim() === ""
     ? ""
-    : `Why · ${singleLine(tool.rationale, 240)}`
+    : `Why · ${singleLine(tool.rationale, 160)}`
   return [rationale, output, activity]
     .filter(Boolean)
     .join("\n")
@@ -506,12 +577,13 @@ function toolBlockExpanded(
   return expansion?.get(tool.toolCallId) ?? tool.status === "awaiting_approval"
 }
 
-function compactToolArguments(tool: ToolProjection): string {
-  return singleLine(presentTool(tool).subject, 80)
-}
-
-function compactToolResult(tool: ToolProjection): string {
-  return singleLine(presentTool(tool).summary, 56)
+function compactToolPresentation(tool: ToolProjection): { subject: string; summary: string } {
+  const presentation = presentTool(tool)
+  const subject = singleLine(presentation.subject, 80)
+  const summary = singleLine(presentation.summary, 56)
+  return subject !== "" && summary.includes(subject)
+    ? { subject: "", summary }
+    : { subject, summary }
 }
 
 function toolDisplayName(name: string): string {
@@ -653,7 +725,7 @@ function subagentDetail(subagent: SubagentProjection): string {
   return `${subagent.summary === null ? subagent.status.replaceAll("_", " ") : singleLine(subagent.summary, 72)}${files}${diff}`
 }
 
-function subagentGlyph(status: SubagentProjection["status"]): string {
+export function subagentGlyph(status: SubagentProjection["status"]): string {
   switch (status) {
     case "running":
       return "◌"
@@ -889,7 +961,6 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly streamingMarkdown: MarkdownRenderable
   readonly compactionCard: BoxRenderable
   readonly compactionMarkdown: MarkdownRenderable
-  readonly subagentPanel: SubagentPanelRenderable
   readonly mountedCards = new Map<string, TurnCardRenderable>()
   readonly #tailReasoning: ReasoningBlockRenderable
   readonly #compactionReasoning: ReasoningBlockRenderable
@@ -912,6 +983,7 @@ export class TranscriptRenderable extends BoxRenderable {
   #tools: RottweilerState["tools"] | null = null
   #turns: RottweilerState["turns"] | null = null
   #subagents: RottweilerState["subagents"] | null = null
+  #agentName = "Rottweiler"
   #tailReasoningTurnId: string | null = null
   #compactionAttempt: number | null = null
 
@@ -1007,12 +1079,10 @@ export class TranscriptRenderable extends BoxRenderable {
       width: "100%",
       flexDirection: "column",
     })
-    this.subagentPanel = new SubagentPanelRenderable(ctx, theme, this.#onOpenSubagent)
     this.streamingCard.add(this.#tailHeader)
     this.streamingCard.add(this.#tailReasoning)
     this.streamingCard.add(this.streamingMarkdown)
     this.streamingCard.add(this.#tailCitations)
-    this.streamingCard.add(this.subagentPanel)
     this.streamingCard.add(this.#tailTools)
     this.scroller.add(this.streamingCard)
     this.compactionCard = new BoxRenderable(ctx, {
@@ -1075,8 +1145,9 @@ export class TranscriptRenderable extends BoxRenderable {
     return this.#presentableTranscript.map(entryKey)
   }
 
-  update(state: RottweilerState): void {
+  update(state: RottweilerState, agentName = "Rottweiler"): void {
     this.#state = state
+    this.#agentName = singleLine(agentName, 48) || "Child agent"
     const transcriptChanged = this.#transcript !== state.transcript
     if (transcriptChanged && state.streamingTail === null && this.#tailReasoningTurnId !== null) {
       const committed = [...state.transcript]
@@ -1215,18 +1286,7 @@ export class TranscriptRenderable extends BoxRenderable {
 
   #updateTail(state: RottweilerState): void {
     const tail = state.streamingTail
-    const allSubagents =
-      tail === null
-        ? state.subagentOrder
-            .map((subagentId) => state.subagents[subagentId])
-            .filter(
-              (subagent): subagent is SubagentProjection =>
-                subagent !== undefined && subagent.status === "running",
-            )
-        : subagentsForTurn(state, tail.turnId)
-    const subagents = boundedSubagents(allSubagents)
-    this.subagentPanel.update(subagents, allSubagents.length)
-    this.streamingCard.visible = tail !== null || subagents.length > 0
+    this.streamingCard.visible = tail !== null
     if (tail === null) {
       // Finalize the trailing parser block before clearing it. This mirrors
       // OpenCode's streaming lifecycle and avoids leaving an unfinished code
@@ -1234,7 +1294,7 @@ export class TranscriptRenderable extends BoxRenderable {
       this.streamingMarkdown.streaming = false
       this.streamingMarkdown.content = ""
       this.streamingMarkdown.visible = false
-      this.#tailHeader.content = "Rottweiler · delegating"
+      this.#tailHeader.content = `${this.#agentName} · delegating`
       this.#tailReasoning.update("", false, Math.max(20, this.width || this.ctx.width))
       this.#tailReasoningTurnId = null
       this.#tailCitations.visible = false
@@ -1262,7 +1322,7 @@ export class TranscriptRenderable extends BoxRenderable {
       Math.max(20, (this.width || this.ctx.width) - 4),
       tail.finished === null ? "streaming" : "complete",
     )
-    this.#tailHeader.content = `Rottweiler · ${tail.finished === null ? activity : turnDetail(tail.finished.cost, tail.finished.usage)}`
+    this.#tailHeader.content = `${this.#agentName} · ${tail.finished === null ? activity : turnDetail(tail.finished.cost, tail.finished.usage)}`
     if (this.#tailReasoningTurnId !== tail.turnId) {
       this.#tailReasoning.expand(false)
       this.#tailReasoningTurnId = tail.turnId
