@@ -944,13 +944,10 @@ mod tests {
                 .to_string(),
         };
         assert!(state.handle(&frame("call-1")).is_ok());
-        assert_eq!(
-            state
-                .handle(&frame("call-2"))
-                .expect_err("duplicate index")
-                .kind,
-            ProviderErrorKind::Protocol
-        );
+        let Err(error) = state.handle(&frame("call-2")) else {
+            panic!("duplicate index must be rejected");
+        };
+        assert_eq!(error.kind, ProviderErrorKind::Protocol);
     }
 
     #[test]

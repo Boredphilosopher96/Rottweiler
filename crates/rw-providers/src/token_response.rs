@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use crate::{ProviderError, ProviderErrorKind};
 
 pub(crate) const MAX_TOKEN_RESPONSE_BYTES: usize = 64 * 1024;
-const MAX_TOKEN_LIFETIME: Duration = Duration::from_secs(90 * 24 * 60 * 60);
+const MAX_TOKEN_LIFETIME: Duration = Duration::from_hours(90 * 24);
 
 /// Reads a small OAuth/device-flow response without permitting an unbounded body.
 pub(crate) async fn read_json<T: DeserializeOwned>(

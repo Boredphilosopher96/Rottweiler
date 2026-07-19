@@ -2003,8 +2003,11 @@ fn require_private_permissions(_path: &Path) -> Result<(), ToolError> {
 }
 
 #[cfg(test)]
-fn finalize_after_capture_test_hooks() -> &'static Mutex<HashMap<PathBuf, (PathBuf, Vec<u8>)>> {
-    static HOOKS: OnceLock<Mutex<HashMap<PathBuf, (PathBuf, Vec<u8>)>>> = OnceLock::new();
+type FinalizeAfterCaptureTestHooks = HashMap<PathBuf, (PathBuf, Vec<u8>)>;
+
+#[cfg(test)]
+fn finalize_after_capture_test_hooks() -> &'static Mutex<FinalizeAfterCaptureTestHooks> {
+    static HOOKS: OnceLock<Mutex<FinalizeAfterCaptureTestHooks>> = OnceLock::new();
     HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -2023,7 +2026,8 @@ fn run_finalize_after_capture_test_hook(lease_path: &Path) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(lease_path);
     if let Some((target, content)) = hook {
-        std::fs::write(target, content).expect("finalization race test write");
+        std::fs::write(target, content)
+            .unwrap_or_else(|error| panic!("finalization race test write: {error}"));
     }
 }
 

@@ -752,14 +752,12 @@ async fn validate_staged_binary(path: &Path, expected_version: &str) -> Result<(
         Ok::<_, miette::Report>((status.into_diagnostic()?, output?))
     })
     .await;
-    let (status, (stdout, stderr)) = match completed {
-        Ok(result) => result?,
-        Err(_) => {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            return Err(miette!("staged update binary version check timed out"));
-        }
+    let Ok(result) = completed else {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err(miette!("staged update binary version check timed out"));
     };
+    let (status, (stdout, _stderr)) = result?;
     if !status.success()
         || String::from_utf8_lossy(&stdout).trim() != format!("rw {expected_version}")
     {

@@ -602,30 +602,7 @@ async fn atomic_write_unix(
 ) -> Result<(), ToolError> {
     cancellation.check()?;
     let (parent, file_name) = context.secure_parent(path)?;
-    let existing_permissions =
-        match rustix::fs::statat(&parent, &file_name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => {
-                if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
-                    return Err(ToolError::InvalidInput(format!(
-                        "{} is not a regular file",
-                        context.relative_display(path).display()
-                    )));
-                }
-                #[cfg(target_os = "linux")]
-                let mode = stat.st_mode;
-                #[cfg(not(target_os = "linux"))]
-                let mode = u32::from(stat.st_mode);
-                Some(std::fs::Permissions::from_mode(mode & 0o7777))
-            }
-            Err(rustix::io::Errno::NOENT) => None,
-            Err(source) => {
-                return Err(ToolError::Io {
-                    operation: "inspect existing file without following links",
-                    path: path.to_path_buf(),
-                    source: source.into(),
-                });
-            }
-        };
+    let existing_permissions = existing_permissions_unix(context, &parent, &file_name, path)?;
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = format!(
         ".{}.rottweiler.{}.{sequence}.tmp",
@@ -677,10 +654,7 @@ async fn atomic_write_unix(
         })?;
         cancellation.check()?;
         drop(file);
-        let target = snapshot
-            .map(|snapshot| verify_snapshot_unix(&parent, &file_name, path, snapshot))
-            .transpose()?;
-        cancellation.check()?;
+        let target = verify_snapshot_unchanged(&parent, &file_name, path, snapshot, cancellation)?;
         rustix::fs::renameat(&parent, temporary.as_str(), &parent, &file_name).map_err(
             |source| ToolError::Io {
                 operation: "replace file",
@@ -702,6 +676,51 @@ async fn atomic_write_unix(
         let _ = rustix::fs::unlinkat(&parent, temporary.as_str(), rustix::fs::AtFlags::empty());
     }
     result
+}
+
+#[cfg(unix)]
+fn existing_permissions_unix(
+    context: &ToolContext,
+    parent: &impl std::os::fd::AsFd,
+    file_name: &std::ffi::OsStr,
+    path: &std::path::Path,
+) -> Result<Option<std::fs::Permissions>, ToolError> {
+    match rustix::fs::statat(parent, file_name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => {
+            if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_file() {
+                return Err(ToolError::InvalidInput(format!(
+                    "{} is not a regular file",
+                    context.relative_display(path).display()
+                )));
+            }
+            #[cfg(target_os = "linux")]
+            let mode = stat.st_mode;
+            #[cfg(not(target_os = "linux"))]
+            let mode = u32::from(stat.st_mode);
+            Ok(Some(std::fs::Permissions::from_mode(mode & 0o7777)))
+        }
+        Err(rustix::io::Errno::NOENT) => Ok(None),
+        Err(source) => Err(ToolError::Io {
+            operation: "inspect existing file without following links",
+            path: path.to_path_buf(),
+            source: source.into(),
+        }),
+    }
+}
+
+#[cfg(unix)]
+fn verify_snapshot_unchanged(
+    parent: &impl std::os::fd::AsFd,
+    file_name: &std::ffi::OsStr,
+    path: &std::path::Path,
+    snapshot: Option<&FileSnapshot>,
+    cancellation: &crate::CancellationToken,
+) -> Result<Option<std::fs::File>, ToolError> {
+    let target = snapshot
+        .map(|snapshot| verify_snapshot_unix(parent, file_name, path, snapshot))
+        .transpose()?;
+    cancellation.check()?;
+    Ok(target)
 }
 
 #[cfg(unix)]

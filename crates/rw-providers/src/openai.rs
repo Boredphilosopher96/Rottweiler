@@ -1065,41 +1065,44 @@ impl OpenAiState {
     ) -> Result<(), ProviderError> {
         let key = (choice_index, tool_index);
         let start = provider_id.is_some() || function.get("name").is_some();
-        if start && self.tools.contains_key(&key) {
-            return Err(ProviderError::new(
-                ProviderErrorKind::Protocol,
-                "tool call start reused an active index",
-            ));
-        }
-        let inserted = !self.tools.contains_key(&key);
-        if inserted {
-            let id = provider_id
-                .filter(|id| !id.trim().is_empty())
-                .ok_or_else(|| {
-                    ProviderError::new(
+        let (inserted, state) = match self.tools.entry(key) {
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                if start {
+                    return Err(ProviderError::new(
                         ProviderErrorKind::Protocol,
-                        "tool call start omitted its id",
-                    )
-                })?;
-            let name = function["name"]
-                .as_str()
-                .filter(|name| !name.trim().is_empty())
-                .ok_or_else(|| {
-                    ProviderError::new(
-                        ProviderErrorKind::Protocol,
-                        "tool call start omitted its name",
-                    )
-                })?;
-            self.tools.insert(
-                key,
-                OpenAiToolState {
-                    id: id.to_owned(),
-                    name: name.to_owned(),
-                    arguments: String::new(),
-                },
-            );
-        }
-        let state = self.tools.get_mut(&key).expect("tool state was inserted");
+                        "tool call start reused an active index",
+                    ));
+                }
+                (false, entry.into_mut())
+            }
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let id = provider_id
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| {
+                        ProviderError::new(
+                            ProviderErrorKind::Protocol,
+                            "tool call start omitted its id",
+                        )
+                    })?;
+                let name = function["name"]
+                    .as_str()
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or_else(|| {
+                        ProviderError::new(
+                            ProviderErrorKind::Protocol,
+                            "tool call start omitted its name",
+                        )
+                    })?;
+                (
+                    true,
+                    entry.insert(OpenAiToolState {
+                        id: id.to_owned(),
+                        name: name.to_owned(),
+                        arguments: String::new(),
+                    }),
+                )
+            }
+        };
         if inserted {
             events.push(ProviderEvent::ToolCallStart {
                 id: state.id.clone(),
@@ -1644,12 +1647,12 @@ mod tests {
             json!({"model":"fixture","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}),
             json!({"model":"fixture","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"arguments":"\"a.rs\"}"}}]},"finish_reason":"tool_calls"}]}),
         ];
-        let error = state
-            .handle(&SseEvent {
-                event: None,
-                data: frames[0].to_string(),
-            })
-            .expect_err("missing tool id must be rejected");
+        let Err(error) = state.handle(&SseEvent {
+            event: None,
+            data: frames[0].to_string(),
+        }) else {
+            panic!("missing tool id must be rejected");
+        };
         assert_eq!(error.kind, ProviderErrorKind::Protocol);
     }
 
@@ -1657,12 +1660,12 @@ mod tests {
     fn legacy_function_call_without_an_id_is_rejected() {
         let mut state = OpenAiState::new(OpenAiWireMode::ChatCompletions);
         let frame = json!({"model":"fixture","choices":[{"index":0,"delta":{"function_call":{"name":"shell"}},"finish_reason":null}]});
-        let error = state
-            .handle(&SseEvent {
-                event: None,
-                data: frame.to_string(),
-            })
-            .expect_err("legacy tool calls omit an id");
+        let Err(error) = state.handle(&SseEvent {
+            event: None,
+            data: frame.to_string(),
+        }) else {
+            panic!("legacy tool calls omit an id");
+        };
         assert_eq!(error.kind, ProviderErrorKind::Protocol);
     }
 
@@ -1678,10 +1681,10 @@ mod tests {
             if id == "call-1" {
                 assert!(result.is_ok());
             } else {
-                assert_eq!(
-                    result.expect_err("duplicate index").kind,
-                    ProviderErrorKind::Protocol
-                );
+                let Err(error) = result else {
+                    panic!("duplicate index must be rejected");
+                };
+                assert_eq!(error.kind, ProviderErrorKind::Protocol);
             }
         }
     }
@@ -1702,10 +1705,10 @@ mod tests {
             if id == "call-1" {
                 assert!(result.is_ok());
             } else {
-                assert_eq!(
-                    result.expect_err("duplicate index").kind,
-                    ProviderErrorKind::Protocol
-                );
+                let Err(error) = result else {
+                    panic!("duplicate index must be rejected");
+                };
+                assert_eq!(error.kind, ProviderErrorKind::Protocol);
             }
         }
     }
