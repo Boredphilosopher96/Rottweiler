@@ -11,6 +11,9 @@ import type { ClipboardImage, EditorAdapter, ImagePasteAdapter } from "../platfo
 import type { RottweilerTheme } from "../theme"
 import { ImageAttachmentRenderable } from "./image"
 
+const COMPOSER_PLACEHOLDER =
+  "Message Rottweiler · / commands · ! shell · @ files · Ctrl+V image"
+
 export interface ComposerOptions {
   readonly editor: EditorAdapter
   readonly imagePaste: ImagePasteAdapter
@@ -91,7 +94,9 @@ export class ComposerRenderable extends BoxRenderable {
       minHeight: 2,
       maxHeight: 5,
       initialValue: "",
-      placeholder: "Message Rottweiler · @ files · Ctrl+V image · Ctrl+E $EDITOR",
+      // The full discovery copy is 83 cells, but this editor has 76 usable
+      // cells at an 80-column terminal after border and horizontal padding.
+      placeholder: COMPOSER_PLACEHOLDER,
       backgroundColor: theme.panel,
       textColor: theme.foreground,
       focusedBackgroundColor: theme.panelRaised,
@@ -211,7 +216,7 @@ export class ComposerRenderable extends BoxRenderable {
     this.focusedBorderColor = active ? this.#theme.warning : this.#theme.focus
     this.editor.placeholder = active
       ? "Shell command · Enter to run in foreground"
-      : "Message Rottweiler · @ files · Ctrl+V image · Ctrl+E $EDITOR"
+      : COMPOSER_PLACEHOLDER
   }
 
   currentFileMention(): ComposerFileMention | null {

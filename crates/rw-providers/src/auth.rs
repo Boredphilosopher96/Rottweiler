@@ -751,12 +751,11 @@ impl OAuthLoginSession {
                 ),
             ));
         }
-        let response: AuthorizationCodeTokenResponse = response.json().await.map_err(|_| {
-            ProviderError::new(
-                ProviderErrorKind::Protocol,
-                "OAuth token endpoint returned invalid JSON",
-            )
-        })?;
+        let response: AuthorizationCodeTokenResponse = crate::token_response::read_json(
+            response,
+            "OAuth token endpoint returned invalid JSON",
+        )
+        .await?;
         if response.access_token.is_empty()
             || response
                 .token_type
@@ -1253,12 +1252,11 @@ impl AuthProvider for RefreshingOAuth {
                 format!("OAuth token endpoint returned HTTP {}", response.status()),
             ));
         }
-        let token: TokenResponse = response.json().await.map_err(|_| {
-            ProviderError::new(
-                ProviderErrorKind::Protocol,
-                "OAuth token endpoint returned invalid JSON",
-            )
-        })?;
+        let token: TokenResponse = crate::token_response::read_json(
+            response,
+            "OAuth token endpoint returned invalid JSON",
+        )
+        .await?;
         if token.access_token.is_empty()
             || token
                 .token_type
@@ -1295,7 +1293,7 @@ impl AuthProvider for RefreshingOAuth {
         }
         state.cached = Some(CachedToken {
             value: value.clone(),
-            expires_at: now + Duration::from_secs(token.expires_in),
+            expires_at: crate::token_response::checked_deadline(now, token.expires_in)?,
         });
         Ok(AuthMaterial::Bearer(value))
     }

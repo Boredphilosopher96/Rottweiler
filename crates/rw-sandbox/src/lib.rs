@@ -21,6 +21,26 @@ pub const COMPONENT: &str = "sandbox";
 /// The internal argv marker handled before the public CLI parser starts.
 pub const HELPER_ARG: &str = "__rottweiler-sandbox-helper";
 
+// Keep this list shared by Seatbelt and Landlock so broad/default policies do
+// not drift in which credential stores they protect.
+const SENSITIVE_HOME_SUFFIXES: &[&str] = &[
+    ".ssh",
+    ".aws",
+    ".azure",
+    ".codex",
+    ".docker",
+    ".gnupg",
+    ".kube",
+    ".rottweiler",
+    ".config/gcloud",
+    ".config/gh",
+    ".config/opencode",
+    ".git-credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+];
+
 /// Network authority granted to a sandboxed process.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,6 +95,11 @@ impl SandboxPolicy {
     /// Creates a policy after resolving every writable root to an existing,
     /// absolute filesystem object.
     ///
+    /// Linux's default read policy grants only the writable roots, a reviewed
+    /// set of system/runtime roots, and the executable selected for launch. It
+    /// does not grant the user's home directory. macOS retains its broad-read
+    /// compatibility policy with explicit credential-root denials.
+    ///
     /// # Errors
     ///
     /// Returns an error when no root is supplied, a root does not exist, or a
@@ -122,9 +147,10 @@ impl SandboxPolicy {
         &self.write_roots
     }
 
-    /// Restricts reads to these intrinsic runtime/code roots plus writable roots.
-    /// The default policy preserves broad-read command compatibility; security-
-    /// sensitive callers such as the plugin host opt into this narrower form.
+    /// Adds these caller-trusted read roots to intrinsic runtime/code roots and
+    /// writable roots. On macOS this retains the existing narrower-read policy;
+    /// on Linux the Landlock backend also grants its reviewed system roots.
+    /// Sensitive credential paths beneath the user's home remain excluded.
     ///
     /// # Errors
     ///
@@ -781,26 +807,10 @@ fn sensitive_read_roots() -> Vec<PathBuf> {
     else {
         return Vec::new();
     };
-    [
-        ".ssh",
-        ".aws",
-        ".azure",
-        ".codex",
-        ".docker",
-        ".gnupg",
-        ".kube",
-        ".rottweiler",
-        ".config/gcloud",
-        ".config/gh",
-        ".config/opencode",
-        ".git-credentials",
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
-    ]
-    .into_iter()
-    .map(|suffix| home.join(suffix))
-    .collect()
+    SENSITIVE_HOME_SUFFIXES
+        .iter()
+        .map(|suffix| home.join(suffix))
+        .collect()
 }
 
 /// Handles a Linux sandbox-helper invocation and replaces the current process
@@ -838,14 +848,14 @@ where
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::convert::TryInto as _;
     use std::io;
     use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
     use std::os::fd::AsFd as _;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::{
         Arc,
@@ -864,9 +874,33 @@ mod linux {
     };
 
     use super::{
-        NetworkPolicy, OsString, RootKind, SandboxError, SandboxPolicy, audited_linux_tool,
-        serde_json,
+        NetworkPolicy, OsString, RootKind, SENSITIVE_HOME_SUFFIXES, SandboxError, SandboxPolicy,
+        audited_linux_tool, serde_json,
     };
+
+    /// Linux's default compatibility roots. These are deliberately explicit:
+    /// Landlock cannot subtract a credential directory after granting `/`.
+    /// Optional multilib and virtual-filesystem entries are skipped when the
+    /// host does not provide them.
+    const SYSTEM_READ_ROOTS: &[&str] = &[
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/lib",
+        "/lib32",
+        "/lib64",
+        "/libx32",
+        "/etc",
+        "/proc/self",
+        "/sys/devices/system/cpu",
+        "/sys/fs/cgroup",
+        "/tmp",
+        "/dev/null",
+        "/dev/zero",
+        "/dev/random",
+        "/dev/urandom",
+        "/dev/tty",
+    ];
 
     pub(super) fn run_helper(args: &[OsString]) -> Result<std::convert::Infallible, SandboxError> {
         if args.len() < 4 {
@@ -884,7 +918,7 @@ mod linux {
         if policy.network != NetworkPolicy::Deny {
             return Err(SandboxError::MalformedHelper);
         }
-        install_landlock(&policy)?;
+        install_landlock(&policy, &args[3])?;
         install_network_floor(false)?;
         let error = command_without_helper_pin(&args[3], &args[4..], helper_pin)?.exec();
         Err(SandboxError::Exec(error))
@@ -956,7 +990,7 @@ mod linux {
             .spawn(move || serve_namespace_relay(&listener, &relay_path, &relay_running))
             .map_err(SandboxError::Proxy)?;
 
-        install_landlock(policy)?;
+        install_landlock(policy, program)?;
         install_network_floor(true)?;
         let status = command_without_helper_pin(program, args, helper_pin)?
             .status()
@@ -1039,7 +1073,7 @@ mod linux {
         reverse.map(|_| ())
     }
 
-    fn install_landlock(policy: &SandboxPolicy) -> Result<(), SandboxError> {
+    fn install_landlock(policy: &SandboxPolicy, program: &OsString) -> Result<(), SandboxError> {
         // V3 includes REFER and TRUNCATE.  Requiring full enforcement prevents
         // older kernels from silently leaving path-based truncate unrestricted.
         let abi = ABI::V3;
@@ -1050,29 +1084,34 @@ mod linux {
             .map_err(sandbox_backend)?
             .create()
             .map_err(sandbox_backend)?;
+        let homes = linux_homes();
+        let sensitive = homes
+            .iter()
+            .flat_map(|home| sensitive_linux_roots(home))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut read_grants = BTreeMap::new();
+        for root in SYSTEM_READ_ROOTS {
+            collect_system_read_root(Path::new(root), &homes, &mut read_grants)?;
+        }
         match (&policy.read_roots, &policy.read_root_kinds) {
             (Some(read_roots), Some(read_root_kinds))
                 if read_roots.len() == read_root_kinds.len() =>
             {
                 for (root, kind) in read_roots.iter().zip(read_root_kinds) {
-                    let root = open_landlock_root(root, *kind)?;
-                    let access = if *kind == RootKind::Directory {
-                        read
-                    } else {
-                        read & AccessFs::from_file(abi)
-                    };
-                    ruleset = ruleset
-                        .add_rule(PathBeneath::new(root, access))
-                        .map_err(sandbox_backend)?;
+                    collect_authorized_read_root(root, *kind, &sensitive, &mut read_grants)?;
                 }
             }
             (None, None) => {
-                ruleset = ruleset
-                    .add_rule(PathBeneath::new(
-                        PathFd::new("/").map_err(sandbox_backend)?,
-                        read,
-                    ))
-                    .map_err(sandbox_backend)?;
+                if let Some(program) = absolute_existing_root(Path::new(program))? {
+                    collect_authorized_read_root(
+                        &program.0,
+                        program.1,
+                        &sensitive,
+                        &mut read_grants,
+                    )?;
+                }
             }
             _ => return Err(SandboxError::MalformedHelper),
         }
@@ -1080,11 +1119,37 @@ mod linux {
             return Err(SandboxError::MalformedHelper);
         }
         for (root, kind) in policy.write_roots.iter().zip(&policy.write_root_kinds) {
-            let root = open_landlock_root(root, *kind)?;
-            let access = if *kind == RootKind::Directory {
-                all
+            collect_authorized_read_root(root, *kind, &sensitive, &mut read_grants)?;
+        }
+        for (root, kind) in read_grants {
+            let root = open_landlock_root(&root, kind)?;
+            let access = if kind == RootKind::Directory {
+                read
             } else {
-                all & AccessFs::from_file(abi)
+                read & AccessFs::from_file(abi)
+            };
+            ruleset = ruleset
+                .add_rule(PathBeneath::new(root, access))
+                .map_err(sandbox_backend)?;
+        }
+        for (root_path, kind) in policy.write_roots.iter().zip(&policy.write_root_kinds) {
+            // A write root containing a sensitive home path cannot receive an
+            // `all` rule: Landlock rules are additive, so that would restore
+            // READ_FILE below the excluded path. Grant write authority at the
+            // parent and add read authority only on the safe sibling snapshot.
+            let root_contains_sensitive = sensitive
+                .iter()
+                .any(|secret| secret.starts_with(root_path) || root_path.starts_with(secret));
+            let write_access = if root_contains_sensitive {
+                all & !read
+            } else {
+                all
+            };
+            let root = open_landlock_root(root_path, *kind)?;
+            let access = if *kind == RootKind::Directory {
+                write_access
+            } else {
+                write_access & AccessFs::from_file(abi)
             };
             ruleset = ruleset
                 .add_rule(PathBeneath::new(root, access))
@@ -1098,6 +1163,162 @@ mod linux {
             )));
         }
         Ok(())
+    }
+
+    fn linux_homes() -> Vec<PathBuf> {
+        let mut homes = BTreeSet::new();
+        if let Some(home) = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .and_then(|path| path.canonicalize().ok())
+            .filter(|path| path.is_dir())
+        {
+            homes.insert(home);
+        }
+        // HOME is caller-controlled process state. Also consult the local
+        // account database so overriding HOME cannot expose the real account's
+        // credential stores. Hosts using a remote identity database still get
+        // the environment-derived path and the explicit allowlist floor.
+        let uid = rustix::process::getuid().as_raw().to_string();
+        if let Ok(passwd) = std::fs::read_to_string("/etc/passwd") {
+            for fields in passwd
+                .lines()
+                .map(|line| line.split(':').collect::<Vec<_>>())
+            {
+                if fields.get(2) == Some(&uid.as_str())
+                    && let Some(home) = fields
+                        .get(5)
+                        .map(PathBuf::from)
+                        .filter(|path| path.is_absolute())
+                        .and_then(|path| path.canonicalize().ok())
+                        .filter(|path| path.is_dir())
+                {
+                    homes.insert(home);
+                }
+            }
+        }
+        homes.into_iter().collect()
+    }
+
+    fn sensitive_linux_roots(home: &Path) -> Vec<PathBuf> {
+        let mut roots = BTreeSet::new();
+        for suffix in SENSITIVE_HOME_SUFFIXES {
+            let lexical = home.join(suffix);
+            roots.insert(lexical.clone());
+            if let Ok(canonical) = lexical.canonicalize() {
+                roots.insert(canonical);
+            }
+        }
+        roots.into_iter().collect()
+    }
+
+    fn collect_system_read_root(
+        root: &Path,
+        homes: &[PathBuf],
+        grants: &mut BTreeMap<PathBuf, RootKind>,
+    ) -> Result<(), SandboxError> {
+        let Some((root, kind)) = absolute_existing_root(root)? else {
+            return Ok(());
+        };
+        if homes.iter().any(|home| root.starts_with(home)) {
+            return Ok(());
+        }
+        let excluded = homes
+            .iter()
+            .filter(|home| home.starts_with(&root))
+            .cloned()
+            .collect::<Vec<_>>();
+        if kind == RootKind::Directory && !excluded.is_empty() {
+            return collect_directory_except(&root, &excluded, grants);
+        }
+        grants.insert(root, kind);
+        Ok(())
+    }
+
+    /// Adds an explicitly authorized root while carving credential paths out
+    /// of any parent grant. Landlock has no deny rule, so a home-directory
+    /// workspace is represented by rules for its existing safe siblings. This
+    /// preserves reads of existing workspace content, but the home directory
+    /// itself cannot be listed and new top-level entries are not readable until
+    /// a future sandbox invocation rebuilds the snapshot.
+    fn collect_authorized_read_root(
+        root: &Path,
+        kind: RootKind,
+        sensitive: &[PathBuf],
+        grants: &mut BTreeMap<PathBuf, RootKind>,
+    ) -> Result<(), SandboxError> {
+        if sensitive.iter().any(|secret| root.starts_with(secret)) {
+            return Ok(());
+        }
+        let excluded = sensitive
+            .iter()
+            .filter(|secret| secret.starts_with(root))
+            .cloned()
+            .collect::<Vec<_>>();
+        if kind == RootKind::Directory && !excluded.is_empty() {
+            collect_directory_except(root, &excluded, grants)
+        } else {
+            grants.insert(root.to_path_buf(), kind);
+            Ok(())
+        }
+    }
+
+    fn collect_directory_except(
+        root: &Path,
+        excluded: &[PathBuf],
+        grants: &mut BTreeMap<PathBuf, RootKind>,
+    ) -> Result<(), SandboxError> {
+        for entry in std::fs::read_dir(root).map_err(sandbox_backend)? {
+            let entry = entry.map_err(sandbox_backend)?;
+            let path = entry.path();
+            let link_metadata = path.symlink_metadata().map_err(sandbox_backend)?;
+            // A PathBeneath rule is attached to the resolved inode. Following
+            // a sibling symlink here could accidentally grant an object outside
+            // the authorized root, so snapshot carving deliberately omits it.
+            if link_metadata.file_type().is_symlink() {
+                continue;
+            }
+            let canonical = match path.canonicalize() {
+                Ok(path) => path,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(sandbox_backend(error)),
+            };
+            if !canonical.starts_with(root) {
+                continue;
+            }
+            let is_excluded = excluded
+                .iter()
+                .any(|secret| path == *secret || canonical == *secret);
+            if is_excluded {
+                continue;
+            }
+            let nested = excluded
+                .iter()
+                .filter(|secret| secret.starts_with(&path) || secret.starts_with(&canonical))
+                .cloned()
+                .collect::<Vec<_>>();
+            let metadata = canonical.metadata().map_err(sandbox_backend)?;
+            let kind = RootKind::for_metadata(&metadata);
+            if kind == RootKind::Directory && !nested.is_empty() {
+                collect_directory_except(&path, &nested, grants)?;
+            } else {
+                grants.insert(canonical, kind);
+            }
+        }
+        Ok(())
+    }
+
+    fn absolute_existing_root(root: &Path) -> Result<Option<(PathBuf, RootKind)>, SandboxError> {
+        if !root.is_absolute() {
+            return Ok(None);
+        }
+        let canonical = match root.canonicalize() {
+            Ok(root) => root,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(sandbox_backend(error)),
+        };
+        let metadata = canonical.metadata().map_err(sandbox_backend)?;
+        Ok(Some((canonical, RootKind::for_metadata(&metadata))))
     }
 
     fn open_landlock_root(root: &Path, expected: RootKind) -> Result<PathFd, SandboxError> {

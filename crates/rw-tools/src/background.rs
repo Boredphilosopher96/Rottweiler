@@ -1,6 +1,7 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt::Write as _;
-use std::sync::{Arc, Mutex, Weak};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use async_trait::async_trait;
 use rw_types::{SessionId, ToolCapability, ToolOutputStream};
@@ -168,6 +169,94 @@ struct ManagerInner {
     sessions: Mutex<BTreeMap<String, SessionProcesses>>,
 }
 
+#[derive(Default)]
+struct WorktreeProcessState {
+    active_directories: BTreeMap<PathBuf, usize>,
+    finalizing_roots: BTreeSet<PathBuf>,
+}
+
+fn worktree_process_state() -> &'static Mutex<WorktreeProcessState> {
+    static STATE: OnceLock<Mutex<WorktreeProcessState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(WorktreeProcessState::default()))
+}
+
+struct BackgroundProcessOwnership {
+    cwd: PathBuf,
+}
+
+impl BackgroundProcessOwnership {
+    fn acquire(cwd: &Path) -> Result<Self, ToolError> {
+        let mut state = worktree_process_state()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(root) = state
+            .finalizing_roots
+            .iter()
+            .find(|root| cwd.starts_with(root))
+        {
+            return Err(ToolError::WorktreeFinalizing(root.clone()));
+        }
+        *state
+            .active_directories
+            .entry(cwd.to_path_buf())
+            .or_default() += 1;
+        Ok(Self {
+            cwd: cwd.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for BackgroundProcessOwnership {
+    fn drop(&mut self) {
+        let mut state = worktree_process_state()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remove = state
+            .active_directories
+            .get_mut(&self.cwd)
+            .is_some_and(|count| {
+                *count = count.saturating_sub(1);
+                *count == 0
+            });
+        if remove {
+            state.active_directories.remove(&self.cwd);
+        }
+    }
+}
+
+pub(crate) struct WorktreeFinalizationProcessGuard {
+    root: PathBuf,
+}
+
+impl Drop for WorktreeFinalizationProcessGuard {
+    fn drop(&mut self) {
+        worktree_process_state()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finalizing_roots
+            .remove(&self.root);
+    }
+}
+
+pub(crate) fn begin_worktree_finalization(
+    root: &Path,
+) -> Result<WorktreeFinalizationProcessGuard, ToolError> {
+    let mut state = worktree_process_state()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if state
+        .active_directories
+        .keys()
+        .any(|cwd| cwd.starts_with(root))
+    {
+        return Err(ToolError::WorktreeProcessRunning(root.to_path_buf()));
+    }
+    state.finalizing_roots.insert(root.to_path_buf());
+    Ok(WorktreeFinalizationProcessGuard {
+        root: root.to_path_buf(),
+    })
+}
+
 impl Drop for ManagerInner {
     fn drop(&mut self) {
         let sessions = self
@@ -222,6 +311,7 @@ impl BackgroundProcessManager {
                 "background execution is unavailable in command record/replay mode".to_owned(),
             ));
         }
+        let ownership = BackgroundProcessOwnership::acquire(&request.cwd)?;
         let entry = {
             let mut sessions = self
                 .inner
@@ -271,6 +361,7 @@ impl BackgroundProcessManager {
         });
         let sink: Arc<dyn ToolOutputSink> = background_sink.clone();
         let task = tokio::spawn(async move {
+            let _ownership = ownership;
             let result = executor.run(request, cancellation.clone(), sink).await;
             background_sink.finish();
             let status = match result {
@@ -897,6 +988,27 @@ mod tests {
             tokio::task::yield_now().await;
         }
         panic!("process state did not converge")
+    }
+
+    #[test]
+    fn worktree_finalization_and_background_ownership_are_mutually_exclusive() {
+        let root = tempdir().expect("root");
+        let nested = root.path().join("nested");
+        std::fs::create_dir(&nested).expect("nested");
+        let ownership = BackgroundProcessOwnership::acquire(&nested).expect("process ownership");
+        assert!(matches!(
+            begin_worktree_finalization(root.path()),
+            Err(ToolError::WorktreeProcessRunning(ref path)) if path == root.path()
+        ));
+        drop(ownership);
+
+        let finalization = begin_worktree_finalization(root.path()).expect("finalization guard");
+        assert!(matches!(
+            BackgroundProcessOwnership::acquire(&nested),
+            Err(ToolError::WorktreeFinalizing(ref path)) if path == root.path()
+        ));
+        drop(finalization);
+        BackgroundProcessOwnership::acquire(&nested).expect("process after finalization");
     }
 
     #[tokio::test]

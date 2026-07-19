@@ -340,12 +340,11 @@ impl OpenAiSubscriptionAuth {
                 ),
             ));
         }
-        let token: SubscriptionTokenResponse = response.json().await.map_err(|_| {
-            ProviderError::new(
-                ProviderErrorKind::Protocol,
-                "ChatGPT subscription token endpoint returned invalid JSON",
-            )
-        })?;
+        let token: SubscriptionTokenResponse = crate::token_response::read_json(
+            response,
+            "ChatGPT subscription token endpoint returned invalid JSON",
+        )
+        .await?;
         if token.access_token.is_empty()
             || token
                 .token_type
@@ -413,9 +412,10 @@ impl OpenAiSubscriptionAuth {
         state.account_id = Some(account_id.clone());
         state.access = Some(CachedAccess {
             value: access.clone(),
-            expiry: TokenExpiry::Monotonic(
-                tokio::time::Instant::now() + Duration::from_secs(token.expires_in),
-            ),
+            expiry: TokenExpiry::Monotonic(crate::token_response::checked_deadline(
+                tokio::time::Instant::now(),
+                token.expires_in,
+            )?),
         });
         Ok(subscription_material(&self.config, &access, &account_id))
     }

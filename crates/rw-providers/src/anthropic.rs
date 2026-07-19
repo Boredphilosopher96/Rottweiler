@@ -603,11 +603,40 @@ impl AnthropicState {
                 ])
             }
             Some("content_block_start") => {
-                let index = value["index"].as_u64().unwrap_or_default();
+                let index = value["index"].as_u64().ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::Protocol,
+                        "tool call start omitted its index",
+                    )
+                })?;
                 let block = &value["content_block"];
                 if block["type"] == "tool_use" {
-                    let id = block["id"].as_str().unwrap_or_default().to_owned();
-                    let name = block["name"].as_str().unwrap_or_default().to_owned();
+                    let id = block["id"]
+                        .as_str()
+                        .filter(|id| !id.trim().is_empty())
+                        .ok_or_else(|| {
+                            ProviderError::new(
+                                ProviderErrorKind::Protocol,
+                                "tool call start omitted its id",
+                            )
+                        })?
+                        .to_owned();
+                    let name = block["name"]
+                        .as_str()
+                        .filter(|name| !name.trim().is_empty())
+                        .ok_or_else(|| {
+                            ProviderError::new(
+                                ProviderErrorKind::Protocol,
+                                "tool call start omitted its name",
+                            )
+                        })?
+                        .to_owned();
+                    if self.tools.contains_key(&index) {
+                        return Err(ProviderError::new(
+                            ProviderErrorKind::Protocol,
+                            "tool call start reused an active index",
+                        ));
+                    }
                     self.tools.insert(
                         index,
                         ToolState {
@@ -903,6 +932,24 @@ mod tests {
                 id: "call-1".to_owned(),
                 arguments: json!({"path":"a.rs"}),
             }
+        );
+    }
+
+    #[test]
+    fn duplicate_tool_start_index_is_rejected() {
+        let mut state = AnthropicState::default();
+        let frame = |id| SseEvent {
+            event: Some("content_block_start".to_owned()),
+            data: json!({"index":0,"content_block":{"type":"tool_use","id":id,"name":"read"}})
+                .to_string(),
+        };
+        assert!(state.handle(&frame("call-1")).is_ok());
+        assert_eq!(
+            state
+                .handle(&frame("call-2"))
+                .expect_err("duplicate index")
+                .kind,
+            ProviderErrorKind::Protocol
         );
     }
 

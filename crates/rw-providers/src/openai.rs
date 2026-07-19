@@ -954,7 +954,6 @@ struct OpenAiToolState {
     id: String,
     name: String,
     arguments: String,
-    emitted_start: bool,
 }
 
 struct OpenAiReasoningState {
@@ -1021,7 +1020,12 @@ impl OpenAiState {
                 });
             }
             for tool in delta["tool_calls"].as_array().into_iter().flatten() {
-                let tool_index = tool["index"].as_u64().unwrap_or_default();
+                let tool_index = tool["index"].as_u64().ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::Protocol,
+                        "tool call start omitted its index",
+                    )
+                })?;
                 self.handle_chat_tool_delta(
                     &mut events,
                     choice_index,
@@ -1060,26 +1064,43 @@ impl OpenAiState {
         function: &Value,
     ) -> Result<(), ProviderError> {
         let key = (choice_index, tool_index);
-        let fallback_id = deterministic_chat_tool_id(choice_index, tool_index);
-        let state = self.tools.entry(key).or_insert_with(|| OpenAiToolState {
-            id: provider_id
-                .filter(|id| !id.is_empty())
-                .unwrap_or(&fallback_id)
-                .to_owned(),
-            name: function["name"].as_str().unwrap_or_default().to_owned(),
-            arguments: String::new(),
-            emitted_start: false,
-        });
-        if !state.emitted_start
-            && let Some(id) = provider_id.filter(|id| !id.is_empty())
-        {
-            id.clone_into(&mut state.id);
+        let start = provider_id.is_some() || function.get("name").is_some();
+        if start && self.tools.contains_key(&key) {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "tool call start reused an active index",
+            ));
         }
-        if let Some(name) = function["name"].as_str().filter(|name| !name.is_empty()) {
-            name.clone_into(&mut state.name);
+        let inserted = !self.tools.contains_key(&key);
+        if inserted {
+            let id = provider_id
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::Protocol,
+                        "tool call start omitted its id",
+                    )
+                })?;
+            let name = function["name"]
+                .as_str()
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::Protocol,
+                        "tool call start omitted its name",
+                    )
+                })?;
+            self.tools.insert(
+                key,
+                OpenAiToolState {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    arguments: String::new(),
+                },
+            );
         }
-        if !state.emitted_start && !state.name.is_empty() {
-            state.emitted_start = true;
+        let state = self.tools.get_mut(&key).expect("tool state was inserted");
+        if inserted {
             events.push(ProviderEvent::ToolCallStart {
                 id: state.id.clone(),
                 name: state.name.clone(),
@@ -1090,12 +1111,10 @@ impl OpenAiState {
             .filter(|fragment| !fragment.is_empty())
         {
             append_arguments(&mut state.arguments, fragment)?;
-            if state.emitted_start {
-                events.push(ProviderEvent::ToolCallArgumentsDelta {
-                    id: state.id.clone(),
-                    json_fragment: fragment.to_owned(),
-                });
-            }
+            events.push(ProviderEvent::ToolCallArgumentsDelta {
+                id: state.id.clone(),
+                json_fragment: fragment.to_owned(),
+            });
         }
         Ok(())
     }
@@ -1211,23 +1230,45 @@ impl OpenAiState {
                 .collect()),
             "response.output_item.added" if value["item"]["type"] == "function_call" => {
                 self.finish_reason = Some(FinishReason::ToolCalls);
-                let index = value["output_index"].as_u64().unwrap_or_default();
+                let index = value["output_index"].as_u64().ok_or_else(|| {
+                    ProviderError::new(
+                        ProviderErrorKind::Protocol,
+                        "tool call start omitted its index",
+                    )
+                })?;
                 let id = value["item"]["call_id"]
                     .as_str()
                     .or_else(|| value["item"]["id"].as_str())
-                    .unwrap_or_default()
+                    .filter(|id| !id.trim().is_empty())
+                    .ok_or_else(|| {
+                        ProviderError::new(
+                            ProviderErrorKind::Protocol,
+                            "tool call start omitted its id",
+                        )
+                    })?
                     .to_owned();
                 let name = value["item"]["name"]
                     .as_str()
-                    .unwrap_or_default()
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or_else(|| {
+                        ProviderError::new(
+                            ProviderErrorKind::Protocol,
+                            "tool call start omitted its name",
+                        )
+                    })?
                     .to_owned();
+                if self.tools.contains_key(&(0, index)) {
+                    return Err(ProviderError::new(
+                        ProviderErrorKind::Protocol,
+                        "tool call start reused an active index",
+                    ));
+                }
                 self.tools.insert(
                     (0, index),
                     OpenAiToolState {
                         id: id.clone(),
                         name: name.clone(),
                         arguments: String::new(),
-                        emitted_start: true,
                     },
                 );
                 Ok(vec![ProviderEvent::ToolCallStart { id, name }])
@@ -1301,14 +1342,6 @@ impl OpenAiState {
                 })
             })
             .collect()
-    }
-}
-
-fn deterministic_chat_tool_id(choice_index: u64, tool_index: u64) -> String {
-    if tool_index == u64::MAX {
-        format!("call-{choice_index}-legacy")
-    } else {
-        format!("call-{choice_index}-{tool_index}")
     }
 }
 
@@ -1605,83 +1638,76 @@ mod tests {
     }
 
     #[test]
-    fn compatible_chat_missing_ids_are_deterministic() {
+    fn chat_tool_start_requires_an_id() {
         let mut state = OpenAiState::new(OpenAiWireMode::ChatCompletions);
         let frames = [
             json!({"model":"fixture","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"name":"read","arguments":"{\"path\":"}}]},"finish_reason":null}]}),
             json!({"model":"fixture","choices":[{"index":0,"delta":{"tool_calls":[{"index":2,"function":{"arguments":"\"a.rs\"}"}}]},"finish_reason":"tool_calls"}]}),
         ];
-        let mut events = Vec::new();
-        for frame in frames {
-            events.extend(
-                state
-                    .handle(&SseEvent {
-                        event: None,
-                        data: frame.to_string(),
-                    })
-                    .unwrap_or_else(|error| panic!("compatible chunk must parse: {error}")),
-            );
-        }
-        events.extend(
-            state
-                .handle(&SseEvent {
-                    event: None,
-                    data: "[DONE]".to_owned(),
-                })
-                .unwrap_or_else(|error| panic!("compatible completion must parse: {error}")),
-        );
-
-        assert!(events.contains(&ProviderEvent::ToolCallStart {
-            id: "call-0-2".to_owned(),
-            name: "read".to_owned(),
-        }));
-        assert!(events.contains(&ProviderEvent::ToolCallEnd {
-            id: "call-0-2".to_owned(),
-            arguments: json!({"path":"a.rs"}),
-        }));
+        let error = state
+            .handle(&SseEvent {
+                event: None,
+                data: frames[0].to_string(),
+            })
+            .expect_err("missing tool id must be rejected");
+        assert_eq!(error.kind, ProviderErrorKind::Protocol);
     }
 
     #[test]
-    fn legacy_function_call_deltas_normalize_to_tool_events() {
+    fn legacy_function_call_without_an_id_is_rejected() {
         let mut state = OpenAiState::new(OpenAiWireMode::ChatCompletions);
-        let frames = [
-            json!({"model":"fixture","choices":[{"index":0,"delta":{"function_call":{"name":"shell","arguments":"{\"command\":"}},"finish_reason":null}]}),
-            json!({"model":"fixture","choices":[{"index":0,"delta":{"function_call":{"arguments":"\"pwd\"}"}},"finish_reason":"function_call"}]}),
-        ];
-        let mut events = Vec::new();
-        for frame in frames {
-            events.extend(
-                state
-                    .handle(&SseEvent {
-                        event: None,
-                        data: frame.to_string(),
-                    })
-                    .unwrap_or_else(|error| panic!("legacy chunk must parse: {error}")),
-            );
-        }
-        events.extend(
-            state
-                .handle(&SseEvent {
-                    event: None,
-                    data: "[DONE]".to_owned(),
-                })
-                .unwrap_or_else(|error| panic!("legacy completion must parse: {error}")),
-        );
-
-        assert!(events.contains(&ProviderEvent::ToolCallStart {
-            id: "call-0-legacy".to_owned(),
-            name: "shell".to_owned(),
-        }));
-        assert!(events.contains(&ProviderEvent::ToolCallEnd {
-            id: "call-0-legacy".to_owned(),
-            arguments: json!({"command":"pwd"}),
-        }));
-        assert!(matches!(
-            events.last(),
-            Some(ProviderEvent::Finished {
-                reason: FinishReason::ToolCalls
+        let frame = json!({"model":"fixture","choices":[{"index":0,"delta":{"function_call":{"name":"shell"}},"finish_reason":null}]});
+        let error = state
+            .handle(&SseEvent {
+                event: None,
+                data: frame.to_string(),
             })
-        ));
+            .expect_err("legacy tool calls omit an id");
+        assert_eq!(error.kind, ProviderErrorKind::Protocol);
+    }
+
+    #[test]
+    fn duplicate_chat_tool_index_is_rejected() {
+        let mut state = OpenAiState::new(OpenAiWireMode::ChatCompletions);
+        for (id, name) in [("call-1", "read"), ("call-2", "write")] {
+            let frame = json!({"model":"fixture","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":id,"function":{"name":name}}]}}]});
+            let result = state.handle(&SseEvent {
+                event: None,
+                data: frame.to_string(),
+            });
+            if id == "call-1" {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(
+                    result.expect_err("duplicate index").kind,
+                    ProviderErrorKind::Protocol
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_responses_tool_index_is_rejected() {
+        let mut state = OpenAiState::new(OpenAiWireMode::Responses);
+        for id in ["call-1", "call-2"] {
+            let frame = json!({
+                "type":"response.output_item.added",
+                "output_index":0,
+                "item":{"type":"function_call","call_id":id,"name":"read"}
+            });
+            let result = state.handle(&SseEvent {
+                event: None,
+                data: frame.to_string(),
+            });
+            if id == "call-1" {
+                assert!(result.is_ok());
+            } else {
+                assert_eq!(
+                    result.expect_err("duplicate index").kind,
+                    ProviderErrorKind::Protocol
+                );
+            }
+        }
     }
 
     #[test]

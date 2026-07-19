@@ -8,10 +8,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: nightly-hardening
+  cancel-in-progress: true
+
 jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -20,7 +25,14 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Install nightly Rust
         run: rustup toolchain install nightly --profile minimal
+      - name: Cache pinned cargo-fuzz
+        id: cargo-fuzz-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: ${{ runner.os }}-cargo-fuzz-0.13.2
       - name: Install pinned cargo-fuzz
+        if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
         run: cargo install --locked cargo-fuzz --version 0.13.2
       - name: Run bounded sanitizer-backed campaign
         run: cargo +nightly fuzz run "${{ matrix.target }}" -- -max_total_time=60 -rss_limit_mb=2048
@@ -28,6 +40,9 @@ jobs:
   cross-platform-release:
     name: Release budgets (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Hosted-runner perf budgets are advisory; protected-runner baselines remain the release gate.
+    continue-on-error: true
+    timeout-minutes: 60
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
     strategy:
@@ -96,6 +111,8 @@ jobs:
 
   eight-hour-soak:
     name: Eight-hour supervised soak (${{ matrix.platform }})
+    # Gate until self-hosted runners exist; set ROTTWEILER_SELF_HOSTED_RUNNERS=true to re-enable.
+    if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 510
     strategy:
@@ -150,6 +167,8 @@ jobs:
 
   wsl2-acceptance:
     name: WSL2 release, sandbox, doctor, and DrvFS acceptance
+    # Gate until self-hosted runners exist; set ROTTWEILER_SELF_HOSTED_RUNNERS=true to re-enable.
+    if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
     runs-on: [self-hosted, Windows, X64, wsl2]
     timeout-minutes: 90
     steps:
@@ -165,6 +184,8 @@ jobs:
 
   terminal-bench:
     name: Terminal-Bench 2.1 pinned subset
+    # Gate until self-hosted runners exist; set ROTTWEILER_SELF_HOSTED_RUNNERS=true to re-enable.
+    if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
     runs-on: [self-hosted, Linux, X64, terminal-bench]
     timeout-minutes: 720
     env:

@@ -6,6 +6,7 @@ use std::{
     io::{Cursor, Read as _, Write as _},
     os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _, symlink},
     path::{Component, Path, PathBuf},
+    process::Stdio,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -725,26 +726,75 @@ fn extract_exact_archive(
 }
 
 async fn validate_staged_binary(path: &Path, expected_version: &str) -> Result<()> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new(path)
-            .arg("--version")
-            .env_clear()
-            .output(),
-    )
-    .await
-    .map_err(|_| miette!("staged update binary version check timed out"))?
-    .into_diagnostic()?;
-    if !output.status.success()
-        || output.stdout.len() > 4096
-        || output.stderr.len() > 4096
-        || String::from_utf8_lossy(&output.stdout).trim() != format!("rw {expected_version}")
+    let mut command = tokio::process::Command::new(path);
+    command
+        .arg("--version")
+        .env_clear()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().into_diagnostic()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| miette!("could not capture staged binary stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| miette!("could not capture staged binary stderr"))?;
+    let completed = tokio::time::timeout(Duration::from_secs(5), async {
+        let (status, output) = tokio::join!(child.wait(), async {
+            tokio::try_join!(
+                read_limited_child_output(stdout),
+                read_limited_child_output(stderr)
+            )
+        });
+        Ok::<_, miette::Report>((status.into_diagnostic()?, output?))
+    })
+    .await;
+    let (status, (stdout, stderr)) = match completed {
+        Ok(result) => result?,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(miette!("staged update binary version check timed out"));
+        }
+    };
+    if !status.success()
+        || String::from_utf8_lossy(&stdout).trim() != format!("rw {expected_version}")
     {
         return Err(miette!(
             "staged update binary did not report the signed version"
         ));
     }
     Ok(())
+}
+
+async fn read_limited_child_output(
+    mut output: impl tokio::io::AsyncRead + Unpin,
+) -> Result<Vec<u8>> {
+    const LIMIT: usize = 4096;
+    use tokio::io::AsyncReadExt as _;
+
+    let mut bytes = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    let mut exceeded = false;
+    loop {
+        let read = output.read(&mut buffer).await.into_diagnostic()?;
+        if read == 0 {
+            break;
+        }
+        let remaining = LIMIT.saturating_sub(bytes.len());
+        let keep = remaining.min(read);
+        bytes.extend_from_slice(&buffer[..keep]);
+        exceeded |= keep != read;
+    }
+    if exceeded {
+        return Err(miette!(
+            "staged update binary output exceeded the 4 KiB safety limit"
+        ));
+    }
+    Ok(bytes)
 }
 
 fn inspect_generation(path: &Path, version: &str, platform: &str) -> Result<Generation> {

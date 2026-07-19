@@ -84,6 +84,8 @@ export interface PickerItem<T> {
   readonly searchText?: string
   /** Render this row as status/context, but never focus or activate it. */
   readonly selectable?: boolean
+  /** Empty-query grouping label; hidden as soon as fuzzy filtering starts. */
+  readonly sectionHeader?: boolean
 }
 
 export class FuzzyPickerRenderable<T> extends BoxRenderable {
@@ -350,7 +352,12 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.status.visible = false
     this.input.visible = true
     this.select.visible = true
-    this.#configurePresentation(false, items.length, compact)
+    this.#configurePresentation(
+      false,
+      items.length,
+      compact,
+      items.some((item) => item.sectionHeader === true),
+    )
     this.title = ` ${title} `
     this.#items = items
     this.#onSelect = onSelect
@@ -434,7 +441,12 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       this.open(title, items, onSelect, compact)
       return
     }
-    this.#configurePresentation(false, items.length, compact)
+    this.#configurePresentation(
+      false,
+      items.length,
+      compact,
+      items.some((item) => item.sectionHeader === true),
+    )
     this.status.visible = false
     this.input.visible = true
     this.select.visible = true
@@ -562,7 +574,12 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.input.value = ""
   }
 
-  #configurePresentation(anchored: boolean, itemCount: number, compact = false): void {
+  #configurePresentation(
+    anchored: boolean,
+    itemCount: number,
+    compact = false,
+    grouped = false,
+  ): void {
     this.#anchored = anchored
     this.#compact = !anchored && compact
     this.input.visible = !anchored
@@ -573,7 +590,12 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
       ? Math.min(12, Math.max(3, itemCount + 2))
       : this.#compact
         ? Math.min(14, compactLimit, Math.max(5, itemCount + 3))
-        : 12
+        : grouped
+          ? Math.min(
+              Math.max(12, itemCount * 2 + 3),
+              Math.max(12, Math.floor(this.ctx.height * 0.8)),
+            )
+          : 12
     this.height = this.#desiredHeight
   }
 
@@ -581,7 +603,9 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     const selectedId = preserveSelection ? this.select.getSelectedOption()?.value : undefined
     const selectedIndex = preserveSelection ? this.select.getSelectedIndex() : 0
     const scrollOffset = preserveSelection ? this.#scrollOffset() : 0
+    const filtering = query.trim().length > 0
     const ranked = this.#items
+      .filter((item) => !filtering || item.sectionHeader !== true)
       .map((item, index) => ({
         item,
         index,
@@ -605,8 +629,11 @@ export class FuzzyPickerRenderable<T> extends BoxRenderable {
     this.select.selectedBackgroundColor = noMatches ? this.#theme.panelRaised : selected.background
     this.select.showSelectionIndicator = !noMatches
     this.select.options = this.#filtered.map((item) => ({
-      name: item.label,
-      description: item.description,
+      // SelectRenderable has one color for all labels and a separate muted
+      // description color. Put section text on the description line so headers
+      // are visibly muted without making them selectable.
+      name: item.sectionHeader === true ? "" : item.label,
+      description: item.sectionHeader === true ? item.label : item.description,
       value: item.id,
     }))
     if (this.#filtered.length === 0) return

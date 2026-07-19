@@ -764,6 +764,14 @@ pub enum ToolError {
     EditNotFound,
     #[error("edit target is ambiguous at {candidates:?}")]
     AmbiguousEdit { candidates: Vec<CandidateLocation> },
+    #[error("file changed since read: {0}")]
+    FileChangedSinceRead(PathBuf),
+    #[error("isolated worktree changed after capture: {0}")]
+    WorktreeChangedAfterCapture(PathBuf),
+    #[error("isolated worktree has a running background process: {0}")]
+    WorktreeProcessRunning(PathBuf),
+    #[error("isolated worktree is being finalized: {0}")]
+    WorktreeFinalizing(PathBuf),
     #[error("tool invocation was cancelled")]
     Cancelled,
     #[error("{operation} failed for {path}: {source}")]

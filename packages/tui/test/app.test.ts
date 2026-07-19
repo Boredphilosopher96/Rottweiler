@@ -1450,7 +1450,7 @@ describe("Rottweiler OpenTUI shell", () => {
     }))
   })
 
-  test("prefills slash commands with required arguments instead of running invalid input", async () => {
+  test("opens the conversation timeline for /rewind without an argument", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
@@ -1467,9 +1467,305 @@ describe("Rottweiler OpenTUI shell", () => {
     setup.mockInput.pressEnter()
     await Bun.sleep(0)
 
-    expect(app.composer.value).toBe("/rewind ")
-    expect(app.picker.visible).toBeFalse()
+    expect(app.composer.value).toBe("")
+    expect(app.picker.visible).toBeTrue()
+    expect(app.picker.title).toContain("Conversation timeline")
+    expect(app.picker.status.plainText).toContain("No completed user turns")
     expect(emitted.some((command) => command.type === "send_message")).toBeFalse()
+  })
+
+  test("builds newest-first timeline rows from completed user transcript entries", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "10",
+          agentTurn: "2",
+          turn: {
+            role: "user",
+            blocks: [{ type: "text", text: "Older request\nwith more detail" }],
+            meta: { synthetic: false, summary: false },
+          },
+        }, {
+          sequenceId: "20",
+          agentTurn: "5",
+          turn: {
+            role: "user",
+            blocks: [{
+              type: "text",
+              text: "Newest request has a deliberately long first line that must be bounded for the picker row",
+            }],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+        tools: {
+          edit: {
+            toolCallId: "edit",
+            turnId: "5",
+            name: "edit",
+            args: { path: "src/app.ts" },
+            status: "finished",
+            capabilities: ["write_filesystem"],
+            rationale: "Update the picker",
+            diff: {
+              proposal_id: "proposal",
+              path: "src/app.ts",
+              unified_diff: "+timeline\n",
+              arguments_hash: "arguments",
+              base_hash: "base",
+              diff_hash: "diff",
+              truncated: false,
+            },
+            chunks: [],
+            output: { type: "text", text: "done" },
+            isError: false,
+            callIndex: 0,
+          },
+        },
+      },
+    })
+    renderer.root.add(app)
+
+    app.openCommandPicker()
+    const rewindAction = app.picker.select.options.findIndex(
+      (option) => option.value === "rewind.run",
+    )
+    app.picker.select.setSelectedIndex(rewindAction)
+    app.picker.select.selectCurrent()
+
+    expect(app.picker.title).toContain("Conversation timeline")
+    const rows = app.picker.select.options.filter(
+      (option) => String(option.value).startsWith("timeline.turn."),
+    )
+    expect(rows.map((row) => row.name)).toEqual([
+      "Newest request has a deliberately long first line that must be …",
+      "Older request",
+    ])
+    expect(rows[0]?.description).toBe("turn 5 · 1 tool · 1 edit")
+    expect(rows[1]?.description).toBe("turn 2")
+  })
+
+  test("fills and focuses the composer after an edit-and-resend rewind completes", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const original = "Keep this exact text\nincluding its second line."
+    const app = createRottweilerApp(renderer, {
+      requestId: () => "rewind-edit-request",
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "1",
+          agentTurn: "3",
+          turn: {
+            role: "user",
+            blocks: [
+              { type: "text", text: original },
+              { type: "image", media_type: "image/png", data: { type: "url", url: "https://example.invalid/image.png" } },
+            ],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+      },
+    })
+    renderer.root.add(app)
+    app.openTimelinePicker()
+    app.picker.select.selectCurrent()
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "Edit and resend",
+      "Retry",
+      "Rewind only",
+    ])
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "send_message",
+      content: "/rewind 2",
+      attachments: [],
+    }))
+    app.handleEvent({
+      type: "conversation_rewound",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+        caused_by: "rewind-edit-request",
+      },
+      to_agent_turn: "2",
+      operation_id: "rewind-edit-operation",
+      unrestorable_paths: [],
+    })
+
+    expect(app.composer.value).toBe(original)
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
+    expect(app.banner.plainText).toBe("attachments from the original message are not restored")
+  })
+
+  test("retries the exact original text only after the rewind event", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const original = "  preserve whitespace\nand newlines exactly  "
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      requestId: () => `rewind-retry-${request++}`,
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "4",
+          agentTurn: "4",
+          turn: {
+            role: "user",
+            blocks: [{ type: "text", text: original }],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+      },
+    })
+    renderer.root.add(app)
+    app.openTimelinePicker()
+    app.picker.select.selectCurrent()
+    const retry = app.picker.select.options.findIndex(
+      (option) => option.value === "timeline.action.retry",
+    )
+    app.picker.select.setSelectedIndex(retry)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+
+    expect(commands.filter((command) => command.type === "send_message")).toEqual([
+      expect.objectContaining({ content: "/rewind 3", attachments: [] }),
+    ])
+    app.handleEvent({
+      type: "conversation_rewound",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+        caused_by: "rewind-retry-0",
+      },
+      to_agent_turn: "3",
+      operation_id: "rewind-retry-operation",
+      unrestorable_paths: [],
+    })
+    await Bun.sleep(0)
+
+    expect(commands.filter((command) => command.type === "send_message")).toEqual([
+      expect.objectContaining({ content: "/rewind 3", attachments: [] }),
+      expect.objectContaining({ content: original, attachments: [] }),
+    ])
+  })
+
+  test("clears a pending edit intent when the rewind request is rejected", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      requestId: () => "rewind-rejected-request",
+      onCommand() {
+        return { type: "accepted" }
+      },
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "3",
+          agentTurn: "3",
+          turn: {
+            role: "user",
+            blocks: [{ type: "text", text: "Do not restore after rejection" }],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+      },
+    })
+    renderer.root.add(app)
+    app.openTimelinePicker()
+    app.picker.select.selectCurrent()
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    app.handleEvent({
+      type: "command_acknowledged",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: "rewind-rejected-request",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      outcome: {
+        type: "rejected",
+        error: {
+          category: "protocol",
+          code: "turn_running",
+          message: "interrupt the active turn before rewinding",
+          retryable: false,
+        },
+      },
+    })
+    app.handleEvent({
+      type: "conversation_rewound",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-local",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:01Z",
+        caused_by: "rewind-rejected-request",
+      },
+      to_agent_turn: "2",
+      operation_id: "late-rewind-operation",
+      unrestorable_paths: [],
+    })
+
+    expect(app.state.errors.at(-1)?.code).toBe("turn_running")
+    expect(app.composer.value).toBe("")
+  })
+
+  test("shows replay timelines as read-only rows with no actions", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      replaySessionId: "historical-timeline",
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "1",
+          agentTurn: "2",
+          turn: {
+            role: "user",
+            blocks: [{ type: "text", text: "Historical request" }],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+      },
+    })
+    renderer.root.add(app)
+    app.openTimelinePicker()
+
+    expect(app.picker.title).toContain("Conversation timeline")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "read-only session",
+      "Historical request",
+    ])
+    expect(app.picker.select.options[1]?.description).toBe("turn 2 · read-only")
+    app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("Conversation timeline")
+    expect(commands.filter((command) => command.type === "send_message")).toEqual([])
   })
 
   test("keeps slash defaults and the full action palette useful before engine projections", async () => {
@@ -1492,8 +1788,8 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(palette).toContain("session.list")
     expect(palette).toContain("provider.list")
     expect(palette).toContain("agent.children")
-    expect(palette).toContain("mcp.configure")
-    expect(palette).not.toContain("mcp.status")
+    expect(palette).toContain("mcp.manage")
+    expect(palette).not.toContain("mcp.configure")
     expect(palette).toContain("permissions.manage")
     expect(palette.length).toBeGreaterThan(10)
 
@@ -1503,6 +1799,120 @@ describe("Rottweiler OpenTUI shell", () => {
     app.picker.select.setSelectedIndex(statusIndex)
     app.picker.select.selectCurrent()
     expect(app.composer.value).toBe("/status")
+  })
+
+  test("groups an empty palette in fixed section order and removes headers while filtering", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        commands: [{
+          name: "deploy",
+          description: "Deploy the project",
+          usage: "/deploy [environment]",
+          source: "project",
+        }],
+      },
+    })
+    renderer.root.add(app)
+    app.openCommandPicker()
+
+    const headers = app.picker.select.options
+      .filter((option) => String(option.value).startsWith("palette.section."))
+      .map((option) => option.description)
+    expect(headers).toEqual([
+      "Conversation",
+      "Agents & models",
+      "Workspace",
+      "Safety",
+      "Appearance & settings",
+      "Help & system",
+      "Commands",
+    ])
+    expect(app.picker.select.options.map((option) => option.value)).not.toContain("interrupt.run")
+    expect(app.picker.select.getSelectedOption()?.value).toBe("compact.run")
+
+    await setup.mockInput.typeText("model")
+    expect(app.picker.select.options.some(
+      (option) => String(option.value).startsWith("palette.section."),
+    )).toBeFalse()
+    expect(app.picker.select.options.map((option) => option.value)).toContain("model.list")
+  })
+
+  test("derives palette binding hints from custom compiled global bindings", () => {
+    const setup = createTestRenderer({ width: 80, height: 18, useThread: false })
+    return setup.then(({ renderer: testRenderer }) => {
+      renderer = testRenderer
+      const app = createRottweilerApp(testRenderer, {
+        keybindings: {
+          bindings: { global: { open_model_picker: "ctrl+k" } },
+        },
+      })
+      testRenderer.root.add(app)
+      app.openCommandPicker()
+      const model = app.picker.select.options.find((option) => option.value === "model.list")
+      expect(model?.description).toContain("Ctrl+K")
+      expect(model?.description).not.toContain("Ctrl+M")
+    })
+  })
+
+  test("marks the current permission mode and confirms yolo before sending", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+        permissions: {
+          default: "ask",
+          effective_rules: [],
+          project_rules: [],
+          session_rules: [],
+          approvals: [],
+          truncated: false,
+          runtime_mode: "auto-safe",
+        },
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openPermissionModePicker()
+
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "permissions.mode.strict",
+      "permissions.mode.auto-safe",
+      "permissions.mode.yolo",
+      "permissions.mode.default",
+    ])
+    expect(app.picker.select.options.find(
+      (option) => option.value === "permissions.mode.auto-safe",
+    )?.name).toBe("● auto-safe")
+
+    const yoloIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "permissions.mode.yolo",
+    )
+    app.picker.select.setSelectedIndex(yoloIndex)
+    app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("Run every tool without asking?")
+    expect(emitted.some(
+      (command) => command.type === "send_message" && command.content === "/permissions mode yolo",
+    )).toBeFalse()
+
+    const confirmIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "permissions.yolo.confirm",
+    )
+    app.picker.select.setSelectedIndex(confirmIndex)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "send_message",
+      content: "/permissions mode yolo",
+    }))
   })
 
   test("inspects a parent-owned child transcript and routes follow-ups without attaching its session", async () => {
@@ -3859,16 +4269,25 @@ describe("Rottweiler OpenTUI shell", () => {
     await setup.mockInput.typeText("mcp")
     expect(app.picker.select.options.map((option) => option.value)).toContain("mcp.manage")
 
-    app.picker.input.value = "trust this folder"
+    app.picker.input.value = "folder trust"
     const trustIndex = app.picker.select.options.findIndex(
-      (option) => option.value === "trust.grant",
+      (option) => option.value === "trust.manage",
     )
     expect(trustIndex).toBeGreaterThanOrEqual(0)
     app.picker.select.setSelectedIndex(trustIndex)
     app.picker.select.selectCurrent()
-    expect(app.composer.value).toBe("/trust grant ")
-    expect(emitted).toHaveLength(1)
-    expect(emitted[0]?.type).toBe("list_commands")
+    expect(app.picker.title).toContain("Folder trust")
+    const grantIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "trust.grant",
+    )
+    app.picker.select.setSelectedIndex(grantIndex)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.composer.value).toBe("")
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "send_message",
+      content: "/trust grant",
+    }))
   })
 
   test("refreshes live catalogs when pickers reopen and workspace roots change", async () => {
@@ -3925,22 +4344,44 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(emitted.filter((command) => command.type === "list_models")).toHaveLength(2)
   })
 
-  test("shows command catalog truncation in both command surfaces", async () => {
+  test("shows command catalog truncation once without a palette pseudo-action", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
+    const emitted: ClientCommand[] = []
     const app = createRottweilerApp(renderer, {
       initialState: {
         ...createInitialState(),
-        commands: [{ name: "fixture", description: "Fixture", usage: "" }],
-        commandsTruncated: true,
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
       },
     })
     renderer.root.add(app)
+    app.openCommandPicker()
+    const request = emitted.find((command) => command.type === "list_commands")
+    if (request?.type !== "list_commands") throw new Error("missing command catalog request")
+    const event = {
+      type: "command_descriptors_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui",
+        request_id: request.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      commands: [{ name: "fixture", description: "Fixture", usage: "/fixture" }],
+      truncated: true,
+    } as const
+    app.handleEvent(event)
+    app.handleEvent(event)
+    expect(app.state.errors.filter((error) => error.code === "command_catalog_truncated")).toHaveLength(1)
+    expect(app.banner.plainText).toContain("command catalog is too large")
+    expect(app.picker.select.options.map((option) => option.value)).not.toContain("commands.truncated")
+    app.closePicker()
     await setup.mockInput.typeText("/")
     expect(app.picker.title).toContain("results truncated")
-    app.closePicker()
-    app.openCommandPicker()
-    expect(app.picker.select.options.map((option) => option.value)).toContain("commands.truncated")
   })
 
   test("keeps local slash commands usable while a rejected live catalog is loud and retryable", async () => {
@@ -4182,14 +4623,15 @@ describe("Rottweiler OpenTUI shell", () => {
 
     const offset = () =>
       (app.picker.select as unknown as { scrollOffset: number }).scrollOffset
-    expect(app.picker.select.getSelectedIndex()).toBe(0)
+    expect(app.picker.select.getSelectedIndex()).toBe(1)
     expect(offset()).toBe(0)
     await setup.mockMouse.scroll(app.picker.select.x + 2, app.picker.select.y + 1, "down")
-    expect(app.picker.select.getSelectedIndex()).toBe(0)
+    expect(app.picker.select.getSelectedIndex()).toBe(1)
     expect(offset()).toBe(1)
     await setup.mockMouse.click(app.picker.select.x + 2, app.picker.select.y)
     expect(app.picker.visible).toBeTrue()
-    expect(app.picker.title).toContain("Models")
+    expect(app.picker.title).toContain("Commands")
+    expect(app.composer.value).toBe("/compact")
   })
 
   test("centers Ctrl-P keyboard selection instead of following viewport edges", async () => {
@@ -4211,16 +4653,17 @@ describe("Rottweiler OpenTUI shell", () => {
 
     const offset = () =>
       (app.picker.select as unknown as { scrollOffset: number }).scrollOffset
-    expect(app.picker.select.showDescription).toBeFalse()
-    const visible = Math.max(1, Math.floor(app.picker.select.height))
+    expect(app.picker.select.showDescription).toBeTrue()
+    const visible = Math.max(1, Math.floor(app.picker.select.height / 2))
     const maximum = app.picker.select.options.length - visible
     for (let index = 1; index <= visible + 2; index += 1) {
       setup.mockInput.pressArrow("down")
-      expect(app.picker.select.getSelectedIndex()).toBe(index)
-      expect(offset()).toBe(Math.min(maximum, Math.max(0, index - Math.floor(visible / 2))))
+      const selected = index + 1
+      expect(app.picker.select.getSelectedIndex()).toBe(selected)
+      expect(offset()).toBe(Math.min(maximum, Math.max(0, selected - Math.floor(visible / 2))))
     }
     setup.mockInput.pressArrow("up")
-    const previous = visible + 1
+    const previous = visible + 2
     expect(app.picker.select.getSelectedIndex()).toBe(previous)
     expect(offset()).toBe(
       Math.min(maximum, Math.max(0, previous - Math.floor(visible / 2))),
@@ -4257,8 +4700,12 @@ describe("Rottweiler OpenTUI shell", () => {
     app.picker.select.setSelectedIndex(0)
     app.picker.select.selectCurrent()
     expect(app.picker.title).toContain("Models · copilot")
-    expect(app.picker.select.options.map((option) => option.value)).toEqual(["fast", "steady"])
-    app.picker.select.setSelectedIndex(1)
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "models.section.models",
+      "fast",
+      "steady",
+    ])
+    app.picker.select.setSelectedIndex(2)
     app.picker.select.selectCurrent()
     expect(commands).toContainEqual(expect.objectContaining({
       type: "switch_model",
@@ -4282,7 +4729,124 @@ describe("Rottweiler OpenTUI shell", () => {
     app.composer.value = "/models"
     expect(await app.composer.submit()).toBeTrue()
     expect(app.picker.title).toContain("Models")
-    expect(app.picker.select.options.map((option) => option.value)).toEqual(["fast", "steady"])
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "models.section.models",
+      "fast",
+      "steady",
+    ])
+  })
+
+  test("keeps failover aliases distinct from pinned model routes", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        models: [
+          {
+            id: "openai/gpt-5",
+            alias: "openai/gpt-5",
+            provider: "openai",
+            providers: ["openai"],
+            available: true,
+            vision: true,
+            thinking: true,
+            toolCalling: true,
+          },
+          {
+            id: "anthropic/claude",
+            alias: "anthropic/claude",
+            provider: "anthropic",
+            providers: ["anthropic"],
+            available: true,
+            vision: false,
+            thinking: true,
+            toolCalling: true,
+          },
+          {
+            id: "offline/one",
+            alias: "offline/one",
+            provider: "offline",
+            providers: ["offline"],
+            available: false,
+            vision: false,
+            thinking: false,
+            toolCalling: true,
+          },
+          {
+            id: "offline/two",
+            alias: "offline/two",
+            provider: "offline",
+            providers: ["offline"],
+            available: false,
+            vision: false,
+            thinking: false,
+            toolCalling: true,
+          },
+        ],
+        modelAliases: [
+          { alias: "fast", candidates: ["openai/gpt-5", "anthropic/claude"], current: true },
+          { alias: "openai/gpt-5", candidates: ["openai/gpt-5"], current: false },
+          { alias: "preferred", candidates: ["openai/gpt-5"], current: false },
+          { alias: "offline", candidates: ["offline/one", "offline/two"], current: false },
+        ],
+      },
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openModelPicker()
+    const options = app.picker.select.options
+    const values = options.map((option) => option.value)
+    expect(values).toEqual([
+      "models.section.failover-chains",
+      "model-alias:fast",
+      "model-alias:preferred",
+      "model-alias:offline",
+      "models.section.models",
+      "openai/gpt-5",
+      "anthropic/claude",
+      "offline/one",
+      "offline/two",
+    ])
+    expect(options[0]).toMatchObject({ name: "", description: "Failover chains" })
+    expect(options[1]).toMatchObject({ name: "● fast", description: "failover · openai/gpt-5 → anthropic/claude · available" })
+    expect(options[3]?.description).toContain("no available route")
+    expect(options[5]?.description).toContain("pinned route")
+    expect(options[4]).toMatchObject({ name: "", description: "Models" })
+
+    app.picker.select.setSelectedIndex(values.indexOf("model-alias:fast"))
+    app.picker.select.selectCurrent()
+    const aliasSwitch = commands.find(
+      (command) => command.type === "switch_model" && command.model === "fast",
+    )
+    expect(aliasSwitch).toMatchObject({ type: "switch_model", model: "fast" })
+    expect(aliasSwitch).not.toHaveProperty("provider")
+
+    app.openModelPicker()
+    const offlineIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "model-alias:offline",
+    )
+    app.picker.select.setSelectedIndex(offlineIndex)
+    app.picker.select.selectCurrent()
+    const offlineSwitch = commands.find(
+      (command) => command.type === "switch_model" && command.model === "offline",
+    )
+    expect(offlineSwitch).toMatchObject({ type: "switch_model", model: "offline" })
+    expect(offlineSwitch).not.toHaveProperty("provider")
+
+    app.openModelPicker()
+    await setup.mockInput.typeText("fast")
+    expect(app.picker.select.options.map((option) => option.value)).not.toContain(
+      "models.section.failover-chains",
+    )
+    expect(app.picker.select.options.map((option) => option.value)).not.toContain(
+      "models.section.models",
+    )
   })
 
   test("clicking a model presents the three typed context choices with summary selected", async () => {
@@ -4316,7 +4880,7 @@ describe("Rottweiler OpenTUI shell", () => {
     app.openModelPicker()
     await setup.renderOnce()
 
-    await setup.mockMouse.click(app.picker.select.x + 2, app.picker.select.y)
+    await setup.mockMouse.click(app.picker.select.x + 2, app.picker.select.y + 2)
     expect(commands).toContainEqual(expect.objectContaining({
       type: "switch_model",
       session_id: "session-model-context",
@@ -4483,6 +5047,7 @@ describe("Rottweiler OpenTUI shell", () => {
 
     app.openModelPicker()
     expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "models.section.models",
       "copilot/gpt-5",
     ])
     expect(app.picker.select.options.map((option) => option.name).join(" ")).not.toContain(
@@ -4795,6 +5360,13 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options.map((option) => option.value)).toContain(
       "permissions.effective.effective:one",
     )
+    expect(app.picker.select.options.slice(0, 4).map((option) => option.value)).toEqual([
+      "permissions.mode.strict",
+      "permissions.mode.auto-safe",
+      "permissions.mode.yolo",
+      "permissions.mode.default",
+    ])
+    expect(app.picker.select.options[3]?.name).toBe("● default")
     expect(app.picker.status.visible).toBeFalse()
     expect(app.picker.select.visible).toBeTrue()
     const permissionCopy = app.picker.select.options
@@ -6102,7 +6674,7 @@ describe("Rottweiler OpenTUI shell", () => {
 
     expect(app.picker.select.getSelectedOption()?.value).toBe("slash.command-15")
     expect(app.picker.select.getSelectedIndex()).toBe(commandIndex)
-    expect(setup.captureCharFrame()).toContain("Run /command-15")
+    expect(setup.captureCharFrame()).toContain("/command-15")
     setup.mockInput.pressEscape()
     await Bun.sleep(30)
     expect(app.picker.visible).toBeFalse()

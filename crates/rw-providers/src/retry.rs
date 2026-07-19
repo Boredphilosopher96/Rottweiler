@@ -160,7 +160,7 @@ impl RetryPolicy {
         jitter_unit: f64,
     ) -> Duration {
         if let Some(milliseconds) = error.retry_after_ms {
-            return Duration::from_millis(milliseconds).min(self.max_delay);
+            return Duration::from_millis(milliseconds).min(Duration::from_secs(120));
         }
         let exponent = u32::try_from(retry_index.min(31)).unwrap_or(31);
         let factor = 2_u32.saturating_pow(exponent);
@@ -185,18 +185,24 @@ mod tests {
     use super::{JitterSource, RetryPolicy, SeededJitter};
 
     #[test]
-    fn retry_after_wins_and_backoff_is_capped() {
+    fn retry_after_is_honored_separately_from_backoff_cap() {
         let policy = RetryPolicy {
             max_attempts: 3,
             base_delay: Duration::from_secs(1),
             max_delay: Duration::from_secs(3),
             jitter_fraction: 0.0,
         };
-        let throttled =
-            ProviderError::new(ProviderErrorKind::RateLimited, "slow down").with_retry_after(2_000);
+        let throttled = ProviderError::new(ProviderErrorKind::RateLimited, "slow down")
+            .with_retry_after(60_000);
         assert_eq!(
             policy.delay_for(0, &throttled, 0.75),
-            Duration::from_secs(2)
+            Duration::from_secs(60)
+        );
+        let excessive = ProviderError::new(ProviderErrorKind::RateLimited, "slow down")
+            .with_retry_after(121_000);
+        assert_eq!(
+            policy.delay_for(0, &excessive, 0.75),
+            Duration::from_secs(120)
         );
         let server = ProviderError::new(ProviderErrorKind::Server, "unavailable");
         assert_eq!(policy.delay_for(8, &server, 0.75), Duration::from_secs(3));

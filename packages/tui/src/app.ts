@@ -159,10 +159,11 @@ type PickerKind =
   | "mcpInput"
   | "modes" | "models" | "providers" | "providerAuth" | "providerApiKey"
   | "providerRecovery"
-  | "permissions"
+  | "permissions" | "permissionMode" | "permissionYoloConfirm" | "trust"
   | "permissionInput"
   | "sessions" | "settings"
   | "agents" | "agentActions"
+  | "timeline" | "timelineActions"
   | "themes"
 type ProjectionKind = "commands" | "models" | "sessions" | "files" | "settings" | "permissions" | "mcp" | "runtime_services"
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
@@ -172,6 +173,24 @@ const MAX_SUBAGENT_ID_LENGTH = 256
 interface ComposerDraft {
   readonly content: string
   readonly attachments: readonly Attachment[]
+}
+
+interface TimelineTurnChoice {
+  readonly sequenceId: string
+  readonly agentTurn: string
+  readonly rewindTarget: string
+  readonly content: string
+  readonly hadAttachments: boolean
+}
+
+type TimelineAction = "edit" | "retry" | "rewind"
+
+interface PendingRewindIntent {
+  readonly action: TimelineAction
+  readonly target: string
+  readonly content: string
+  readonly hadAttachments: boolean
+  requestId: string | null
 }
 
 type CommandChoice = RottweilerState["commands"][number]
@@ -184,15 +203,18 @@ type SubagentAction =
   | { readonly kind: "close"; readonly subagent: SubagentDescriptor }
 type ProviderProjection = RottweilerState["providers"][number]
 type ProviderIdentity = Pick<ProviderProjection, "name" | "authKind">
-type ModelPickerChoice = { readonly kind: "model"; readonly model: RottweilerState["models"][number] }
+type ModelPickerChoice =
+  | { readonly kind: "alias"; readonly alias: RottweilerState["modelAliases"][number] }
+  | { readonly kind: "model"; readonly model: RottweilerState["models"][number] }
 
 type PermissionPickerAction =
   | { readonly kind: "refresh" }
-  | { readonly kind: "mode"; readonly mode: "default" | "yolo" }
+  | { readonly kind: "mode"; readonly mode: PermissionMode }
   | { readonly kind: "add"; readonly action: PermissionAction }
   | { readonly kind: "remove"; readonly ruleId: string }
   | { readonly kind: "revoke"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
   | { readonly kind: "info" }
+type PermissionModePickerAction = Extract<PermissionPickerAction, { readonly kind: "mode" }>
 
 const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
   { name: "help", description: "List available commands", usage: "/help" },
@@ -221,9 +243,42 @@ interface PaletteAction {
   readonly id: string
   readonly title: string
   readonly description: string
-  readonly category: string
+  readonly section: PaletteSection
   readonly run: () => void
 }
+
+type PaletteSection =
+  | "Conversation"
+  | "Agents & models"
+  | "Workspace"
+  | "Safety"
+  | "Appearance & settings"
+  | "Help & system"
+  | "Commands"
+
+type PermissionMode = "strict" | "auto-safe" | "yolo" | "default"
+
+interface PermissionModeChoice {
+  readonly mode: PermissionMode
+  readonly description: string
+}
+
+const PALETTE_SECTIONS: readonly PaletteSection[] = [
+  "Conversation",
+  "Agents & models",
+  "Workspace",
+  "Safety",
+  "Appearance & settings",
+  "Help & system",
+  "Commands",
+]
+
+const PERMISSION_MODE_CHOICES: readonly PermissionModeChoice[] = [
+  { mode: "strict", description: "Ask before every tool use" },
+  { mode: "auto-safe", description: "Ask only for risky actions" },
+  { mode: "yolo", description: "Never ask · dangerous" },
+  { mode: "default", description: "Follow the launch policy" },
+]
 
 type ProviderAuthPickerAction =
   | { readonly kind: "open_url"; readonly value: string }
@@ -310,6 +365,7 @@ export class RottweilerApp extends BoxRenderable {
   #interruptSubagentId: string | null = null
   #subagentErrorBaseline: RottweilerState["errors"][number] | undefined
   #commandsRequested = false
+  #commandCatalogTruncationNotified = false
   #modelsRequested = false
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
   #pickerAnchored = false
@@ -337,6 +393,10 @@ export class RottweilerApp extends BoxRenderable {
   #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
   #pendingModelSwitchRequests = new Set<string>()
+  #timelineTurn: TimelineTurnChoice | null = null
+  #pendingRewindIntent: PendingRewindIntent | null = null
+  #composerNotice: string | null = null
+  #lastComposerValue = ""
   #keybindings: CompiledKeybindings
   #inputMode: InputMode
   #vimFocus: VimFocus = "composer"
@@ -719,7 +779,7 @@ export class RottweilerApp extends BoxRenderable {
       onManageAttachments: () => this.openAttachmentPicker(),
       onAttachmentError: (message) =>
         this.#projectClientError("attachment_unavailable", message, true),
-      onInput: (value) => this.#updateComposerAutocomplete(value),
+      onInput: (value) => this.#composerInputChanged(value),
       onSubmitted: () => this.#openPostSubmitPicker(),
       onSubmissionSettled: () => {
         this.#composerSubmissionsInFlight = Math.max(0, this.#composerSubmissionsInFlight - 1)
@@ -825,11 +885,15 @@ export class RottweilerApp extends BoxRenderable {
       this.#subagentActionId = null
       this.#subagentErrorBaseline = undefined
       this.#commandsRequested = false
+      this.#commandCatalogTruncationNotified = false
       this.#modelsRequested = false
       this.#projectionErrors = {}
       this.#pendingReviewSelection = null
       this.#reviewOpen = false
       this.#pendingModelSwitchRequests.clear()
+      this.#timelineTurn = null
+      this.#pendingRewindIntent = null
+      this.#composerNotice = null
       this.#providerApiKeyProvider = null
       this.#providerRecoveryProvider = null
       this.#storedProviderKeys.clear()
@@ -1128,6 +1192,57 @@ export class RottweilerApp extends BoxRenderable {
 
   #afterPresentedEvent(item: PendingPresentationEvent): void {
     const { event, eventRecord, commandRequestId, previous, next } = item
+    if (
+      event.type === "command_descriptors_listed" &&
+      event.truncated &&
+      !this.#commandCatalogTruncationNotified
+    ) {
+      this.#commandCatalogTruncationNotified = true
+      this.#projectClientError(
+        "command_catalog_truncated",
+        "the live command catalog exceeded the safe display limit; narrow the configured extension set",
+      )
+    }
+    const pendingRewind = this.#pendingRewindIntent
+    const causedBy = isRecord(eventRecord.meta) && typeof eventRecord.meta.caused_by === "string"
+      ? eventRecord.meta.caused_by
+      : null
+    const rewindAckOutcome = commandRequestId === null
+      ? null
+      : next.commandAcks[commandRequestId]?.outcome ?? null
+    if (
+      pendingRewind !== null &&
+      event.type === "command_acknowledged" &&
+      commandRequestId === pendingRewind.requestId &&
+      rewindAckOutcome?.type === "rejected"
+    ) {
+      this.#pendingRewindIntent = null
+      this.#projectRejection(rewindAckOutcome)
+    } else if (
+      pendingRewind !== null &&
+      event.type === "error" &&
+      (causedBy === null || causedBy === pendingRewind.requestId)
+    ) {
+      this.#pendingRewindIntent = null
+    } else if (
+      pendingRewind !== null &&
+      event.type === "conversation_rewound" &&
+      event.to_agent_turn === pendingRewind.target &&
+      (causedBy === null || causedBy === pendingRewind.requestId)
+    ) {
+      // Clear before applying the follow-up so a duplicate durable event cannot fire it twice.
+      this.#pendingRewindIntent = null
+      if (pendingRewind.action === "edit") {
+        this.composer.value = pendingRewind.content
+        this.#composerNotice = pendingRewind.hadAttachments
+          ? "attachments from the original message are not restored"
+          : null
+        this.composer.focus()
+        this.setState(this.#state)
+      } else if (pendingRewind.action === "retry") {
+        void this.#sendMessage(pendingRewind.content, [])
+      }
+    }
     const modelSwitchOutcome =
       event.type === "command_acknowledged" &&
       commandRequestId !== null &&
@@ -1373,6 +1488,11 @@ export class RottweilerApp extends BoxRenderable {
     )
     this.statusLine.update(presented)
     this.banner.update(presented)
+    if (this.#composerNotice !== null && this.composer.visible) {
+      this.banner.visible = true
+      this.banner.fg = this.#theme.muted
+      this.banner.content = this.#composerNotice
+    }
     if (viewingSubagent) this.#updateSubagentBanner(presented)
     if (!this.#isInterruptible()) this.#clearInterruptEscape(false)
     if (this.#interruptEscapeArmed) {
@@ -1497,6 +1617,31 @@ export class RottweilerApp extends BoxRenderable {
     this.#positionPicker(false)
     this.#pickerKind = "permissions"
     this.#command({ type: "list_permissions" })
+    this.#refreshPicker()
+  }
+
+  openPermissionModePicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "permissionMode"
+    this.#refreshPicker()
+  }
+
+  openTrustPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "trust"
+    this.#refreshPicker()
+  }
+
+  openTimelinePicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#timelineTurn = null
+    this.#positionPicker(false)
+    this.#pickerKind = "timeline"
     this.#refreshPicker()
   }
 
@@ -2031,16 +2176,31 @@ export class RottweilerApp extends BoxRenderable {
   #refreshPicker(): void {
     switch (this.#pickerKind) {
       case "palette":
-        this.#openPicker(
-          "Command palette",
-          this.#paletteActions().map((action) => ({
+        const paletteActions = this.#paletteActions()
+        const paletteItems: PickerItem<PaletteAction | null>[] = []
+        for (const section of PALETTE_SECTIONS) {
+          const sectionActions = paletteActions.filter((action) => action.section === section)
+          if (sectionActions.length === 0) continue
+          paletteItems.push({
+            id: `palette.section.${section.toLocaleLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+            label: section,
+            description: "",
+            value: null,
+            selectable: false,
+            sectionHeader: true,
+          })
+          paletteItems.push(...sectionActions.map((action) => ({
             id: action.id,
             label: action.title,
-            description: `${action.category} · ${action.description}`,
-            searchText: `${action.category} ${action.title} ${action.description}`,
+            description: action.description,
+            searchText: `${action.section} ${action.title} ${action.description}`,
             value: action,
-          })),
-          (item) => (item.value as PaletteAction).run(),
+          })))
+        }
+        this.#openPicker(
+          "Command palette",
+          paletteItems,
+          (item) => item.value?.run(),
         )
         break
       case "commands":
@@ -2084,6 +2244,12 @@ export class RottweilerApp extends BoxRenderable {
               clearAnchoredTrigger()
               void this.#requestFork(null)
               this.closePicker()
+              return
+            }
+            if (command.name === "rewind") {
+              clearAnchoredTrigger()
+              this.closePicker()
+              this.openTimelinePicker()
               return
             }
             if (command.name === "models") {
@@ -2135,6 +2301,75 @@ export class RottweilerApp extends BoxRenderable {
           },
         )
         break
+      case "timeline": {
+        const turns = this.#timelineTurns()
+        if (turns.length === 0) {
+          this.#showPickerStatus(
+            "Conversation timeline",
+            "No completed user turns",
+            this.#state.replay.active ? "read-only session" : "Send a message to create a checkpoint.",
+          )
+          break
+        }
+        const readOnly = this.#state.replay.active
+        const items: PickerItem<TimelineTurnChoice | null>[] = [
+          ...(readOnly
+            ? [{
+                id: "timeline.read-only",
+                label: "read-only session",
+                description: "Timeline actions are unavailable in replay",
+                value: null,
+                selectable: false,
+              }]
+            : []),
+          ...turns.map((turn) => ({
+            id: `timeline.turn.${turn.sequenceId}`,
+            label: timelineTurnLabel(turn.content),
+            description: this.#timelineTurnDescription(turn.agentTurn, readOnly),
+            value: turn,
+            selectable: !readOnly,
+          })),
+        ]
+        this.#openPicker("Conversation timeline", items, (item) => {
+          if (item.value === null || readOnly) return
+          this.#timelineTurn = item.value
+          this.#pickerKind = "timelineActions"
+          this.#refreshPicker()
+        })
+        break
+      }
+      case "timelineActions": {
+        const turn = this.#timelineTurn
+        if (turn === null) {
+          this.openTimelinePicker()
+          break
+        }
+        const items: PickerItem<TimelineAction>[] = [
+          {
+            id: "timeline.action.edit",
+            label: "Edit and resend",
+            description: "Rewind, restore the message in the composer, and focus it",
+            value: "edit",
+          },
+          {
+            id: "timeline.action.retry",
+            label: "Retry",
+            description: "Rewind and resend the same text without attachments",
+            value: "retry",
+          },
+          {
+            id: "timeline.action.rewind",
+            label: "Rewind only",
+            description: "Rewind without restoring the message",
+            value: "rewind",
+          },
+        ]
+        this.#openPicker(`Turn ${turn.agentTurn} actions`, items, (item) => {
+          this.closePicker()
+          void this.#startRewindIntent(turn, item.value)
+        })
+        break
+      }
       case "files":
         const fileError = this.#projectionErrors.files
         if (
@@ -2239,8 +2474,42 @@ export class RottweilerApp extends BoxRenderable {
               ? model.providers.includes(this.#modelProviderFilter)
               : model.provider === this.#modelProviderFilter),
         )
-        const modelItems: PickerItem<ModelPickerChoice | null>[] =
-          [
+        const concreteModelIds = new Set(models.map((model) => model.id ?? model.alias))
+        const aliases = this.#modelProviderFilter === null
+          ? this.#state.modelAliases.filter(
+              (alias) =>
+                alias.candidates.length !== 1 ||
+                alias.alias !== alias.candidates[0] ||
+                !concreteModelIds.has(alias.candidates[0]!),
+            )
+          : []
+        const modelItems: PickerItem<ModelPickerChoice | null>[] = [
+          ...(aliases.length === 0
+            ? []
+            : [{
+                id: "models.section.failover-chains",
+                label: "Failover chains",
+                description: "",
+                value: null,
+                selectable: false,
+                sectionHeader: true,
+              }]),
+          ...aliases.map((alias) => ({
+            id: `model-alias:${alias.alias}`,
+            label: `${alias.current ? "● " : ""}${alias.alias}`,
+            description: modelAliasDescription(alias, models),
+            value: { kind: "alias" as const, alias },
+          })),
+          ...(models.length === 0
+            ? []
+            : [{
+                id: "models.section.models",
+                label: "Models",
+                description: "",
+                value: null,
+                selectable: false,
+                sectionHeader: true,
+              }]),
           ...models.map((model) => ({
             id: model.id ?? model.alias,
             label: `${model.current === true ? "● " : ""}${model.displayName ?? model.alias}`,
@@ -2250,6 +2519,7 @@ export class RottweilerApp extends BoxRenderable {
               model.toolCalling ? "tools" : "",
               model.vision ? "vision" : "",
               model.thinking ? "thinking" : "",
+              "pinned route",
             ]
               .filter(Boolean)
               .join(" · "),
@@ -2296,20 +2566,27 @@ export class RottweilerApp extends BoxRenderable {
               this.closePicker()
               return
             }
-            const model = selection.model
-            if (model.available === false) {
-              this.#projectClientError(
-                "model_unavailable",
-                model.status ?? `${model.displayName ?? model.alias} is unavailable`,
-                true,
-              )
-              return
+            if (selection.kind === "alias") {
+              this.#command({
+                type: "switch_model",
+                model: selection.alias.alias,
+              })
+            } else {
+              const model = selection.model
+              if (model.available === false) {
+                this.#projectClientError(
+                  "model_unavailable",
+                  model.status ?? `${model.displayName ?? model.alias} is unavailable`,
+                  true,
+                )
+                return
+              }
+              this.#command({
+                type: "switch_model",
+                model: model.id ?? model.alias,
+                provider: model.provider ?? this.#modelProviderFilter,
+              })
             }
-            this.#command({
-              type: "switch_model",
-              model: model.id ?? model.alias,
-              provider: model.provider ?? this.#modelProviderFilter,
-            })
             this.closePicker()
           },
         )
@@ -2606,6 +2883,62 @@ export class RottweilerApp extends BoxRenderable {
         )
         break
       }
+      case "trust":
+        this.#openPicker(
+          "Folder trust",
+          [
+            {
+              id: "trust.status",
+              label: "Show trust status",
+              description: "Display the current folder trust state",
+              value: "/trust status",
+            },
+            {
+              id: "trust.grant",
+              label: "Grant trust",
+              description: "Allow executable project configuration",
+              value: "/trust grant",
+            },
+            {
+              id: "trust.revoke",
+              label: "Revoke trust",
+              description: "Disable executable project configuration",
+              value: "/trust revoke",
+            },
+          ],
+          (item) => this.#submitPaletteCommand(item.value),
+        )
+        break
+      case "permissionMode":
+        this.#openPicker(
+          "Permission mode",
+          this.#permissionModeItems(),
+          (item) => this.#selectPermissionMode(item.value.mode),
+        )
+        break
+      case "permissionYoloConfirm":
+        this.#openPicker(
+          "Run every tool without asking?",
+          [
+            {
+              id: "permissions.yolo.confirm",
+              label: "Yes, enable yolo",
+              description: "Never ask before tool use",
+              value: true,
+            },
+            {
+              id: "permissions.yolo.cancel",
+              label: "Cancel",
+              description: "Keep the current permission mode",
+              value: false,
+            },
+          ],
+          (item) => {
+            if (item.value) this.#submitPaletteCommand("/permissions mode yolo")
+            else this.closePicker()
+          },
+        )
+        break
       case "permissions":
         {
           const permissions = this.#state.permissions
@@ -2623,18 +2956,7 @@ export class RottweilerApp extends BoxRenderable {
             break
           }
           const items: PickerItem<PermissionPickerAction>[] = [
-            {
-              id: "permissions.mode.yolo",
-              label: "YOLO mode",
-              description: "Run without prompts; explicit denies and mode safety still apply",
-              value: { kind: "mode", mode: "yolo" },
-            },
-            {
-              id: "permissions.mode.default",
-              label: "Standard permissions",
-              description: "Prompt only for file changes and unsafe shell commands",
-              value: { kind: "mode", mode: "default" },
-            },
+            ...this.#permissionModeItems(),
             {
               id: "permissions.refresh",
               label: `Default behavior · ${permissionActionLabel(permissions.default)}`,
@@ -2685,8 +3007,7 @@ export class RottweilerApp extends BoxRenderable {
             const action = item.value
             if (action.kind === "refresh") this.#command({ type: "list_permissions" })
             else if (action.kind === "mode") {
-              this.closePicker()
-              void this.#sendMessage(`/permissions mode ${action.mode}`, [])
+              this.#selectPermissionMode(action.mode)
             }
             else if (action.kind === "add") this.#openPermissionPatternPrompt(action.action)
             else if (action.kind === "remove") {
@@ -2993,7 +3314,7 @@ export class RottweilerApp extends BoxRenderable {
           title,
           items as readonly PickerItem<unknown>[],
           select,
-          this.#pickerKind === "palette",
+          false,
         )
         this.#positionPicker(false)
       }
@@ -3023,112 +3344,171 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#pickerAnchored) this.composer.focus()
   }
 
+  #timelineTurns(): readonly TimelineTurnChoice[] {
+    return this.#state.transcript
+      .filter(
+        (entry) =>
+          entry.turn.role === "user" &&
+          this.#state.turns[entry.agentTurn]?.status !== "running" &&
+          isU64(entry.agentTurn),
+      )
+      .map((entry) => {
+        const message = timelineUserMessage(entry.turn)
+        return {
+          sequenceId: entry.sequenceId,
+          agentTurn: entry.agentTurn,
+          rewindTarget: (BigInt(entry.agentTurn) - 1n).toString(),
+          content: message.content,
+          hadAttachments: message.hadAttachments,
+        }
+      })
+      .reverse()
+  }
+
+  #timelineTurnDescription(agentTurn: string, readOnly: boolean): string {
+    const tools = Object.values(this.#state.tools).filter((tool) => tool.turnId === agentTurn)
+    const edits = tools.filter((tool) => tool.diff !== null).length
+    const detail = [`turn ${agentTurn}`]
+    if (tools.length > 0) detail.push(`${tools.length} ${tools.length === 1 ? "tool" : "tools"}`)
+    if (edits > 0) detail.push(`${edits} ${edits === 1 ? "edit" : "edits"}`)
+    if (readOnly) detail.push("read-only")
+    return detail.join(" · ")
+  }
+
+  async #startRewindIntent(turn: TimelineTurnChoice, action: TimelineAction): Promise<void> {
+    const target = action === "rewind" ? turn.agentTurn : turn.rewindTarget
+    const intent: PendingRewindIntent = {
+      action,
+      target,
+      content: turn.content,
+      hadAttachments: turn.hadAttachments,
+      requestId: null,
+    }
+    this.#pendingRewindIntent = intent
+    try {
+      const accepted = await this.#sendMessage(`/rewind ${target}`, [], true)
+      if (!accepted && this.#pendingRewindIntent === intent) this.#pendingRewindIntent = null
+    } catch (error) {
+      if (this.#pendingRewindIntent === intent) this.#pendingRewindIntent = null
+      this.#projectClientError(
+        "rewind_failed",
+        presentError({
+          category: "protocol",
+          code: "rewind_failed",
+          message: safeErrorMessage(error),
+        }).text,
+        true,
+      )
+    }
+  }
+
+  #permissionModeItems(): PickerItem<PermissionModePickerAction>[] {
+    const current = this.#state.permissions?.runtime_mode ?? "default"
+    return PERMISSION_MODE_CHOICES.map((choice) => ({
+      id: `permissions.mode.${choice.mode}`,
+      label: choice.mode === current ? `● ${choice.mode}` : choice.mode,
+      description: choice.description,
+      value: { kind: "mode", mode: choice.mode },
+    }))
+  }
+
+  #selectPermissionMode(mode: PermissionMode): void {
+    if (mode === "yolo") {
+      this.#pickerAnchored = false
+      this.#pickerQuery = ""
+      this.#pickerKind = "permissionYoloConfirm"
+      this.#refreshPicker()
+      return
+    }
+    this.#submitPaletteCommand(`/permissions mode ${mode}`)
+  }
+
+  #submitPaletteCommand(content: string): void {
+    this.closePicker()
+    if (
+      this.#state.connection.phase === "connected" ||
+      this.#state.connection.phase === "replaying"
+    ) {
+      void this.#sendMessage(content, [])
+    } else {
+      this.composer.value = content
+      this.composer.focus()
+    }
+  }
+
+  #paletteBinding(action: KeybindingAction): string | null {
+    for (const [stroke, boundAction] of this.#keybindings.bindings("global")) {
+      if (boundAction === action) return keycapLabel(stroke)
+    }
+    return null
+  }
+
+  #paletteDescription(description: string, binding?: KeybindingAction): string {
+    if (binding === undefined) return description
+    const hint = this.#paletteBinding(binding)
+    return hint === null ? description : `${description} · ${hint}`
+  }
 
   #paletteActions(): readonly PaletteAction[] {
     const open = (action: () => void) => () => {
       this.closePicker()
       action()
     }
-    const submit = (content: string) => () => {
-      this.closePicker()
-      if (
-        this.#state.connection.phase === "connected" ||
-        this.#state.connection.phase === "replaying"
-      ) {
-        void this.#sendMessage(content, [])
-      } else {
-        this.composer.value = content
-        this.composer.focus()
-      }
-    }
+    const submit = (content: string) => () => this.#submitPaletteCommand(content)
     const prefill = (content: string) => () => {
       this.closePicker()
       this.composer.value = `${content} `
       this.composer.focus()
     }
     const actions: PaletteAction[] = [
-      { id: "session.list", title: "Switch session", category: "Session", description: "Resume another durable session", run: open(() => this.openSessionPicker()) },
-      { id: "model.list", title: "Switch model", category: "Agent", description: "Choose the active model alias", run: open(() => this.openModelPicker()) },
-      { id: "agent.children", title: "Child agents", category: "Agent", description: "Inspect, resume, interrupt, or close child agents", run: open(() => this.openSubagentPicker()) },
-      { id: "provider.list", title: "Provider and model routes", category: "Agent", description: "Choose a configured provider route", run: open(() => this.openProviderPicker()) },
-      { id: "theme.list", title: "Switch theme", category: "Settings", description: "Preview and choose an interface theme", run: open(() => this.openThemePicker()) },
-      { id: "settings.open", title: "Settings", category: "Settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
-      { id: "mode.list", title: "Switch mode", category: "Agent", description: "Choose discuss, plan, or execute", run: open(() => this.openModePicker()) },
-      { id: "review.open", title: "Review changes", category: "Session", description: "Open the cumulative session diff", run: open(() => this.openReview()) },
-      { id: "permissions.manage", title: "Permission settings", category: "Settings", description: "Inspect, add, and remove session rules", run: open(() => this.openPermissionPicker()) },
-      { id: "permissions.yolo", title: "Enable YOLO mode", category: "Settings", description: "Run without permission prompts", run: submit("/permissions mode yolo") },
-      { id: "permissions.default", title: "Use standard permissions", category: "Settings", description: "Prompt only for file changes and unsafe shell", run: submit("/permissions mode default") },
-      { id: "trust.manage", title: "Folder trust settings", category: "Settings", description: "Inspect, grant, or revoke workspace trust", run: prefill("/trust") },
-      { id: "trust.status", title: "Show folder trust", category: "Settings", description: "Inspect the current workspace trust state", run: submit("/trust status") },
-      { id: "trust.grant", title: "Trust this folder", category: "Settings", description: "Grant executable project configuration trust", run: prefill("/trust grant") },
-      { id: "trust.revoke", title: "Revoke folder trust", category: "Settings", description: "Disable executable project configuration", run: prefill("/trust revoke") },
-      { id: "context.manage", title: "Context manager", category: "Session", description: "Inspect, pin, or evict context", run: prefill("/context") },
-      { id: "workspace.add", title: "Add workspace directory", category: "Workspace", description: "Append another live workspace root", run: prefill("/add-dir") },
-      { id: "plan.show", title: "Show plan", category: "Session", description: "Display the pending or approved plan", run: submit("/plan") },
-      { id: "cost.show", title: "Show usage and cost", category: "Session", description: "Display tokens, cost, and budget", run: submit("/cost") },
-      { id: "compact.run", title: "Compact context", category: "Session", description: "Compact with optional instructions", run: prefill("/compact") },
-      { id: "rewind.run", title: "Rewind to turn", category: "Session", description: "Restore a completed turn checkpoint", run: prefill("/rewind") },
-      { id: "fork.run", title: "Fork session", category: "Session", description: "Fork at the latest completed turn", run: open(() => void this.#requestFork(null)) },
-      { id: "interrupt.run", title: "Interrupt turn", category: "Session", description: "Stop the active turn", run: submit("/interrupt") },
-      { id: "status.show", title: "Show agent status", category: "Agent", description: "Display running and queue state", run: submit("/status") },
-      { id: "help.show", title: "Show command help", category: "System", description: "List every available slash command", run: submit("/help") },
-      { id: "app.exit", title: "Exit Rottweiler", category: "System", description: "Close the TUI and its supervised engine", run: open(() => this.#options.onExit?.()) },
-    ]
-    if (this.#activeSubagentId !== null) {
-      actions.splice(1, 0, {
+      ...(Object.values(this.#presentedState().turns).some((turn) => turn.status === "running")
+        ? [{ id: "interrupt.run", title: "Interrupt turn", section: "Conversation", description: "Stop the active turn", run: submit("/interrupt") } satisfies PaletteAction]
+        : []),
+      { id: "compact.run", title: "Compact context", section: "Conversation", description: "Compact the conversation context", run: submit("/compact") },
+      { id: "rewind.run", title: "Rewind to a turn", section: "Conversation", description: "Choose from completed user turns", run: open(() => this.openTimelinePicker()) },
+      { id: "fork.run", title: "Fork session", section: "Conversation", description: "Fork at the latest completed turn", run: open(() => void this.#requestFork(null)) },
+      { id: "session.list", title: "Switch session", section: "Conversation", description: this.#paletteDescription("Resume another durable session", "open_session_picker"), run: open(() => this.openSessionPicker()) },
+      { id: "review.open", title: "Review changes", section: "Conversation", description: this.#paletteDescription("Open the cumulative session diff", "open_review"), run: open(() => this.openReview()) },
+      { id: "plan.show", title: "Show plan", section: "Conversation", description: "Display the pending or approved plan", run: submit("/plan") },
+      { id: "cost.show", title: "Show usage & cost", section: "Conversation", description: "Display tokens, cost, and budget", run: submit("/cost") },
+
+      { id: "model.list", title: "Switch model", section: "Agents & models", description: this.#paletteDescription("Choose the active model alias", "open_model_picker"), run: open(() => this.openModelPicker()) },
+      { id: "provider.list", title: "Switch provider route", section: "Agents & models", description: "Choose a configured provider and model route", run: open(() => this.openProviderPicker()) },
+      { id: "mode.list", title: "Switch mode", section: "Agents & models", description: this.#paletteDescription("Choose discuss, plan, or execute", "open_mode_picker"), run: open(() => this.openModePicker()) },
+      { id: "agent.children", title: "Child agents", section: "Agents & models", description: this.#paletteDescription("Inspect, resume, interrupt, or close child agents", "open_subagent_picker"), run: open(() => this.openSubagentPicker()) },
+      ...(this.#activeSubagentId === null ? [] : [{
         id: "agent.current.actions",
         title: "Current child actions",
-        category: "Agent",
+        section: "Agents & models",
         description: "Inspect, continue, interrupt, or close the visible child",
         run: open(() => this.openSubagentActionPicker(this.#activeSubagentId)),
-      })
-    }
-    const mcpIndex = actions.findIndex((action) => action.id === "permissions.manage")
-    if (this.#state.commands.some((command) => command.name === "mcp")) {
-      actions.splice(
-        mcpIndex,
-        0,
-        { id: "mcp.manage", title: "MCP connections", category: "Settings", description: "Inspect, add, enable, disable, or approve MCP servers", run: open(() => this.openMcpPicker()) },
-      )
-    } else {
-      actions.splice(mcpIndex, 0, {
-        id: "mcp.configure",
-        title: "Configure MCP connections",
-        category: "Settings",
-        description: "Add an MCP server configuration and restart Rottweiler",
-        run: () => {
-          this.closePicker()
-          this.#projectClientError(
-            "mcp_unconfigured",
-            "no MCP servers are configured; add an MCP server configuration and restart Rottweiler",
-          )
-        },
-      })
-    }
-    if (this.#state.commandsTruncated) {
-      actions.push({
-        id: "commands.truncated",
-        title: "Command results truncated",
-        category: "System",
-        description: "The live extension catalog exceeded the safe display limit",
-        run: () => {
-          this.closePicker()
-          this.#projectClientError(
-            "command_catalog_truncated",
-            "the live command catalog exceeded the safe display limit; narrow the configured extension set",
-          )
-        },
-      })
-    }
+      } satisfies PaletteAction]),
+      { id: "status.show", title: "Show agent status", section: "Agents & models", description: "Display running and queue state", run: submit("/status") },
+
+      { id: "workspace.add", title: "Add workspace directory", section: "Workspace", description: "Prefills /add-dir · give a directory path", run: prefill("/add-dir") },
+      { id: "trust.manage", title: "Folder trust", section: "Workspace", description: "Show, grant, or revoke folder trust", run: open(() => this.openTrustPicker()) },
+      { id: "context.manage", title: "Manage context", section: "Workspace", description: "Inspect, pin, or evict context items", run: submit("/context") },
+
+      { id: "permissions.mode", title: "Permission mode", section: "Safety", description: "Choose when tool use needs confirmation", run: open(() => this.openPermissionModePicker()) },
+      { id: "permissions.manage", title: "Permission rules", section: "Safety", description: "Inspect, add, and remove session rules", run: open(() => this.openPermissionPicker()) },
+
+      { id: "theme.list", title: "Switch theme", section: "Appearance & settings", description: "Preview and choose an interface theme", run: open(() => this.openThemePicker()) },
+      { id: "settings.open", title: "Settings", section: "Appearance & settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
+      { id: "mcp.manage", title: "MCP connections", section: "Appearance & settings", description: "Inspect, add, enable, disable, or approve MCP servers", run: open(() => this.openMcpPicker()) },
+
+      { id: "help.show", title: "Command help", section: "Help & system", description: "List every available slash command", run: submit("/help") },
+      { id: "app.exit", title: "Exit Rottweiler", section: "Help & system", description: "Close the TUI and its supervised engine", run: open(() => this.#options.onExit?.()) },
+    ]
     const localNames = new Set(LOCAL_SLASH_COMMANDS.map((command) => command.name))
     for (const command of this.#state.commands) {
       if (localNames.has(command.name)) continue
+      const requiresArgument = /<[^>]+>/.test(command.usage)
       actions.push({
         id: `slash.${command.name}`,
-        title: `Run /${command.name}`,
-        category: commandSourceLabel(command.source),
-        description: command.description,
-        run: prefill(`/${command.name}`),
+        title: `/${command.name}`,
+        section: "Commands",
+        description: `${commandSourceLabel(command.source)} · ${command.description}`,
+        run: requiresArgument ? prefill(`/${command.name}`) : submit(`/${command.name}`),
       })
     }
     return actions
@@ -3138,6 +3518,27 @@ export class RottweilerApp extends BoxRenderable {
     const choices = new Map(LOCAL_SLASH_COMMANDS.map((command) => [command.name, command]))
     for (const command of this.#state.commands) choices.set(command.name, command)
     return [...choices.values()]
+  }
+
+  #composerInputChanged(value: string): void {
+    const changed = value !== this.#lastComposerValue
+    this.#lastComposerValue = value
+    if (!changed) {
+      this.#updateComposerAutocomplete(value)
+      return
+    }
+    const hadPendingIntent = this.#pendingRewindIntent !== null
+    this.#pendingRewindIntent = null
+    const hadNotice = this.#composerNotice !== null
+    this.#composerNotice = null
+    if ((hadPendingIntent || hadNotice) && !this.#destroyed) this.setState(this.#state)
+    this.#updateComposerAutocomplete(value)
+  }
+
+  #clearComposerNotice(): void {
+    if (this.#composerNotice === null) return
+    this.#composerNotice = null
+    if (!this.#destroyed) this.setState(this.#state)
   }
 
   #updateComposerAutocomplete(value: string): void {
@@ -3669,7 +4070,15 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
-  async #sendMessage(content: string, attachments: readonly Attachment[]): Promise<boolean> {
+  async #sendMessage(
+    content: string,
+    attachments: readonly Attachment[],
+    preserveRewindIntent = false,
+  ): Promise<boolean> {
+    if (!preserveRewindIntent) {
+      this.#pendingRewindIntent = null
+      this.#clearComposerNotice()
+    }
     if (this.#state.replay.active) {
       return false
     }
@@ -3779,6 +4188,11 @@ export class RottweilerApp extends BoxRenderable {
       this.#options.onExit?.()
       return true
     }
+    if (sessionAction?.type === "rewindTimeline") {
+      this.closePicker()
+      this.openTimelinePicker()
+      return true
+    }
     if (sessionAction?.type === "models") {
       this.#postSubmitPicker = "models"
       this.closePicker()
@@ -3843,9 +4257,13 @@ export class RottweilerApp extends BoxRenderable {
     if (sessionAction?.type === "fork") {
       return await this.#requestFork(sessionAction.atTurn)
     }
+    const meta = this.#meta()
+    if (preserveRewindIntent && this.#pendingRewindIntent !== null) {
+      this.#pendingRewindIntent.requestId = meta.request_id
+    }
     const outcome = await this.#emit({
       type: "send_message",
-      meta: this.#meta(),
+      meta,
       session_id: this.#sessionId,
       content,
       attachments: [...attachments],
@@ -4138,7 +4556,7 @@ export class RottweilerApp extends BoxRenderable {
     command:
       | { readonly type: "search_workspace_files"; readonly query: string; readonly limit: number }
       | { readonly type: "preview_workspace_file"; readonly path: string; readonly max_bytes: number }
-      | { readonly type: "switch_model"; readonly model: string; readonly provider: string | null }
+      | { readonly type: "switch_model"; readonly model: string; readonly provider?: string | null }
       | { readonly type: "get_session_review" | "get_workspace_status" | "get_context" | "get_cost" }
       | { readonly type: "get_workspace_diff"; readonly path: string; readonly max_bytes: number }
       | { readonly type: "search_sessions"; readonly query: string; readonly limit: number }
@@ -4653,6 +5071,27 @@ function boundedUiText(value: string, maximum: number): string {
   return truncateToCells(safe, maximum)
 }
 
+function timelineTurnLabel(content: string): string {
+  const firstLine = content.split(/\r?\n/, 1)[0] ?? ""
+  const label = boundedUiText(firstLine, 64)
+  return label.length === 0 ? "(attachment-only message)" : label
+}
+
+function timelineUserMessage(turn: RottweilerState["transcript"][number]["turn"]): {
+  readonly content: string
+  readonly hadAttachments: boolean
+} {
+  const first = turn.blocks[0]
+  if (first?.type !== "text") {
+    return { content: "", hadAttachments: turn.blocks.length > 0 }
+  }
+  const firstIsTextAttachment = /^Attached file .+ \([^\n]+\):\n/.test(first.text)
+  return {
+    content: firstIsTextAttachment ? "" : first.text,
+    hadAttachments: firstIsTextAttachment || turn.blocks.length > 1,
+  }
+}
+
 function mergeComposerDraft(
   draft: ComposerDraft,
   rejectedContent: string,
@@ -4705,6 +5144,7 @@ type SessionAction =
   | { readonly type: "exit" }
   | { readonly type: "review" }
   | { readonly type: "fork"; readonly atTurn: string | null }
+  | { readonly type: "rewindTimeline" }
   | { readonly type: "models" }
   | { readonly type: "providers" }
   | { readonly type: "agents" }
@@ -4726,6 +5166,9 @@ function parseSessionAction(content: string): SessionAction | null {
     return tokens.length === 1
       ? { type: "review" }
       : { type: "invalid", message: "usage: /review" }
+  }
+  if (command === "/rewind" && tokens.length === 1) {
+    return { type: "rewindTimeline" }
   }
   if (command === "/models") {
     return tokens.length === 1
@@ -4815,6 +5258,27 @@ function commandSourceLabel(source: CommandChoice["source"]): string {
   }
 }
 
+function keycapLabel(stroke: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    alt: "Alt",
+    ctrl: "Ctrl",
+    meta: "Meta",
+    super: "Super",
+    hyper: "Hyper",
+    shift: "Shift",
+    escape: "Escape",
+    return: "Enter",
+    pageup: "PageUp",
+    pagedown: "PageDown",
+    space: "Space",
+    tab: "Tab",
+  }
+  return stroke
+    .split("+")
+    .map((part) => labels[part] ?? part.toLocaleUpperCase())
+    .join("+")
+}
+
 function providerDisplayName(provider: ProviderIdentity): string {
   return providerName(provider.name)
 }
@@ -4895,6 +5359,26 @@ function modelAvailabilityLabel(model: RottweilerState["models"][number]): strin
     return "couldn't verify availability"
   }
   return "unavailable"
+}
+
+function modelAliasDescription(
+  alias: RottweilerState["modelAliases"][number],
+  models: readonly RottweilerState["models"][number][],
+): string {
+  const candidates = alias.candidates.map((candidate) => boundedUiText(candidate, 64))
+  const candidateModels = alias.candidates.map((candidate) =>
+    models.find((model) => (model.id ?? model.alias) === candidate),
+  )
+  const availability =
+    candidateModels.length > 0 && candidateModels.every((model) => model !== undefined)
+      ? candidateModels.every((model) => model?.available === false)
+        ? "no available route"
+        : "available"
+      : ""
+  return boundedUiText(
+    ["failover", candidates.join(" → "), availability].filter(Boolean).join(" · "),
+    160,
+  )
 }
 
 function permissionActionLabel(action: "allow" | "ask" | "deny"): string {

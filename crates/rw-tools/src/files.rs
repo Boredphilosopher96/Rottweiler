@@ -270,12 +270,19 @@ impl Tool for EditTool {
         context.cancellation.check()?;
         let input: EditInput = parse_input(input)?;
         let path = context.resolve_existing(&input.path)?;
-        let bytes = read_capped(context, &path, self.limits.max_write_bytes).await?;
-        let source = String::from_utf8(bytes)
+        let snapshot = read_capped_snapshot(context, &path, self.limits.max_write_bytes).await?;
+        let source = String::from_utf8(snapshot.bytes.clone())
             .map_err(|_| ToolError::InvalidInput("edit only supports UTF-8 files".to_owned()))?;
         let (edited, mode) = apply_edit(&source, &input.old, &input.new)?;
         ensure_size(edited.len(), self.limits.max_write_bytes)?;
-        atomic_write(context, &path, edited.as_bytes(), &context.cancellation).await?;
+        atomic_write_if_unchanged(
+            context,
+            &path,
+            edited.as_bytes(),
+            &snapshot,
+            &context.cancellation,
+        )
+        .await?;
         update_symbol_index(self.symbol_index.as_deref(), context, &path, &edited);
         Ok(ToolResult::new(
             "applied 1 edit",
@@ -360,8 +367,8 @@ impl Tool for MultiEditTool {
             ));
         }
         let path = context.resolve_existing(&input.path)?;
-        let bytes = read_capped(context, &path, self.limits.max_write_bytes).await?;
-        let mut source = String::from_utf8(bytes).map_err(|_| {
+        let snapshot = read_capped_snapshot(context, &path, self.limits.max_write_bytes).await?;
+        let mut source = String::from_utf8(snapshot.bytes.clone()).map_err(|_| {
             ToolError::InvalidInput("multi_edit only supports UTF-8 files".to_owned())
         })?;
         let mut modes = Vec::with_capacity(input.edits.len());
@@ -372,7 +379,14 @@ impl Tool for MultiEditTool {
             source = next;
             modes.push(mode);
         }
-        atomic_write(context, &path, source.as_bytes(), &context.cancellation).await?;
+        atomic_write_if_unchanged(
+            context,
+            &path,
+            source.as_bytes(),
+            &snapshot,
+            &context.cancellation,
+        )
+        .await?;
         update_symbol_index(self.symbol_index.as_deref(), context, &path, &source);
         Ok(ToolResult::new(
             format!("applied {} edits", modes.len()),
@@ -423,8 +437,40 @@ async fn read_capped(
     path: &std::path::Path,
     limit: usize,
 ) -> Result<Vec<u8>, ToolError> {
+    Ok(read_capped_snapshot(context, path, limit).await?.bytes)
+}
+
+#[derive(Clone, Debug)]
+struct FileSnapshot {
+    bytes: Vec<u8>,
+    content_hash: [u8; 32],
     #[cfg(unix)]
-    let file = {
+    identity: FileIdentity,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+    FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    }
+}
+
+async fn read_capped_snapshot(
+    context: &ToolContext,
+    path: &std::path::Path,
+    limit: usize,
+) -> Result<FileSnapshot, ToolError> {
+    #[cfg(unix)]
+    let (file, identity) = {
         let (parent, file_name) = context.secure_parent(path)?;
         let descriptor = rustix::fs::openat(
             parent,
@@ -441,22 +487,18 @@ async fn read_capped(
             source: source.into(),
         })?;
         let file = std::fs::File::from(descriptor);
-        if !file
-            .metadata()
-            .map_err(|source| ToolError::Io {
-                operation: "inspect opened file",
-                path: path.to_path_buf(),
-                source,
-            })?
-            .file_type()
-            .is_file()
-        {
+        let metadata = file.metadata().map_err(|source| ToolError::Io {
+            operation: "inspect opened file",
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if !metadata.file_type().is_file() {
             return Err(ToolError::InvalidInput(format!(
                 "{} is not a regular file",
                 context.relative_display(path).display()
             )));
         }
-        tokio::fs::File::from_std(file)
+        (tokio::fs::File::from_std(file), file_identity(&metadata))
     };
     #[cfg(not(unix))]
     let file = tokio::fs::File::open(path)
@@ -478,7 +520,12 @@ async fn read_capped(
     if bytes.len() > limit {
         return Err(ToolError::SizeLimit { limit });
     }
-    Ok(bytes)
+    Ok(FileSnapshot {
+        content_hash: *blake3::hash(&bytes).as_bytes(),
+        bytes,
+        #[cfg(unix)]
+        identity,
+    })
 }
 
 fn ensure_size(size: usize, limit: usize) -> Result<(), ToolError> {
@@ -515,13 +562,33 @@ async fn atomic_write(
     payload: &[u8],
     cancellation: &crate::CancellationToken,
 ) -> Result<(), ToolError> {
+    atomic_write_with_snapshot(context, path, payload, None, cancellation).await
+}
+
+async fn atomic_write_if_unchanged(
+    context: &ToolContext,
+    path: &std::path::Path,
+    payload: &[u8],
+    snapshot: &FileSnapshot,
+    cancellation: &crate::CancellationToken,
+) -> Result<(), ToolError> {
+    atomic_write_with_snapshot(context, path, payload, Some(snapshot), cancellation).await
+}
+
+async fn atomic_write_with_snapshot(
+    context: &ToolContext,
+    path: &std::path::Path,
+    payload: &[u8],
+    snapshot: Option<&FileSnapshot>,
+    cancellation: &crate::CancellationToken,
+) -> Result<(), ToolError> {
     #[cfg(unix)]
     {
-        return atomic_write_unix(context, path, payload, cancellation).await;
+        return atomic_write_unix(context, path, payload, snapshot, cancellation).await;
     }
     #[cfg(not(unix))]
     {
-        atomic_write_portable(path, payload, cancellation).await
+        atomic_write_portable(path, payload, snapshot, cancellation).await
     }
 }
 
@@ -530,6 +597,7 @@ async fn atomic_write_unix(
     context: &ToolContext,
     path: &std::path::Path,
     payload: &[u8],
+    snapshot: Option<&FileSnapshot>,
     cancellation: &crate::CancellationToken,
 ) -> Result<(), ToolError> {
     cancellation.check()?;
@@ -609,6 +677,10 @@ async fn atomic_write_unix(
         })?;
         cancellation.check()?;
         drop(file);
+        let target = snapshot
+            .map(|snapshot| verify_snapshot_unix(&parent, &file_name, path, snapshot))
+            .transpose()?;
+        cancellation.check()?;
         rustix::fs::renameat(&parent, temporary.as_str(), &parent, &file_name).map_err(
             |source| ToolError::Io {
                 operation: "replace file",
@@ -616,6 +688,7 @@ async fn atomic_write_unix(
                 source: source.into(),
             },
         )?;
+        drop(target);
         rustix::fs::fsync(&parent).map_err(|source| ToolError::Io {
             operation: "synchronize parent directory",
             path: path
@@ -631,10 +704,91 @@ async fn atomic_write_unix(
     result
 }
 
+#[cfg(unix)]
+fn verify_snapshot_unix(
+    parent: &impl std::os::fd::AsFd,
+    file_name: &std::ffi::OsStr,
+    path: &std::path::Path,
+    snapshot: &FileSnapshot,
+) -> Result<std::fs::File, ToolError> {
+    use std::io::Read as _;
+
+    let descriptor = rustix::fs::openat(
+        parent,
+        file_name,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::NONBLOCK
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|_| ToolError::FileChangedSinceRead(path.to_path_buf()))?;
+    let mut file = std::fs::File::from(descriptor);
+    let metadata = file.metadata().map_err(|source| ToolError::Io {
+        operation: "inspect file for compare-and-swap",
+        path: path.to_path_buf(),
+        source,
+    })?;
+    if !metadata.file_type().is_file()
+        || file_identity(&metadata) != snapshot.identity
+        || metadata.len() != snapshot.bytes.len() as u64
+    {
+        return Err(ToolError::FileChangedSinceRead(path.to_path_buf()));
+    }
+    let path_stat = rustix::fs::statat(parent, file_name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|_| ToolError::FileChangedSinceRead(path.to_path_buf()))?;
+    let descriptor_stat = rustix::fs::fstat(&file).map_err(|source| ToolError::Io {
+        operation: "inspect file descriptor for compare-and-swap",
+        path: path.to_path_buf(),
+        source: source.into(),
+    })?;
+    if path_stat.st_dev != descriptor_stat.st_dev || path_stat.st_ino != descriptor_stat.st_ino {
+        return Err(ToolError::FileChangedSinceRead(path.to_path_buf()));
+    }
+    let mut bytes = Vec::with_capacity(snapshot.bytes.len());
+    (&mut file)
+        .take(snapshot.bytes.len().saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|source| ToolError::Io {
+            operation: "re-read file for compare-and-swap",
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if bytes.len() != snapshot.bytes.len()
+        || *blake3::hash(&bytes).as_bytes() != snapshot.content_hash
+    {
+        return Err(ToolError::FileChangedSinceRead(path.to_path_buf()));
+    }
+    let final_path_stat =
+        rustix::fs::statat(parent, file_name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(|_| ToolError::FileChangedSinceRead(path.to_path_buf()))?;
+    let final_descriptor_stat = rustix::fs::fstat(&file).map_err(|source| ToolError::Io {
+        operation: "reinspect file descriptor for compare-and-swap",
+        path: path.to_path_buf(),
+        source: source.into(),
+    })?;
+    let final_length = file
+        .metadata()
+        .map_err(|source| ToolError::Io {
+            operation: "reinspect file length for compare-and-swap",
+            path: path.to_path_buf(),
+            source,
+        })?
+        .len();
+    if final_path_stat.st_dev != final_descriptor_stat.st_dev
+        || final_path_stat.st_ino != final_descriptor_stat.st_ino
+        || final_length != snapshot.bytes.len() as u64
+    {
+        return Err(ToolError::FileChangedSinceRead(path.to_path_buf()));
+    }
+    Ok(file)
+}
+
 #[cfg(not(unix))]
 async fn atomic_write_portable(
     path: &std::path::Path,
     content: &[u8],
+    snapshot: Option<&FileSnapshot>,
     cancellation: &crate::CancellationToken,
 ) -> Result<(), ToolError> {
     cancellation.check()?;
@@ -690,6 +844,25 @@ async fn atomic_write_portable(
         })?;
         cancellation.check()?;
         drop(file);
+        if let Some(snapshot) = snapshot {
+            let metadata = tokio::fs::symlink_metadata(path)
+                .await
+                .map_err(|_| ToolError::FileChangedSinceRead(path.to_path_buf()))?;
+            if !metadata.file_type().is_file() || metadata.len() != snapshot.bytes.len() as u64 {
+                return Err(ToolError::FileChangedSinceRead(path.to_path_buf()));
+            }
+            let current = tokio::fs::read(path)
+                .await
+                .map_err(|source| ToolError::Io {
+                    operation: "re-read file for compare-and-swap",
+                    path: path.to_path_buf(),
+                    source,
+                })?;
+            if *blake3::hash(&current).as_bytes() != snapshot.content_hash {
+                return Err(ToolError::FileChangedSinceRead(path.to_path_buf()));
+            }
+        }
+        cancellation.check()?;
         tokio::fs::rename(&temporary, path)
             .await
             .map_err(|source| ToolError::Io {
@@ -954,6 +1127,52 @@ mod tests {
             fs::read_to_string(root.path().join("sample.txt")).expect("unchanged fixture"),
             "one two three"
         );
+    }
+
+    #[tokio::test]
+    async fn edit_compare_and_swap_rejects_a_changed_snapshot_and_accepts_an_unchanged_one() {
+        let root = tempdir().expect("temp directory");
+        let path = root.path().join("sample.txt");
+        fs::write(&path, "before").expect("fixture");
+        let context = ToolContext::new(root.path()).expect("context");
+        let resolved = context
+            .resolve_existing(std::path::Path::new("sample.txt"))
+            .expect("resolved fixture");
+        let stale = read_capped_snapshot(&context, &resolved, 1024)
+            .await
+            .expect("stale snapshot");
+        fs::write(&path, "format").expect("concurrent formatter write");
+
+        let error = atomic_write_if_unchanged(
+            &context,
+            &resolved,
+            b"edited",
+            &stale,
+            &crate::CancellationToken::default(),
+        )
+        .await
+        .expect_err("stale snapshot must be rejected");
+        assert!(
+            matches!(error, ToolError::FileChangedSinceRead(ref changed) if changed == &resolved)
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("preserved formatter output"),
+            "format"
+        );
+
+        let current = read_capped_snapshot(&context, &resolved, 1024)
+            .await
+            .expect("current snapshot");
+        atomic_write_if_unchanged(
+            &context,
+            &resolved,
+            b"edited",
+            &current,
+            &crate::CancellationToken::default(),
+        )
+        .await
+        .expect("unchanged snapshot succeeds");
+        assert_eq!(fs::read_to_string(&path).expect("edited output"), "edited");
     }
 
     #[tokio::test]

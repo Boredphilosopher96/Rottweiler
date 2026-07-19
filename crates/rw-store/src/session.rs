@@ -97,15 +97,23 @@ pub struct SessionEventLog {
     path: PathBuf,
     next_sequence: u64,
     file: File,
+    writer_state: SessionWriterState,
+}
+
+/// Whether an append can safely continue using the open writer descriptor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SessionWriterState {
+    Healthy,
+    Poisoned,
 }
 
 impl SessionEventLog {
-    /// Opens or creates `sessions/<id>/events.jsonl`, repairing only an
-    /// incomplete final record left by a killed writer.
+    /// Opens or creates `sessions/<id>/events.jsonl`, repairing an incomplete
+    /// or malformed final record left by a killed writer.
     ///
     /// # Errors
     ///
-    /// Returns an error for an unsafe id, I/O failure, corrupt complete record,
+    /// Returns an error for an unsafe id, I/O failure, corrupt non-final record,
     /// schema mismatch, or non-contiguous sequence.
     pub fn open(root: &Path, session_id: &str) -> Result<Self, SessionStoreError> {
         validate_session_id(session_id)?;
@@ -124,6 +132,7 @@ impl SessionEventLog {
             path,
             next_sequence,
             file,
+            writer_state: SessionWriterState::Healthy,
         })
     }
 
@@ -188,8 +197,8 @@ impl SessionEventLog {
     }
 
     /// Serializes a batch before writing, then appends it under the existing
-    /// writer lock and performs one durable synchronization. A killed partial
-    /// tail is removed on the next open.
+    /// writer lock and performs one durable synchronization. A failed append
+    /// is rolled back to its original length before its error is returned.
     ///
     /// # Errors
     ///
@@ -198,6 +207,9 @@ impl SessionEventLog {
         &mut self,
         events: impl IntoIterator<Item = T>,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+        if self.writer_state == SessionWriterState::Poisoned {
+            return Err(SessionStoreError::EventWriterPoisoned);
+        }
         let events = events.into_iter().collect::<Vec<_>>();
         let count = u64::try_from(events.len()).map_err(|_| SessionStoreError::SequenceOverflow)?;
         self.next_sequence
@@ -223,11 +235,29 @@ impl SessionEventLog {
         if bytes.is_empty() {
             return Ok(envelopes);
         }
-        self.file.write_all(&bytes)?;
-        self.file.flush()?;
-        sync_event_file(&self.file)?;
+        let pre_append_len = self.file.metadata()?.len();
+        if let Err(append_error) = append_event_bytes(&mut self.file, &bytes) {
+            return Err(self.rollback_failed_append(pre_append_len, append_error));
+        }
         self.next_sequence += count;
         Ok(envelopes)
+    }
+
+    fn rollback_failed_append(
+        &mut self,
+        pre_append_len: u64,
+        append_error: std::io::Error,
+    ) -> SessionStoreError {
+        match truncate_and_sync_event_file(&self.file, pre_append_len) {
+            Ok(()) => SessionStoreError::Io(append_error),
+            Err(rollback_error) => {
+                self.writer_state = SessionWriterState::Poisoned;
+                SessionStoreError::AppendRollbackFailed {
+                    append: append_error,
+                    rollback: rollback_error,
+                }
+            }
+        }
     }
 
     /// Backward-compatible name for appending one durably synchronized turn.
@@ -2073,20 +2103,150 @@ fn remove_if_exists(path: &Path) -> Result<(), SessionStoreError> {
 
 fn recover_and_validate(file: &File) -> Result<u64, SessionStoreError> {
     let bytes = read_opened_file(file)?;
-    let complete_len = if bytes.last().is_none_or(|byte| *byte == b'\n') {
-        bytes.len()
-    } else {
-        bytes
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |position| position + 1)
-    };
-    if complete_len != bytes.len() {
-        file.set_len(u64::try_from(complete_len).map_err(|_| SessionStoreError::LimitOverflow)?)?;
-        sync_event_file(file)?;
+    let mut next_sequence = 0_u64;
+    let mut record_start = 0_usize;
+
+    for record in bytes.split_inclusive(|byte| *byte == b'\n') {
+        let record_end = record_start
+            .checked_add(record.len())
+            .ok_or(SessionStoreError::LimitOverflow)?;
+        let is_final_record = record_end == bytes.len();
+        if is_final_record && record.last() != Some(&b'\n') {
+            truncate_and_sync_event_file(
+                file,
+                u64::try_from(record_start).map_err(|_| SessionStoreError::LimitOverflow)?,
+            )?;
+            return Ok(next_sequence);
+        }
+
+        let validated =
+            validate_recovered_event(&record[..record.len().saturating_sub(1)], next_sequence);
+        match validated {
+            Ok(()) => {
+                next_sequence = next_sequence
+                    .checked_add(1)
+                    .ok_or(SessionStoreError::SequenceOverflow)?;
+                record_start = record_end;
+            }
+            Err(_) if is_final_record => {
+                truncate_and_sync_event_file(
+                    file,
+                    u64::try_from(record_start).map_err(|_| SessionStoreError::LimitOverflow)?,
+                )?;
+                return Ok(next_sequence);
+            }
+            Err(error) => return Err(error),
+        }
     }
-    let events = parse_events::<serde_json::Value>(&bytes[..complete_len])?;
-    u64::try_from(events.len()).map_err(|_| SessionStoreError::SequenceOverflow)
+    Ok(next_sequence)
+}
+
+fn validate_recovered_event(
+    record: &[u8],
+    expected_sequence: u64,
+) -> Result<(), SessionStoreError> {
+    if record.is_empty() {
+        return Err(SessionStoreError::CorruptEvent("blank JSONL record"));
+    }
+    let envelope: EventEnvelope<serde_json::Value> = serde_json::from_slice(record)?;
+    if envelope.schema_version != EVENT_SCHEMA_VERSION {
+        return Err(SessionStoreError::UnsupportedEventVersion(
+            envelope.schema_version,
+        ));
+    }
+    if envelope.sequence != SequenceId(expected_sequence) {
+        return Err(SessionStoreError::CorruptEvent(
+            "non-contiguous event sequence",
+        ));
+    }
+    Ok(())
+}
+
+fn append_event_bytes(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    write_event_bytes(file, bytes)?;
+    file.flush()?;
+    sync_event_file(file)
+}
+
+fn truncate_and_sync_event_file(file: &File, len: u64) -> std::io::Result<()> {
+    set_event_file_len(file, len)?;
+    sync_event_file(file)
+}
+
+fn write_event_bytes(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(fail_after) = take_partial_append_write_fault() {
+        file.write_all(&bytes[..bytes.len().min(fail_after)])?;
+        return Err(std::io::Error::other(
+            "injected partial event-log append failure",
+        ));
+    }
+    file.write_all(bytes)
+}
+
+fn set_event_file_len(file: &File, len: u64) -> std::io::Result<()> {
+    #[cfg(test)]
+    if take_append_truncate_fault() {
+        return Err(std::io::Error::other("injected event-log rollback failure"));
+    }
+    file.set_len(len)
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct AppendFault {
+    partial_write_after: Option<usize>,
+    fail_truncate: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    static APPEND_FAULT: std::cell::Cell<Option<AppendFault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn install_append_fault(partial_write_after: usize, fail_truncate: bool) -> AppendFaultGuard {
+    APPEND_FAULT.with(|fault| {
+        assert!(fault.get().is_none(), "append fault already installed");
+        fault.set(Some(AppendFault {
+            partial_write_after: Some(partial_write_after),
+            fail_truncate,
+        }));
+    });
+    AppendFaultGuard
+}
+
+#[cfg(test)]
+struct AppendFaultGuard;
+
+#[cfg(test)]
+impl Drop for AppendFaultGuard {
+    fn drop(&mut self) {
+        APPEND_FAULT.with(|fault| fault.set(None));
+    }
+}
+
+#[cfg(test)]
+fn take_partial_append_write_fault() -> Option<usize> {
+    APPEND_FAULT.with(|fault| {
+        let mut state = fault.get()?;
+        let fail_after = state.partial_write_after.take();
+        fault.set(Some(state));
+        fail_after
+    })
+}
+
+#[cfg(test)]
+fn take_append_truncate_fault() -> bool {
+    APPEND_FAULT.with(|fault| {
+        let Some(mut state) = fault.get() else {
+            return false;
+        };
+        let fail = state.fail_truncate;
+        state.fail_truncate = false;
+        fault.set(Some(state));
+        fail
+    })
 }
 
 fn load_events<T: DeserializeOwned>(
@@ -2867,6 +3027,18 @@ pub enum SessionStoreError {
     /// A complete JSONL record was structurally corrupt.
     #[error("session event log is corrupt: {0}")]
     CorruptEvent(&'static str),
+    /// An append failed and the original log length could not be restored durably.
+    #[error("session event append failed and rollback could not be completed")]
+    AppendRollbackFailed {
+        /// Original write, flush, or synchronization failure.
+        #[source]
+        append: std::io::Error,
+        /// Failure while truncating or synchronizing the rollback.
+        rollback: std::io::Error,
+    },
+    /// An earlier append rollback failed, so this writer cannot append safely.
+    #[error("session event writer is poisoned after an incomplete append rollback")]
+    EventWriterPoisoned,
     /// A derived index row stored a malformed decimal watermark.
     #[error("session index projection watermark is corrupt")]
     CorruptProjectionWatermark,
@@ -2921,7 +3093,7 @@ mod tests {
         AccountingLedger, EventEnvelope, MAX_SEARCH_INDEX_BYTES, MAX_SEARCH_INDEX_WAL_BYTES,
         ProjectionStatus, SessionEventLog, SessionEventPageLimits, SessionIndex, SessionProjection,
         SessionStoreError, SessionSummary, TurnAccountingEntry, UtcDayKey, UtcTimestamp,
-        upsert_projection,
+        install_append_fault, upsert_projection,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3153,6 +3325,143 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn partial_append_failure_rolls_back_and_the_writer_can_continue() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "partial-append")
+            .unwrap_or_else(|error| panic!("log must open: {error}"));
+        log.append(FixtureEvent {
+            kind: "user".to_owned(),
+            text: "durable prefix".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("prefix must append: {error}"));
+        let before = std::fs::read(log.path())
+            .unwrap_or_else(|error| panic!("prefix bytes must read: {error}"));
+
+        let fault = install_append_fault(7, false);
+        assert!(matches!(
+            log.append(FixtureEvent {
+                kind: "assistant".to_owned(),
+                text: "must roll back".to_owned(),
+            }),
+            Err(SessionStoreError::Io(_))
+        ));
+        assert_eq!(
+            std::fs::read(log.path()).unwrap_or_else(|error| panic!("rolled-back bytes: {error}")),
+            before
+        );
+        drop(fault);
+
+        log.append(FixtureEvent {
+            kind: "assistant".to_owned(),
+            text: "clean retry".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("retry must append: {error}"));
+        drop(log);
+
+        let recovered = SessionEventLog::open(root.path(), "partial-append")
+            .unwrap_or_else(|error| panic!("clean retry must recover: {error}"));
+        assert_eq!(recovered.next_sequence(), 2);
+        assert_eq!(
+            recovered
+                .load::<FixtureEvent>()
+                .unwrap_or_else(|error| panic!("recovered events must load: {error}"))
+                .into_iter()
+                .map(|event| event.event.text)
+                .collect::<Vec<_>>(),
+            vec!["durable prefix", "clean retry"]
+        );
+    }
+
+    #[test]
+    fn trailing_malformed_record_with_newline_is_truncated_on_open() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "malformed-tail")
+            .unwrap_or_else(|error| panic!("log must open: {error}"));
+        log.append(FixtureEvent {
+            kind: "user".to_owned(),
+            text: "complete".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("event must append: {error}"));
+        let complete = std::fs::read(log.path())
+            .unwrap_or_else(|error| panic!("complete bytes must read: {error}"));
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(log.path())
+            .unwrap_or_else(|error| panic!("tail file must open: {error}"));
+        file.write_all(b"{\"schema_version\":1,\"sequence\":1,\"event\":\n")
+            .unwrap_or_else(|error| panic!("malformed tail must write: {error}"));
+        file.sync_data()
+            .unwrap_or_else(|error| panic!("malformed tail must sync: {error}"));
+        drop(file);
+        drop(log);
+
+        let recovered = SessionEventLog::open(root.path(), "malformed-tail")
+            .unwrap_or_else(|error| panic!("malformed tail must recover: {error}"));
+        assert_eq!(recovered.next_sequence(), 1);
+        assert_eq!(
+            std::fs::read(recovered.path())
+                .unwrap_or_else(|error| panic!("recovered bytes must read: {error}")),
+            complete
+        );
+    }
+
+    #[test]
+    fn malformed_record_before_the_tail_fails_closed() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "malformed-middle")
+            .unwrap_or_else(|error| panic!("log must open: {error}"));
+        log.append(FixtureEvent {
+            kind: "user".to_owned(),
+            text: "complete".to_owned(),
+        })
+        .unwrap_or_else(|error| panic!("event must append: {error}"));
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(log.path())
+            .unwrap_or_else(|error| panic!("tail file must open: {error}"));
+        file.write_all(b"{\"schema_version\":1,\"sequence\":1,\"event\":\n")
+            .unwrap_or_else(|error| panic!("malformed middle must write: {error}"));
+        file.write_all(
+            br#"{"schema_version":1,"sequence":1,"event":{"kind":"assistant","text":"later"}}"#,
+        )
+        .unwrap_or_else(|error| panic!("later event must write: {error}"));
+        file.write_all(b"\n")
+            .unwrap_or_else(|error| panic!("later event delimiter must write: {error}"));
+        file.sync_data()
+            .unwrap_or_else(|error| panic!("malformed middle must sync: {error}"));
+        drop(file);
+        drop(log);
+
+        assert!(matches!(
+            SessionEventLog::open(root.path(), "malformed-middle"),
+            Err(SessionStoreError::Json(_))
+        ));
+    }
+
+    #[test]
+    fn failed_rollback_poisons_the_writer() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "poisoned-writer")
+            .unwrap_or_else(|error| panic!("log must open: {error}"));
+        let fault = install_append_fault(1, true);
+        assert!(matches!(
+            log.append(FixtureEvent {
+                kind: "user".to_owned(),
+                text: "will fail".to_owned(),
+            }),
+            Err(SessionStoreError::AppendRollbackFailed { .. })
+        ));
+        drop(fault);
+        assert!(matches!(
+            log.append(FixtureEvent {
+                kind: "user".to_owned(),
+                text: "must not write".to_owned(),
+            }),
+            Err(SessionStoreError::EventWriterPoisoned)
+        ));
     }
 
     #[test]

@@ -24,6 +24,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
+use crate::background::begin_worktree_finalization;
 use crate::bash::audited_system_git;
 use crate::registry::{
     CancellationToken, CapabilityManifest, MutationScope, Tool, ToolContext, ToolDescriptor,
@@ -71,6 +72,7 @@ pub struct WorktreeLease {
     path: PathBuf,
     base_commit: String,
     identity: DirectoryIdentity,
+    finalization_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Host-private durable metadata used to rebind a continuable child after restart.
@@ -224,6 +226,21 @@ fn process_worktree_registry_gate(common_dir: &Path) -> Arc<tokio::sync::Mutex<(
     }
     let gate = Arc::new(tokio::sync::Mutex::new(()));
     gates.insert(common_dir.to_path_buf(), Arc::downgrade(&gate));
+    gate
+}
+
+fn process_worktree_finalization_gate(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    static GATES: OnceLock<Mutex<HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>>> = OnceLock::new();
+    let mut gates = GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    gates.retain(|_, gate| gate.strong_count() != 0);
+    if let Some(gate) = gates.get(path).and_then(Weak::upgrade) {
+        return gate;
+    }
+    let gate = Arc::new(tokio::sync::Mutex::new(()));
+    gates.insert(path.to_path_buf(), Arc::downgrade(&gate));
     gate
 }
 
@@ -610,6 +627,7 @@ impl WorktreeIsolation {
             ));
         }
         Ok(WorktreeLease {
+            finalization_gate: process_worktree_finalization_gate(&path),
             path,
             base_commit,
             identity,
@@ -823,13 +841,26 @@ impl WorktreeIsolation {
         }
         let (usage, cost) = empty_accounting();
         let current = self
-            .collect(lease, "", usage, cost, cancellation.clone())
+            .collect(lease, "", usage.clone(), cost.clone(), cancellation.clone())
             .await?;
         if current.diff.as_ref() != Some(artifact) {
             return Ok(false);
         }
+        #[cfg(test)]
+        run_finalize_after_capture_test_hook(&lease.path);
+        let _finalization = tokio::select! {
+            guard = Arc::clone(&lease.finalization_gate).lock_owned() => guard,
+            () = cancellation.cancelled() => return Err(ToolError::Cancelled),
+        };
+        let _processes = begin_worktree_finalization(&lease.path)?;
         let _registry = self.lock_registry(&cancellation).await?;
         self.verify_lease(lease, &cancellation).await?;
+        let current = self
+            .collect(lease, "", usage, cost, cancellation.clone())
+            .await?;
+        if current.diff.as_ref() != Some(artifact) {
+            return Err(ToolError::WorktreeChangedAfterCapture(lease.path.clone()));
+        }
         let output = run_git(
             &self.repository_root,
             [
@@ -899,6 +930,7 @@ impl WorktreeIsolation {
             ));
         }
         Ok(WorktreeLease {
+            finalization_gate: process_worktree_finalization_gate(&record.path),
             path: record.path.clone(),
             base_commit: record.base_commit.clone(),
             identity: DirectoryIdentity::from_record(record)?,
@@ -1971,6 +2003,31 @@ fn require_private_permissions(_path: &Path) -> Result<(), ToolError> {
 }
 
 #[cfg(test)]
+fn finalize_after_capture_test_hooks() -> &'static Mutex<HashMap<PathBuf, (PathBuf, Vec<u8>)>> {
+    static HOOKS: OnceLock<Mutex<HashMap<PathBuf, (PathBuf, Vec<u8>)>>> = OnceLock::new();
+    HOOKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn install_finalize_after_capture_test_write(lease_path: &Path, target: PathBuf, content: Vec<u8>) {
+    finalize_after_capture_test_hooks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(lease_path.to_path_buf(), (target, content));
+}
+
+#[cfg(test)]
+fn run_finalize_after_capture_test_hook(lease_path: &Path) {
+    let hook = finalize_after_capture_test_hooks()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(lease_path);
+    if let Some((target, content)) = hook {
+        std::fs::write(target, content).expect("finalization race test write");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
 
@@ -2741,6 +2798,45 @@ mod tests {
         );
         assert!(!lease.path().exists());
         assert!(git(repo.path(), &["status", "--porcelain=v1"]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn finalization_rechecks_after_capture_before_forced_removal() {
+        let repo = repository();
+        let private = tempfile::tempdir().expect("private tempdir");
+        let manager = isolation(repo.path(), private.path()).await;
+        let lease = manager
+            .create(CancellationToken::default())
+            .await
+            .expect("lease");
+        let target = lease.path().join("new.txt");
+        std::fs::write(&target, b"captured\n").expect("captured write");
+        let (usage, cost) = accounting();
+        let artifact = manager
+            .collect(&lease, "done", usage, cost, CancellationToken::default())
+            .await
+            .expect("collect")
+            .diff
+            .expect("diff");
+        install_finalize_after_capture_test_write(
+            lease.path(),
+            target.clone(),
+            b"late writer\n".to_vec(),
+        );
+
+        let error = manager
+            .finalize_captured(&lease, &artifact, CancellationToken::default())
+            .await
+            .expect_err("late write must abort finalization");
+        assert!(matches!(
+            error,
+            ToolError::WorktreeChangedAfterCapture(ref changed) if changed == lease.path()
+        ));
+        assert!(lease.path().exists());
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("late output retained"),
+            "late writer\n"
+        );
     }
 
     #[tokio::test]

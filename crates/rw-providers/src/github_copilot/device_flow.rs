@@ -462,12 +462,12 @@ impl GitHubDeviceFlowTransport for ReqwestGitHubDeviceFlowTransport {
         if let Some(error) = response_error(&response) {
             return Err(error);
         }
-        let data: DeviceCodeResponse = response.json().await.map_err(|_| {
-            ProviderError::new(
-                ProviderErrorKind::Protocol,
-                "GitHub device authorization returned an invalid response",
-            )
-        })?;
+        let data: DeviceCodeResponse = crate::token_response::read_json(
+            response,
+            "GitHub device authorization returned an invalid response",
+        )
+        .await?;
+        let expires_in = crate::token_response::expiry_duration(data.expires_in)?;
         Ok(GitHubCopilotDeviceAuthorization {
             verification_uri: Url::parse(&data.verification_uri).map_err(|_| {
                 ProviderError::new(
@@ -478,7 +478,7 @@ impl GitHubDeviceFlowTransport for ReqwestGitHubDeviceFlowTransport {
             user_code: Secret::new(data.user_code),
             device_code: Secret::new(data.device_code),
             interval: Duration::from_secs(data.interval),
-            expires_in: Duration::from_secs(data.expires_in),
+            expires_in,
         })
     }
 
@@ -504,12 +504,11 @@ impl GitHubDeviceFlowTransport for ReqwestGitHubDeviceFlowTransport {
         if let Some(error) = response_error(&response) {
             return Err(error);
         }
-        let data: AccessTokenResponse = response.json().await.map_err(|_| {
-            ProviderError::new(
-                ProviderErrorKind::Protocol,
-                "GitHub device authorization returned an invalid polling response",
-            )
-        })?;
+        let data: AccessTokenResponse = crate::token_response::read_json(
+            response,
+            "GitHub device authorization returned an invalid polling response",
+        )
+        .await?;
         interpret_access_token_response(data)
     }
 }

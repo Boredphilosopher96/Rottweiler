@@ -18,6 +18,7 @@ mod recording;
 mod retry;
 mod router;
 mod sse;
+mod token_response;
 mod types;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy};

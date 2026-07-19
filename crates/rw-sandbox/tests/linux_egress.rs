@@ -22,6 +22,49 @@ const UNIX_PAIR_CHILD_ENV: &str = "ROTTWEILER_SANDBOX_UNIX_PAIR_CHILD";
 const UNIX_DGRAM_TARGET_ENV: &str = "ROTTWEILER_SANDBOX_UNIX_DGRAM_TARGET";
 const FILE_READ_FIXTURE_ENV: &str = "ROTTWEILER_SANDBOX_FILE_READ_FIXTURE";
 const FILE_READ_OUTPUT_ENV: &str = "ROTTWEILER_SANDBOX_FILE_READ_OUTPUT";
+const DEFAULT_READ_CHILD_ENV: &str = "ROTTWEILER_SANDBOX_DEFAULT_READ_CHILD";
+const WORKSPACE_READ_FIXTURE_ENV: &str = "ROTTWEILER_SANDBOX_WORKSPACE_READ_FIXTURE";
+const TRUSTED_READ_FIXTURE_ENV: &str = "ROTTWEILER_SANDBOX_TRUSTED_READ_FIXTURE";
+
+#[test]
+fn sandboxed_default_read_policy_child() {
+    if std::env::var_os(DEFAULT_READ_CHILD_ENV).is_none() {
+        return;
+    }
+    let workspace_fixture =
+        std::env::var_os(WORKSPACE_READ_FIXTURE_ENV).expect("workspace read fixture");
+    assert_eq!(
+        std::fs::read(workspace_fixture).expect("read workspace fixture"),
+        b"workspace-readable"
+    );
+    assert!(
+        std::fs::read("/etc/passwd")
+            .expect("read reviewed system prefix")
+            .starts_with(b"root:")
+    );
+    if let Some(trusted_fixture) = std::env::var_os(TRUSTED_READ_FIXTURE_ENV) {
+        assert_eq!(
+            std::fs::read(trusted_fixture).expect("read caller-trusted fixture"),
+            b"trusted-readable"
+        );
+    }
+    let home = std::env::var_os("HOME").expect("sandbox HOME");
+    for suffix in [
+        ".ssh/id_rsa",
+        ".aws/credentials",
+        ".kube/config",
+        ".rottweiler/credentials",
+    ] {
+        let error = std::fs::read(Path::new(&home).join(suffix))
+            .expect_err("sensitive home file was readable");
+        assert!(
+            error
+                .raw_os_error()
+                .is_some_and(|code| matches!(code, libc::EACCES | libc::EPERM)),
+            "sensitive read failed for the wrong reason: {error}"
+        );
+    }
+}
 
 #[test]
 fn sandboxed_exact_file_read_child() {
@@ -330,6 +373,103 @@ fn regular_file_read_roots_allow_exact_data_and_executable_files() {
         std::fs::read(output).expect("child result"),
         b"exact-file-read"
     );
+}
+
+#[test]
+fn default_read_policy_excludes_home_secrets_but_keeps_required_roots() {
+    if !sandbox_available(&rw_sandbox::probe(), "default read-root isolation") {
+        return;
+    }
+    let host_home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_dir())
+        .expect("Linux security tests require a writable HOME");
+    let sandbox_home = tempfile::Builder::new()
+        .prefix("rottweiler-sandbox-home-")
+        .tempdir_in(host_home)
+        .expect("sandbox HOME");
+    for suffix in [
+        ".ssh/id_rsa",
+        ".aws/credentials",
+        ".kube/config",
+        ".rottweiler/credentials",
+    ] {
+        let path = sandbox_home.path().join(suffix);
+        std::fs::create_dir_all(path.parent().expect("secret parent")).expect("secret directory");
+        std::fs::write(path, b"credential-canary").expect("secret fixture");
+    }
+    let trusted = sandbox_home.path().join(".cache/toolchain/trusted");
+    std::fs::create_dir_all(trusted.parent().expect("trusted parent")).expect("trusted directory");
+    std::fs::write(&trusted, b"trusted-readable").expect("trusted fixture");
+    let benign_home_file = sandbox_home.path().join("project.txt");
+    std::fs::write(&benign_home_file, b"workspace-readable").expect("home workspace fixture");
+
+    let workspace = tempdir().expect("workspace");
+    let workspace_fixture = workspace.path().join("workspace.txt");
+    std::fs::write(&workspace_fixture, b"workspace-readable").expect("workspace fixture");
+    let executable = std::env::current_exe().expect("current test executable");
+    let args = [
+        OsString::from("--exact"),
+        OsString::from("sandboxed_default_read_policy_child"),
+        OsString::from("--nocapture"),
+    ];
+
+    let default_policy =
+        SandboxPolicy::new([workspace.path()], NetworkPolicy::Deny).expect("default policy");
+    assert_read_policy_case(
+        &default_policy,
+        &executable,
+        &args,
+        sandbox_home.path(),
+        &workspace_fixture,
+        None,
+    );
+
+    let trusted_policy = SandboxPolicy::new([workspace.path()], NetworkPolicy::Deny)
+        .and_then(|policy| policy.with_read_roots([executable.as_path(), trusted.as_path()]))
+        .expect("trusted-root policy");
+    assert_read_policy_case(
+        &trusted_policy,
+        &executable,
+        &args,
+        sandbox_home.path(),
+        &workspace_fixture,
+        Some(&trusted),
+    );
+
+    // Landlock cannot subtract from a parent grant. The implementation keeps
+    // a HOME workspace readable by granting its existing non-sensitive sibling
+    // entries, while the credential directories remain absent from the ruleset.
+    let home_workspace_policy =
+        SandboxPolicy::new([sandbox_home.path()], NetworkPolicy::Deny).expect("HOME policy");
+    assert_read_policy_case(
+        &home_workspace_policy,
+        &executable,
+        &args,
+        sandbox_home.path(),
+        &benign_home_file,
+        Some(&trusted),
+    );
+}
+
+fn assert_read_policy_case(
+    policy: &SandboxPolicy,
+    executable: &Path,
+    args: &[OsString],
+    home: &Path,
+    workspace_fixture: &Path,
+    trusted_fixture: Option<&Path>,
+) {
+    let mut command = test_helper_command(policy, executable, args);
+    command
+        .env(DEFAULT_READ_CHILD_ENV, "1")
+        .env("HOME", home)
+        .env(WORKSPACE_READ_FIXTURE_ENV, workspace_fixture);
+    if let Some(trusted_fixture) = trusted_fixture {
+        command.env(TRUSTED_READ_FIXTURE_ENV, trusted_fixture);
+    }
+    let status = command.status().expect("sandboxed read-policy child");
+    assert!(status.success(), "read-policy child exited {status}");
 }
 
 #[test]
