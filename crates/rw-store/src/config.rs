@@ -650,6 +650,28 @@ impl ConfigLoader {
     pub fn persist_tui_setting(&self, key: &str, value: &str) -> Result<LoadedConfig, ConfigError> {
         let effective = self.load()?;
         validate_tui_setting(&effective.config, key, value)?;
+        if matches!(
+            key,
+            "budget.session_cost_cap_micros_usd"
+                | "budget.daily_cost_cap_micros_usd"
+                | "budget.warn_at_percent"
+        ) && matches!(
+            effective.provenance(key),
+            Some(ConfigSource::ProjectFile(_))
+        ) {
+            return Err(ConfigError::InvalidUserSetting {
+                key: key.to_owned(),
+                reason: "a trusted project configuration already sets this budget; edit the project's config file to change it".to_owned(),
+            });
+        }
+        let provenance_value = match key {
+            "budget.session_cost_cap_micros_usd" | "budget.daily_cost_cap_micros_usd" => {
+                parse_tui_budget_cap(key, value)?
+                    .map_or_else(|| "unlimited".to_owned(), |micros| micros.to_string())
+            }
+            "budget.warn_at_percent" => parse_tui_budget_warning(key, value)?.to_string(),
+            _ => value.to_owned(),
+        };
         let parent = self
             .user_path
             .parent()
@@ -685,6 +707,12 @@ impl ConfigLoader {
                     reason: "model thinking configuration is not a table".to_owned(),
                 })?;
             thinking.insert(alias.to_owned(), toml::Value::String(value.to_owned()));
+        } else if matches!(
+            key,
+            "budget.session_cost_cap_micros_usd" | "budget.daily_cost_cap_micros_usd"
+        ) && value.trim().eq_ignore_ascii_case("unlimited")
+        {
+            clear_toml_leaf(&mut document, key)?;
         } else {
             set_toml_leaf(&mut document, key, value)?;
         }
@@ -698,7 +726,7 @@ impl ConfigLoader {
         // Record provenance first. If the config rewrite fails, the stale entry
         // cannot claim a source because loading requires its value to match.
         // The inverse order could report failure after changing the setting.
-        persist_tui_provenance(parent, &self.user_path, key, value)?;
+        persist_tui_provenance(parent, &self.user_path, key, &provenance_value)?;
         persist_tui_config_atomic(parent, &self.user_path, encoded.as_bytes(), key)?;
         drop(settings_lock);
         self.load()
@@ -2131,6 +2159,15 @@ fn validate_ui(config: &Config) -> Result<(), ConfigError> {
 }
 
 fn validate_tui_setting(config: &Config, key: &str, value: &str) -> Result<(), ConfigError> {
+    match key {
+        "budget.session_cost_cap_micros_usd" | "budget.daily_cost_cap_micros_usd" => {
+            return parse_tui_budget_cap(key, value).map(|_| ());
+        }
+        "budget.warn_at_percent" => {
+            return parse_tui_budget_warning(key, value).map(|_| ());
+        }
+        _ => {}
+    }
     let valid = match key {
         "ui.theme" => valid_theme_name(value),
         "compaction.auto" => matches!(value, "true" | "false"),
@@ -2154,6 +2191,63 @@ fn validate_tui_setting(config: &Config, key: &str, value: &str) -> Result<(), C
             reason: "key or value is outside the safe TUI settings allowlist".to_owned(),
         })
     }
+}
+
+fn parse_tui_budget_cap(key: &str, value: &str) -> Result<Option<u64>, ConfigError> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("unlimited") {
+        return Ok(None);
+    }
+    let mut parts = value.split('.');
+    let dollars = parts.next().unwrap_or_default();
+    let cents = parts.next();
+    let valid_cents = cents.is_none_or(|fraction| {
+        (1..=2).contains(&fraction.len()) && fraction.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    if dollars.is_empty()
+        || dollars.len() > 6
+        || !dollars.bytes().all(|byte| byte.is_ascii_digit())
+        || !valid_cents
+        || parts.next().is_some()
+    {
+        return Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "budget cap must be \"unlimited\" or a dollar amount from 0.01 through 999999.99 with at most two decimal places".to_owned(),
+        });
+    }
+    let dollars = dollars
+        .parse::<u64>()
+        .map_err(|_| ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "budget cap dollar amount is invalid".to_owned(),
+        })?;
+    let cents = match cents.unwrap_or_default().as_bytes() {
+        [] => 0,
+        [tenths] => u64::from(tenths - b'0') * 10,
+        [tenths, hundredths] => u64::from(tenths - b'0') * 10 + u64::from(hundredths - b'0'),
+        _ => unreachable!("validated cent precision"),
+    };
+    let micros = dollars * 1_000_000 + cents * 10_000;
+    if micros == 0 {
+        return Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "budget cap must be greater than zero".to_owned(),
+        });
+    }
+    Ok(Some(micros))
+}
+
+fn parse_tui_budget_warning(key: &str, value: &str) -> Result<u8, ConfigError> {
+    let value = value.trim();
+    let valid_integer = !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit());
+    let percent = valid_integer
+        .then(|| value.parse::<u8>().ok())
+        .flatten()
+        .filter(|percent| (1..=100).contains(percent));
+    percent.ok_or_else(|| ConfigError::InvalidUserSetting {
+        key: key.to_owned(),
+        reason: "warning threshold must be an integer from 1 through 100".to_owned(),
+    })
 }
 
 fn prepare_tui_config_parent(parent: &Path, user_path: &Path) -> Result<(), ConfigError> {
@@ -2577,6 +2671,15 @@ fn configured_setting_value(config: &Config, key: &str) -> Option<String> {
         "ui.theme" => Some(config.ui.theme.clone()),
         "compaction.auto" => Some(config.compaction.auto.to_string()),
         "permissions.default" => Some(permission_name(config.permissions.default).to_owned()),
+        "budget.session_cost_cap_micros_usd" => config
+            .budget
+            .session_cost_cap_micros_usd
+            .map(|value| value.to_string()),
+        "budget.daily_cost_cap_micros_usd" => config
+            .budget
+            .daily_cost_cap_micros_usd
+            .map(|value| value.to_string()),
+        "budget.warn_at_percent" => Some(config.budget.warn_at_percent.to_string()),
         _ if key.starts_with("models.thinking.") => config
             .models
             .thinking
@@ -2623,8 +2726,33 @@ fn set_toml_leaf(document: &mut toml::Value, key: &str, value: &str) -> Result<(
     }
     let boolean_leaf = key == "compaction.auto"
         || (segments.first() == Some(&"servers") && segments.last() == Some(&"enabled"));
+    let integer_leaf = matches!(
+        key,
+        "budget.session_cost_cap_micros_usd"
+            | "budget.daily_cost_cap_micros_usd"
+            | "budget.warn_at_percent"
+    );
     let stored = if boolean_leaf {
         toml::Value::Boolean(value == "true")
+    } else if integer_leaf {
+        let value = match key {
+            "budget.session_cost_cap_micros_usd" | "budget.daily_cost_cap_micros_usd" => {
+                parse_tui_budget_cap(key, value)?.ok_or_else(|| {
+                    ConfigError::InvalidUserSetting {
+                        key: key.to_owned(),
+                        reason: "unlimited budget caps must clear the TOML leaf".to_owned(),
+                    }
+                })?
+            }
+            "budget.warn_at_percent" => u64::from(parse_tui_budget_warning(key, value)?),
+            _ => unreachable!("matched integer TUI setting"),
+        };
+        toml::Value::Integer(
+            i64::try_from(value).map_err(|_| ConfigError::InvalidUserSetting {
+                key: key.to_owned(),
+                reason: "setting value exceeds the TOML integer range".to_owned(),
+            })?,
+        )
     } else {
         toml::Value::String(value.to_owned())
     };
@@ -2635,6 +2763,37 @@ fn set_toml_leaf(document: &mut toml::Value, key: &str, value: &str) -> Result<(
         });
     };
     table.insert((*leaf).to_owned(), stored);
+    Ok(())
+}
+
+fn clear_toml_leaf(document: &mut toml::Value, key: &str) -> Result<(), ConfigError> {
+    let segments = key.split('.').collect::<Vec<_>>();
+    let Some((leaf, parents)) = segments.split_last() else {
+        return Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "setting key is empty".to_owned(),
+        });
+    };
+    let mut cursor = document;
+    for segment in parents {
+        let Some(table) = cursor.as_table_mut() else {
+            return Err(ConfigError::InvalidUserSetting {
+                key: key.to_owned(),
+                reason: "setting parent is not a TOML table".to_owned(),
+            });
+        };
+        let Some(next) = table.get_mut(*segment) else {
+            return Ok(());
+        };
+        cursor = next;
+    }
+    let Some(table) = cursor.as_table_mut() else {
+        return Err(ConfigError::InvalidUserSetting {
+            key: key.to_owned(),
+            reason: "setting parent is not a TOML table".to_owned(),
+        });
+    };
+    table.remove(*leaf);
     Ok(())
 }
 
@@ -3085,7 +3244,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    use rw_types::config::{PermissionDecision, UpdateChannel};
+    use rw_types::config::{Config, PermissionDecision, UpdateChannel};
     use tempfile::tempdir;
 
     use super::{ConfigError, ConfigLoader, ConfigSource, read_assessed_project_file};
@@ -3205,6 +3364,129 @@ mod tests {
         assert!(
             matches!(error, ConfigError::InvalidUserSetting { .. }),
             "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn tui_budget_settings_parse_human_dollars_and_validate_percent() {
+        let config = Config::default();
+        let session_key = "budget.session_cost_cap_micros_usd";
+        let daily_key = "budget.daily_cost_cap_micros_usd";
+        let warning_key = "budget.warn_at_percent";
+
+        for value in ["1", "12.5", " 12.5 ", "999999.99", "unlimited", "UNLIMITED"] {
+            super::validate_tui_setting(&config, session_key, value)
+                .unwrap_or_else(|error| panic!("{value:?} should be valid: {error}"));
+        }
+        for value in ["0", "0.00", "-1", "12.345", "1000000", "$12.50"] {
+            assert!(
+                matches!(
+                    super::validate_tui_setting(&config, session_key, value),
+                    Err(ConfigError::InvalidUserSetting { .. })
+                ),
+                "{value:?} should be rejected",
+            );
+        }
+        for value in ["1", "100", " 80 "] {
+            super::validate_tui_setting(&config, warning_key, value)
+                .unwrap_or_else(|error| panic!("{value:?} should be valid: {error}"));
+        }
+        for value in ["0", "101"] {
+            assert!(matches!(
+                super::validate_tui_setting(&config, warning_key, value),
+                Err(ConfigError::InvalidUserSetting { .. })
+            ));
+        }
+
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        let loader = ConfigLoader::new(user.clone(), project);
+        let applied = loader
+            .persist_tui_setting(session_key, "12")
+            .expect("whole-dollar session cap");
+        assert_eq!(
+            applied.config.budget.session_cost_cap_micros_usd,
+            Some(12_000_000)
+        );
+        let applied = loader
+            .persist_tui_setting(daily_key, "12.50")
+            .expect("cent-precise daily cap");
+        assert_eq!(
+            applied.config.budget.daily_cost_cap_micros_usd,
+            Some(12_500_000)
+        );
+        let applied = loader
+            .persist_tui_setting(warning_key, "1")
+            .expect("lower warning bound");
+        assert_eq!(applied.config.budget.warn_at_percent, 1);
+        let applied = loader
+            .persist_tui_setting(warning_key, "100")
+            .expect("upper warning bound");
+        assert_eq!(applied.config.budget.warn_at_percent, 100);
+
+        let persisted = fs::read_to_string(user).expect("user config");
+        assert!(persisted.contains("session_cost_cap_micros_usd = 12000000"));
+        assert!(persisted.contains("daily_cost_cap_micros_usd = 12500000"));
+        assert!(persisted.contains("warn_at_percent = 100"));
+    }
+
+    #[test]
+    fn tui_budget_unlimited_clears_an_existing_cap_leaf() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(
+            &user,
+            "[budget]\nsession_cost_cap_micros_usd = 5000000\nwarn_at_percent = 75\n",
+        )
+        .expect("budget config");
+        let loader = ConfigLoader::new(user.clone(), project);
+
+        let applied = loader
+            .persist_tui_setting("budget.session_cost_cap_micros_usd", " UnLiMiTeD ")
+            .expect("clear session cap");
+
+        assert_eq!(applied.config.budget.session_cost_cap_micros_usd, None);
+        assert_eq!(applied.config.budget.warn_at_percent, 75);
+        let persisted = fs::read_to_string(user).expect("user config");
+        assert!(!persisted.contains("session_cost_cap_micros_usd"));
+        assert!(persisted.contains("warn_at_percent = 75"));
+    }
+
+    #[test]
+    fn tui_budget_setting_refuses_a_trusted_project_override_without_writing_user_config() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        fs::write(
+            &project,
+            "[budget]\nsession_cost_cap_micros_usd = 5000000\n",
+        )
+        .expect("project budget config");
+        let loader = ConfigLoader::new(user.clone(), project).with_project_trust(true);
+
+        let error = loader
+            .persist_tui_setting("budget.session_cost_cap_micros_usd", "1")
+            .expect_err("trusted project budget must refuse a user-layer write");
+
+        match error {
+            ConfigError::InvalidUserSetting { key, reason } => {
+                assert_eq!(key, "budget.session_cost_cap_micros_usd");
+                assert_eq!(
+                    reason,
+                    "a trusted project configuration already sets this budget; edit the project's config file to change it"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(
+            !user.exists(),
+            "refused setting must not create the user file"
         );
     }
 

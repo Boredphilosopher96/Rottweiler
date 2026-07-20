@@ -1123,6 +1123,15 @@ pub enum ClientCommand {
         session_id: SessionId,
         rule_id: String,
     },
+    RemoveQueuedMessage {
+        meta: CommandMeta,
+        session_id: SessionId,
+        position: String,
+    },
+    ClearQueuedMessages {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
     RevokePermissionApproval {
         meta: CommandMeta,
         session_id: SessionId,
@@ -1249,6 +1258,8 @@ impl ClientCommand {
             | Self::ListPermissions { meta, .. }
             | Self::AddSessionPermissionRule { meta, .. }
             | Self::RemoveSessionPermissionRule { meta, .. }
+            | Self::RemoveQueuedMessage { meta, .. }
+            | Self::ClearQueuedMessages { meta, .. }
             | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
@@ -1310,6 +1321,8 @@ impl ClientCommand {
             | Self::ListPermissions { meta, .. }
             | Self::AddSessionPermissionRule { meta, .. }
             | Self::RemoveSessionPermissionRule { meta, .. }
+            | Self::RemoveQueuedMessage { meta, .. }
+            | Self::ClearQueuedMessages { meta, .. }
             | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
@@ -1834,6 +1847,16 @@ pub enum EngineEvent {
         content: String,
         attachments: Vec<StoredAttachment>,
     },
+    QueuedMessageRemoved {
+        meta: EventMeta,
+        #[serde(with = "decimal_u64")]
+        #[schemars(with = "String")]
+        #[ts(type = "string")]
+        position: u64,
+    },
+    QueuedMessagesCleared {
+        meta: EventMeta,
+    },
     UserMessageAccepted {
         meta: EventMeta,
         #[serde(with = "decimal_u64")]
@@ -2236,6 +2259,8 @@ impl EngineEvent {
             | Self::WorkspaceRootsChanged { meta, .. }
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
+            | Self::QueuedMessageRemoved { meta, .. }
+            | Self::QueuedMessagesCleared { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
             | Self::SessionTitleUpdated { meta, .. }
             | Self::PluginMessageInjected { meta, .. }
@@ -2322,6 +2347,8 @@ impl EngineEvent {
             | Self::WorkspaceRootsChanged { meta, .. }
             | Self::DriverChanged { meta, .. }
             | Self::MessageQueued { meta, .. }
+            | Self::QueuedMessageRemoved { meta, .. }
+            | Self::QueuedMessagesCleared { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
             | Self::SessionTitleUpdated { meta, .. }
             | Self::PluginMessageInjected { meta, .. }

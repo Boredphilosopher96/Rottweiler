@@ -701,10 +701,14 @@ enum PendingEvent {
         unrestorable_paths: Vec<UnrestorablePath>,
     },
     MessageQueued {
-        position: usize,
+        position: u64,
         content: String,
         attachments: Vec<StoredAttachment>,
     },
+    QueuedMessageRemoved {
+        position: u64,
+    },
+    QueuedMessagesCleared,
     PluginMessageInjected {
         plugin_id: String,
         content: String,
@@ -1182,10 +1186,14 @@ impl PendingEvent {
                 attachments,
             } => EngineEvent::MessageQueued {
                 meta,
-                position: u64::try_from(position).unwrap_or(u64::MAX),
+                position,
                 content,
                 attachments,
             },
+            Self::QueuedMessageRemoved { position } => {
+                EngineEvent::QueuedMessageRemoved { meta, position }
+            }
+            Self::QueuedMessagesCleared => EngineEvent::QueuedMessagesCleared { meta },
             Self::PluginMessageInjected {
                 plugin_id,
                 content,
@@ -1649,6 +1657,7 @@ pub struct SessionRecoveredState {
     pub title: Option<String>,
     pub conversation: Vec<Turn>,
     pub queued_messages: Vec<String>,
+    pub queued_message_positions: Vec<u64>,
     pub completed_turns: u64,
     pub next_turn: u64,
     pub last_sequence: Option<SequenceId>,
@@ -1808,10 +1817,14 @@ fn recovered_pending_event(
             attachments,
             ..
         } => PendingEvent::MessageQueued {
-            position: usize::try_from(*position).unwrap_or(usize::MAX),
+            position: *position,
             content: content.clone(),
             attachments: attachments.clone(),
         },
+        EngineEvent::QueuedMessageRemoved { position, .. } => PendingEvent::QueuedMessageRemoved {
+            position: *position,
+        },
+        EngineEvent::QueuedMessagesCleared { .. } => PendingEvent::QueuedMessagesCleared,
         EngineEvent::UserMessageAccepted {
             agent_turn,
             content,
@@ -2250,7 +2263,7 @@ pub fn project_session_events(
     let mut conversation = Vec::new();
     let mut title = None;
     let mut conversation_agent_turns = Vec::new();
-    let mut queued = VecDeque::new();
+    let mut queued = VecDeque::<(u64, String)>::new();
     let mut uncommitted_users = BTreeMap::<u64, Vec<String>>::new();
     let mut completed_turns = 0_u64;
     let mut active_turn = None;
@@ -2324,9 +2337,23 @@ pub fn project_session_events(
                 partial_tool_blocks.clear();
                 next_turn = next_turn.max(turn.saturating_add(1));
             }
-            PendingEvent::MessageQueued { content, .. } => queued.push_back(content.clone()),
+            PendingEvent::MessageQueued {
+                position, content, ..
+            } => queued.push_back((*position, content.clone())),
+            PendingEvent::QueuedMessageRemoved { position } => {
+                if let Some(index) = queued
+                    .iter()
+                    .position(|(queued_position, _)| queued_position == position)
+                {
+                    queued.remove(index);
+                }
+            }
+            PendingEvent::QueuedMessagesCleared => queued.clear(),
             PendingEvent::UserMessageAccepted { turn, content, .. } => {
-                if let Some(position) = queued.iter().position(|queued| queued == content) {
+                if let Some(position) = queued
+                    .iter()
+                    .position(|(_, queued_content)| queued_content == content)
+                {
                     queued.remove(position);
                 }
                 uncommitted_users
@@ -2782,7 +2809,8 @@ pub fn project_session_events(
     Ok(SessionRecoveredState {
         title,
         conversation,
-        queued_messages: queued.into_iter().collect(),
+        queued_messages: queued.iter().map(|(_, content)| content.clone()).collect(),
+        queued_message_positions: queued.iter().map(|(position, _)| *position).collect(),
         completed_turns,
         next_turn,
         last_sequence,
@@ -5523,6 +5551,7 @@ struct ActorState {
     event_clock: Arc<dyn EventClock>,
     conversation: Vec<Turn>,
     queued: VecDeque<String>,
+    queued_positions: VecDeque<u64>,
     running: Option<RunningTurn>,
     pending_approvals: BTreeMap<String, PendingApproval>,
     next_turn: u64,
@@ -5611,6 +5640,18 @@ impl ActorState {
                     })
             })
             .collect();
+        let queued_positions = recovered
+            .queued_messages
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                recovered
+                    .queued_message_positions
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(|| u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
+            })
+            .collect();
         Self {
             session_id,
             session_title: recovered.title.clone(),
@@ -5618,6 +5659,7 @@ impl ActorState {
             event_clock,
             conversation: recovered.conversation.clone(),
             queued: recovered.queued_messages.iter().cloned().collect(),
+            queued_positions,
             running: None,
             pending_approvals: BTreeMap::new(),
             next_turn: recovered
@@ -5925,6 +5967,7 @@ async fn run_actor(
         state.turn_ends.insert(turn, state.conversation.len());
     }
     if !state.queued.is_empty() {
+        state.queued_positions.clear();
         let messages = state
             .queued
             .drain(..)
@@ -6034,6 +6077,8 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::ListPermissions { meta, .. }
         | ClientCommand::AddSessionPermissionRule { meta, .. }
         | ClientCommand::RemoveSessionPermissionRule { meta, .. }
+        | ClientCommand::RemoveQueuedMessage { meta, .. }
+        | ClientCommand::ClearQueuedMessages { meta, .. }
         | ClientCommand::RevokePermissionApproval { meta, .. }
         | ClientCommand::BeginProviderAuth { meta, .. }
         | ClientCommand::ConfigureBuiltinProvider { meta, .. }
@@ -6097,6 +6142,8 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::ListPermissions { session_id, .. }
         | ClientCommand::AddSessionPermissionRule { session_id, .. }
         | ClientCommand::RemoveSessionPermissionRule { session_id, .. }
+        | ClientCommand::RemoveQueuedMessage { session_id, .. }
+        | ClientCommand::ClearQueuedMessages { session_id, .. }
         | ClientCommand::RevokePermissionApproval { session_id, .. }
         | ClientCommand::BeginProviderAuth { session_id, .. }
         | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
@@ -7381,13 +7428,25 @@ async fn handle_plugin_message(
         MAX_PLUGIN_MESSAGE_BYTES,
     )?;
     let disposition = if state.running.is_some() {
+        let position = state
+            .queued_positions
+            .back()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                AgentLoopError::InvalidConfiguration(
+                    "queued message position space is exhausted".to_owned(),
+                )
+            })?;
         state.queued.push_back(content.clone());
+        state.queued_positions.push_back(position);
         if let Err(error) = emit(
             state,
             runtime.events,
             &runtime.config.event_sink,
             PendingEvent::MessageQueued {
-                position: state.queued.len(),
+                position,
                 content: content.clone(),
                 attachments: Vec::new(),
             },
@@ -7395,6 +7454,7 @@ async fn handle_plugin_message(
         .await
         {
             state.queued.pop_back();
+            state.queued_positions.pop_back();
             return Err(error);
         }
         MessageDisposition::Queued
@@ -8038,6 +8098,121 @@ async fn handle_actor_command(
                 }
             }
 
+            if let ClientCommand::RemoveQueuedMessage { position, .. } = &command {
+                let Some(index) = state
+                    .queued_positions
+                    .iter()
+                    .position(|queued_position| queued_position.to_string() == *position)
+                else {
+                    let (code, message) = if state.queued.is_empty() {
+                        (
+                            "queued_messages_empty",
+                            "there are no queued messages to remove".to_owned(),
+                        )
+                    } else {
+                        (
+                            "queued_message_not_found",
+                            format!("queued message position {position:?} is no longer present"),
+                        )
+                    };
+                    let outcome = protocol_rejection(code, message);
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(Err(AgentLoopError::InvalidConfiguration(
+                            "queued message removal failed".to_owned(),
+                        )));
+                    }
+                    return;
+                };
+                let queued_position = state.queued_positions[index];
+                state.transient_cause = Some(meta.request_id.clone());
+                let persisted = emit(
+                    state,
+                    events,
+                    &config.event_sink,
+                    PendingEvent::QueuedMessageRemoved {
+                        position: queued_position,
+                    },
+                )
+                .await;
+                state.transient_cause = None;
+                match persisted {
+                    Ok(()) => {
+                        state.queued.remove(index);
+                        state.queued_positions.remove(index);
+                        let accepted = CommandOutcome::Accepted;
+                        send_ack(state, events, &meta, session, accepted.clone());
+                        let _ = respond.send(accepted);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Ok(ProtocolCompletion::Unit));
+                        }
+                    }
+                    Err(error) => {
+                        let outcome = protocol_rejection(
+                            "session_persistence_failure",
+                            format!("could not persist queued message removal: {error}"),
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Err(error));
+                        }
+                    }
+                }
+                return;
+            }
+
+            if matches!(&command, ClientCommand::ClearQueuedMessages { .. }) {
+                if state.queued.is_empty() {
+                    let outcome = protocol_rejection(
+                        "queued_messages_empty",
+                        "there are no queued messages to clear",
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(Err(AgentLoopError::InvalidConfiguration(
+                            "queued message clear failed".to_owned(),
+                        )));
+                    }
+                    return;
+                }
+                state.transient_cause = Some(meta.request_id.clone());
+                let persisted = emit(
+                    state,
+                    events,
+                    &config.event_sink,
+                    PendingEvent::QueuedMessagesCleared,
+                )
+                .await;
+                state.transient_cause = None;
+                match persisted {
+                    Ok(()) => {
+                        state.queued.clear();
+                        state.queued_positions.clear();
+                        let accepted = CommandOutcome::Accepted;
+                        send_ack(state, events, &meta, session, accepted.clone());
+                        let _ = respond.send(accepted);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Ok(ProtocolCompletion::Unit));
+                        }
+                    }
+                    Err(error) => {
+                        let outcome = protocol_rejection(
+                            "session_persistence_failure",
+                            format!("could not persist queued message clear: {error}"),
+                        );
+                        send_ack(state, events, &meta, session, outcome.clone());
+                        let _ = respond.send(outcome);
+                        if let Some(complete) = completion.take() {
+                            let _ = complete.send(Err(error));
+                        }
+                    }
+                }
+                return;
+            }
+
             if matches!(
                 &command,
                 ClientCommand::ListPermissions { .. }
@@ -8346,6 +8521,8 @@ async fn handle_actor_command(
                 ClientCommand::ListPermissions { .. }
                 | ClientCommand::AddSessionPermissionRule { .. }
                 | ClientCommand::RemoveSessionPermissionRule { .. }
+                | ClientCommand::RemoveQueuedMessage { .. }
+                | ClientCommand::ClearQueuedMessages { .. }
                 | ClientCommand::RevokePermissionApproval { .. }
                 | ClientCommand::ListMcpServers { .. }
                 | ClientCommand::ListRuntimeServices { .. }
@@ -8820,6 +8997,11 @@ async fn handle_actor_command(
                         Ok(SessionRecoveredState {
                             conversation: state.conversation.clone(),
                             queued_messages: state.queued.iter().cloned().collect(),
+                            queued_message_positions: state
+                                .queued_positions
+                                .iter()
+                                .copied()
+                                .collect(),
                             context_surgery: state.context_surgery.clone(),
                             pruned_tool_outputs: state.pruned_tool_outputs.clone(),
                             accounting: state.accounting.clone(),
@@ -9526,13 +9708,26 @@ async fn handle_actor_command(
                 )));
             } else if state.running.is_some() {
                 let content = config.secret_redactor.redact(&content);
+                let Some(position) = state
+                    .queued_positions
+                    .back()
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                else {
+                    let _ = respond.send(Err(AgentLoopError::InvalidConfiguration(
+                        "queued message position space is exhausted".to_owned(),
+                    )));
+                    return;
+                };
                 state.queued.push_back(content.clone());
+                state.queued_positions.push_back(position);
                 let persisted = emit(
                     state,
                     events,
                     &config.event_sink,
                     PendingEvent::MessageQueued {
-                        position: state.queued.len(),
+                        position,
                         content,
                         attachments: Vec::new(),
                     },
@@ -9540,6 +9735,7 @@ async fn handle_actor_command(
                 .await;
                 if let Err(error) = persisted {
                     state.queued.pop_back();
+                    state.queued_positions.pop_back();
                     let _ = respond.send(Err(error));
                 } else {
                     let _ = respond.send(Ok(MessageDisposition::Queued));
@@ -9790,6 +9986,7 @@ async fn rewind_state(
     state.turn_ends.retain(|turn, _| *turn <= to_turn);
     state.completed_turns = u64::try_from(state.turn_ends.len()).unwrap_or(u64::MAX);
     state.queued.clear();
+    state.queued_positions.clear();
     state.pending_rewind = Some((to_turn, rewind.clone()));
     if let Err(error) = config.checkpoints.acknowledge_rewind(&rewind).await {
         state.poisoned = true;
@@ -10078,6 +10275,7 @@ async fn handle_turn_signal(
                 start_session_title_generation(state, config, turn_signals);
             }
             if !state.queued.is_empty() {
+                state.queued_positions.clear();
                 let messages = state
                     .queued
                     .drain(..)
@@ -10130,6 +10328,7 @@ async fn handle_turn_signal(
                 let _ = completion.send(result.map(|()| ProtocolCompletion::Unit));
             }
             if state.running.is_none() && !state.queued.is_empty() {
+                state.queued_positions.clear();
                 let messages = state
                     .queued
                     .drain(..)
@@ -21592,6 +21791,193 @@ mod tests {
         assert!(matches!(
             driver_events.recv().await.expect("old driver notification"),
             EngineEvent::DriverChanged { .. }
+        ));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn queued_message_mutations_are_durable_broadcast_and_reject_stale_targets() {
+        let root = TempDir::new().expect("tempdir");
+        let sink = Arc::new(RecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(PendingModel),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.event_sink = sink.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let session_id = SessionId("fixture-session".to_owned());
+        let mut driver_events = handle.subscribe_client(ClientId("local".to_owned()), None);
+        let mut observer_events = handle.subscribe_client(ClientId("observer".to_owned()), None);
+        for (client, role) in [
+            ("local", ClientRole::Driver),
+            ("observer", ClientRole::Observer),
+        ] {
+            assert_eq!(
+                handle
+                    .dispatch(ClientCommand::AttachSession {
+                        meta: protocol_meta(client, &format!("attach-{client}")),
+                        session_id: session_id.clone(),
+                        last_seen_sequence: None,
+                        role,
+                    })
+                    .await
+                    .expect("attach"),
+                CommandOutcome::Accepted
+            );
+        }
+
+        assert_eq!(
+            handle
+                .send_message("running")
+                .await
+                .expect("running message"),
+            MessageDisposition::Started
+        );
+        assert_eq!(
+            handle.send_message("remove me").await.expect("first queue"),
+            MessageDisposition::Queued
+        );
+        assert_eq!(
+            handle.send_message("keep me").await.expect("second queue"),
+            MessageDisposition::Queued
+        );
+        assert_eq!(
+            handle
+                .snapshot()
+                .await
+                .expect("queued snapshot")
+                .queued_messages,
+            ["remove me", "keep me"]
+        );
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::RemoveQueuedMessage {
+                    meta: protocol_meta("local", "remove-queued"),
+                    session_id: session_id.clone(),
+                    position: "1".to_owned(),
+                })
+                .await
+                .expect("remove queued message"),
+            CommandOutcome::Accepted
+        );
+        for receiver in [&mut driver_events, &mut observer_events] {
+            let removed = next_matching(receiver, |event| {
+                matches!(event, PendingEvent::QueuedMessageRemoved { position: 1 })
+            })
+            .await;
+            assert!(matches!(
+                removed.wire,
+                EngineEvent::QueuedMessageRemoved {
+                    meta: EventMeta {
+                        caused_by: Some(RequestId(ref request)),
+                        ..
+                    },
+                    position: 1,
+                } if request == "remove-queued"
+            ));
+        }
+        assert_eq!(
+            handle
+                .snapshot()
+                .await
+                .expect("removed snapshot")
+                .queued_messages,
+            ["keep me"]
+        );
+
+        let unknown = handle
+            .dispatch(ClientCommand::RemoveQueuedMessage {
+                meta: protocol_meta("local", "remove-unknown"),
+                session_id: session_id.clone(),
+                position: "99".to_owned(),
+            })
+            .await
+            .expect("unknown removal outcome");
+        assert!(matches!(
+            unknown,
+            CommandOutcome::Rejected {
+                error: EngineError { ref code, .. }
+            } if code == "queued_message_not_found"
+        ));
+        assert_eq!(
+            handle.send_message("new tail").await.expect("third queue"),
+            MessageDisposition::Queued
+        );
+
+        let durable_after_remove = sink.read_after(None).await.expect("durable removal log");
+        assert!(durable_after_remove.iter().any(|event| matches!(
+            event,
+            EngineEvent::MessageQueued {
+                position: 3,
+                content,
+                ..
+            } if content == "new tail"
+        )));
+        let recovered_after_remove =
+            project_session_events(&durable_after_remove).expect("recover removed queue");
+        assert_eq!(
+            recovered_after_remove.queued_messages,
+            ["keep me", "new tail"]
+        );
+        assert_eq!(recovered_after_remove.queued_message_positions, [2, 3]);
+
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::ClearQueuedMessages {
+                    meta: protocol_meta("local", "clear-queued"),
+                    session_id: session_id.clone(),
+                })
+                .await
+                .expect("clear queued messages"),
+            CommandOutcome::Accepted
+        );
+        for receiver in [&mut driver_events, &mut observer_events] {
+            let cleared = next_matching(receiver, |event| {
+                matches!(event, PendingEvent::QueuedMessagesCleared)
+            })
+            .await;
+            assert!(matches!(
+                cleared.wire,
+                EngineEvent::QueuedMessagesCleared {
+                    meta: EventMeta {
+                        caused_by: Some(RequestId(ref request)),
+                        ..
+                    },
+                } if request == "clear-queued"
+            ));
+        }
+        assert!(
+            handle
+                .snapshot()
+                .await
+                .expect("cleared snapshot")
+                .queued_messages
+                .is_empty()
+        );
+        let durable_after_clear = sink.read_after(None).await.expect("durable clear log");
+        assert!(
+            project_session_events(&durable_after_clear)
+                .expect("recover cleared queue")
+                .queued_messages
+                .is_empty()
+        );
+
+        let empty = handle
+            .dispatch(ClientCommand::ClearQueuedMessages {
+                meta: protocol_meta("local", "clear-empty"),
+                session_id,
+            })
+            .await
+            .expect("empty clear outcome");
+        assert!(matches!(
+            empty,
+            CommandOutcome::Rejected {
+                error: EngineError { ref code, .. }
+            } if code == "queued_messages_empty"
         ));
     }
 

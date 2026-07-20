@@ -542,6 +542,36 @@ describe("pure TUI state reducer", () => {
     expect(state.protocol.unknownEvents).toBe(0)
   })
 
+  test("projects queued-message removal and clear broadcasts by stable position", () => {
+    let state = reduce(createInitialState(), {
+      type: "message_queued",
+      meta: meta("1"),
+      position: "1",
+      content: "first",
+      attachments: [],
+    })
+    state = reduce(state, {
+      type: "message_queued",
+      meta: meta("2"),
+      position: "2",
+      content: "second",
+      attachments: [],
+    })
+    state = reduce(state, {
+      type: "queued_message_removed",
+      meta: meta("3"),
+      position: "1",
+    })
+    expect(state.queuedMessages).toEqual([{ position: "2", content: "second" }])
+
+    state = reduce(state, {
+      type: "queued_messages_cleared",
+      meta: meta("4"),
+    })
+    expect(state.queuedMessages).toEqual([])
+    expect(state.protocol.unknownEvents).toBe(0)
+  })
+
   test("projects live workspace-root generations using only virtual paths", () => {
     const state = reduce(createInitialState(), {
       type: "workspace_roots_changed",

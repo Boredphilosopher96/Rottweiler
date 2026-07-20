@@ -991,6 +991,42 @@
         "meta": {
           "$ref": "#/$defs/EventMeta"
         },
+        "position": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "queued_message_removed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "position"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
+        "type": {
+          "type": "string",
+          "const": "queued_messages_cleared"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/EventMeta"
+        },
         "agent_turn": {
           "type": "string"
         },

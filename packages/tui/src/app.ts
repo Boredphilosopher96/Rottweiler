@@ -161,11 +161,17 @@ type PickerKind =
   | "providerRecovery"
   | "permissions" | "permissionMode" | "permissionYoloConfirm" | "trust"
   | "permissionInput"
+  | "queuedMessages"
+  | "budgets" | "budgetPresets" | "budgetInput"
   | "sessions" | "settings"
   | "agents" | "agentActions"
   | "timeline" | "timelineActions"
   | "themes"
 type ProjectionKind = "commands" | "models" | "sessions" | "files" | "settings" | "permissions" | "mcp" | "runtime_services"
+type BudgetSettingKey =
+  | "budget.session_cost_cap_micros_usd"
+  | "budget.daily_cost_cap_micros_usd"
+  | "budget.warn_at_percent"
 const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 const MAX_VISIBLE_SUBAGENTS = 256
 const MAX_SUBAGENT_ID_LENGTH = 256
@@ -214,6 +220,9 @@ type PermissionPickerAction =
   | { readonly kind: "remove"; readonly ruleId: string }
   | { readonly kind: "revoke"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
   | { readonly kind: "info" }
+type QueuedMessagePickerAction =
+  | { readonly kind: "remove"; readonly position: string }
+  | { readonly kind: "clear" }
 type PermissionModePickerAction = Extract<PermissionPickerAction, { readonly kind: "mode" }>
 
 const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
@@ -349,6 +358,7 @@ export class RottweilerApp extends BoxRenderable {
   #latestModelsRequest: string | null = null
   #latestSessionsRequest: string | null = null
   #latestSettingsRequest: string | null = null
+  #pendingSettingsRequest: string | null = null
   #latestPermissionsRequest: string | null = null
   #latestMcpRequest: string | null = null
   #latestRuntimeServicesRequest: string | null = null
@@ -367,6 +377,10 @@ export class RottweilerApp extends BoxRenderable {
   #commandsRequested = false
   #commandCatalogTruncationNotified = false
   #modelsRequested = false
+  #providerOnboardingOffered = false
+  #providerOnboardingModelsResponseHandled = false
+  #providerPickerOnboarding = false
+  #providerActivationModelsRequest: string | null = null
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
   #pickerAnchored = false
   #pickerQuery = ""
@@ -379,6 +393,7 @@ export class RottweilerApp extends BoxRenderable {
   #storedProviderKeys = new Set<string>()
   #providerApiKeyPending: string | null = null
   #mcpDraftName: string | null = null
+  #budgetSettingKey: BudgetSettingKey | null = null
   #reviewOpen = false
   #pendingReviewSelection: string | null = null
   #postSubmitPicker: "models" | "providers" | "themes" | "settings" | "permissions" | "mcp" | "agents" | null = null
@@ -871,6 +886,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#latestModelsRequest = null
       this.#latestSessionsRequest = null
       this.#latestSettingsRequest = null
+      this.#pendingSettingsRequest = null
       this.#latestPermissionsRequest = null
       this.#latestMcpRequest = null
       this.#latestRuntimeServicesRequest = null
@@ -1074,6 +1090,11 @@ export class RottweilerApp extends BoxRenderable {
       commandRequestId !== this.#latestModelsRequest
     ) return
     if (
+      event.type === "settings_listed" &&
+      this.#latestSettingsRequest !== null &&
+      commandRequestId !== this.#latestSettingsRequest
+    ) return
+    if (
       (event.type === "sessions_listed" || event.type === "sessions_search_ready") &&
       this.#latestSessionsRequest !== null &&
       commandRequestId !== this.#latestSessionsRequest
@@ -1094,7 +1115,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (event.type === "settings_listed") {
       this.#clearProjectionError("settings")
-      this.#latestSettingsRequest = null
+      this.#pendingSettingsRequest = null
     }
     if (event.type === "permissions_listed") {
       this.#clearProjectionError("permissions")
@@ -1331,6 +1352,46 @@ export class RottweilerApp extends BoxRenderable {
     if (event.type === "subagent_spawned" || event.type === "subagent_finished") {
       this.#requestSubagents()
     }
+    if (event.type === "models_listed") {
+      const activationCatalog = commandRequestId === this.#providerActivationModelsRequest
+      if (activationCatalog) this.#providerActivationModelsRequest = null
+      if (
+        activationCatalog &&
+        !next.replay.active &&
+        this.#activeSubagentId === null
+      ) {
+        const availableModels = next.models.filter((model) => model.available !== false)
+        if (availableModels.length === 1) {
+          const model = availableModels[0]!
+          this.#command({
+            type: "switch_model",
+            model: model.id ?? model.alias,
+            provider: model.provider ?? null,
+          })
+          this.closePicker()
+        }
+      }
+      if (
+        !this.#providerOnboardingModelsResponseHandled &&
+        next.connection.phase === "connected"
+      ) {
+        this.#providerOnboardingModelsResponseHandled = true
+        const ready = next.providers.some(
+          (provider) => provider.configured && provider.authenticated && provider.reachable,
+        )
+        if (
+          !ready &&
+          !this.#providerOnboardingOffered &&
+          !next.replay.active &&
+          this.#activeSubagentId === null &&
+          this.composer.value.length === 0 &&
+          this.#pickerKind === null
+        ) {
+          this.#providerOnboardingOffered = true
+          this.openProviderPicker(true)
+        }
+      }
+    }
     if (event.type === "provider_auth_started") {
       const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
       const attemptId = typeof eventRecord.attempt_id === "string" ? eventRecord.attempt_id : null
@@ -1390,6 +1451,7 @@ export class RottweilerApp extends BoxRenderable {
         : "provider connection did not become ready"
       if (eventRecord.success === true) {
         this.#requestModels(true)
+        this.#providerActivationModelsRequest = this.#latestModelsRequest
       } else {
         this.#projectClientError("provider_activation_failed", message, true)
       }
@@ -1558,10 +1620,11 @@ export class RottweilerApp extends BoxRenderable {
     this.#refreshPicker()
   }
 
-  openProviderPicker(): void {
+  openProviderPicker(onboarding = false): void {
     this.#pickerAnchored = false
     this.#pickerQuery = ""
     this.#modelProviderFilter = null
+    this.#providerPickerOnboarding = onboarding
     this.#positionPicker(false)
     this.#pickerKind = "providers"
     if (!this.#modelsRequested) {
@@ -1620,6 +1683,40 @@ export class RottweilerApp extends BoxRenderable {
     this.#refreshPicker()
   }
 
+  openBudgetPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#budgetSettingKey = null
+    this.#positionPicker(false)
+    this.#pickerKind = "budgets"
+    this.#command({ type: "list_settings" })
+    this.#refreshPicker()
+  }
+
+  #openBudgetPresetPicker(key: BudgetSettingKey): void {
+    this.#budgetSettingKey = key
+    this.#pickerKind = "budgetPresets"
+    this.#refreshPicker()
+  }
+
+  #openBudgetTextPrompt(key: BudgetSettingKey): void {
+    this.#budgetSettingKey = key
+    this.#pickerKind = "budgetInput"
+    const prompt = key === "budget.session_cost_cap_micros_usd"
+      ? "Session limit in USD, e.g. 12.50"
+      : key === "budget.daily_cost_cap_micros_usd"
+        ? "Daily limit in USD, e.g. 12.50"
+        : "Warning threshold as a percent, e.g. 70"
+    const placeholder = key === "budget.warn_at_percent" ? "70" : "12.50"
+    this.picker.openTextPrompt(prompt, placeholder, (value) => {
+      const selectedKey = this.#budgetSettingKey
+      this.closePicker()
+      if (selectedKey !== null) {
+        this.#command({ type: "set_setting", key: selectedKey, value })
+      }
+    }, 32)
+  }
+
   openPermissionModePicker(): void {
     this.#pickerAnchored = false
     this.#pickerQuery = ""
@@ -1642,6 +1739,15 @@ export class RottweilerApp extends BoxRenderable {
     this.#timelineTurn = null
     this.#positionPicker(false)
     this.#pickerKind = "timeline"
+    this.#refreshPicker()
+  }
+
+  openQueuedMessagesPicker(): void {
+    if (this.#state.replay.active) return
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "queuedMessages"
     this.#refreshPicker()
   }
 
@@ -1833,6 +1939,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#pendingFilePreview = null
     this.#providerApiKeyProvider = null
     this.#providerRecoveryProvider = null
+    this.#budgetSettingKey = null
     this.#subagentActionId = null
     this.#themeBeforePreview = null
     this.#themePreviewCommitted = false
@@ -2370,6 +2477,49 @@ export class RottweilerApp extends BoxRenderable {
         })
         break
       }
+      case "queuedMessages": {
+        if (this.#state.replay.active) {
+          this.closePicker()
+          break
+        }
+        const queuedMessages = this.#state.queuedMessages
+        if (queuedMessages.length === 0) {
+          this.#showPickerStatus(
+            "Queued messages",
+            "No queued messages",
+            "Messages sent during an active turn will appear here.",
+          )
+          break
+        }
+        const items: PickerItem<QueuedMessagePickerAction>[] = [
+          ...queuedMessages.map((message) => ({
+            id: `queued.message.${message.position}`,
+            label: queuedMessageLabel(message.content),
+            description: "queued",
+            value: { kind: "remove", position: message.position } as const,
+          })),
+          ...(queuedMessages.length < 2
+            ? []
+            : [{
+                id: "queued.messages.clear",
+                label: "Clear all queued messages",
+                description: "Remove every queued message",
+                value: { kind: "clear" } as const,
+              }]),
+        ]
+        this.#openPicker("Queued messages · select to remove", items, (item) => {
+          if (item.value.kind === "clear") {
+            this.closePicker()
+            this.#command({ type: "clear_queued_messages" })
+            return
+          }
+          this.#command({
+            type: "remove_queued_message",
+            position: item.value.position,
+          })
+        })
+        break
+      }
       case "files":
         const fileError = this.#projectionErrors.files
         if (
@@ -2644,7 +2794,9 @@ export class RottweilerApp extends BoxRenderable {
           break
         }
         this.#openPicker(
-          "Providers",
+          this.#providerPickerOnboarding
+            ? "Welcome to Rottweiler · connect a provider to start"
+            : "Providers",
           providerItems,
           (item) => {
             const provider = item.value as RottweilerState["providers"][number] | null
@@ -3023,6 +3175,108 @@ export class RottweilerApp extends BoxRenderable {
         )
         }
         break
+      case "budgets": {
+        const rows = [
+          {
+            key: "budget.session_cost_cap_micros_usd",
+            label: "Session limit",
+            description: "Maximum spend for this session",
+          },
+          {
+            key: "budget.daily_cost_cap_micros_usd",
+            label: "Daily limit",
+            description: "Maximum spend per UTC day",
+          },
+          {
+            key: "budget.warn_at_percent",
+            label: "Warn at",
+            description: "Warn when a configured cap reaches this percentage",
+          },
+        ] as const
+        const settings = rows.map((row) => ({
+          ...row,
+          setting: this.#state.settings.find((setting) => setting.key === row.key),
+        }))
+        if (settings.some(({ setting }) => setting === undefined)) {
+          if (this.#pendingSettingsRequest !== null) {
+            this.#showPickerLoading("Budget limits", "Loading budget limits")
+          } else {
+            this.#showPickerStatus(
+              "Budget limits",
+              "Budget limits could not be loaded",
+              "Close and reopen this panel to retry.",
+            )
+          }
+          break
+        }
+        this.#openPicker(
+          "Budget limits",
+          settings.map(({ key, label, description, setting }) => ({
+            id: `budget.setting.${key}`,
+            label: `${label} · ${setting?.value}`,
+            description: `${description} · ${setting?.provenance}${setting?.appliesImmediately ? " · live" : " · next session"}`,
+            value: key,
+          })),
+          (item) => this.#openBudgetPresetPicker(item.value),
+        )
+        break
+      }
+      case "budgetPresets": {
+        const key = this.#budgetSettingKey
+        if (key === null) {
+          this.openBudgetPicker()
+          break
+        }
+        const isWarning = key === "budget.warn_at_percent"
+        const title = key === "budget.session_cost_cap_micros_usd"
+          ? "Session limit"
+          : key === "budget.daily_cost_cap_micros_usd"
+            ? "Daily limit"
+            : "Warn at"
+        const presets = isWarning
+          ? [
+              { label: "50%", value: "50" },
+              { label: "75%", value: "75" },
+              { label: "80%", value: "80" },
+              { label: "90%", value: "90" },
+              { label: "Custom…", value: null },
+            ]
+          : [
+              { label: "$5", value: "5" },
+              { label: "$10", value: "10" },
+              { label: "$20", value: "20" },
+              { label: "$50", value: "50" },
+              { label: "$100", value: "100" },
+              { label: "Unlimited", value: "unlimited" },
+              { label: "Custom amount…", value: null },
+            ]
+        this.#openPicker(
+          title,
+          presets.map((preset) => ({
+            id: `budget.preset.${key}.${preset.value ?? "custom"}`,
+            label: preset.label,
+            description: preset.value === null
+              ? isWarning
+                ? "Enter a custom warning percentage"
+                : "Enter a USD amount with up to two decimals"
+              : isWarning
+                ? `Warn at ${preset.label} of either configured cap`
+                : preset.value === "unlimited"
+                  ? `Remove the ${title.toLowerCase()} cap`
+                  : `Set the ${title.toLowerCase()} to ${preset.label}`,
+            value: preset.value,
+          })),
+          (item) => {
+            if (item.value === null) {
+              this.#openBudgetTextPrompt(key)
+              return
+            }
+            this.closePicker()
+            this.#command({ type: "set_setting", key, value: item.value })
+          },
+        )
+        break
+      }
       case "settings": {
         type SettingPickerAction =
           | { kind: "theme"; theme: RottweilerTheme }
@@ -3050,7 +3304,7 @@ export class RottweilerApp extends BoxRenderable {
             })
           }
         }
-        if (items.length === 0 && this.#latestSettingsRequest !== null) {
+        if (items.length === 0 && this.#pendingSettingsRequest !== null) {
           this.#showPickerLoading("Settings", "Loading settings")
           break
         }
@@ -3470,6 +3724,7 @@ export class RottweilerApp extends BoxRenderable {
       { id: "session.list", title: "Switch session", section: "Conversation", description: this.#paletteDescription("Resume another durable session", "open_session_picker"), run: open(() => this.openSessionPicker()) },
       { id: "review.open", title: "Review changes", section: "Conversation", description: this.#paletteDescription("Open the cumulative session diff", "open_review"), run: open(() => this.openReview()) },
       { id: "plan.show", title: "Show plan", section: "Conversation", description: "Display the pending or approved plan", run: submit("/plan") },
+      { id: "queue.manage", title: "Manage queued messages", section: "Conversation", description: "Review, remove, or clear queued messages", run: open(() => this.openQueuedMessagesPicker()) },
       { id: "cost.show", title: "Show usage & cost", section: "Conversation", description: "Display tokens, cost, and budget", run: submit("/cost") },
 
       { id: "model.list", title: "Switch model", section: "Agents & models", description: this.#paletteDescription("Choose the active model alias", "open_model_picker"), run: open(() => this.openModelPicker()) },
@@ -3491,6 +3746,7 @@ export class RottweilerApp extends BoxRenderable {
 
       { id: "permissions.mode", title: "Permission mode", section: "Safety", description: "Choose when tool use needs confirmation", run: open(() => this.openPermissionModePicker()) },
       { id: "permissions.manage", title: "Permission rules", section: "Safety", description: "Inspect, add, and remove session rules", run: open(() => this.openPermissionPicker()) },
+      { id: "budget.manage", title: "Budget limits", section: "Safety", description: "Set session and daily spend caps", run: open(() => this.openBudgetPicker()) },
 
       { id: "theme.list", title: "Switch theme", section: "Appearance & settings", description: "Preview and choose an interface theme", run: open(() => this.openThemePicker()) },
       { id: "settings.open", title: "Settings", section: "Appearance & settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
@@ -4577,6 +4833,8 @@ export class RottweilerApp extends BoxRenderable {
       | { readonly type: "add_session_permission_rule"; readonly pattern: string; readonly action: PermissionAction }
       | { readonly type: "remove_session_permission_rule"; readonly ruleId: string }
       | { readonly type: "revoke_permission_approval"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
+      | { readonly type: "remove_queued_message"; readonly position: string }
+      | { readonly type: "clear_queued_messages" }
       | { readonly type: "begin_provider_auth"; readonly provider: string }
       | { readonly type: "configure_builtin_provider"; readonly provider: string }
       | { readonly type: "complete_provider_auth" | "cancel_provider_auth"; readonly provider: string; readonly attemptId: string }
@@ -4604,8 +4862,9 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingModelSwitchRequests.add(meta.request_id)
     } else if (command.type === "list_sessions" || command.type === "search_sessions") {
       this.#latestSessionsRequest = meta.request_id
-    } else if (command.type === "list_settings") {
+    } else if (command.type === "list_settings" || command.type === "set_setting") {
       this.#latestSettingsRequest = meta.request_id
+      if (command.type === "list_settings") this.#pendingSettingsRequest = meta.request_id
     } else if (command.type === "list_permissions") {
       this.#latestPermissionsRequest = meta.request_id
     } else if (command.type === "list_mcp_servers") {
@@ -4626,6 +4885,7 @@ export class RottweilerApp extends BoxRenderable {
       case "list_mcp_servers":
       case "list_runtime_services":
       case "list_permissions":
+      case "clear_queued_messages":
         dispatched = { type: command.type, meta, session_id: this.#sessionId }
         break
       case "set_setting":
@@ -4642,6 +4902,14 @@ export class RottweilerApp extends BoxRenderable {
           meta,
           session_id: this.#sessionId,
           rule_id: command.ruleId,
+        }
+        break
+      case "remove_queued_message":
+        dispatched = {
+          type: command.type,
+          meta,
+          session_id: this.#sessionId,
+          position: command.position,
         }
         break
       case "revoke_permission_approval":
@@ -4773,7 +5041,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#modelsRequested = false
       this.#latestModelsRequest = null
     } else if (kind === "settings") {
-      this.#latestSettingsRequest = null
+      this.#pendingSettingsRequest = null
     } else if (kind === "permissions") {
       this.#latestPermissionsRequest = null
     } else if (kind === "mcp") {
@@ -5069,6 +5337,12 @@ function boundedUiText(value: string, maximum: number): string {
     .replace(/\s+/g, " ")
     .trim()
   return truncateToCells(safe, maximum)
+}
+
+function queuedMessageLabel(content: string): string {
+  const firstLine = content.split(/\r?\n/, 1)[0] ?? ""
+  const label = boundedUiText(firstLine, 64)
+  return label.length === 0 ? "(empty message)" : label
 }
 
 function timelineTurnLabel(content: string): string {

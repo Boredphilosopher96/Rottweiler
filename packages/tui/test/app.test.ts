@@ -1840,6 +1840,375 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.picker.select.options.map((option) => option.value)).toContain("model.list")
   })
 
+  test("manages queued messages from the Conversation palette and refreshes after removal", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        queuedMessages: [
+          { position: "1", content: "Remove this instruction\nwith hidden details" },
+          { position: "2", content: "Keep this instruction" },
+        ],
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openCommandPicker()
+    const paletteOptions = app.picker.select.options
+    const planIndex = paletteOptions.findIndex((option) => option.value === "plan.show")
+    const queueIndex = paletteOptions.findIndex((option) => option.value === "queue.manage")
+    const costIndex = paletteOptions.findIndex((option) => option.value === "cost.show")
+    expect(queueIndex).toBe(planIndex + 1)
+    expect(costIndex).toBe(queueIndex + 1)
+    expect(paletteOptions[queueIndex]?.name).toBe("Manage queued messages")
+    expect(paletteOptions[queueIndex]?.description).toBe(
+      "Review, remove, or clear queued messages",
+    )
+    app.picker.select.setSelectedIndex(queueIndex)
+    app.picker.select.selectCurrent()
+
+    expect(app.picker.title).toContain("Queued messages")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "Remove this instruction",
+      "Keep this instruction",
+      "Clear all queued messages",
+    ])
+    expect(app.picker.select.options.map((option) => option.description)).toEqual([
+      "queued",
+      "queued",
+      "Remove every queued message",
+    ])
+
+    app.picker.select.setSelectedIndex(0)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "remove_queued_message",
+      position: "1",
+    }))
+    expect(app.picker.visible).toBeTrue()
+
+    app.handleEvent({
+      type: "queued_message_removed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-tui-test",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      position: "1",
+    })
+    expect(app.picker.visible).toBeTrue()
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "Keep this instruction",
+    ])
+
+    app.handleEvent({
+      type: "message_queued",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-tui-test",
+        sequence_id: "2",
+        emitted_at: "2026-01-01T00:00:02Z",
+      },
+      position: "3",
+      content: "Another queued instruction",
+      attachments: [],
+    })
+    const clearIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "queued.messages.clear",
+    )
+    expect(clearIndex).toBeGreaterThanOrEqual(0)
+    app.picker.select.setSelectedIndex(clearIndex)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(app.picker.visible).toBeFalse()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "clear_queued_messages",
+    }))
+  })
+
+  test("shows an empty queued-message status without actionable rows", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openQueuedMessagesPicker()
+    expect(app.picker.status.plainText).toContain("No queued messages")
+    expect(app.picker.status.visible).toBeTrue()
+    expect(app.picker.select.visible).toBeFalse()
+    expect(app.picker.select.options).toHaveLength(0)
+    app.picker.select.selectCurrent()
+    expect(emitted.filter((command) =>
+      command.type === "remove_queued_message" || command.type === "clear_queued_messages"
+    )).toEqual([])
+  })
+
+  test("does not open queued-message controls during historical replay", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      replaySessionId: "historical-queue",
+      initialState: {
+        ...createInitialState(),
+        queuedMessages: [{ position: "1", content: "Historical queued instruction" }],
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openQueuedMessagesPicker()
+    expect(app.picker.visible).toBeFalse()
+    expect(emitted.filter((command) =>
+      command.type === "remove_queued_message" || command.type === "clear_queued_messages"
+    )).toEqual([])
+  })
+
+  test("configures human-friendly budget limits from palette presets and custom prompts", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+        settings: [
+          {
+            key: "budget.session_cost_cap_micros_usd",
+            label: "Session cost cap",
+            value: "$12.50",
+            choices: [],
+            provenance: "user",
+            appliesImmediately: false,
+          },
+          {
+            key: "budget.daily_cost_cap_micros_usd",
+            label: "Daily cost cap",
+            value: "Unlimited",
+            choices: [],
+            provenance: "built-in",
+            appliesImmediately: false,
+          },
+          {
+            key: "budget.warn_at_percent",
+            label: "Budget warning",
+            value: "80%",
+            choices: [],
+            provenance: "user",
+            appliesImmediately: false,
+          },
+        ],
+      },
+      onCommand(command) {
+        emitted.push(command)
+        if (command.type === "set_setting" && command.value === "0") {
+          return {
+            type: "rejected",
+            error: {
+              category: "config",
+              code: "invalid_user_setting",
+              message: "warning threshold must be an integer from 1 through 100",
+              retryable: false,
+            },
+          }
+        }
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openCommandPicker()
+    const paletteOptions = app.picker.select.options
+    const permissionsIndex = paletteOptions.findIndex((option) => option.value === "permissions.manage")
+    const budgetIndex = paletteOptions.findIndex((option) => option.value === "budget.manage")
+    expect(budgetIndex).toBe(permissionsIndex + 1)
+    expect(paletteOptions[budgetIndex]?.name).toBe("Budget limits")
+    expect(paletteOptions[budgetIndex]?.description).toBe("Set session and daily spend caps")
+    app.picker.select.setSelectedIndex(budgetIndex)
+    app.picker.select.selectCurrent()
+
+    expect(app.picker.title).toContain("Budget limits")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "Session limit · $12.50",
+      "Daily limit · Unlimited",
+      "Warn at · 80%",
+    ])
+    expect(app.picker.select.options.map((option) => option.description)).toEqual([
+      "Maximum spend for this session · user · next session",
+      "Maximum spend per UTC day · built-in · next session",
+      "Warn when a configured cap reaches this percentage · user · next session",
+    ])
+
+    const sessionIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "budget.setting.budget.session_cost_cap_micros_usd",
+    )
+    app.picker.select.setSelectedIndex(sessionIndex)
+    app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("Session limit")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "$5",
+      "$10",
+      "$20",
+      "$50",
+      "$100",
+      "Unlimited",
+      "Custom amount…",
+    ])
+    const twentyIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "budget.preset.budget.session_cost_cap_micros_usd.20",
+    )
+    app.picker.select.setSelectedIndex(twentyIndex)
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "set_setting",
+      key: "budget.session_cost_cap_micros_usd",
+      value: "20",
+    }))
+
+    app.openBudgetPicker()
+    const warningIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "budget.setting.budget.warn_at_percent",
+    )
+    app.picker.select.setSelectedIndex(warningIndex)
+    app.picker.select.selectCurrent()
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "50%",
+      "75%",
+      "80%",
+      "90%",
+      "Custom…",
+    ])
+    const eightyIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "budget.preset.budget.warn_at_percent.80",
+    )
+    app.picker.select.setSelectedIndex(eightyIndex)
+    app.picker.select.selectCurrent()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "set_setting",
+      key: "budget.warn_at_percent",
+      value: "80",
+    }))
+
+    app.openBudgetPicker()
+    const customWarningIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "budget.setting.budget.warn_at_percent",
+    )
+    app.picker.select.setSelectedIndex(customWarningIndex)
+    app.picker.select.selectCurrent()
+    const customWarningPreset = app.picker.select.options.findIndex(
+      (option) => option.value === "budget.preset.budget.warn_at_percent.custom",
+    )
+    app.picker.select.setSelectedIndex(customWarningPreset)
+    app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("Warning threshold as a percent, e.g. 70")
+    await setup.mockInput.typeText("0")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    expect(app.banner.plainText).toContain("warning threshold must be an integer from 1 through 100")
+
+    app.openBudgetPicker()
+    const dailyIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "budget.setting.budget.daily_cost_cap_micros_usd",
+    )
+    app.picker.select.setSelectedIndex(dailyIndex)
+    app.picker.select.selectCurrent()
+    const customIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "budget.preset.budget.daily_cost_cap_micros_usd.custom",
+    )
+    app.picker.select.setSelectedIndex(customIndex)
+    app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("Daily limit in USD, e.g. 12.50")
+    expect(app.picker.input.placeholder).toBe("12.50")
+    await setup.mockInput.typeText("12.50")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "set_setting",
+      key: "budget.daily_cost_cap_micros_usd",
+      value: "12.50",
+    }))
+  })
+
+  test("ignores an older settings response after a newer settings change response", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+        settings: [{
+          key: "compaction.auto",
+          label: "Automatic compaction",
+          value: "true",
+          choices: ["true", "false"],
+          provenance: "user",
+          appliesImmediately: false,
+        }],
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openSettingsPicker()
+    const olderRequest = emitted.findLast((command) => command.type === "list_settings")
+    const disabled = app.picker.select.options.findIndex(
+      (option) => option.value === "compaction.auto:false",
+    )
+    app.picker.select.setSelectedIndex(disabled)
+    app.picker.select.selectCurrent()
+    const newerRequest = emitted.findLast((command) => command.type === "set_setting")
+    expect(olderRequest?.type).toBe("list_settings")
+    expect(newerRequest?.type).toBe("set_setting")
+
+    const settingsListed = (requestId: string, value: string): EngineEvent => ({
+      type: "settings_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "ui",
+        request_id: requestId,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      settings: [{
+        key: "compaction.auto",
+        label: "Automatic compaction",
+        value,
+        choices: ["true", "false"],
+        provenance: "user",
+        applies_immediately: false,
+      }],
+    })
+
+    app.handleEvent(settingsListed(newerRequest!.meta.request_id, "false"))
+    app.handleEvent(settingsListed(olderRequest!.meta.request_id, "true"))
+
+    expect(app.state.settings).toEqual([
+      expect.objectContaining({ key: "compaction.auto", value: "false" }),
+    ])
+  })
+
   test("derives palette binding hints from custom compiled global bindings", () => {
     const setup = createTestRenderer({ width: 80, height: 18, useThread: false })
     return setup.then(({ renderer: testRenderer }) => {
@@ -4342,6 +4711,155 @@ describe("Rottweiler OpenTUI shell", () => {
     app.closePicker()
     app.openModelPicker()
     expect(emitted.filter((command) => command.type === "list_models")).toHaveLength(2)
+  })
+
+  test("offers provider onboarding once on the first unready model catalog", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+      },
+    })
+    renderer.root.add(app)
+
+    app.handleEvent({
+      type: "models_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "first-models", emitted_at: "2026-01-01T00:00:00Z" },
+      models: [],
+      providers: [{
+        name: "openai",
+        auth_kind: "api_key",
+        next_action: "configure",
+        configured: false,
+        authenticated: false,
+        reachable: false,
+        model_count: 0,
+      }],
+    })
+    expect(app.picker.title).toContain("Welcome to Rottweiler · connect a provider to start")
+
+    app.closePicker()
+    app.handleEvent({
+      type: "models_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "refreshed-models", emitted_at: "2026-01-01T00:00:01Z" },
+      models: [],
+      providers: [{
+        name: "openai",
+        auth_kind: "api_key",
+        next_action: "configure",
+        configured: false,
+        authenticated: false,
+        reachable: false,
+        model_count: 0,
+      }],
+    })
+    expect(app.picker.visible).toBeFalse()
+  })
+
+  test("does not offer provider onboarding when a provider is ready", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+      },
+    })
+    renderer.root.add(app)
+
+    app.handleEvent({
+      type: "models_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "ready-models", emitted_at: "2026-01-01T00:00:00Z" },
+      models: [],
+      providers: [{
+        name: "openai",
+        auth_kind: "api_key",
+        next_action: "select_models",
+        configured: true,
+        authenticated: true,
+        reachable: true,
+        model_count: 1,
+      }],
+    })
+    expect(app.picker.visible).toBeFalse()
+  })
+
+  test("does not interrupt a non-empty composer with provider onboarding", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+      },
+    })
+    renderer.root.add(app)
+    app.composer.value = "already typing"
+
+    app.handleEvent({
+      type: "models_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "typed-models", emitted_at: "2026-01-01T00:00:00Z" },
+      models: [],
+      providers: [],
+    })
+    expect(app.picker.visible).toBeFalse()
+  })
+
+  test("auto-selects the sole available model after provider activation", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+      },
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.handleEvent({
+      type: "provider_activation_finished",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "activation", emitted_at: "2026-01-01T00:00:00Z" },
+      session_id: "session-local",
+      provider: "openai",
+      success: true,
+      message: "Connected",
+    })
+    const refresh = emitted.findLast((command) => command.type === "list_models")
+    expect(refresh?.type).toBe("list_models")
+    app.handleEvent({
+      type: "models_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: refresh!.meta.request_id, emitted_at: "2026-01-01T00:00:01Z" },
+      models: [{
+        id: "openai/gpt-5",
+        alias: "openai/gpt-5",
+        provider: "openai",
+        providers: ["openai"],
+        available: true,
+        capabilities: { vision: true, thinking: true, tool_calling: true },
+      }],
+      providers: [{
+        name: "openai",
+        auth_kind: "api_key",
+        next_action: "select_models",
+        configured: true,
+        authenticated: true,
+        reachable: true,
+        model_count: 1,
+      }],
+    })
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "switch_model",
+      model: "openai/gpt-5",
+      provider: "openai",
+    }))
+    expect(app.picker.visible).toBeFalse()
   })
 
   test("shows command catalog truncation once without a palette pseudo-action", async () => {

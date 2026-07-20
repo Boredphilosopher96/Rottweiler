@@ -3458,6 +3458,8 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::ListPermissions { session_id, .. }
         | ClientCommand::AddSessionPermissionRule { session_id, .. }
         | ClientCommand::RemoveSessionPermissionRule { session_id, .. }
+        | ClientCommand::RemoveQueuedMessage { session_id, .. }
+        | ClientCommand::ClearQueuedMessages { session_id, .. }
         | ClientCommand::RevokePermissionApproval { session_id, .. }
         | ClientCommand::BeginProviderAuth { session_id, .. }
         | ClientCommand::ConfigureBuiltinProvider { session_id, .. }

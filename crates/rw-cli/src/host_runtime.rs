@@ -453,6 +453,7 @@ impl CliSessionFactory {
                 applies_immediately: false,
             },
         ];
+        settings.extend(budget_setting_descriptors(loaded));
         settings.extend(
             mcp_servers
                 .iter()
@@ -2217,6 +2218,51 @@ fn mcp_setting_server(key: &str) -> Option<&str> {
         (Some("mcp"), Some("servers"), Some(server), Some("enabled"), None) => Some(server),
         _ => None,
     }
+}
+
+/// Rounds down to whole cents for display; TUI-authored values are exact multiples of 10,000 micros and round-trip exactly.
+fn format_cost_cap(micros: Option<u64>) -> String {
+    let Some(micros) = micros else {
+        return "Unlimited".to_owned();
+    };
+    let cents = micros / 10_000;
+    format!("${}.{:02}", cents / 100, cents % 100)
+}
+
+fn budget_setting_descriptors(
+    loaded: &rw_store::config::LoadedConfig,
+) -> [UserSettingDescriptor; 3] {
+    let provenance = |key: &str| {
+        loaded
+            .provenance(key)
+            .map_or_else(|| "built-in".to_owned(), ToString::to_string)
+    };
+    [
+        UserSettingDescriptor {
+            key: "budget.session_cost_cap_micros_usd".to_owned(),
+            label: "Session cost cap".to_owned(),
+            value: format_cost_cap(loaded.config.budget.session_cost_cap_micros_usd),
+            choices: Vec::new(),
+            provenance: provenance("budget.session_cost_cap_micros_usd"),
+            applies_immediately: false,
+        },
+        UserSettingDescriptor {
+            key: "budget.daily_cost_cap_micros_usd".to_owned(),
+            label: "Daily cost cap".to_owned(),
+            value: format_cost_cap(loaded.config.budget.daily_cost_cap_micros_usd),
+            choices: Vec::new(),
+            provenance: provenance("budget.daily_cost_cap_micros_usd"),
+            applies_immediately: false,
+        },
+        UserSettingDescriptor {
+            key: "budget.warn_at_percent".to_owned(),
+            label: "Budget warning".to_owned(),
+            value: format!("{}%", loaded.config.budget.warn_at_percent),
+            choices: Vec::new(),
+            provenance: provenance("budget.warn_at_percent"),
+            applies_immediately: false,
+        },
+    ]
 }
 
 const fn permission_decision_name(decision: PermissionDecision) -> &'static str {
@@ -4921,6 +4967,56 @@ mod tests {
                 .iter()
                 .all(|setting| !setting.key.contains("openai/gpt-5-mini"))
         );
+    }
+
+    #[test]
+    fn budget_setting_descriptors_format_human_values_without_choices() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        let mut loaded = ConfigLoader::new(user, project)
+            .load()
+            .expect("loaded config");
+        loaded.config.budget.session_cost_cap_micros_usd = Some(12_500_000);
+        loaded.config.budget.daily_cost_cap_micros_usd = None;
+        loaded.config.budget.warn_at_percent = 80;
+        let session = SessionDescriptor {
+            session_id: SessionId("budget-settings".to_owned()),
+            title: "Budget settings".to_owned(),
+            workspace_name: "repo".to_owned(),
+            model: ModelAlias("fast".to_owned()),
+            driver_client_id: None,
+            shell_active: false,
+        };
+
+        let settings =
+            CliSessionFactory::setting_descriptors(&loaded, &session, None, "standard", &[]);
+        let descriptor = |key: &str| {
+            settings
+                .iter()
+                .find(|setting| setting.key == key)
+                .unwrap_or_else(|| panic!("missing descriptor {key}"))
+        };
+
+        assert_eq!(
+            descriptor("budget.session_cost_cap_micros_usd").value,
+            "$12.50"
+        );
+        assert_eq!(
+            descriptor("budget.daily_cost_cap_micros_usd").value,
+            "Unlimited"
+        );
+        assert_eq!(descriptor("budget.warn_at_percent").value, "80%");
+        for key in [
+            "budget.session_cost_cap_micros_usd",
+            "budget.daily_cost_cap_micros_usd",
+            "budget.warn_at_percent",
+        ] {
+            assert!(descriptor(key).choices.is_empty());
+            assert!(!descriptor(key).applies_immediately);
+        }
     }
 
     #[test]

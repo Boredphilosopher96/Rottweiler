@@ -56,6 +56,8 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "workspace_roots_changed",
   "driver_changed",
   "message_queued",
+  "queued_message_removed",
+  "queued_messages_cleared",
   "user_message_accepted",
   "session_title_updated",
   "plugin_message_injected",
@@ -590,6 +592,15 @@ function applyKnownEvent(
           { position: event.position, content: event.content },
         ],
       }
+    case "queued_message_removed":
+      return {
+        ...state,
+        queuedMessages: state.queuedMessages.filter(
+          (message) => message.position !== event.position,
+        ),
+      }
+    case "queued_messages_cleared":
+      return { ...state, queuedMessages: [] }
     case "workspace_roots_changed":
       return {
         ...state,

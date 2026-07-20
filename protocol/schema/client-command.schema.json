@@ -1014,6 +1014,50 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "position": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "remove_queued_message"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "position"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "clear_queued_messages"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "approval_id": {
           "type": "string"
         },
