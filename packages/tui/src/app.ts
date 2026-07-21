@@ -53,7 +53,6 @@ import {
   type TextClipboardAdapter,
 } from "./platform"
 import {
-  PROTOCOL_VERSION,
   type ApprovalDecision,
   type ApprovalBinding,
   type Attachment,
@@ -65,6 +64,15 @@ import {
   type PermissionAction,
   type PermissionApprovalScope,
 } from "./protocol"
+import {
+  ProjectionRequestBroker,
+  type ProjectionKind,
+} from "./projection-requests"
+import {
+  PresentationController,
+  type PresentationFrameScheduler,
+} from "./presentation"
+import { PickerController, type PickerKind } from "./picker-controller"
 import { presentError, sanitizeErrorFragment, truncateToCells } from "./render"
 import { setWorkspaceRoots } from "./render/tool-presentation"
 import {
@@ -142,10 +150,7 @@ export interface RottweilerAppOptions {
   readonly platform?: NodeJS.Platform
 }
 
-export interface PresentationFrameScheduler {
-  schedule(callback: () => void, delayMs: number): unknown
-  cancel(handle: unknown): void
-}
+export type { PresentationFrameScheduler } from "./presentation"
 
 interface PendingPresentationEvent {
   readonly event: WireEngineEvent
@@ -160,27 +165,10 @@ export interface TerminalHandoverAdapter {
   resume(): void
 }
 
-type PickerKind =
-  | "palette" | "keyboardHelp" | "commands" | "files" | "attachments" | "mcp"
-  | "mcpActions" | "mcpInput" | "mcpRemoveConfirm"
-  | "modes" | "models" | "providers" | "providerAuth" | "providerApiKey"
-  | "providerRecovery"
-  | "permissions" | "permissionMode" | "permissionYoloConfirm" | "trust"
-  | "permissionInput"
-  | "queuedMessages"
-  | "exportFormat" | "exportPath" | "exportOverwrite"
-  | "workspaceRoots"
-  | "budgets" | "budgetPresets" | "budgetInput"
-  | "sessions" | "sessionActions" | "sessionRename" | "settings"
-  | "agents" | "agentActions"
-  | "timeline" | "timelineActions"
-  | "themes"
-type ProjectionKind = "commands" | "models" | "sessions" | "files" | "settings" | "permissions" | "mcp" | "runtime_services"
 type BudgetSettingKey =
   | "budget.session_cost_cap_micros_usd"
   | "budget.daily_cost_cap_micros_usd"
   | "budget.warn_at_percent"
-const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 const MAX_VISIBLE_SUBAGENTS = 256
 const EMPTY_TEXT_PROMPT_SENTINEL = "\u200B"
 const MAX_SUBAGENT_ID_LENGTH = 256
@@ -393,27 +381,8 @@ export class RottweilerApp extends BoxRenderable {
   #terminalFocused = true
   #systemThemeMode: ThemeMode | null
   #systemTheme: RottweilerTheme
-  #pickerKind: PickerKind | null = null
-  #pendingFilePreview: {
-    readonly path: string
-    readonly requestId: string
-    readonly draft: string
-    readonly mention: { readonly start: number; readonly end: number } | null
-  } | null = null
-  #pendingWorkspaceSearchRequest: string | null = null
-  #latestWorkspaceStatusRequest: string | null = null
-  #latestWorkspaceDiffRequest: string | null = null
-  #pendingWorkspaceDiffPath: string | null = null
-  #latestReviewRequest: string | null = null
-  #latestCommandsRequest: string | null = null
-  #latestModelsRequest: string | null = null
-  #latestSessionsRequest: string | null = null
-  #latestSettingsRequest: string | null = null
-  #pendingSettingsRequest: string | null = null
-  #latestPermissionsRequest: string | null = null
-  #latestMcpRequest: string | null = null
-  #latestRuntimeServicesRequest: string | null = null
-  #latestSubagentsRequest: string | null = null
+  #projectionRequests: ProjectionRequestBroker
+  #pickerController: PickerController
   #subagentListError: string | null = null
   #subagentReplays = new Map<string, SubagentReplayState<WireEngineEvent>>()
   #subagentDescriptors: readonly SubagentDescriptor[] = []
@@ -432,10 +401,7 @@ export class RottweilerApp extends BoxRenderable {
   #providerOnboardingModelsResponseReceived = false
   #providerOnboardingSessionsResponseReceived = false
   #providerPickerOnboarding = false
-  #providerActivationModelsRequest: string | null = null
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
-  #pickerAnchored = false
-  #pickerQuery = ""
   #modelProviderFilter: string | null = null
   #providerApiKeyProvider: string | null = null
   #providerRecoveryProvider: RottweilerState["providers"][number] | null = null
@@ -463,9 +429,7 @@ export class RottweilerApp extends BoxRenderable {
   #clipboardNoticeTimer: ReturnType<typeof setTimeout> | null = null
   #exportNoticeTimer: ReturnType<typeof setTimeout> | null = null
   #interruptEscapeArmed = false
-  #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
-  #pendingModelSwitchRequests = new Set<string>()
   #sessionActionId: string | null = null
   #timelineTurn: TimelineTurnChoice | null = null
   #pendingRewindIntent: PendingRewindIntent | null = null
@@ -477,11 +441,7 @@ export class RottweilerApp extends BoxRenderable {
   #vimFocus: VimFocus = "composer"
   #vimFocusBeforePicker: Exclude<VimFocus, "picker"> = "composer"
   #destroyed = false
-  #presentationQueue: PendingPresentationEvent[] = []
-  #subagentPresentationDirty = false
-  #presentationFrameHandle: unknown | null = null
-  #presentingFrame = false
-  #lastPresentationFlushAt = performance.now() - 16
+  #presentation: PresentationController<PendingPresentationEvent>
   #onTerminalFocus = () => {
     this.#terminalFocused = true
   }
@@ -589,7 +549,7 @@ export class RottweilerApp extends BoxRenderable {
       (key.name === "up" || key.name === "down") &&
       this.composer.navigateHistory(key.name === "up" ? "previous" : "next")
     ) {
-      if (this.#pickerAnchored) this.closePicker()
+      if (this.#pickerController.anchored) this.closePicker()
       key.preventDefault()
       key.stopPropagation()
       return
@@ -683,6 +643,28 @@ export class RottweilerApp extends BoxRenderable {
       externalUrl: options.externalUrl ?? noExternalUrl,
       textClipboard: options.textClipboard ?? noTextClipboard,
     }
+    this.#projectionRequests = new ProjectionRequestBroker({
+      clientId: () => this.#options.clientId,
+      sessionId: () => this.#sessionId,
+      requestId: () => this.#options.requestId(),
+      replayActive: () => this.#state.replay.active,
+      emit: (command) => this.#options.onCommand?.(command),
+      onProjectionFailure: (kind, _type, _requestId, message) => {
+        this.#recordProjectionFailure(kind, message)
+      },
+      onCommandFailure: (type, requestId, outcome, message, failure) => {
+        if (outcome !== null) {
+          this.#projectRejection(outcome)
+          return
+        }
+        const code = `${type}_${failure === "unavailable" ? "unavailable" : "failed"}`
+        this.#projectClientError(
+          code,
+          presentError({ category: "protocol", code, message, requestId }).text,
+          true,
+        )
+      },
+    })
     this.#keybindings = compileKeybindings(options.keybindings)
     this.#inputMode = this.#keybindings.preset === "vim" ? "normal" : "standard"
     this.#theme = theme
@@ -702,6 +684,41 @@ export class RottweilerApp extends BoxRenderable {
     if (options.initialEvent !== undefined) {
       this.#state = reduceRottweilerState(this.#state, engineEvent(options.initialEvent))
     }
+    this.#presentation = new PresentationController({
+      scheduler: options.presentationFrame,
+      destroyed: () => this.#destroyed,
+      present: (pending, subagentDirty) => {
+        const latest = pending.at(-1)
+        if (latest !== undefined) this.#bindStateToComponents(latest.next)
+        else if (subagentDirty) this.#bindStateToComponents(this.#state)
+      },
+      afterPresent: (item) => this.#afterPresentedEvent(item),
+    })
+    this.#pickerController = new PickerController({
+      picker: () => this.picker,
+      terminalHeight: () => this.height === 0 ? this.ctx.height : this.height,
+      statusHeight: () => Math.max(1, this.statusLine.height || 1),
+      composerDockHeight: () => this.composer.dockHeight,
+      focusComposer: () => this.composer.focus(),
+      renderPicker: () => this.#renderPicker(),
+      withRefreshGuard: (kind, refresh) => {
+        const suppressThemePreview = kind === "themes" || kind === "settings"
+        const rethemeWasInProgress = this.#rethemeInProgress
+        if (suppressThemePreview) this.#rethemeInProgress = true
+        try {
+          refresh()
+        } finally {
+          this.#rethemeInProgress = rethemeWasInProgress
+        }
+      },
+      onModalOpened: () => {
+        if (this.#keybindings.preset !== "vim" || this.#vimFocus === "picker") return
+        this.#vimFocusBeforePicker = this.#vimFocus
+        this.#vimFocus = "picker"
+        this.#setInputMode("insert")
+      },
+      onClosed: (kind) => this.#afterPickerClosed(kind),
+    })
 
     this.#createThemedSurface(theme)
     ctx.on(CliRenderEvents.FOCUS, this.#onTerminalFocus)
@@ -728,7 +745,7 @@ export class RottweilerApp extends BoxRenderable {
     const attachments = rebuilding ? [...this.composer.attachments] : []
     const scrollTop = rebuilding ? this.transcript.scroller.scrollTop : 0
     const pickerWasVisible = rebuilding && this.picker.visible
-    const pickerKind = this.#pickerKind
+    const pickerKind = this.#pickerController.kind
     const pickerQuery = rebuilding ? this.picker.input.value : ""
     const pickerSelection = rebuilding
       ? this.picker.select.getSelectedOption()?.value
@@ -778,7 +795,7 @@ export class RottweilerApp extends BoxRenderable {
       {
         onApproval: (tool, action) => {
           if (action === "allow_tool_session") {
-            this.#command({
+            this.#projectionRequests.command({
               type: "add_session_permission_rule",
               pattern: `${tool.name}(*)`,
               action: "allow",
@@ -818,14 +835,14 @@ export class RottweilerApp extends BoxRenderable {
     )
     const picker = new FuzzyPickerRenderable(this.ctx, theme, (query) => {
       if (this.picker !== picker) return
-      if (this.#pickerKind === "sessions") this.#scheduleSessionSearch(query)
+      if (this.#pickerController.kind === "sessions") this.#scheduleSessionSearch(query)
     })
     this.picker = picker
     picker.select.on(SelectRenderableEvents.SELECTION_CHANGED, () => {
       // A preview rebuild destroys the old picker. Ignore any queued selection
       // notification from that generation instead of reading its dead buffer.
       if (this.picker !== picker) return
-      if ((this.#pickerKind !== "themes" && this.#pickerKind !== "settings") || this.#rethemeInProgress) return
+      if ((this.#pickerController.kind !== "themes" && this.#pickerController.kind !== "settings") || this.#rethemeInProgress) return
       const id = picker.select.getSelectedOption()?.value
       if (typeof id !== "string") return
       const name = id.startsWith("theme:")
@@ -903,7 +920,7 @@ export class RottweilerApp extends BoxRenderable {
     this.transcript.setScrollOffset(scrollTop)
 
     if (pickerWasVisible && pickerKind !== null) {
-      this.#refreshPicker()
+      this.#pickerController.refresh()
       const selectedIndex = this.picker.select.options.findIndex(
         (option) => option.value === pickerSelection,
       )
@@ -911,7 +928,7 @@ export class RottweilerApp extends BoxRenderable {
       this.picker.input.value = pickerQuery
     }
     this.#rethemeInProgress = false
-    if (this.picker.visible && !this.#pickerAnchored) this.picker.input.focus()
+    if (this.picker.visible && !this.#pickerController.anchored) this.picker.input.focus()
   }
 
   #openPostSubmitPicker(): void {
@@ -951,17 +968,7 @@ export class RottweilerApp extends BoxRenderable {
   /** Update command routing only after the runtime owns the new driver lease. */
   setSessionId(sessionId: string): void {
     if (sessionId !== this.#sessionId) {
-      this.#latestWorkspaceStatusRequest = null
-      this.#latestReviewRequest = null
-      this.#latestCommandsRequest = null
-      this.#latestModelsRequest = null
-      this.#latestSessionsRequest = null
-      this.#latestSettingsRequest = null
-      this.#pendingSettingsRequest = null
-      this.#latestPermissionsRequest = null
-      this.#latestMcpRequest = null
-      this.#latestRuntimeServicesRequest = null
-      this.#latestSubagentsRequest = null
+      this.#projectionRequests.clearForSessionChange()
       this.#subagentListError = null
       this.#subagentReplays.clear()
       this.#subagentDescriptors = []
@@ -978,7 +985,6 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingReviewSelection = null
       this.#outputViewerToolCallId = null
       this.#reviewOpen = false
-      this.#pendingModelSwitchRequests.clear()
       this.#timelineTurn = null
       this.#pendingRewindIntent = null
       this.#composerNotice = null
@@ -1010,10 +1016,9 @@ export class RottweilerApp extends BoxRenderable {
       const listed = event as Extract<EngineEvent, { type: "subagents_listed" }>
       if (
         listed.session_id !== this.#sessionId ||
-        this.#latestSubagentsRequest === null ||
-        commandRequestId !== this.#latestSubagentsRequest
+        !this.#projectionRequests.matches("subagents", commandRequestId)
       ) return
-      this.#latestSubagentsRequest = null
+      this.#projectionRequests.clear("subagents")
       this.#subagentListError = null
       this.#subagentDescriptors = listed.subagents
         .slice(0, MAX_VISIBLE_SUBAGENTS)
@@ -1091,123 +1096,22 @@ export class RottweilerApp extends BoxRenderable {
       if (
         !isSessionForkedEvent(event) ||
         event.parent_session_id !== this.#sessionId ||
-        !this.#pendingForkRequests.has(event.meta.request_id)
+        !this.#projectionRequests.acceptsFork(event.meta.request_id)
       ) return
-      this.#pendingForkRequests.clear()
+      this.#projectionRequests.clearForks()
     }
     if (
       event.type === "sessions_search_ready" &&
-      this.#pickerKind === "sessions" &&
+      this.#pickerController.kind === "sessions" &&
       event.query !== this.picker.input.value
     ) {
       return
     }
-    if (
-      event.type === "workspace_status_ready" &&
-      this.#latestWorkspaceStatusRequest !== null &&
-      commandRequestId !== this.#latestWorkspaceStatusRequest
-    ) {
-      return
-    }
-    if (
-      event.type === "runtime_services_listed" &&
-      this.#latestRuntimeServicesRequest !== null &&
-      commandRequestId !== this.#latestRuntimeServicesRequest
-    ) return
-    if (event.type === "workspace_diff_ready") {
-      const diffPath =
-        isRecord(eventRecord.diff) && typeof eventRecord.diff.path === "string"
-          ? eventRecord.diff.path
-          : null
-      if (
-        this.#latestWorkspaceDiffRequest === null ||
-        commandRequestId !== this.#latestWorkspaceDiffRequest ||
-        diffPath !== this.#pendingWorkspaceDiffPath
-      ) return
-    }
-    if (
-      event.type === "session_review_ready" &&
-      this.#latestReviewRequest !== null &&
-      commandRequestId !== this.#latestReviewRequest
-    ) {
-      return
-    }
-    if (event.type === "workspace_files_found" && this.#pendingWorkspaceSearchRequest !== null) {
-      const requestId =
-        isRecord(event.meta) && typeof event.meta.request_id === "string"
-          ? event.meta.request_id
-          : null
-      if (requestId !== this.#pendingWorkspaceSearchRequest) return
-    }
-    if (event.type === "workspace_file_preview_ready") {
-      const requestId =
-        isRecord(event.meta) && typeof event.meta.request_id === "string"
-          ? event.meta.request_id
-          : null
-      const path =
-        isRecord(event.preview) && typeof event.preview.path === "string"
-          ? event.preview.path
-          : null
-      if (
-        this.#pendingFilePreview === null ||
-        requestId !== this.#pendingFilePreview.requestId ||
-        path !== this.#pendingFilePreview.path
-      ) return
-    }
-    if (
-      event.type === "command_descriptors_listed" &&
-      this.#latestCommandsRequest !== null &&
-      commandRequestId !== this.#latestCommandsRequest
-    ) return
-    if (
-      event.type === "models_listed" &&
-      this.#latestModelsRequest !== null &&
-      commandRequestId !== this.#latestModelsRequest
-    ) return
-    if (
-      event.type === "settings_listed" &&
-      this.#latestSettingsRequest !== null &&
-      commandRequestId !== this.#latestSettingsRequest
-    ) return
-    if (
-      (event.type === "sessions_listed" || event.type === "sessions_search_ready") &&
-      this.#latestSessionsRequest !== null &&
-      commandRequestId !== this.#latestSessionsRequest
-    ) return
-    if (event.type === "command_descriptors_listed") {
-      this.#commandsRequested = false
-      this.#latestCommandsRequest = null
-      this.#clearProjectionError("commands")
-    }
-    if (event.type === "models_listed") {
-      this.#modelsRequested = false
-      this.#latestModelsRequest = null
-      this.#clearProjectionError("models")
-    }
-    if (event.type === "sessions_listed" || event.type === "sessions_search_ready") {
-      this.#clearProjectionError("sessions")
-      this.#latestSessionsRequest = null
-    }
-    if (event.type === "settings_listed") {
-      this.#clearProjectionError("settings")
-      this.#pendingSettingsRequest = null
-    }
-    if (event.type === "permissions_listed") {
-      this.#clearProjectionError("permissions")
-      this.#latestPermissionsRequest = null
-    }
-    if (event.type === "mcp_servers_listed") {
-      this.#clearProjectionError("mcp")
-      this.#latestMcpRequest = null
-    }
-    if (event.type === "runtime_services_listed") {
-      this.#clearProjectionError("runtime_services")
-      this.#latestRuntimeServicesRequest = null
-    }
-    if (event.type === "workspace_files_found") {
-      this.#clearProjectionError("files")
-      this.#pendingWorkspaceSearchRequest = null
-    }
+    if (!this.#projectionRequests.acceptsEvent(event)) return
+    const completedProjection = this.#projectionRequests.completeEvent(event)
+    if (completedProjection === "commands") this.#commandsRequested = false
+    if (completedProjection === "models") this.#modelsRequested = false
+    if (completedProjection !== null) this.#clearProjectionError(completedProjection)
     const previous = this.#state
     const crossSessionTitle =
       event.type === "session_title_updated" &&
@@ -1236,64 +1140,10 @@ export class RottweilerApp extends BoxRenderable {
     // Advance protocol state immediately so reconnect cursors and durable handoff
     // observe every accepted event even when its presentation waits for a frame.
     this.#state = next
-    this.#presentationQueue.push({ event, eventRecord, commandRequestId, previous, next })
-    if (isPresentationStreamDelta(event)) {
-      this.#schedulePresentationFrame()
-      return
-    }
-    this.#flushPresentationQueue()
-  }
-
-  #schedulePresentationFrame(): void {
-    if (this.#presentationFrameHandle !== null) return
-    const scheduler = this.#options.presentationFrame
-    if (scheduler === undefined) {
-      const elapsed = performance.now() - this.#lastPresentationFlushAt
-      // Match OpenCode's ingress batching: after an idle frame, show the first
-      // token immediately; only coalesce deltas that arrive inside the active
-      // 16 ms presentation window.
-      if (elapsed >= 16) {
-        this.#flushPresentationQueue()
-        return
-      }
-      this.#presentationFrameHandle = setTimeout(
-        () => this.#flushPresentationQueue(),
-        Math.max(0, 16 - elapsed),
-      )
-      return
-    }
-    this.#presentationFrameHandle = scheduler.schedule(() => this.#flushPresentationQueue(), 16)
-  }
-
-  #cancelPresentationFrame(): void {
-    const handle = this.#presentationFrameHandle
-    if (handle === null) return
-    this.#presentationFrameHandle = null
-    const scheduler = this.#options.presentationFrame
-    if (scheduler === undefined) clearTimeout(handle as ReturnType<typeof setTimeout>)
-    else scheduler.cancel(handle)
-  }
-
-  #flushPresentationQueue(): void {
-    this.#cancelPresentationFrame()
-    if (
-      this.#destroyed ||
-      (this.#presentationQueue.length === 0 && !this.#subagentPresentationDirty)
-    ) return
-    const pending = this.#presentationQueue
-    this.#presentationQueue = []
-    const subagentDirty = this.#subagentPresentationDirty
-    this.#subagentPresentationDirty = false
-    this.#presentingFrame = true
-    try {
-      const latest = pending.at(-1)
-      if (latest !== undefined) this.setState(latest.next)
-      else if (subagentDirty) this.setState(this.#state)
-    } finally {
-      this.#presentingFrame = false
-    }
-    this.#lastPresentationFlushAt = performance.now()
-    for (const item of pending) this.#afterPresentedEvent(item)
+    this.#presentation.enqueue(
+      { event, eventRecord, commandRequestId, previous, next },
+      isPresentationStreamDelta(event),
+    )
   }
 
   #afterPresentedEvent(item: PendingPresentationEvent): void {
@@ -1352,7 +1202,7 @@ export class RottweilerApp extends BoxRenderable {
     const modelSwitchOutcome =
       event.type === "command_acknowledged" &&
       commandRequestId !== null &&
-      this.#pendingModelSwitchRequests.delete(commandRequestId)
+      this.#projectionRequests.consumeModelSwitch(commandRequestId)
         ? next.commandAcks[commandRequestId]?.outcome
         : null
     if (modelSwitchOutcome?.type === "rejected") {
@@ -1408,7 +1258,7 @@ export class RottweilerApp extends BoxRenderable {
     if (
       next.workspacePreview !== previous.workspacePreview &&
       next.workspacePreview !== null &&
-      this.#pendingFilePreview !== null
+      this.#projectionRequests.filePreview() !== null
     ) {
       const preview = next.workspacePreview
       const name = preview.path.split("/").filter(Boolean).at(-1) ?? "attachment"
@@ -1418,7 +1268,7 @@ export class RottweilerApp extends BoxRenderable {
         media_type: preview.mediaType,
         data: preview.data,
       })
-      const pending = this.#pendingFilePreview
+      const pending = this.#projectionRequests.filePreview()!
       if (attached && pending.mention !== null) {
         const original = pending.draft.slice(pending.mention.start, pending.mention.end)
         const current = this.composer.value
@@ -1430,7 +1280,7 @@ export class RottweilerApp extends BoxRenderable {
             : -1
         if (exact >= 0) this.composer.replaceRange(exact, exact + original.length, "")
       }
-      this.#pendingFilePreview = null
+      this.#projectionRequests.setFilePreview(null)
       if (attached) this.closePicker()
     }
     if (event.type === "session_review_ready" || event.type === "session_review_updated") {
@@ -1447,7 +1297,7 @@ export class RottweilerApp extends BoxRenderable {
       }
     }
     if (event.type === "workspace_diff_ready" && next.workspaceDiff !== null) {
-      this.#pendingWorkspaceDiffPath = null
+      this.#projectionRequests.clear("workspace_diff")
       this.reviewPanel.showWorkspaceDiff(
         next.workspaceDiff.path,
         next.workspaceDiff.unifiedDiff,
@@ -1462,8 +1312,9 @@ export class RottweilerApp extends BoxRenderable {
       this.#requestSubagents()
     }
     if (event.type === "models_listed") {
-      const activationCatalog = commandRequestId === this.#providerActivationModelsRequest
-      if (activationCatalog) this.#providerActivationModelsRequest = null
+      const activationCatalog = this.#projectionRequests.consumeProviderActivationModels(
+        commandRequestId,
+      )
       if (
         activationCatalog &&
         !next.replay.active &&
@@ -1472,7 +1323,7 @@ export class RottweilerApp extends BoxRenderable {
         const availableModels = next.models.filter((model) => model.available !== false)
         if (availableModels.length === 1) {
           const model = availableModels[0]!
-          this.#command({
+          this.#projectionRequests.command({
             type: "switch_model",
             model: model.id ?? model.alias,
             provider: model.provider ?? null,
@@ -1509,7 +1360,7 @@ export class RottweilerApp extends BoxRenderable {
           if (oldest !== undefined) this.#providerAuthCompletionAttempts.delete(oldest)
         }
         this.#providerAuthCompletionAttempts.add(attemptId)
-        this.#command({
+        this.#projectionRequests.command({
           type: "complete_provider_auth",
           provider,
           attemptId,
@@ -1530,7 +1381,7 @@ export class RottweilerApp extends BoxRenderable {
       const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
       if (provider === null) return
       if (eventRecord.auth_kind === "oauth" || eventRecord.auth_kind === "device_flow") {
-        this.#command({ type: "begin_provider_auth", provider })
+        this.#projectionRequests.command({ type: "begin_provider_auth", provider })
       } else if (eventRecord.auth_kind === "api_key") {
         this.openProviderApiKeyPrompt(provider)
       }
@@ -1555,7 +1406,7 @@ export class RottweilerApp extends BoxRenderable {
         : "provider connection did not become ready"
       if (eventRecord.success === true) {
         this.#requestModels(true)
-        this.#providerActivationModelsRequest = this.#latestModelsRequest
+        this.#projectionRequests.markProviderActivationModels()
       } else {
         this.#projectClientError("provider_activation_failed", message, true)
       }
@@ -1569,7 +1420,7 @@ export class RottweilerApp extends BoxRenderable {
       event.type === "command_finished" ||
       (event.type === "user_shell_state_changed" && !event.active)
     ) {
-      this.#command({ type: "get_workspace_status" })
+      this.#projectionRequests.command({ type: "get_workspace_status" })
     }
     if (
       event.type === "tool_call_started" ||
@@ -1584,8 +1435,8 @@ export class RottweilerApp extends BoxRenderable {
       event.type === "context_item_evicted" ||
       event.type === "compaction_attempt_finished"
     ) {
-      this.#command({ type: "get_context" })
-      this.#command({ type: "get_cost" })
+      this.#projectionRequests.command({ type: "get_context" })
+      this.#projectionRequests.command({ type: "get_cost" })
     }
   }
 
@@ -1608,7 +1459,7 @@ export class RottweilerApp extends BoxRenderable {
       !state.replay.active &&
       this.#activeSubagentId === null &&
       this.composer.value.length === 0 &&
-      this.#pickerKind === null
+      this.#pickerController.kind === null
     ) {
       this.#providerOnboardingOffered = true
       this.openProviderPicker(true)
@@ -1617,9 +1468,11 @@ export class RottweilerApp extends BoxRenderable {
 
   setState(state: RottweilerState): void {
     if (this.#destroyed) return
-    if (!this.#presentingFrame && this.#presentationQueue.length > 0) {
-      this.#flushPresentationQueue()
-    }
+    this.#presentation.flushBeforeStateChange()
+    this.#bindStateToComponents(state)
+  }
+
+  #bindStateToComponents(state: RottweilerState): void {
     const previousConnectionPhase = this.#state.connection.phase
     const previousFocusOwner = this.#visibleFocusOwner()
     if (state.workspaceRoots !== this.#workspaceRoots) {
@@ -1711,8 +1564,8 @@ export class RottweilerApp extends BoxRenderable {
         ? "Press Esc again to stop the active response"
         : "Back in parent · press Esc again to stop the child agent"
     }
-    if (this.#pickerKind !== null) {
-      this.#refreshPicker()
+    if (this.#pickerController.kind !== null) {
+      this.#pickerController.refresh()
     }
     if (
       (state.connection.phase === "reconnecting" || state.connection.phase === "disconnected") &&
@@ -1725,92 +1578,64 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   openCommandPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "palette"
+    this.#pickerController.begin("palette")
     if (!this.#commandsRequested) {
       this.#requestCommands()
     }
-    this.#refreshPicker()
+    this.#pickerController.refresh()
   }
 
   openKeyboardHelpPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "keyboardHelp"
-    this.#refreshPicker()
+    this.#pickerController.begin("keyboardHelp")
+    this.#pickerController.refresh()
   }
 
   openFilePicker(query = "", anchored = false): void {
-    this.#pickerAnchored = anchored
-    this.#pickerQuery = query
-    this.#positionPicker(anchored)
-    this.#pickerKind = "files"
-    this.#pendingWorkspaceSearchRequest =
-      this.#command({ type: "search_workspace_files", query, limit: 100 }) ?? null
-    this.#refreshPicker()
+    this.#pickerController.begin("files", anchored, query)
+    this.#projectionRequests.command({ type: "search_workspace_files", query, limit: 100 })
+    this.#pickerController.refresh()
     if (!anchored) this.picker.input.value = query
   }
 
   openAttachmentPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "attachments"
-    this.#refreshPicker()
+    this.#pickerController.begin("attachments")
+    this.#pickerController.refresh()
   }
 
   openModelPicker(provider: string | null = null): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
     this.#modelProviderFilter = provider
-    this.#positionPicker(false)
-    this.#pickerKind = "models"
+    this.#pickerController.begin("models")
     if (!this.#modelsRequested) {
       this.#requestModels(true)
     }
-    this.#command({ type: "list_settings" })
-    this.#refreshPicker()
+    this.#projectionRequests.command({ type: "list_settings" })
+    this.#pickerController.refresh()
   }
 
   openProviderPicker(onboarding = false): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
     this.#modelProviderFilter = null
     this.#providerPickerOnboarding = onboarding
-    this.#positionPicker(false)
-    this.#pickerKind = "providers"
+    this.#pickerController.begin("providers")
     if (!this.#modelsRequested) {
       this.#requestModels(true)
     }
-    this.#refreshPicker()
+    this.#pickerController.refresh()
   }
 
   openProviderAuthPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "providerAuth"
-    this.#refreshPicker()
+    this.#pickerController.begin("providerAuth")
+    this.#pickerController.refresh()
   }
 
   openProviderRecoveryPicker(provider: RottweilerState["providers"][number]): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
     this.#providerRecoveryProvider = provider
-    this.#pickerKind = "providerRecovery"
-    this.#refreshPicker()
+    this.#pickerController.begin("providerRecovery")
+    this.#pickerController.refresh()
   }
 
   openProviderApiKeyPrompt(provider: string): void {
     if (this.#state.replay.active || provider.length === 0) return
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "providerApiKey"
+    this.#pickerController.begin("providerApiKey")
     this.#providerApiKeyProvider = provider
     this.picker.openSecret(`Enter ${providerName(provider)} API key`, (apiKey) => {
       const selectedProvider = this.#providerApiKeyProvider
@@ -1821,42 +1646,33 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   openSettingsPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "settings"
-    this.#command({ type: "list_settings" })
-    this.#refreshPicker()
+    this.#pickerController.begin("settings")
+    this.#projectionRequests.command({ type: "list_settings" })
+    this.#pickerController.refresh()
   }
 
   openPermissionPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "permissions"
-    this.#command({ type: "list_permissions" })
-    this.#refreshPicker()
+    this.#pickerController.begin("permissions")
+    this.#projectionRequests.command({ type: "list_permissions" })
+    this.#pickerController.refresh()
   }
 
   openBudgetPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
     this.#budgetSettingKey = null
-    this.#positionPicker(false)
-    this.#pickerKind = "budgets"
-    this.#command({ type: "list_settings" })
-    this.#refreshPicker()
+    this.#pickerController.begin("budgets")
+    this.#projectionRequests.command({ type: "list_settings" })
+    this.#pickerController.refresh()
   }
 
   #openBudgetPresetPicker(key: BudgetSettingKey): void {
     this.#budgetSettingKey = key
-    this.#pickerKind = "budgetPresets"
-    this.#refreshPicker()
+    this.#pickerController.kind = "budgetPresets"
+    this.#pickerController.refresh()
   }
 
   #openBudgetTextPrompt(key: BudgetSettingKey): void {
     this.#budgetSettingKey = key
-    this.#pickerKind = "budgetInput"
+    this.#pickerController.kind = "budgetInput"
     const prompt = key === "budget.session_cost_cap_micros_usd"
       ? "Session limit in USD, e.g. 12.50"
       : key === "budget.daily_cost_cap_micros_usd"
@@ -1867,58 +1683,43 @@ export class RottweilerApp extends BoxRenderable {
       const selectedKey = this.#budgetSettingKey
       this.closePicker()
       if (selectedKey !== null) {
-        this.#command({ type: "set_setting", key: selectedKey, value })
+        this.#projectionRequests.command({ type: "set_setting", key: selectedKey, value })
       }
     }, 32)
   }
 
   openPermissionModePicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "permissionMode"
-    this.#refreshPicker()
+    this.#pickerController.begin("permissionMode")
+    this.#pickerController.refresh()
   }
 
   openTrustPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "trust"
-    this.#refreshPicker()
+    this.#pickerController.begin("trust")
+    this.#pickerController.refresh()
   }
 
   openTimelinePicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
     this.#timelineTurn = null
-    this.#positionPicker(false)
-    this.#pickerKind = "timeline"
-    this.#refreshPicker()
+    this.#pickerController.begin("timeline")
+    this.#pickerController.refresh()
   }
 
   openQueuedMessagesPicker(): void {
     if (this.#state.replay.active) return
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "queuedMessages"
-    this.#refreshPicker()
+    this.#pickerController.begin("queuedMessages")
+    this.#pickerController.refresh()
   }
 
   openExportSessionPicker(): void {
     if (this.#state.replay.active) return
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "exportFormat"
-    this.#refreshPicker()
+    this.#pickerController.begin("exportFormat")
+    this.#pickerController.refresh()
   }
 
   #openExportPathPrompt(format: ExportFormat): void {
     const choice = EXPORT_FORMAT_CHOICES.find((item) => item.format === format)
     if (choice === undefined) return
-    this.#pickerKind = "exportPath"
+    this.#pickerController.kind = "exportPath"
     this.picker.openTextPrompt(
       "Save to path, e.g. ~/transcript.md",
       `~/rottweiler-export.${choice.extension}`,
@@ -1937,7 +1738,7 @@ export class RottweilerApp extends BoxRenderable {
     force: boolean,
   ): Promise<void> {
     if (this.#state.replay.active) return
-    const meta = this.#meta()
+    const meta = this.#projectionRequests.meta()
     const pending: PendingExport = {
       format,
       outputPath,
@@ -1946,7 +1747,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     this.#pendingExport = pending
     try {
-      const outcome = await this.#emit({
+      const outcome = await this.#projectionRequests.emit({
         type: "export_session",
         meta,
         session_id: this.#sessionId,
@@ -1979,46 +1780,37 @@ export class RottweilerApp extends BoxRenderable {
     this.#projectRejection(outcome)
     if (!pending.force && outcome.error.message.includes("export output already exists")) {
       this.#pendingExport = { ...pending, requestId: null }
-      this.#pickerAnchored = false
-      this.#pickerQuery = ""
-      this.#positionPicker(false)
-      this.#pickerKind = "exportOverwrite"
-      this.#refreshPicker()
+      this.#pickerController.begin("exportOverwrite")
+      this.#pickerController.refresh()
       return
     }
     this.#pendingExport = null
   }
 
   openWorkspaceRootsPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "workspaceRoots"
-    this.#refreshPicker()
+    this.#pickerController.begin("workspaceRoots")
+    this.#pickerController.refresh()
   }
 
   openMcpPicker(): void {
     if (this.#state.replay.active) return
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
     this.#mcpActionName = null
     this.#clearMcpDraft()
-    this.#positionPicker(false)
-    this.#pickerKind = "mcp"
-    this.#command({ type: "list_mcp_servers" })
-    this.#refreshPicker()
+    this.#pickerController.begin("mcp")
+    this.#projectionRequests.command({ type: "list_mcp_servers" })
+    this.#pickerController.refresh()
   }
 
   #openMcpActionPicker(server: string): void {
     if (this.#state.replay.active) return
     this.#mcpActionName = server
-    this.#pickerKind = "mcpActions"
-    this.#refreshPicker()
+    this.#pickerController.kind = "mcpActions"
+    this.#pickerController.refresh()
   }
 
   #openMcpHttpNamePrompt(): void {
     if (this.#state.replay.active) return
-    this.#pickerKind = "mcpInput"
+    this.#pickerController.kind = "mcpInput"
     this.picker.openTextPrompt(
       "Add remote MCP server",
       "server name",
@@ -2062,7 +1854,7 @@ export class RottweilerApp extends BoxRenderable {
               )
               return
             }
-            this.#command({ type: "add_mcp_http_server", name: server, endpoint })
+            this.#projectionRequests.command({ type: "add_mcp_http_server", name: server, endpoint })
             this.openMcpPicker()
           }
         )
@@ -2073,7 +1865,7 @@ export class RottweilerApp extends BoxRenderable {
   #openMcpStdioNamePrompt(): void {
     if (this.#state.replay.active) return
     this.#clearMcpDraft()
-    this.#pickerKind = "mcpInput"
+    this.#pickerController.kind = "mcpInput"
     this.picker.openTextPrompt(
       "Server name, e.g. docs",
       "docs",
@@ -2131,7 +1923,7 @@ export class RottweilerApp extends BoxRenderable {
           const environment = [...this.#mcpDraftEnvironment]
           this.closePicker()
           if (name === null || executable === null) return
-          this.#command({
+          this.#projectionRequests.command({
             type: "add_mcp_stdio_server",
             name,
             executable,
@@ -2171,26 +1963,23 @@ export class RottweilerApp extends BoxRenderable {
   #openPermissionPatternPrompt(
     action: PermissionAction
   ): void {
-    this.#pickerKind = "permissionInput"
+    this.#pickerController.kind = "permissionInput"
     this.picker.openTextPrompt(
       `Add ${action} permission rule`,
       "tool(glob), e.g. bash(cargo test*)",
       (pattern) => {
         this.closePicker()
-        this.#command({ type: "add_session_permission_rule", pattern, action })
+        this.#projectionRequests.command({ type: "add_session_permission_rule", pattern, action })
       }
     )
   }
 
   openThemePicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
     this.#themeBeforePreview = this.#theme
     this.#themePreviewCommitted = false
-    this.#pickerKind = "themes"
+    this.#pickerController.begin("themes")
     this.#rethemeInProgress = true
-    this.#refreshPicker()
+    this.#pickerController.refresh()
     const selectedIndex = this.picker.select.options.findIndex(
       (option) => option.value === `theme:${this.#theme.name}`,
     )
@@ -2204,9 +1993,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   async #confirmTheme(theme: RottweilerTheme): Promise<void> {
-    const outcome = await this.#emit({
+    const outcome = await this.#projectionRequests.emit({
       type: "set_setting",
-      meta: this.#meta(),
+      meta: this.#projectionRequests.meta(),
       session_id: this.#sessionId,
       key: "ui.theme",
       value: theme.name,
@@ -2223,43 +2012,37 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   openModePicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "modes"
-    this.#refreshPicker()
+    this.#pickerController.begin("modes")
+    this.#pickerController.refresh()
   }
 
   openSessionPicker(): void {
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
     this.#sessionActionId = null
-    this.#positionPicker(false)
-    this.#pickerKind = "sessions"
-    this.#command({ type: "list_sessions" })
-    this.#refreshPicker()
+    this.#pickerController.begin("sessions")
+    this.#projectionRequests.command({ type: "list_sessions" })
+    this.#pickerController.refresh()
   }
 
   #openSessionActionPicker(session: SessionProjection): void {
     this.#sessionActionId = session.sessionId
-    this.#pickerKind = "sessionActions"
-    this.#refreshPicker()
+    this.#pickerController.kind = "sessionActions"
+    this.#pickerController.refresh()
   }
 
   #openSessionRenamePrompt(session: SessionProjection): void {
     this.#sessionActionId = session.sessionId
-    this.#pickerKind = "sessionRename"
+    this.#pickerController.kind = "sessionRename"
     this.picker.openTextPrompt(
       "Rename session, e.g. Auth refactor",
       session.title ?? session.workspaceName,
       (title) => {
         const sessionId = this.#sessionActionId
-        this.#pickerKind = "sessions"
-        this.#pickerQuery = ""
+        this.#pickerController.kind = "sessions"
+        this.#pickerController.query = ""
         if (sessionId !== null) {
-          this.#command({ type: "rename_session", sessionId, title })
+          this.#projectionRequests.command({ type: "rename_session", sessionId, title })
         }
-        this.#refreshPicker()
+        this.#pickerController.refresh()
       },
       288,
     )
@@ -2273,22 +2056,16 @@ export class RottweilerApp extends BoxRenderable {
       )
       return
     }
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
-    this.#pickerKind = "agents"
+    this.#pickerController.begin("agents")
     this.#requestSubagents()
-    this.#refreshPicker()
+    this.#pickerController.refresh()
   }
 
   openSubagentActionPicker(subagentId = this.#activeSubagentId): void {
     if (subagentId === null || this.#subagentDescriptor(subagentId) === undefined) return
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#positionPicker(false)
     this.#subagentActionId = subagentId
-    this.#pickerKind = "agentActions"
-    this.#refreshPicker()
+    this.#pickerController.begin("agentActions")
+    this.#pickerController.refresh()
   }
 
   #openToolOutput(toolCallId: string): void {
@@ -2312,21 +2089,21 @@ export class RottweilerApp extends BoxRenderable {
     this.reviewPanel.showSessionReview()
     this.#reviewOpen = true
     this.setState(this.#state)
-    this.#command({ type: "get_session_review" })
+    this.#projectionRequests.command({ type: "get_session_review" })
   }
 
   closePicker(): void {
+    this.#pickerController.close()
+  }
+
+  #afterPickerClosed(kind: PickerKind | null): void {
     const restoreTheme =
-      (this.#pickerKind === "themes" || this.#pickerKind === "settings")
+      (kind === "themes" || kind === "settings")
         && !this.#themePreviewCommitted
         ? this.#themeBeforePreview
         : null
-    this.#pickerKind = null
-    this.picker.close()
-    this.#pickerAnchored = false
-    this.#pickerQuery = ""
-    this.#pendingWorkspaceSearchRequest = null
-    this.#pendingFilePreview = null
+    this.#projectionRequests.clear("files")
+    this.#projectionRequests.setFilePreview(null)
     this.#providerApiKeyProvider = null
     this.#providerRecoveryProvider = null
     this.#clearMcpDraft()
@@ -2366,15 +2143,13 @@ export class RottweilerApp extends BoxRenderable {
     )
     this.outputViewer.resizeForTerminal(height)
     this.reviewPanel.resizeForTerminal(height)
-    if (this.picker.visible) this.#positionPicker(this.#pickerAnchored)
+    if (this.picker.visible) this.#pickerController.position(this.#pickerController.anchored)
   }
 
   override destroy(): void {
     if (this.#destroyed) return
     this.#destroyed = true
-    this.#cancelPresentationFrame()
-    this.#presentationQueue = []
-    this.#subagentPresentationDirty = false
+    this.#presentation.destroy()
     this.#clearPendingShellTimer()
     this.#clearPluginNotificationTimer()
     this.#clearSessionSearchTimer()
@@ -2429,7 +2204,7 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#keybindings.preset === "standard") {
       return this.#outputViewerToolCallId !== null || this.#reviewOpen ? "review" : "standard"
     }
-    if (this.picker.visible && !this.#pickerAnchored) {
+    if (this.picker.visible && !this.#pickerController.anchored) {
       return this.#inputMode === "insert" ? "picker_insert" : "picker_normal"
     }
     if (this.#outputViewerToolCallId !== null || this.#reviewOpen) return "review"
@@ -2479,9 +2254,9 @@ export class RottweilerApp extends BoxRenderable {
         const current = this.#state.mode ?? "execute"
         const mode: ModeId =
           current === "execute" ? "discuss" : current === "discuss" ? "plan" : "execute"
-        this.#emit({
+        this.#projectionRequests.emit({
           type: "switch_mode",
-          meta: this.#meta(),
+          meta: this.#projectionRequests.meta(),
           session_id: this.#sessionId,
           mode,
         })
@@ -2641,7 +2416,7 @@ export class RottweilerApp extends BoxRenderable {
       this.composer.focus()
       return
     }
-    if (this.picker.visible && !this.#pickerAnchored) {
+    if (this.picker.visible && !this.#pickerController.anchored) {
       if (this.#inputMode === "insert") {
         this.picker.input.focus()
       } else {
@@ -2707,7 +2482,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #visibleFocusOwner(): VimFocus | "interaction" | "output" | "review" {
-    if (this.picker.visible && !this.#pickerAnchored) return "picker"
+    if (this.picker.visible && !this.#pickerController.anchored) return "picker"
     if (this.outputViewer.visible) return "output"
     if (this.reviewPanel.visible) return "review"
     if (this.interactionPanel.capturesInput) return "interaction"
@@ -2721,8 +2496,8 @@ export class RottweilerApp extends BoxRenderable {
     return owner === "output" ? "review" : owner
   }
 
-  #refreshPicker(): void {
-    switch (this.#pickerKind) {
+  #renderPicker(): void {
+    switch (this.#pickerController.kind) {
       case "palette":
         const paletteActions = this.#paletteActions()
         const paletteItems: PickerItem<PaletteAction | null>[] = []
@@ -2745,7 +2520,7 @@ export class RottweilerApp extends BoxRenderable {
             value: action,
           })))
         }
-        this.#openPicker(
+        this.#pickerController.show(
           "Command palette",
           paletteItems,
           (item) => item.value?.run(),
@@ -2776,7 +2551,7 @@ export class RottweilerApp extends BoxRenderable {
             })
           }
         }
-        this.#openPicker("Keyboard shortcuts", items, () => this.closePicker())
+        this.#pickerController.show("Keyboard shortcuts", items, () => this.closePicker())
         break
       }
       case "commands":
@@ -2798,7 +2573,7 @@ export class RottweilerApp extends BoxRenderable {
             value: command,
           })),
         ]
-        this.#openPicker(
+        this.#pickerController.show(
           this.#state.commandsTruncated ? "Commands · results truncated" : "Commands",
           commandItems,
           (item) => {
@@ -2808,7 +2583,7 @@ export class RottweilerApp extends BoxRenderable {
               return
             }
             const clearAnchoredTrigger = () => {
-              if (this.#pickerAnchored) this.composer.value = ""
+              if (this.#pickerController.anchored) this.composer.value = ""
             }
             if (command.name === "review") {
               clearAnchoredTrigger()
@@ -2866,7 +2641,7 @@ export class RottweilerApp extends BoxRenderable {
             }
             const content = `/${command.name}`
             const requiresArgument = /<[^>]+>/.test(command.usage)
-            if (this.#pickerAnchored && !requiresArgument) {
+            if (this.#pickerController.anchored && !requiresArgument) {
               this.composer.value = content
               this.closePicker()
               void this.composer.submit()
@@ -2880,7 +2655,7 @@ export class RottweilerApp extends BoxRenderable {
       case "timeline": {
         const turns = this.#timelineTurns()
         if (turns.length === 0) {
-          this.#showPickerStatus(
+          this.#pickerController.showStatus(
             "Conversation timeline",
             "No completed user turns",
             this.#state.replay.active ? "read-only session" : "Send a message to create a checkpoint.",
@@ -2906,11 +2681,11 @@ export class RottweilerApp extends BoxRenderable {
             selectable: !readOnly,
           })),
         ]
-        this.#openPicker("Conversation timeline", items, (item) => {
+        this.#pickerController.show("Conversation timeline", items, (item) => {
           if (item.value === null || readOnly) return
           this.#timelineTurn = item.value
-          this.#pickerKind = "timelineActions"
-          this.#refreshPicker()
+          this.#pickerController.kind = "timelineActions"
+          this.#pickerController.refresh()
         })
         break
       }
@@ -2940,7 +2715,7 @@ export class RottweilerApp extends BoxRenderable {
             value: "rewind",
           },
         ]
-        this.#openPicker(`Turn ${turn.agentTurn} actions`, items, (item) => {
+        this.#pickerController.show(`Turn ${turn.agentTurn} actions`, items, (item) => {
           this.closePicker()
           void this.#startRewindIntent(turn, item.value)
         })
@@ -2953,7 +2728,7 @@ export class RottweilerApp extends BoxRenderable {
         }
         const queuedMessages = this.#state.queuedMessages
         if (queuedMessages.length === 0) {
-          this.#showPickerStatus(
+          this.#pickerController.showStatus(
             "Queued messages",
             "No queued messages",
             "Messages sent during an active turn will appear here.",
@@ -2976,13 +2751,13 @@ export class RottweilerApp extends BoxRenderable {
                 value: { kind: "clear" } as const,
               }]),
         ]
-        this.#openPicker("Queued messages · select to remove", items, (item) => {
+        this.#pickerController.show("Queued messages · select to remove", items, (item) => {
           if (item.value.kind === "clear") {
             this.closePicker()
-            this.#command({ type: "clear_queued_messages" })
+            this.#projectionRequests.command({ type: "clear_queued_messages" })
             return
           }
-          this.#command({
+          this.#projectionRequests.command({
             type: "remove_queued_message",
             position: item.value.position,
           })
@@ -2994,7 +2769,7 @@ export class RottweilerApp extends BoxRenderable {
           this.closePicker()
           break
         }
-        this.#openPicker(
+        this.#pickerController.show(
           "Export session",
           EXPORT_FORMAT_CHOICES.map((choice) => ({
             id: `export.format.${choice.format}`,
@@ -3012,7 +2787,7 @@ export class RottweilerApp extends BoxRenderable {
           this.closePicker()
           break
         }
-        this.#openPicker(
+        this.#pickerController.show(
           "Overwrite existing file?",
           [
             {
@@ -3043,10 +2818,10 @@ export class RottweilerApp extends BoxRenderable {
       case "workspaceRoots": {
         const workspaceRoots = this.#state.workspaceRoots
         if (workspaceRoots === null) {
-          this.#showPickerLoading("Workspace roots", "Loading workspace roots")
+          this.#pickerController.showLoading("Workspace roots", "Loading workspace roots")
           break
         }
-        this.#openPicker(
+        this.#pickerController.show(
           "Workspace roots",
           workspaceRoots.roots.map((root, index) => ({
             id: `workspace.root.${index}`,
@@ -3062,14 +2837,14 @@ export class RottweilerApp extends BoxRenderable {
         const fileError = this.#projectionErrors.files
         if (
           fileError === undefined &&
-          this.#pendingWorkspaceSearchRequest !== null &&
+          this.#projectionRequests.current("files") !== null &&
           this.#state.workspaceFiles.length === 0
         ) {
-          this.#showPickerLoading("Workspace files", "Searching workspace files")
+          this.#pickerController.showLoading("Workspace files", "Searching workspace files")
           break
         }
         if (fileError === undefined && this.#state.workspaceFiles.length === 0) {
-          this.#showPickerStatus(
+          this.#pickerController.showStatus(
             "Workspace files",
             "No matching files",
             "Try a different search.",
@@ -3092,18 +2867,18 @@ export class RottweilerApp extends BoxRenderable {
             value: file,
           })),
         ]
-        this.#openPicker(
+        this.#pickerController.show(
           "Workspace files",
           fileItems,
           (item) => {
             const file = item.value as RottweilerState["workspaceFiles"][number] | null
             if (file === null) {
-              this.openFilePicker(this.#pickerQuery, this.#pickerAnchored)
+              this.openFilePicker(this.#pickerController.query, this.#pickerController.anchored)
               return
             }
             if (file.isDirectory) {
               const query = `${file.path.replace(/\/$/, "")}/`
-              if (this.#pickerAnchored) {
+              if (this.#pickerController.anchored) {
                 const mention = this.composer.currentFileMention()
                 if (mention !== null) {
                   this.composer.replaceRange(mention.start, mention.end, `@${query}`)
@@ -3114,19 +2889,19 @@ export class RottweilerApp extends BoxRenderable {
               return
             }
             const draft = this.composer.value
-            const mention = this.#pickerAnchored ? this.composer.currentFileMention() : null
-            const requestId = this.#command({
+            const mention = this.#pickerController.anchored ? this.composer.currentFileMention() : null
+            const requestId = this.#projectionRequests.command({
               type: "preview_workspace_file",
               path: file.path,
               max_bytes: 5_242_880,
             })
             if (requestId !== null) {
-              this.#pendingFilePreview = {
+              this.#projectionRequests.setFilePreview({
                 path: file.path,
                 requestId,
                 draft,
                 mention: mention === null ? null : { start: mention.start, end: mention.end },
-              }
+              })
             }
           }
         )
@@ -3140,17 +2915,17 @@ export class RottweilerApp extends BoxRenderable {
           value: index,
         }))
         if (items.length === 0) {
-          this.#showPickerStatus(
+          this.#pickerController.showStatus(
             "Attachments",
             "No attachments in this draft",
             "Paste an image or select a file with @ to attach it.",
           )
           break
         }
-        this.#openPicker("Attachments", items, (item) => {
+        this.#pickerController.show("Attachments", items, (item) => {
           this.composer.removeAttachment(item.value as number)
           if (this.composer.attachments.length === 0) this.closePicker()
-          else this.#refreshPicker()
+          else this.#pickerController.refresh()
         })
         break
       }
@@ -3216,7 +2991,7 @@ export class RottweilerApp extends BoxRenderable {
         ]
         const modelError = this.#projectionErrors.models
         if (modelError === undefined && this.#modelsRequested && modelItems.length === 0) {
-          this.#showPickerLoading("Models", "Loading available models")
+          this.#pickerController.showLoading("Models", "Loading available models")
           break
         }
         if (modelError !== undefined) {
@@ -3228,14 +3003,14 @@ export class RottweilerApp extends BoxRenderable {
           })
         }
         if (modelItems.length === 0) {
-          this.#showPickerStatus(
+          this.#pickerController.showStatus(
             "Models",
             "No models are available",
             "Connect a provider, then reopen this panel.",
           )
           break
         }
-        this.#openPicker(
+        this.#pickerController.show(
           this.#modelProviderFilter === null
             ? "Models"
             : `Models · ${this.#modelProviderFilter}`,
@@ -3255,7 +3030,7 @@ export class RottweilerApp extends BoxRenderable {
               return
             }
             if (selection.kind === "alias") {
-              this.#command({
+              this.#projectionRequests.command({
                 type: "switch_model",
                 model: selection.alias.alias,
               })
@@ -3269,7 +3044,7 @@ export class RottweilerApp extends BoxRenderable {
                 )
                 return
               }
-              this.#command({
+              this.#projectionRequests.command({
                 type: "switch_model",
                 model: model.id ?? model.alias,
                 provider: model.provider ?? this.#modelProviderFilter,
@@ -3312,7 +3087,7 @@ export class RottweilerApp extends BoxRenderable {
             }))
         const providerError = this.#projectionErrors.models
         if (providerError === undefined && this.#modelsRequested && providerItems.length === 0) {
-          this.#showPickerLoading("Providers", "Loading provider connections")
+          this.#pickerController.showLoading("Providers", "Loading provider connections")
           break
         }
         if (providerError !== undefined) {
@@ -3324,14 +3099,14 @@ export class RottweilerApp extends BoxRenderable {
           })
         }
         if (providerItems.length === 0) {
-          this.#showPickerStatus(
+          this.#pickerController.showStatus(
             "Providers",
             "No providers are connected",
             "Connect a provider, then reopen this panel.",
           )
           break
         }
-        this.#openPicker(
+        this.#pickerController.show(
           this.#providerPickerOnboarding
             ? "Welcome to Rottweiler · connect a provider to start"
             : "Providers",
@@ -3359,7 +3134,7 @@ export class RottweilerApp extends BoxRenderable {
                 this.openModelPicker(provider.name)
                 break
               case "authenticate":
-                this.#command({ type: "begin_provider_auth", provider: provider.name })
+                this.#projectionRequests.command({ type: "begin_provider_auth", provider: provider.name })
                 break
               case "api_key_cli":
                 if (this.#storedProviderKeys.has(provider.name)) {
@@ -3369,7 +3144,7 @@ export class RottweilerApp extends BoxRenderable {
                 }
                 break
               case "configure":
-                this.#command({ type: "configure_builtin_provider", provider: provider.name })
+                this.#projectionRequests.command({ type: "configure_builtin_provider", provider: provider.name })
                 break
               case "none":
                 this.#projectClientError(
@@ -3405,14 +3180,14 @@ export class RottweilerApp extends BoxRenderable {
             value: "reauthenticate",
           })
         }
-        this.#openPicker(`Reconnect ${providerName(provider.name)}`, items, (item) => {
+        this.#pickerController.show(`Reconnect ${providerName(provider.name)}`, items, (item) => {
           if (item.value === "activate") {
             void this.#retryProviderActivation(provider.name)
           } else if (provider.authKind === "api_key") {
             this.openProviderApiKeyPrompt(provider.name)
           } else {
             this.closePicker()
-            this.#command({ type: "begin_provider_auth", provider: provider.name })
+            this.#projectionRequests.command({ type: "begin_provider_auth", provider: provider.name })
           }
         })
         break
@@ -3464,7 +3239,7 @@ export class RottweilerApp extends BoxRenderable {
             value: { kind: "cancel" },
           },
         )
-        this.#openPicker(
+        this.#pickerController.show(
           `Sign in · ${providerDisplayName({
             name: pending.provider,
             authKind: pending.challenge.kind === "oauth" ? "oauth" : "device_flow",
@@ -3473,7 +3248,7 @@ export class RottweilerApp extends BoxRenderable {
           (item) => {
             if (item.value.kind === "cancel") {
               this.#providerAuthActionNotice = null
-              this.#command({
+              this.#projectionRequests.command({
                 type: "cancel_provider_auth",
                 provider: pending.provider,
                 attemptId: pending.attemptId,
@@ -3491,7 +3266,7 @@ export class RottweilerApp extends BoxRenderable {
       }
       case "providerApiKey":
         if (this.#providerApiKeyPending !== null) {
-          this.#showPickerLoading(
+          this.#pickerController.showLoading(
             `Provider credential · ${providerName(this.#providerApiKeyPending)}`,
             "Storing and activating credential",
           )
@@ -3505,10 +3280,10 @@ export class RottweilerApp extends BoxRenderable {
         const mcpError = this.#projectionErrors.mcp
         if (
           mcpError === undefined &&
-          this.#latestMcpRequest !== null &&
+          this.#projectionRequests.current("mcp") !== null &&
           this.#state.mcpServers.length === 0
         ) {
-          this.#showPickerLoading("MCP connections", "Loading MCP connections")
+          this.#pickerController.showLoading("MCP connections", "Loading MCP connections")
           break
         }
         const items: PickerItem<McpPickerAction>[] = [
@@ -3538,12 +3313,12 @@ export class RottweilerApp extends BoxRenderable {
               value: { kind: "actions", server: server.name },
           })),
         ]
-        this.#openPicker(
+        this.#pickerController.show(
           "MCP connections",
           items,
           (item) => {
             const action = item.value
-            if (action.kind === "retry") this.#command({ type: "list_mcp_servers" })
+            if (action.kind === "retry") this.#projectionRequests.command({ type: "list_mcp_servers" })
             else if (action.kind === "add_http") this.#openMcpHttpNamePrompt()
             else if (action.kind === "add_stdio") this.#openMcpStdioNamePrompt()
             else this.#openMcpActionPicker(action.server)
@@ -3557,8 +3332,8 @@ export class RottweilerApp extends BoxRenderable {
         )
         if (server === undefined) {
           this.#mcpActionName = null
-          this.#pickerKind = "mcp"
-          this.#refreshPicker()
+          this.#pickerController.kind = "mcp"
+          this.#pickerController.refresh()
           break
         }
         const review = this.#state.mcpApprovalReview?.server === server.name
@@ -3595,21 +3370,21 @@ export class RottweilerApp extends BoxRenderable {
             value: { kind: "remove", server: server.name },
           },
         ]
-        this.#openPicker(
+        this.#pickerController.show(
           `MCP actions · ${server.name}`,
           items,
           (item) => {
             const action = item.value
             if (action.kind === "toggle") {
-              this.#command({ type: "set_mcp_server_enabled", name: action.server, enabled: !action.enabled })
+              this.#projectionRequests.command({ type: "set_mcp_server_enabled", name: action.server, enabled: !action.enabled })
             } else if (action.kind === "review") {
-              this.#command({ type: "review_mcp_server", name: action.server })
+              this.#projectionRequests.command({ type: "review_mcp_server", name: action.server })
             } else if (action.kind === "approve") {
-              this.#command({ type: "approve_mcp_server", name: action.server, fingerprint: action.fingerprint })
+              this.#projectionRequests.command({ type: "approve_mcp_server", name: action.server, fingerprint: action.fingerprint })
             } else {
               this.#mcpActionName = action.server
-              this.#pickerKind = "mcpRemoveConfirm"
-              this.#refreshPicker()
+              this.#pickerController.kind = "mcpRemoveConfirm"
+              this.#pickerController.refresh()
             }
           },
         )
@@ -3618,11 +3393,11 @@ export class RottweilerApp extends BoxRenderable {
       case "mcpRemoveConfirm": {
         const server = this.#mcpActionName
         if (server === null) {
-          this.#pickerKind = "mcp"
-          this.#refreshPicker()
+          this.#pickerController.kind = "mcp"
+          this.#pickerController.refresh()
           break
         }
-        this.#openPicker(
+        this.#pickerController.show(
           `Remove ${server}? This deletes its configuration`,
           [
             { id: "mcp.remove.confirm", label: "Remove", description: "Disable if needed, then delete", value: true },
@@ -3630,19 +3405,19 @@ export class RottweilerApp extends BoxRenderable {
           ],
           (item) => {
             if (item.value) {
-              this.#command({ type: "remove_mcp_server", name: server })
+              this.#projectionRequests.command({ type: "remove_mcp_server", name: server })
               this.#mcpActionName = null
-              this.#pickerKind = "mcp"
+              this.#pickerController.kind = "mcp"
             } else {
-              this.#pickerKind = "mcpActions"
+              this.#pickerController.kind = "mcpActions"
             }
-            this.#refreshPicker()
+            this.#pickerController.refresh()
           },
         )
         break
       }
       case "trust":
-        this.#openPicker(
+        this.#pickerController.show(
           "Folder trust",
           [
             {
@@ -3668,14 +3443,14 @@ export class RottweilerApp extends BoxRenderable {
         )
         break
       case "permissionMode":
-        this.#openPicker(
+        this.#pickerController.show(
           "Permission mode",
           this.#permissionModeItems(),
           (item) => this.#selectPermissionMode(item.value.mode),
         )
         break
       case "permissionYoloConfirm":
-        this.#openPicker(
+        this.#pickerController.show(
           "Run every tool without asking?",
           [
             {
@@ -3702,11 +3477,11 @@ export class RottweilerApp extends BoxRenderable {
           const permissions = this.#state.permissions
           const permissionError = this.#projectionErrors.permissions
           if (permissions === null && permissionError === undefined) {
-            this.#showPickerLoading("Permission rules", "Loading permission rules")
+            this.#pickerController.showLoading("Permission rules", "Loading permission rules")
             break
           }
           if (permissions === null) {
-            this.#showPickerStatus(
+            this.#pickerController.showStatus(
               "Permission rules",
               "Permission rules could not be loaded",
               "Close and reopen this panel to retry.",
@@ -3758,20 +3533,20 @@ export class RottweilerApp extends BoxRenderable {
               } as const,
             })),
           ]
-        this.#openPicker(
+        this.#pickerController.show(
           "Permission rules",
           items,
           (item) => {
             const action = item.value
-            if (action.kind === "refresh") this.#command({ type: "list_permissions" })
+            if (action.kind === "refresh") this.#projectionRequests.command({ type: "list_permissions" })
             else if (action.kind === "mode") {
               this.#selectPermissionMode(action.mode)
             }
             else if (action.kind === "add") this.#openPermissionPatternPrompt(action.action)
             else if (action.kind === "remove") {
-              this.#command({ type: "remove_session_permission_rule", ruleId: action.ruleId })
+              this.#projectionRequests.command({ type: "remove_session_permission_rule", ruleId: action.ruleId })
             } else if (action.kind === "revoke") {
-              this.#command({
+              this.#projectionRequests.command({
                 type: "revoke_permission_approval",
                 approvalId: action.approvalId,
                 scope: action.scope,
@@ -3804,10 +3579,10 @@ export class RottweilerApp extends BoxRenderable {
           setting: this.#state.settings.find((setting) => setting.key === row.key),
         }))
         if (settings.some(({ setting }) => setting === undefined)) {
-          if (this.#pendingSettingsRequest !== null) {
-            this.#showPickerLoading("Budget limits", "Loading budget limits")
+          if (this.#projectionRequests.current("settings_pending") !== null) {
+            this.#pickerController.showLoading("Budget limits", "Loading budget limits")
           } else {
-            this.#showPickerStatus(
+            this.#pickerController.showStatus(
               "Budget limits",
               "Budget limits could not be loaded",
               "Close and reopen this panel to retry.",
@@ -3815,7 +3590,7 @@ export class RottweilerApp extends BoxRenderable {
           }
           break
         }
-        this.#openPicker(
+        this.#pickerController.show(
           "Budget limits",
           settings.map(({ key, label, description, setting }) => ({
             id: `budget.setting.${key}`,
@@ -3856,7 +3631,7 @@ export class RottweilerApp extends BoxRenderable {
               { label: "Unlimited", value: "unlimited" },
               { label: "Custom amount…", value: null },
             ]
-        this.#openPicker(
+        this.#pickerController.show(
           title,
           presets.map((preset) => ({
             id: `budget.preset.${key}.${preset.value ?? "custom"}`,
@@ -3878,7 +3653,7 @@ export class RottweilerApp extends BoxRenderable {
               return
             }
             this.closePicker()
-            this.#command({ type: "set_setting", key, value: item.value })
+            this.#projectionRequests.command({ type: "set_setting", key, value: item.value })
           },
         )
         break
@@ -3910,19 +3685,19 @@ export class RottweilerApp extends BoxRenderable {
             })
           }
         }
-        if (items.length === 0 && this.#pendingSettingsRequest !== null) {
-          this.#showPickerLoading("Settings", "Loading settings")
+        if (items.length === 0 && this.#projectionRequests.current("settings_pending") !== null) {
+          this.#pickerController.showLoading("Settings", "Loading settings")
           break
         }
         if (items.length === 0) {
-          this.#showPickerStatus(
+          this.#pickerController.showStatus(
             "Settings",
             "Settings could not be loaded",
             "Close and reopen this panel to retry.",
           )
           break
         }
-        this.#openPicker("Settings", items, (item) => {
+        this.#pickerController.show("Settings", items, (item) => {
           const selection = item.value
           if (selection.kind === "theme") {
             if (this.#themeBeforePreview === null) this.#themeBeforePreview = this.#theme
@@ -3930,7 +3705,7 @@ export class RottweilerApp extends BoxRenderable {
             void this.#confirmTheme(selection.theme)
             return
           }
-          this.#command({
+          this.#projectionRequests.command({
             type: "set_setting",
             key: selection.setting.key,
             value: selection.value,
@@ -3948,13 +3723,13 @@ export class RottweilerApp extends BoxRenderable {
             value: theme,
           }
         })
-        this.#openPicker("Themes · arrows preview · Enter confirms", items, (item) => {
+        this.#pickerController.show("Themes · arrows preview · Enter confirms", items, (item) => {
           void this.#confirmTheme(item.value)
         })
         break
       }
       case "modes":
-        this.#openPicker(
+        this.#pickerController.show(
           "Modes",
           [
             {
@@ -3977,9 +3752,9 @@ export class RottweilerApp extends BoxRenderable {
             },
           ],
           (item) => {
-            this.#emit({
+            this.#projectionRequests.emit({
               type: "switch_mode",
-              meta: this.#meta(),
+              meta: this.#projectionRequests.meta(),
               session_id: this.#sessionId,
               mode: item.value as ModeId,
             })
@@ -3989,7 +3764,7 @@ export class RottweilerApp extends BoxRenderable {
         break
       case "agents": {
         if (this.#subagentListError !== null) {
-          this.#openPicker(
+          this.#pickerController.show(
             "Child agents · load failed",
             [{
               id: "agents.retry",
@@ -4001,8 +3776,11 @@ export class RottweilerApp extends BoxRenderable {
           )
           break
         }
-        if (this.#latestSubagentsRequest !== null && this.#subagentDescriptors.length === 0) {
-          this.#showPickerLoading("Child agents", "Loading child agents")
+        if (
+          this.#projectionRequests.current("subagents") !== null &&
+          this.#subagentDescriptors.length === 0
+        ) {
+          this.#pickerController.showLoading("Child agents", "Loading child agents")
           break
         }
         const items: PickerItem<SubagentDescriptor>[] = this.#subagentDescriptors.map((subagent) => ({
@@ -4013,14 +3791,14 @@ export class RottweilerApp extends BoxRenderable {
           value: subagent,
         }))
         if (items.length === 0) {
-          this.#showPickerStatus(
+          this.#pickerController.showStatus(
             "Child agents",
             "No child agents",
             "Child agents started by this session will appear here.",
           )
           break
         }
-        this.#openPicker("Child agents · Enter to inspect", items, (item) => {
+        this.#pickerController.show("Child agents · Enter to inspect", items, (item) => {
           this.closePicker()
           void this.#enterSubagent(item.value.subagent_id)
         })
@@ -4070,7 +3848,7 @@ export class RottweilerApp extends BoxRenderable {
             value: { kind: "close", subagent },
           },
         ]
-        this.#openPicker(`Child actions · ${boundedUiText(subagent.task, 64)}`, items, (item) => {
+        this.#pickerController.show(`Child actions · ${boundedUiText(subagent.task, 64)}`, items, (item) => {
           const action = item.value
           if (action.kind === "running") return
           this.closePicker()
@@ -4089,14 +3867,14 @@ export class RottweilerApp extends BoxRenderable {
         const sessionError = this.#projectionErrors.sessions
         if (
           sessionError === undefined &&
-          this.#latestSessionsRequest !== null &&
+          this.#projectionRequests.current("sessions") !== null &&
           this.#state.sessions.length === 0
         ) {
-          this.#showPickerLoading("Sessions", "Loading sessions")
+          this.#pickerController.showLoading("Sessions", "Loading sessions")
           break
         }
         if (sessionError === undefined && this.#state.sessions.length === 0) {
-          this.#showPickerStatus(
+          this.#pickerController.showStatus(
             "Sessions",
             "No sessions found",
             "Start a conversation to create a session.",
@@ -4120,7 +3898,7 @@ export class RottweilerApp extends BoxRenderable {
             value: session,
           })),
         ]
-        this.#openPicker(
+        this.#pickerController.show(
           this.#state.sessionSearch?.truncated === true
             ? "Sessions · results truncated"
             : "Sessions",
@@ -4129,10 +3907,11 @@ export class RottweilerApp extends BoxRenderable {
             const session = item.value as RottweilerState["sessions"][number] | null
             if (session === null) {
               const query = this.picker.input.value.trim()
-              this.#latestSessionsRequest =
-                query.length === 0
-                  ? this.#command({ type: "list_sessions" })
-                  : this.#command({ type: "search_sessions", query, limit: 100 })
+              if (query.length === 0) {
+                this.#projectionRequests.command({ type: "list_sessions" })
+              } else {
+                this.#projectionRequests.command({ type: "search_sessions", query, limit: 100 })
+              }
               return
             }
             this.#openSessionActionPicker(session)
@@ -4161,7 +3940,7 @@ export class RottweilerApp extends BoxRenderable {
             value: { kind: "rename", session },
           },
         ]
-        this.#openPicker(
+        this.#pickerController.show(
           `Session actions · ${boundedUiText(session.title ?? session.workspaceName, 64)}`,
           items,
           (item) => {
@@ -4185,60 +3964,6 @@ export class RottweilerApp extends BoxRenderable {
   #resolvedTheme(theme: RottweilerTheme): RottweilerTheme {
     if (theme.name === "system") return this.#systemTheme
     return themeByName(theme.name, this.#systemThemeMode ?? theme.mode) ?? theme
-  }
-
-  #openPicker<T>(
-    title: string,
-    items: readonly PickerItem<T>[],
-    onSelect: (item: PickerItem<T>) => void,
-  ): void {
-    const select = (item: PickerItem<unknown>) => onSelect(item as PickerItem<T>)
-    const suppressThemePreview = this.#pickerKind === "themes" || this.#pickerKind === "settings"
-    const rethemeWasInProgress = this.#rethemeInProgress
-    if (suppressThemePreview) this.#rethemeInProgress = true
-    try {
-      if (this.#pickerAnchored) {
-        this.picker.refreshAnchored(
-          title,
-          items as readonly PickerItem<unknown>[],
-          this.#pickerQuery,
-          select,
-        )
-        this.#positionPicker(true)
-        this.composer.focus()
-      } else {
-        this.picker.refresh(
-          title,
-          items as readonly PickerItem<unknown>[],
-          select,
-          false,
-        )
-        this.#positionPicker(false)
-      }
-    } finally {
-      this.#rethemeInProgress = rethemeWasInProgress
-    }
-    if (
-      !this.#pickerAnchored &&
-      this.#keybindings.preset === "vim" &&
-      this.#vimFocus !== "picker"
-    ) {
-      this.#vimFocusBeforePicker = this.#vimFocus
-      this.#vimFocus = "picker"
-      this.#setInputMode("insert")
-    }
-  }
-
-  #showPickerLoading(title: string, message: string): void {
-    this.picker.showLoading(title, message, this.#pickerAnchored)
-    this.#positionPicker(this.#pickerAnchored)
-    if (this.#pickerAnchored) this.composer.focus()
-  }
-
-  #showPickerStatus(title: string, message: string, description: string): void {
-    this.picker.showStatus(title, message, description, this.#pickerAnchored)
-    this.#positionPicker(this.#pickerAnchored)
-    if (this.#pickerAnchored) this.composer.focus()
   }
 
   #timelineTurns(): readonly TimelineTurnChoice[] {
@@ -4311,10 +4036,10 @@ export class RottweilerApp extends BoxRenderable {
 
   #selectPermissionMode(mode: PermissionMode): void {
     if (mode === "yolo") {
-      this.#pickerAnchored = false
-      this.#pickerQuery = ""
-      this.#pickerKind = "permissionYoloConfirm"
-      this.#refreshPicker()
+      this.#pickerController.anchored = false
+      this.#pickerController.query = ""
+      this.#pickerController.kind = "permissionYoloConfirm"
+      this.#pickerController.refresh()
       return
     }
     this.#submitPaletteCommand(`/permissions mode ${mode}`)
@@ -4457,69 +4182,40 @@ export class RottweilerApp extends BoxRenderable {
   #updateComposerAutocomplete(value: string): void {
     const slash = /^\/([^\s]*)$/.exec(value)
     if (slash !== null) {
-      this.#pickerAnchored = true
-      this.#pickerQuery = slash[1] ?? ""
-      this.#positionPicker(true)
-      this.#pickerKind = "commands"
+      this.#pickerController.anchored = true
+      this.#pickerController.query = slash[1] ?? ""
+      this.#pickerController.position(true)
+      this.#pickerController.kind = "commands"
       if (this.#state.commands.length === 0 && !this.#commandsRequested) {
         this.#requestCommands()
       }
-      this.#refreshPicker()
+      this.#pickerController.refresh()
       return
     }
     const mention = /(?:^|\s)@([^\n]*)$/.exec(value)
-    if (mention === null && this.#pickerAnchored) this.closePicker()
-  }
-
-  #positionPicker(anchored: boolean): void {
-    const terminalHeight = this.height === 0 ? this.ctx.height : this.height
-    if (anchored) {
-      const statusHeight = Math.max(1, this.statusLine.height || 1)
-      // Composer growth happens in the same input tick as anchored picker
-      // refresh. Its previous Yoga y-coordinate can therefore be one frame
-      // stale; derive the dock boundary from the current measured height.
-      const composerTop = Math.max(
-        0,
-        terminalHeight - statusHeight - this.composer.dockHeight,
-      )
-      // Hidden absolute renderables have no measured height before their first
-      // frame. Position from the picker's configured anchored height instead
-      // of its Yoga measurement so the first `/` opens above the composer just
-      // like every subsequent invocation.
-      const pickerHeight = this.picker.constrainAnchoredHeight(composerTop)
-      this.picker.bottom = undefined
-      this.picker.top = Math.max(0, composerTop - pickerHeight)
-      this.picker.left = 0
-      this.picker.width = "100%"
-    } else {
-      const top = Math.min(2, Math.max(0, terminalHeight - 2))
-      const statusHeight = Math.max(1, this.statusLine.height || 1)
-      this.picker.constrainModalHeight(Math.max(1, terminalHeight - top - statusHeight))
-      this.picker.bottom = undefined
-      this.picker.top = top
-      this.picker.left = "15%"
-      this.picker.width = "70%"
-    }
+    if (mention === null && this.#pickerController.anchored) this.closePicker()
   }
 
   #requestCommands(): void {
     this.#commandsRequested = true
     this.#clearProjectionError("commands")
-    this.#latestCommandsRequest = this.#command({ type: "list_commands" })
+    this.#projectionRequests.command({ type: "list_commands" })
   }
 
   #requestSubagents(): void {
     if (this.#state.replay.active) return
     this.#subagentListError = null
-    const meta = this.#meta()
-    this.#latestSubagentsRequest = meta.request_id
-    void this.#emit({
+    const meta = this.#projectionRequests.issue("subagents")
+    void this.#projectionRequests.emit({
       type: "list_subagents",
       meta,
       session_id: this.#sessionId,
     }).then((outcome) => {
-      if (outcome?.type === "rejected" && this.#latestSubagentsRequest === meta.request_id) {
-        this.#latestSubagentsRequest = null
+      if (
+        outcome?.type === "rejected" &&
+        this.#projectionRequests.matches("subagents", meta.request_id)
+      ) {
+        this.#projectionRequests.clear("subagents")
         this.#subagentListError = presentError({
           category: outcome.error.category,
           code: outcome.error.code,
@@ -4527,9 +4223,12 @@ export class RottweilerApp extends BoxRenderable {
           requestId: meta.request_id,
         }).text
         this.#projectRejection(outcome)
-        if (this.#pickerKind === "agents") this.#refreshPicker()
-      } else if (outcome == null && this.#latestSubagentsRequest === meta.request_id) {
-        this.#latestSubagentsRequest = null
+        if (this.#pickerController.kind === "agents") this.#pickerController.refresh()
+      } else if (
+        outcome == null &&
+        this.#projectionRequests.matches("subagents", meta.request_id)
+      ) {
+        this.#projectionRequests.clear("subagents")
         const presentation = presentError({
           category: "protocol",
           code: "subagents_unavailable",
@@ -4542,11 +4241,11 @@ export class RottweilerApp extends BoxRenderable {
           presentation.text,
           true,
         )
-        if (this.#pickerKind === "agents") this.#refreshPicker()
+        if (this.#pickerController.kind === "agents") this.#pickerController.refresh()
       }
     }).catch((error) => {
-      if (this.#latestSubagentsRequest !== meta.request_id) return
-      this.#latestSubagentsRequest = null
+      if (!this.#projectionRequests.matches("subagents", meta.request_id)) return
+      this.#projectionRequests.clear("subagents")
       const presentation = presentError({
         category: "protocol",
         code: "subagents_failed",
@@ -4555,7 +4254,7 @@ export class RottweilerApp extends BoxRenderable {
       })
       this.#subagentListError = presentation.text
       this.#projectClientError("subagents_failed", presentation.text, true)
-      if (this.#pickerKind === "agents") this.#refreshPicker()
+      if (this.#pickerController.kind === "agents") this.#pickerController.refresh()
     })
   }
 
@@ -4582,14 +4281,14 @@ export class RottweilerApp extends BoxRenderable {
     subagentId: string,
     afterSequence: string | null,
   ): Promise<void> {
-    const meta = this.#meta()
+    const meta = this.#projectionRequests.meta()
     this.#transitionSubagentReplay(subagentId, {
       type: "requestIssued",
       requestId: meta.request_id,
       afterSequence,
     })
     try {
-      const outcome = await this.#emit({
+      const outcome = await this.#projectionRequests.emit({
         type: "replay_subagent",
         meta,
         session_id: this.#sessionId,
@@ -4715,9 +4414,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#subagentErrorBaseline = this.#state.errors.at(-1)
     if (event.type === "turn_finished") this.#setSubagentActivity(subagentId, "idle")
     else if (event.type === "turn_started") this.#setSubagentActivity(subagentId, "running")
-    this.#subagentPresentationDirty = true
-    if (isPresentationStreamDelta(event)) this.#schedulePresentationFrame()
-    else this.#flushPresentationQueue()
+    this.#presentation.markDirty(isPresentationStreamDelta(event))
   }
 
   #transitionSubagentReplay(
@@ -4843,9 +4540,9 @@ export class RottweilerApp extends BoxRenderable {
   async #interruptSubagent(subagentId: string): Promise<void> {
     let outcome: void | CommandOutcome | null
     try {
-      outcome = await this.#emit({
+      outcome = await this.#projectionRequests.emit({
         type: "interrupt_subagent",
-        meta: this.#meta(),
+        meta: this.#projectionRequests.meta(),
         session_id: this.#sessionId,
         subagent_id: subagentId,
       })
@@ -4879,9 +4576,9 @@ export class RottweilerApp extends BoxRenderable {
   async #closeSubagent(subagentId: string): Promise<void> {
     let outcome: void | CommandOutcome | null
     try {
-      outcome = await this.#emit({
+      outcome = await this.#projectionRequests.emit({
         type: "close_subagent",
-        meta: this.#meta(),
+        meta: this.#projectionRequests.meta(),
         session_id: this.#sessionId,
         subagent_id: subagentId,
       })
@@ -4935,16 +4632,15 @@ export class RottweilerApp extends BoxRenderable {
   #requestModels(refresh = false): void {
     this.#modelsRequested = true
     this.#clearProjectionError("models")
-    this.#latestModelsRequest = this.#command({ type: "list_models", refresh })
+    this.#projectionRequests.command({ type: "list_models", refresh })
   }
 
   #openChangedFileDiff(path: string): void {
     if (this.#state.replay.active || this.#state.shell.active) return
     this.#reviewOpen = true
-    this.#pendingWorkspaceDiffPath = path
     this.reviewPanel.showWorkspaceDiffMessage(path, "Loading changed-file diff…")
     this.setState(this.#state)
-    this.#latestWorkspaceDiffRequest = this.#command({
+    this.#projectionRequests.command({
       type: "get_workspace_diff",
       path,
       max_bytes: 1_000_000,
@@ -4955,11 +4651,11 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearSessionSearchTimer()
     this.#sessionSearchTimer = setTimeout(() => {
       this.#sessionSearchTimer = null
-      if (this.#pickerKind === "sessions" && this.picker.input.value === query) {
+      if (this.#pickerController.kind === "sessions" && this.picker.input.value === query) {
         if (query.trim().length === 0) {
-          this.#latestSessionsRequest = this.#command({ type: "list_sessions" })
+          this.#projectionRequests.command({ type: "list_sessions" })
         } else {
-          this.#latestSessionsRequest = this.#command({ type: "search_sessions", query, limit: 100 })
+          this.#projectionRequests.command({ type: "search_sessions", query, limit: 100 })
         }
       }
     }, 80)
@@ -4973,7 +4669,7 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #refreshRuntimeServicesWhileToolsRun(): void {
-    this.#latestRuntimeServicesRequest = this.#command({ type: "list_runtime_services" })
+    this.#projectionRequests.command({ type: "list_runtime_services" })
     this.#clearRuntimeServicesTimer()
     if (!Object.values(this.#state.tools).some((tool) => tool.status === "running")) return
     this.#runtimeServicesTimer = setTimeout(() => {
@@ -5038,9 +4734,9 @@ export class RottweilerApp extends BoxRenderable {
       }
       let outcome: void | CommandOutcome | null
       try {
-        outcome = await this.#emit({
+        outcome = await this.#projectionRequests.emit({
           type: "continue_subagent",
-          meta: this.#meta(),
+          meta: this.#projectionRequests.meta(),
           session_id: this.#sessionId,
           subagent_id: subagentId,
           content,
@@ -5085,9 +4781,9 @@ export class RottweilerApp extends BoxRenderable {
         )
         return false
       }
-      const outcome = await this.#emit({
+      const outcome = await this.#projectionRequests.emit({
         type: "answer_question",
-        meta: this.#meta(),
+        meta: this.#projectionRequests.meta(),
         session_id: this.#sessionId,
         question_id: textQuestion.questionId,
         answers: [{ question_id: textQuestion.questionId, values: [content] }],
@@ -5159,9 +4855,8 @@ export class RottweilerApp extends BoxRenderable {
       this.reviewPanel.showSessionReview()
       this.#reviewOpen = true
       this.setState(this.#state)
-      const meta = this.#meta()
-      this.#latestReviewRequest = meta.request_id
-      const outcome = await this.#emit({
+      const meta = this.#projectionRequests.issue("review")
+      const outcome = await this.#projectionRequests.emit({
         type: "get_session_review",
         meta,
         session_id: this.#sessionId,
@@ -5177,11 +4872,11 @@ export class RottweilerApp extends BoxRenderable {
     if (sessionAction?.type === "fork") {
       return await this.#requestFork(sessionAction.atTurn)
     }
-    const meta = this.#meta()
+    const meta = this.#projectionRequests.meta()
     if (preserveRewindIntent && this.#pendingRewindIntent !== null) {
       this.#pendingRewindIntent.requestId = meta.request_id
     }
-    const outcome = await this.#emit({
+    const outcome = await this.#projectionRequests.emit({
       type: "send_message",
       meta,
       session_id: this.#sessionId,
@@ -5207,9 +4902,9 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingShellTimer = null
       if (!this.#state.shell.active) this.#resumeTerminal()
     }, 5_000)
-    const outcome = await this.#emit({
+    const outcome = await this.#projectionRequests.emit({
       type: "user_shell_started",
-      meta: this.#meta(),
+      meta: this.#projectionRequests.meta(),
       session_id: this.#sessionId,
       command,
     })
@@ -5228,9 +4923,9 @@ export class RottweilerApp extends BoxRenderable {
 
   async #submitApproval(tool: ToolProjection, decision: ApprovalDecision): Promise<void> {
     try {
-      const outcome = await this.#emit({
+      const outcome = await this.#projectionRequests.emit({
         type: "approve_tool",
-        meta: this.#meta(),
+        meta: this.#projectionRequests.meta(),
         session_id: this.#sessionId,
         tool_call_id: tool.toolCallId,
         decision,
@@ -5259,9 +4954,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #answer(question: QuestionProjection, values: readonly string[]): void {
-    this.#emit({
+    this.#projectionRequests.emit({
       type: "answer_question",
-      meta: this.#meta(),
+      meta: this.#projectionRequests.meta(),
       session_id: this.#sessionId,
       question_id: question.questionId,
       answers: [{ question_id: question.questionId, values: [...values] }],
@@ -5269,9 +4964,9 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #reviewPlan(decision: PlanDecision): void {
-    this.#emit({
+    this.#projectionRequests.emit({
       type: "approve_plan",
-      meta: this.#meta(),
+      meta: this.#projectionRequests.meta(),
       session_id: this.#sessionId,
       decision,
       revisions: decision === "reject" ? "Revise the plan using the user's next message as feedback." : null,
@@ -5294,9 +4989,9 @@ export class RottweilerApp extends BoxRenderable {
     this.#pendingReviewPaths.add(path)
     this.reviewPanel.setDecisionPending(path, true)
     try {
-      const outcome = await this.#emit({
+      const outcome = await this.#projectionRequests.emit({
         type: "review_file",
-        meta: this.#meta(),
+        meta: this.#projectionRequests.meta(),
         session_id: this.#sessionId,
         path,
         decision,
@@ -5325,8 +5020,8 @@ export class RottweilerApp extends BoxRenderable {
 
   async #submitProviderApiKey(provider: string, apiKey: string): Promise<void> {
     this.#providerApiKeyPending = provider
-    this.#pickerKind = "providerApiKey"
-    this.#refreshPicker()
+    this.#pickerController.kind = "providerApiKey"
+    this.#pickerController.refresh()
     try {
       const result = await this.#options.onProviderApiKey?.(provider, apiKey)
       if (result === undefined)
@@ -5364,8 +5059,8 @@ export class RottweilerApp extends BoxRenderable {
 
   async #retryProviderActivation(provider: string): Promise<void> {
     this.#providerApiKeyPending = provider
-    this.#pickerKind = "providerApiKey"
-    this.#refreshPicker()
+    this.#pickerController.kind = "providerApiKey"
+    this.#pickerController.refresh()
     try {
       if (this.#options.onProviderActivate === undefined) throw new Error("activation unavailable")
       await this.#options.onProviderActivate(provider)
@@ -5437,26 +5132,26 @@ export class RottweilerApp extends BoxRenderable {
       this.#providerAuthActionInFlight = false
       const current = this.#state.providerAuth.pending
       if (
-        this.#pickerKind === "providerAuth" &&
+        this.#pickerController.kind === "providerAuth" &&
         current?.provider === provider &&
         current.attemptId === attemptId
       ) {
-        this.#refreshPicker()
+        this.#pickerController.refresh()
       }
     }
   }
 
   async #requestFork(atTurn: string | null): Promise<boolean> {
-    const meta = this.#meta()
-    this.#pendingForkRequests.add(meta.request_id)
-    const outcome = await this.#emit({
+    const meta = this.#projectionRequests.meta()
+    this.#projectionRequests.trackFork(meta.request_id)
+    const outcome = await this.#projectionRequests.emit({
       type: "fork",
       meta,
       session_id: this.#sessionId,
       at_turn: atTurn,
     })
     if (outcome === null || outcome?.type === "rejected") {
-      this.#pendingForkRequests.delete(meta.request_id)
+      this.#projectionRequests.discardFork(meta.request_id)
     }
     if (outcome?.type === "rejected") this.#projectRejection(outcome)
     return outcome?.type === "accepted"
@@ -5466,7 +5161,7 @@ export class RottweilerApp extends BoxRenderable {
     if (!this.#reviewOpen) return
     this.#reviewOpen = false
     this.#pendingReviewSelection = null
-    this.#pendingWorkspaceDiffPath = null
+    this.#projectionRequests.clear("workspace_diff")
     this.reviewPanel.closePresentation()
     this.setState(this.#state)
     this.#focusForInputMode()
@@ -5480,262 +5175,13 @@ export class RottweilerApp extends BoxRenderable {
     this.#focusForInputMode()
   }
 
-  #command(
-    command:
-      | { readonly type: "search_workspace_files"; readonly query: string; readonly limit: number }
-      | { readonly type: "preview_workspace_file"; readonly path: string; readonly max_bytes: number }
-      | { readonly type: "switch_model"; readonly model: string; readonly provider?: string | null }
-      | { readonly type: "get_session_review" | "get_workspace_status" | "get_context" | "get_cost" }
-      | { readonly type: "get_workspace_diff"; readonly path: string; readonly max_bytes: number }
-      | { readonly type: "search_sessions"; readonly query: string; readonly limit: number }
-      | { readonly type: "rename_session"; readonly sessionId: string; readonly title: string }
-      | { readonly type: "list_models"; readonly refresh: boolean }
-      | { readonly type: "list_settings" }
-      | { readonly type: "set_setting"; readonly key: string; readonly value: string }
-      | { readonly type: "list_mcp_servers" }
-      | { readonly type: "list_runtime_services" }
-      | { readonly type: "add_mcp_http_server"; readonly name: string; readonly endpoint: string }
-      | { readonly type: "add_mcp_stdio_server"; readonly name: string; readonly executable: string; readonly args: string[]; readonly environment: Array<{ readonly key: string; readonly value: string }> }
-      | { readonly type: "remove_mcp_server"; readonly name: string }
-      | { readonly type: "review_mcp_server"; readonly name: string }
-      | { readonly type: "approve_mcp_server"; readonly name: string; readonly fingerprint: string }
-      | { readonly type: "set_mcp_server_enabled"; readonly name: string; readonly enabled: boolean }
-      | { readonly type: "list_permissions" }
-      | { readonly type: "add_session_permission_rule"; readonly pattern: string; readonly action: PermissionAction }
-      | { readonly type: "remove_session_permission_rule"; readonly ruleId: string }
-      | { readonly type: "revoke_permission_approval"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
-      | { readonly type: "list_permissions" }
-      | { readonly type: "add_session_permission_rule"; readonly pattern: string; readonly action: PermissionAction }
-      | { readonly type: "remove_session_permission_rule"; readonly ruleId: string }
-      | { readonly type: "revoke_permission_approval"; readonly approvalId: string; readonly scope: PermissionApprovalScope }
-      | { readonly type: "remove_queued_message"; readonly position: string }
-      | { readonly type: "clear_queued_messages" }
-      | { readonly type: "begin_provider_auth"; readonly provider: string }
-      | { readonly type: "configure_builtin_provider"; readonly provider: string }
-      | { readonly type: "complete_provider_auth" | "cancel_provider_auth"; readonly provider: string; readonly attemptId: string }
-      | { readonly type: "list_commands" | "list_sessions" },
-  ): string | null {
-    if (
-      this.#state.replay.active &&
-      command.type !== "list_sessions" &&
-      command.type !== "search_sessions"
-    ) {
-      return null
-    }
-    const meta = this.#meta()
-    if (command.type === "get_workspace_status") {
-      this.#latestWorkspaceStatusRequest = meta.request_id
-    } else if (command.type === "get_workspace_diff") {
-      this.#latestWorkspaceDiffRequest = meta.request_id
-    } else if (command.type === "get_session_review") {
-      this.#latestReviewRequest = meta.request_id
-    } else if (command.type === "switch_model") {
-      if (this.#pendingModelSwitchRequests.size >= MAX_PENDING_MODEL_SWITCH_REQUESTS) {
-        const oldest = this.#pendingModelSwitchRequests.values().next().value
-        if (oldest !== undefined) this.#pendingModelSwitchRequests.delete(oldest)
-      }
-      this.#pendingModelSwitchRequests.add(meta.request_id)
-    } else if (command.type === "list_sessions" || command.type === "search_sessions") {
-      this.#latestSessionsRequest = meta.request_id
-    } else if (command.type === "list_settings" || command.type === "set_setting") {
-      this.#latestSettingsRequest = meta.request_id
-      if (command.type === "list_settings") this.#pendingSettingsRequest = meta.request_id
-    } else if (command.type === "list_permissions") {
-      this.#latestPermissionsRequest = meta.request_id
-    } else if (command.type === "list_mcp_servers") {
-      this.#latestMcpRequest = meta.request_id
-    } else if (command.type === "list_runtime_services") {
-      this.#latestRuntimeServicesRequest = meta.request_id
-    }
-    let dispatched: ClientCommand
-    switch (command.type) {
-      case "list_models":
-        dispatched = { ...command, meta, session_id: this.#sessionId }
-        break
-      case "list_sessions":
-        dispatched = { type: command.type, meta }
-        break
-      case "list_commands":
-      case "list_settings":
-      case "list_mcp_servers":
-      case "list_runtime_services":
-      case "list_permissions":
-      case "clear_queued_messages":
-        dispatched = { type: command.type, meta, session_id: this.#sessionId }
-        break
-      case "set_setting":
-      case "add_mcp_http_server":
-      case "add_mcp_stdio_server":
-      case "remove_mcp_server":
-      case "review_mcp_server":
-      case "approve_mcp_server":
-      case "set_mcp_server_enabled":
-      case "add_session_permission_rule":
-        dispatched = { ...command, meta, session_id: this.#sessionId }
-        break
-      case "remove_session_permission_rule":
-        dispatched = {
-          type: command.type,
-          meta,
-          session_id: this.#sessionId,
-          rule_id: command.ruleId,
-        }
-        break
-      case "remove_queued_message":
-        dispatched = {
-          type: command.type,
-          meta,
-          session_id: this.#sessionId,
-          position: command.position,
-        }
-        break
-      case "revoke_permission_approval":
-        dispatched = {
-          type: command.type,
-          meta,
-          session_id: this.#sessionId,
-          approval_id: command.approvalId,
-          scope: command.scope,
-        }
-        break
-      case "begin_provider_auth":
-      case "configure_builtin_provider":
-        dispatched = { ...command, meta, session_id: this.#sessionId }
-        break
-      case "complete_provider_auth":
-      case "cancel_provider_auth":
-        dispatched = {
-          type: command.type,
-          meta,
-          session_id: this.#sessionId,
-          provider: command.provider,
-          attempt_id: command.attemptId,
-        }
-        break
-      case "search_sessions":
-        dispatched = { ...command, meta }
-        break
-      case "rename_session":
-        dispatched = {
-          type: command.type,
-          meta,
-          session_id: command.sessionId,
-          title: command.title,
-        }
-        break
-      case "get_session_review":
-      case "get_workspace_status":
-      case "get_context":
-      case "get_cost":
-        dispatched = { type: command.type, meta, session_id: this.#sessionId }
-        break
-      case "get_workspace_diff":
-        dispatched = { ...command, meta, session_id: this.#sessionId }
-        break
-      case "search_workspace_files":
-        dispatched = {
-          ...command,
-          meta,
-          session_id: this.#sessionId,
-        }
-        break
-      case "preview_workspace_file":
-        dispatched = {
-          ...command,
-          meta,
-          session_id: this.#sessionId,
-        }
-        break
-      case "switch_model":
-        dispatched = {
-          ...command,
-          meta,
-          session_id: this.#sessionId,
-        }
-        break
-    }
-    void this.#emitProjectionCommand(command.type, dispatched, meta.request_id)
-    return meta.request_id
-  }
-
-  async #emitProjectionCommand(
-    type: ClientCommand["type"],
-    command: ClientCommand,
-    requestId: string,
-  ): Promise<void> {
-    try {
-      const outcome = await this.#emit(command)
-      if (outcome?.type === "rejected") {
-        if (projectionKind(type) === null) {
-          if (type === "switch_model") {
-            this.#pendingModelSwitchRequests.delete(requestId)
-          }
-          this.#projectRejection(outcome)
-        } else {
-          this.#recordProjectionFailure(type, requestId, outcome.error.message)
-        }
-      } else if (outcome === null) {
-        const message = "the engine did not acknowledge the request"
-        if (projectionKind(type) === null) {
-          if (type === "switch_model") {
-            this.#pendingModelSwitchRequests.delete(requestId)
-          }
-          this.#projectClientError(
-            `${type}_unavailable`,
-            presentError({
-              category: "protocol",
-              code: `${type}_unavailable`,
-              message,
-              requestId,
-            }).text,
-            true,
-          )
-        } else {
-          this.#recordProjectionFailure(type, requestId, message)
-        }
-      }
-    } catch (error) {
-      const message = safeErrorMessage(error)
-      if (projectionKind(type) === null) {
-        if (type === "switch_model") {
-          this.#pendingModelSwitchRequests.delete(requestId)
-        }
-        this.#projectClientError(
-          `${type}_failed`,
-          presentError({
-            category: "protocol",
-            code: `${type}_failed`,
-            message,
-            requestId,
-          }).text,
-          true,
-        )
-      } else {
-        this.#recordProjectionFailure(type, requestId, message)
-      }
-    }
-  }
-
-  #recordProjectionFailure(type: ClientCommand["type"], requestId: string, message: string): void {
-    const kind = projectionKind(type)
-    if (kind === null || !this.#isCurrentProjectionRequest(kind, requestId)) return
+  #recordProjectionFailure(kind: ProjectionKind, message: string): void {
     if (kind === "commands") {
       this.#commandsRequested = false
-      this.#latestCommandsRequest = null
     } else if (kind === "models") {
       this.#modelsRequested = false
-      this.#latestModelsRequest = null
-    } else if (kind === "settings") {
-      this.#pendingSettingsRequest = null
-    } else if (kind === "permissions") {
-      this.#latestPermissionsRequest = null
-    } else if (kind === "mcp") {
-      this.#latestMcpRequest = null
-    } else if (kind === "runtime_services") {
-      this.#latestRuntimeServicesRequest = null
-      if (this.#state.runtimeServices.length > 0) {
-        this.setState({ ...this.#state, runtimeServices: [] })
-      }
+    } else if (kind === "runtime_services" && this.#state.runtimeServices.length > 0) {
+      this.setState({ ...this.#state, runtimeServices: [] })
     }
     const fragment = sanitizeErrorFragment(message)
     this.#projectionErrors = {
@@ -5743,19 +5189,11 @@ export class RottweilerApp extends BoxRenderable {
       [kind]: presentError({ message: fragment }).text,
     }
     const label = kind === "runtime_services" ? "active services" : kind
-    this.#projectClientError(`${kind}_projection_failed`, `couldn't load ${label}: ${fragment}`, true)
-  }
-
-  #isCurrentProjectionRequest(kind: ProjectionKind, requestId: string): boolean {
-    if (kind === "commands") return this.#latestCommandsRequest === requestId
-    if (kind === "models") return this.#latestModelsRequest === requestId
-    if (kind === "sessions") return this.#latestSessionsRequest === requestId
-    if (kind === "files") return this.#pendingWorkspaceSearchRequest === requestId
-    if (kind === "settings") return this.#latestSettingsRequest === requestId
-    if (kind === "permissions") return this.#latestPermissionsRequest === requestId
-    if (kind === "mcp") return this.#latestMcpRequest === requestId
-    if (kind === "runtime_services") return this.#latestRuntimeServicesRequest === requestId
-    return true
+    this.#projectClientError(
+      `${kind}_projection_failed`,
+      `couldn't load ${label}: ${fragment}`,
+      true,
+    )
   }
 
   #clearProjectionError(kind: ProjectionKind): void {
@@ -5763,18 +5201,6 @@ export class RottweilerApp extends BoxRenderable {
     const next = { ...this.#projectionErrors }
     delete next[kind]
     this.#projectionErrors = next
-  }
-
-  #meta() {
-    return {
-      protocol_version: PROTOCOL_VERSION,
-      client_id: this.#options.clientId,
-      request_id: this.#options.requestId(),
-    }
-  }
-
-  async #emit(command: ClientCommand): Promise<void | CommandOutcome | null> {
-    return this.#options.onCommand?.(command)
   }
 
   #suspendTerminal(): void {
@@ -5837,9 +5263,9 @@ export class RottweilerApp extends BoxRenderable {
       await this.#interruptSubagent(subagentId)
       return
     }
-    const outcome = await this.#emit({
+    const outcome = await this.#projectionRequests.emit({
       type: "interrupt",
-      meta: this.#meta(),
+      meta: this.#projectionRequests.meta(),
       session_id: this.#sessionId,
     })
     if (outcome === null) {
@@ -6171,30 +5597,6 @@ function parseSessionAction(content: string): SessionAction | null {
 function isU64(value: string): boolean {
   return ( /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n
   )
-}
-
-function projectionKind(type: ClientCommand["type"]): ProjectionKind | null {
-  switch (type) {
-    case "list_commands":
-      return "commands"
-    case "list_models":
-      return "models"
-    case "list_sessions":
-    case "search_sessions":
-      return "sessions"
-    case "search_workspace_files":
-      return "files"
-    case "list_settings":
-      return "settings"
-    case "list_permissions":
-      return "permissions"
-    case "list_mcp_servers":
-      return "mcp"
-    case "list_runtime_services":
-      return "runtime_services"
-    default:
-      return null
-  }
 }
 
 function safeErrorMessage(error: unknown): string {

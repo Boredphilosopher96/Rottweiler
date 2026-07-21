@@ -1,0 +1,146 @@
+import type { FuzzyPickerRenderable, PickerItem } from "./components"
+
+export type PickerKind =
+  | "palette" | "keyboardHelp" | "commands" | "files" | "attachments" | "mcp"
+  | "mcpActions" | "mcpInput" | "mcpRemoveConfirm"
+  | "modes" | "models" | "providers" | "providerAuth" | "providerApiKey"
+  | "providerRecovery"
+  | "permissions" | "permissionMode" | "permissionYoloConfirm" | "trust"
+  | "permissionInput"
+  | "queuedMessages"
+  | "exportFormat" | "exportPath" | "exportOverwrite"
+  | "workspaceRoots"
+  | "budgets" | "budgetPresets" | "budgetInput"
+  | "sessions" | "sessionActions" | "sessionRename" | "settings"
+  | "agents" | "agentActions"
+  | "timeline" | "timelineActions"
+  | "themes"
+
+interface PickerControllerOptions {
+  readonly picker: () => FuzzyPickerRenderable<unknown>
+  readonly terminalHeight: () => number
+  readonly statusHeight: () => number
+  readonly composerDockHeight: () => number
+  readonly focusComposer: () => void
+  readonly renderPicker: (kind: PickerKind | null) => void
+  readonly withRefreshGuard: (kind: PickerKind | null, refresh: () => void) => void
+  readonly onModalOpened: () => void
+  readonly onClosed: (kind: PickerKind | null) => void
+}
+
+export class PickerController {
+  readonly #options: PickerControllerOptions
+  #kind: PickerKind | null = null
+  #anchored = false
+  #query = ""
+
+  constructor(options: PickerControllerOptions) {
+    this.#options = options
+  }
+
+  get kind(): PickerKind | null {
+    return this.#kind
+  }
+
+  set kind(kind: PickerKind | null) {
+    this.#kind = kind
+  }
+
+  get anchored(): boolean {
+    return this.#anchored
+  }
+
+  set anchored(anchored: boolean) {
+    this.#anchored = anchored
+  }
+
+  get query(): string {
+    return this.#query
+  }
+
+  set query(query: string) {
+    this.#query = query
+  }
+
+  begin(kind: PickerKind, anchored = false, query = ""): void {
+    this.#anchored = anchored
+    this.#query = query
+    this.position(anchored)
+    this.#kind = kind
+  }
+
+  refresh(): void {
+    this.#options.renderPicker(this.#kind)
+  }
+
+  show<T>(
+    title: string,
+    items: readonly PickerItem<T>[],
+    onSelect: (item: PickerItem<T>) => void,
+  ): void {
+    const picker = this.#options.picker()
+    const select = (item: PickerItem<unknown>) => onSelect(item as PickerItem<T>)
+    this.#options.withRefreshGuard(this.#kind, () => {
+      if (this.#anchored) {
+        picker.refreshAnchored(
+          title,
+          items as readonly PickerItem<unknown>[],
+          this.#query,
+          select,
+        )
+        this.position(true)
+        this.#options.focusComposer()
+      } else {
+        picker.refresh(title, items as readonly PickerItem<unknown>[], select, false)
+        this.position(false)
+      }
+    })
+    if (!this.#anchored) this.#options.onModalOpened()
+  }
+
+  showLoading(title: string, message: string): void {
+    this.#options.picker().showLoading(title, message, this.#anchored)
+    this.position(this.#anchored)
+    if (this.#anchored) this.#options.focusComposer()
+  }
+
+  showStatus(title: string, message: string, description: string): void {
+    this.#options.picker().showStatus(title, message, description, this.#anchored)
+    this.position(this.#anchored)
+    if (this.#anchored) this.#options.focusComposer()
+  }
+
+  close(): void {
+    const kind = this.#kind
+    this.#kind = null
+    this.#options.picker().close()
+    this.#anchored = false
+    this.#query = ""
+    this.#options.onClosed(kind)
+  }
+
+  position(anchored = this.#anchored): void {
+    const picker = this.#options.picker()
+    const terminalHeight = this.#options.terminalHeight()
+    if (anchored) {
+      const composerTop = Math.max(
+        0,
+        terminalHeight - this.#options.statusHeight() - this.#options.composerDockHeight(),
+      )
+      const pickerHeight = picker.constrainAnchoredHeight(composerTop)
+      picker.bottom = undefined
+      picker.top = Math.max(0, composerTop - pickerHeight)
+      picker.left = 0
+      picker.width = "100%"
+    } else {
+      const top = Math.min(2, Math.max(0, terminalHeight - 2))
+      picker.constrainModalHeight(
+        Math.max(1, terminalHeight - top - this.#options.statusHeight()),
+      )
+      picker.bottom = undefined
+      picker.top = top
+      picker.left = "15%"
+      picker.width = "70%"
+    }
+  }
+}
