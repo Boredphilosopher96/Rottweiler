@@ -3,7 +3,10 @@ import { durableSequenceId, isRecord, type WireEngineEvent } from "../transport"
 import type { RottweilerAction } from "./actions"
 import {
   createInitialState,
+  type BoundedCommandTextProjection,
+  type CommandResultProjection,
   type RottweilerState,
+  type StructuredCommandResultRow,
   type TranscriptEntry,
   type StreamingTail,
   type TodoProjection,
@@ -1169,7 +1172,7 @@ function applyKnownEvent(
       return { ...state, errors: [...state.errors.slice(-63), event.error] }
     case "command_finished": {
       const commandSequence = sequenceId ?? state.lastSequence ?? "0"
-      const message = formatCommandMessage(event.name, event.message, state)
+      const commandResult = projectCommandResult(event.name, event.message, state)
       return {
         ...state,
         errors: [],
@@ -1180,16 +1183,12 @@ function applyKnownEvent(
             agentTurn: `command:${event.name}:${commandSequence}`,
             turn: {
               role: "system",
-              blocks: [
-                {
-                  type: "text",
-                  text: message.length === 0 ? "Command completed." : message,
-                },
-              ],
+              blocks: [],
               meta: { synthetic: true, summary: false },
             },
             presentation: "command_result",
             title: `/${event.name}`,
+            commandResult,
           },
         ],
       }
@@ -1239,110 +1238,113 @@ const HIDDEN_COMMAND_RESULT_FIELDS = new Set([
   "truncated",
 ])
 
-/** Keep extension command payloads structured on the wire without exposing wire JSON in the UI. */
-function formatCommandMessage(name: string, source: string, state: RottweilerState): string {
-  if (name === "context" && state.context !== null) return formatContextCommand(state.context)
-  if (name === "cost" && state.cost !== null) return formatCostCommand(state.cost)
+/** Project command results without retaining renderer-specific Markdown. */
+function projectCommandResult(
+  name: string,
+  source: string,
+  state: RottweilerState,
+): CommandResultProjection {
+  if (name === "context" && state.context !== null) return projectContextCommand(state.context)
+  if (name === "cost" && state.cost !== null) return projectCostCommand(state.cost)
 
   const trimmed = source.trim()
-  if (name === "help") return formatHelpCommand(trimmed)
-  if (name === "status") return formatStatusCommand(trimmed)
-  if (name === "mode") return formatModeCommand(trimmed)
-  if (name === "permissions") return formatPermissionCommand(trimmed)
-  if (name === "plan") return formatPlanCommand(trimmed)
-  if (name === "review") return formatReviewCommand(trimmed)
-  if (name === "trust") return formatTrustCommand(trimmed)
-  if (name === "mcp") return formatMcpCommand(trimmed)
+  if (name === "help") return projectHelpCommand(trimmed)
+  if (name === "status") return projectStatusCommand(trimmed)
+  if (name === "mode") return projectModeCommand(trimmed)
+  if (name === "permissions") return projectPermissionCommand(trimmed)
+  if (name === "plan") return projectPlanCommand(trimmed)
+  if (name === "review") return projectReviewCommand(trimmed)
+  if (name === "trust") return projectTrustCommand(trimmed)
+  if (name === "mcp") return projectMcpCommand(trimmed)
   const completion = commandCompletionTitle(name)
-  if (completion !== null) return trimmed.length === 0
-    ? `**${completion}**`
-    : `**${completion}** · ${sentenceCase(singleLineCommand(trimmed, 180))}`
+  if (completion !== null) {
+    return {
+      kind: "completion",
+      title: completion,
+      detail: trimmed.length === 0 ? null : singleLineCommand(trimmed, 180),
+    }
+  }
   if (trimmed.length === 0 || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) {
-    return boundedCommandText(trimmed)
+    return { kind: "message", content: projectBoundedText(trimmed.split("\n"), 32) }
   }
   try {
     const parsed: unknown = JSON.parse(trimmed)
-    const lines = humanResultLines(parsed, 0)
-    return lines.length === 0 ? "Command completed." : boundedCommandRows(lines)
+    const rows = projectStructuredRows(parsed, 0)
+    return {
+      kind: "structured",
+      rows: rows.slice(0, 24),
+      omittedRowCount: Math.max(0, rows.length - 24),
+    }
   } catch {
-    // A structured-looking result that cannot be decoded is not safe UI text.
-    // It may be a truncated wire payload, so fail closed instead of dumping it.
-    return "_Command returned structured details that could not be displayed safely._"
+    // A structured-looking result that cannot be decoded is not safe UI state.
+    // It may be a truncated wire payload, so fail closed instead of retaining it.
+    return { kind: "unsafe_structured" }
   }
 }
 
-function formatContextCommand(snapshot: NonNullable<RottweilerState["context"]>): string {
-  const used = unsigned(snapshot.used_tokens)
-  const usable = unsigned(snapshot.usable_tokens)
-  const reserved = unsigned(snapshot.reserved_tokens)
-  const percent = snapshot.context_window_known && usable > 0n
-    ? Number((used * 100n) / usable)
-    : null
-  const filled = percent === null ? 0 : Math.min(20, Math.round(percent / 5))
-  const meter = percent === null ? "" : `\`${"█".repeat(filled)}${"░".repeat(20 - filled)}\` ${percent}%`
+function projectContextCommand(
+  snapshot: NonNullable<RottweilerState["context"]>,
+): Extract<CommandResultProjection, { readonly kind: "context" }> {
   const groups = new Map<string, { count: number; tokens: bigint }>()
   for (const item of snapshot.items) {
     const current = groups.get(item.kind) ?? { count: 0, tokens: 0n }
     current.count += 1
-    current.tokens += unsigned(item.estimated_tokens)
+    current.tokens += unsignedCommandValue(item.estimated_tokens)
     groups.set(item.kind, current)
   }
-  const rows = [...groups.entries()]
-    .sort((left, right) => left[1].tokens === right[1].tokens
-      ? left[0].localeCompare(right[0])
-      : left[1].tokens > right[1].tokens ? -1 : 1)
-    .map(([kind, group]) => `| ${contextKindLabel(kind)} | ${group.count} | ${compactNumber(group.tokens)} |`)
-
-  const capacity = snapshot.context_window_known
-    ? `**${compactNumber(used)} / ${compactNumber(usable)} tokens** · ${compactNumber(reserved)} reserved`
-    : `**${compactNumber(used)} tokens used** · context limit unavailable`
-  return [
-    capacity,
-    ...(meter === "" ? [] : [meter]),
-    `**${snapshot.items.length} items** in the active context`,
-    ...(rows.length === 0
-      ? ["\n_No context items yet._"]
-      : ["\n| Source | Items | Tokens |", "| --- | ---: | ---: |", ...rows]),
-  ].join("\n")
+  return {
+    kind: "context",
+    usedTokens: snapshot.used_tokens,
+    usableTokens: snapshot.usable_tokens,
+    reservedTokens: snapshot.reserved_tokens,
+    contextWindowKnown: snapshot.context_window_known,
+    itemCount: snapshot.items.length,
+    groups: [...groups].map(([kind, group]) => ({
+      kind,
+      itemCount: group.count,
+      estimatedTokens: group.tokens.toString(),
+    })),
+  }
 }
 
-function formatCostCommand(snapshot: NonNullable<RottweilerState["cost"]>): string {
+function projectCostCommand(
+  snapshot: NonNullable<RottweilerState["cost"]>,
+): Extract<CommandResultProjection, { readonly kind: "cost" }> {
   const usage = snapshot.session_usage
-  const cachePercent = (snapshot.cache_hit_basis_points / 100).toFixed(
-    snapshot.cache_hit_basis_points % 100 === 0 ? 0 : 2,
-  )
-  const subscription = unsigned(snapshot.session_subscription_quota_entries) > 0n
-  const unavailable = unsigned(snapshot.session_cost_unavailable_entries) > 0n
-  const billing = subscription
-    ? "Covered by subscription quota"
-    : unavailable || !snapshot.session_monetary_accounting_complete
-      ? "Cost unavailable for part of this session"
-      : formatMicrosUsd(snapshot.session_cost_micros_usd)
-  return [
-    `**${billing}**`,
-    `| Input | Output | Reasoning | Cache read | Cache hit |`,
-    `| ---: | ---: | ---: | ---: | ---: |`,
-    `| ${compactNumber(unsigned(usage.input_tokens))} | ${compactNumber(unsigned(usage.output_tokens))} | ${compactNumber(unsigned(usage.reasoning_tokens))} | ${compactNumber(unsigned(usage.cache_read_tokens))} | ${cachePercent}% |`,
-    `\n${snapshot.turns.length} accounted turn${snapshot.turns.length === 1 ? "" : "s"} · ${snapshot.utc_day} UTC`,
-  ].join("\n")
+  return {
+    kind: "cost",
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
+    reasoningTokens: usage.reasoning_tokens,
+    cacheReadTokens: usage.cache_read_tokens,
+    cacheHitBasisPoints: snapshot.cache_hit_basis_points,
+    subscriptionQuotaEntries: snapshot.session_subscription_quota_entries,
+    costUnavailableEntries: snapshot.session_cost_unavailable_entries,
+    monetaryAccountingComplete: snapshot.session_monetary_accounting_complete,
+    costMicrosUsd: snapshot.session_cost_micros_usd,
+    accountedTurnCount: snapshot.turns.length,
+    utcDay: snapshot.utc_day,
+  }
 }
 
-function formatHelpCommand(source: string): string {
-  const rows = source.split("\n").map((line) => line.trim()).filter(Boolean).flatMap((line) => {
+function projectHelpCommand(
+  source: string,
+): Extract<CommandResultProjection, { readonly kind: "help" }> {
+  const commands = source.split("\n").map((line) => line.trim()).filter(Boolean).flatMap((line) => {
     const [usage, description] = line.split(/\s+—\s+/, 2)
-    return usage === undefined || description === undefined ? [] : [`| \`${usage}\` | ${description} |`]
+    return usage === undefined || description === undefined ? [] : [{ usage, description }]
   })
-  return rows.length === 0
-    ? (source.length === 0 ? "No commands are available." : source)
-    : [
-        "| Command | What it does |",
-        "| --- | --- |",
-        ...rows.slice(0, 30),
-        ...(rows.length > 30 ? [`| … | ${rows.length - 30} more commands |`] : []),
-      ].join("\n")
+  return {
+    kind: "help",
+    commands: commands.slice(0, 30),
+    omittedCommandCount: Math.max(0, commands.length - 30),
+    fallback: commands.length > 0 || source.length === 0
+      ? null
+      : projectUnboundedText(source),
+  }
 }
 
-function formatStatusCommand(source: string): string {
+function projectStatusCommand(source: string): CommandResultProjection {
   const values = new Map(source.split("\n").flatMap((line) => {
     const separator = line.indexOf(":")
     return separator < 0 ? [] : [[line.slice(0, separator).trim().toLowerCase(), line.slice(separator + 1).trim()]]
@@ -1350,20 +1352,33 @@ function formatStatusCommand(source: string): string {
   const agent = values.get("agent")
   const mode = values.get("mode")
   const queued = values.get("queued messages")
-  if (agent === undefined || mode === undefined || queued === undefined) return source
-  return `**${sentenceCase(agent)}** · ${sentenceCase(mode)} mode · ${queued} queued message${queued === "1" ? "" : "s"}`
+  if (agent === undefined || mode === undefined || queued === undefined) {
+    return { kind: "message", content: projectUnboundedText(source) }
+  }
+  return { kind: "status", agent, mode, queuedMessages: queued }
 }
 
-function formatPermissionCommand(source: string): string {
-  if (source.length === 0) return "**Permissions updated**"
+function projectPermissionCommand(
+  source: string,
+): Extract<CommandResultProjection, { readonly kind: "permissions" }> {
   const lines = source.split("\n").map((line) => line.trim()).filter(Boolean)
-  if (lines.length <= 1) return `**Permissions** · ${sentenceCase(lines[0] ?? "updated")}`
+  if (lines.length <= 1) {
+    return {
+      kind: "permissions",
+      summary: lines[0] ?? null,
+      mode: null,
+      defaultPermission: null,
+      rememberedApprovals: null,
+      rules: [],
+      omittedRuleCount: 0,
+    }
+  }
 
   const mode = lines.find((line) => /^permission mode:/i.test(line))?.split(":", 2)[1]?.trim()
   const fallback = lines.find((line) => /^default permission:/i.test(line))?.split(":", 2)[1]?.trim()
   const approvals = lines.find((line) => /^remembered approvals:/i.test(line))
-  const rules: string[] = []
-  let scope = "Project"
+  const rules: Extract<CommandResultProjection, { readonly kind: "permissions" }>["rules"][number][] = []
+  let scope: "Project" | "Session" = "Project"
   for (const line of lines) {
     if (/^configured rules:/i.test(line)) {
       scope = "Project"
@@ -1387,74 +1402,104 @@ function formatPermissionCommand(source: string): string {
     // permission picker owns revocation; the transcript should show intent,
     // not internal credential/rule identifiers.
     if (values.length >= 3 && values.at(-1)?.startsWith("revoke with ")) {
-      rules.push(`| ${scope} | Remembered | ${markdownCell(humanLabel(values[0] ?? "tool"))} |`)
+      rules.push({ scope, decision: "remembered", target: values[0] ?? "tool", remembered: true })
       continue
     }
-    rules.push(`| ${scope} | ${sentenceCase(values[0] ?? "ask")} | \`${markdownCell(values.slice(1).join(" · ") || "all tools")}\` |`)
+    rules.push({
+      scope,
+      decision: values[0] ?? "ask",
+      target: values.slice(1).join(" · ") || "all tools",
+      remembered: false,
+    })
   }
-  const heading = mode === undefined
-    ? "**Permission settings**"
-    : `**${sentenceCase(mode)} permissions**${fallback === undefined ? "" : ` · ${fallback} by default`}`
-  return [
-    heading,
-    ...(approvals === undefined ? [] : [approvals.replace(/^remembered approvals:/i, "Remembered:")]),
-    ...(rules.length === 0
-      ? []
-      : ["\n| Scope | Decision | Applies to |", "| --- | --- | --- |", ...rules.slice(0, 16)]),
-    ...(rules.length > 16 ? [`\n… ${rules.length - 16} more rules · open \`/permissions\` to manage`] : []),
-  ].join("\n")
+  return {
+    kind: "permissions",
+    summary: null,
+    mode: mode ?? null,
+    defaultPermission: fallback ?? null,
+    rememberedApprovals: approvals?.replace(/^remembered approvals:/i, "") ?? null,
+    rules: rules.slice(0, 16),
+    omittedRuleCount: Math.max(0, rules.length - 16),
+  }
 }
 
-function formatModeCommand(source: string): string {
+function projectModeCommand(source: string): CommandResultProjection {
   const match = /^(?:active mode:|mode changed to)\s*(\S+)/i.exec(source)
-  if (match === null) return source.length === 0 ? "**Mode unchanged**" : boundedCommandText(source)
-  const mode = sentenceCase(match[1] ?? "execute")
-  return source.toLocaleLowerCase().startsWith("active")
-    ? `**${mode} mode** · currently active`
-    : `**${mode} mode enabled**`
+  if (match === null) return source.length === 0
+    ? { kind: "mode", mode: null, active: false }
+    : { kind: "message", content: projectBoundedText(source.split("\n"), 32) }
+  return {
+    kind: "mode",
+    mode: match[1] ?? "execute",
+    active: source.toLocaleLowerCase().startsWith("active"),
+  }
 }
 
-function formatPlanCommand(source: string): string {
-  if (source.length === 0 || /^no plan/i.test(source)) return "_No plan has been submitted._"
+function projectPlanCommand(
+  source: string,
+): Extract<CommandResultProjection, { readonly kind: "plan" }> {
+  if (source.length === 0 || /^no plan/i.test(source)) {
+    return { kind: "plan", title: null, body: null }
+  }
   const lines = source.split("\n")
   const title = lines.shift()?.trim() ?? "Plan"
-  const body = boundedCommandRows(lines, 32)
-  return [`## ${title.replace(/^#+\s*/, "")}`, body].filter(Boolean).join("\n\n")
+  return { kind: "plan", title, body: projectBoundedText(lines, 32) }
 }
 
-function formatReviewCommand(source: string): string {
-  if (source.length === 0 || /no changed files/i.test(source)) return "**No changed files**"
+function projectReviewCommand(
+  source: string,
+): Extract<CommandResultProjection, { readonly kind: "review" }> {
+  if (source.length === 0 || /no changed files/i.test(source)) {
+    return { kind: "review", summary: null, files: [], omittedFileCount: 0 }
+  }
   const lines = source.split("\n").map((line) => line.trim()).filter(Boolean)
   const summary = lines.shift() ?? "Session review"
   const files = lines.filter((line) => line.startsWith("- ")).map((line) => {
     const [path, status, note] = line.slice(2).split(" · ")
-    return `| \`${markdownCell(path ?? "file")}\` | ${sentenceCase(status ?? "changed")} | ${markdownCell(note ?? "")} |`
+    return { path: path ?? "file", status: status ?? "changed", note: note ?? "" }
   })
-  return [
-    `**${sentenceCase(summary)}**`,
-    ...(files.length === 0 ? [] : ["\n| File | Status | Note |", "| --- | --- | --- |", ...files.slice(0, 20)]),
-    ...(files.length > 20 ? [`\n… ${files.length - 20} more files · open \`/review\` for the full diff`] : []),
-  ].join("\n")
+  return {
+    kind: "review",
+    summary,
+    files: files.slice(0, 20),
+    omittedFileCount: Math.max(0, files.length - 20),
+  }
 }
 
-function formatTrustCommand(source: string): string {
-  if (source.length === 0) return "**Folder trust updated**"
+function projectTrustCommand(
+  source: string,
+): Extract<CommandResultProjection, { readonly kind: "trust" }> {
+  if (source.length === 0) return { kind: "trust", trust: "updated", message: null }
   const safe = singleLineCommand(source, 200)
   const trusted = /(?:^|\b)(?:trusted|granted)(?:\b|$)/i.test(safe) && !/untrusted|not trusted/i.test(safe)
   const revoked = /revoked|untrusted|not trusted/i.test(safe)
-  return `**${trusted ? "Folder trusted" : revoked ? "Folder not trusted" : "Folder trust"}** · ${sentenceCase(safe)}`
+  return {
+    kind: "trust",
+    trust: trusted ? "trusted" : revoked ? "untrusted" : "unknown",
+    message: safe,
+  }
 }
 
-function formatMcpCommand(source: string): string {
-  if (source.length === 0) return "**MCP settings updated**"
+function projectMcpCommand(
+  source: string,
+): Extract<CommandResultProjection, { readonly kind: "mcp" }> {
+  if (source.length === 0) {
+    return { kind: "mcp", updated: true, servers: [], omittedServerCount: 0, fallback: null }
+  }
   const lines = source.split("\n").map((line) => line.trim()).filter(Boolean)
-  const rows = lines.flatMap((line) => {
+  const servers = lines.flatMap((line) => {
     const values = line.replace(/^-\s*/, "").split(" · ")
-    return values.length < 2 ? [] : [`| ${markdownCell(values[0] ?? "Server")} | ${markdownCell(values.slice(1).join(" · "))} |`]
+    return values.length < 2
+      ? []
+      : [{ name: values[0] ?? "Server", status: values.slice(1).join(" · ") }]
   })
-  return rows.length === 0
-    ? boundedCommandText(source)
-    : ["| Server | Status |", "| --- | --- |", ...rows.slice(0, 20), ...(rows.length > 20 ? [`| … | ${rows.length - 20} more servers |`] : [])].join("\n")
+  return {
+    kind: "mcp",
+    updated: false,
+    servers: servers.slice(0, 20),
+    omittedServerCount: Math.max(0, servers.length - 20),
+    fallback: servers.length === 0 ? projectBoundedText(source.split("\n"), 32) : null,
+  }
 }
 
 function commandCompletionTitle(name: string): string | null {
@@ -1469,14 +1514,18 @@ function commandCompletionTitle(name: string): string | null {
   } as Record<string, string>)[name] ?? null
 }
 
-function boundedCommandText(source: string): string {
-  if (source === "") return "Command completed."
-  return boundedCommandRows(source.split("\n"), 32)
+function projectBoundedText(
+  lines: readonly string[],
+  maximum: number,
+): BoundedCommandTextProjection {
+  return {
+    lines: lines.slice(0, maximum),
+    omittedLineCount: Math.max(0, lines.length - maximum),
+  }
 }
 
-function boundedCommandRows(lines: readonly string[], maximum = 24): string {
-  if (lines.length <= maximum) return lines.join("\n")
-  return [...lines.slice(0, maximum), `\n… ${lines.length - maximum} more lines`].join("\n")
+function projectUnboundedText(source: string): BoundedCommandTextProjection {
+  return { lines: source.split("\n"), omittedLineCount: 0 }
 }
 
 function singleLineCommand(source: string, maximum: number): string {
@@ -1484,41 +1533,7 @@ function singleLineCommand(source: string, maximum: number): string {
   return safe.length <= maximum ? safe : `${safe.slice(0, maximum - 1)}…`
 }
 
-function markdownCell(value: string): string {
-  return value.replaceAll("|", "\\|").replaceAll("`", "'")
-}
-
-function contextKindLabel(kind: string): string {
-  return ({
-    system: "System",
-    tool_definitions: "Tools",
-    project_instructions: "Project instructions",
-    conversation: "Conversation",
-    tool_result: "Tool results",
-    pinned: "Pinned",
-    queued_message: "Queued messages",
-  } as Record<string, string>)[kind] ?? humanLabel(kind)
-}
-
-function compactNumber(value: bigint): string {
-  const units = [[1_000_000_000n, "B"], [1_000_000n, "M"], [1_000n, "k"]] as const
-  for (const [divisor, suffix] of units) {
-    if (value < divisor) continue
-    const whole = value / divisor
-    const tenth = (value % divisor) * 10n / divisor
-    return `${whole}${tenth === 0n ? "" : `.${tenth}`}${suffix}`
-  }
-  return value.toString()
-}
-
-function formatMicrosUsd(value: string): string {
-  const micros = unsigned(value)
-  const dollars = micros / 1_000_000n
-  const cents = (micros % 1_000_000n) / 10_000n
-  return `$${dollars}.${cents.toString().padStart(2, "0")}`
-}
-
-function unsigned(value: string): bigint {
+function unsignedCommandValue(value: string): bigint {
   try {
     const parsed = BigInt(value)
     return parsed < 0n ? 0n : parsed
@@ -1527,29 +1542,42 @@ function unsigned(value: string): bigint {
   }
 }
 
-function sentenceCase(value: string): string {
-  if (value.length === 0) return value
-  return `${value.slice(0, 1).toUpperCase()}${value.slice(1).replace(/[.!]+$/, "")}`
-}
-
-function humanResultLines(value: unknown, depth: number, label?: string): string[] {
-  if (depth > 5) return label === undefined ? [] : [`${label}: details omitted`]
+function projectStructuredRows(
+  value: unknown,
+  depth: number,
+  label?: string,
+): StructuredCommandResultRow[] {
+  if (depth > 5) return label === undefined
+    ? []
+    : [{ prefixes: [], label, value: { kind: "details_omitted" } }]
   if (value === null || value === undefined) {
-    return label === undefined ? [] : [`${label}: none`]
+    return label === undefined ? [] : [{ prefixes: [], label, value: { kind: "none" } }]
   }
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    const rendered = typeof value === "string" ? humanEnum(value) : String(value)
-    return label === undefined ? [rendered] : [`${label}: ${rendered}`]
+    return [{
+      prefixes: [],
+      label: label ?? null,
+      value: typeof value === "string"
+        ? { kind: "string", value }
+        : typeof value === "number"
+          ? { kind: "number", value }
+          : { kind: "boolean", value },
+    }]
   }
   if (Array.isArray(value)) {
-    if (value.length === 0) return label === undefined ? ["None"] : [`${label}: none`]
-    const heading = label === undefined ? [] : [`${label}:`]
+    if (value.length === 0) {
+      return [{ prefixes: [], label: label ?? null, value: { kind: "empty_list" } }]
+    }
+    const heading: StructuredCommandResultRow[] = label === undefined
+      ? []
+      : [{ prefixes: [], label, value: { kind: "heading" } }]
     return [
       ...heading,
       ...value.flatMap((item) =>
-        humanResultLines(item, depth + 1).map((line, index) =>
-          `${index === 0 ? "- " : "  "}${line}`,
-        ),
+        projectStructuredRows(item, depth + 1).map((row, index) => ({
+          ...row,
+          prefixes: [index === 0 ? "bullet" as const : "indent" as const, ...row.prefixes],
+        })),
       ),
     ]
   }
@@ -1561,29 +1589,24 @@ function humanResultLines(value: unknown, depth: number, label?: string): string
       !(key === "data" && item !== null && typeof item === "object"),
   )
   const unwrapped = record.data
-  const lines =
+  const rows =
     unwrapped !== null && typeof unwrapped === "object"
-      ? humanResultLines(unwrapped, depth + 1)
+      ? projectStructuredRows(unwrapped, depth + 1)
       : entries.flatMap(([key, item]) => {
-          const label = humanLabel(key)
           return sensitiveCommandResultField(key)
-            ? [`${label}: [redacted]`]
-            : humanResultLines(item, depth + 1, label)
+            ? [{ prefixes: [], label: key, value: { kind: "redacted" as const } }]
+            : projectStructuredRows(item, depth + 1, key)
         })
-  return label === undefined || lines.length === 0 ? lines : [`${label}:`, ...lines.map((line) => `  ${line}`)]
+  return label === undefined || rows.length === 0
+    ? rows
+    : [
+        { prefixes: [], label, value: { kind: "heading" } },
+        ...rows.map((row) => ({ ...row, prefixes: ["indent" as const, ...row.prefixes] })),
+      ]
 }
 
 function sensitiveCommandResultField(key: string): boolean {
   return /token|secret|password|authorization|api[_-]?key|credential/i.test(key)
-}
-
-function humanLabel(value: string): string {
-  const words = value.replaceAll("_", " ").replaceAll("-", " ")
-  return `${words.slice(0, 1).toUpperCase()}${words.slice(1)}`
-}
-
-function humanEnum(value: string): string {
-  return value.includes("_") && !value.includes(" ") ? value.replaceAll("_", " ") : value
 }
 
 function providerQualifiedRoute(

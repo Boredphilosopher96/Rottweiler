@@ -125,6 +125,39 @@ const ACTIONS: readonly KeybindingAction[] = [
   "word_forward",
 ]
 
+/** Short, user-facing descriptions for every configurable action. */
+export const KEYBINDING_ACTION_LABELS: Record<KeybindingAction, string> = {
+  append_insert: "Enter insert mode after the cursor",
+  close_overlay: "Close the current overlay",
+  cycle_agent_mode: "Cycle agent mode",
+  delete_character: "Delete character",
+  enter_insert: "Enter insert mode",
+  enter_normal: "Leave insert mode",
+  focus_next: "Focus next panel",
+  focus_previous: "Focus previous panel",
+  line_end: "Move to line end",
+  line_start: "Move to line start",
+  move_down: "Move down",
+  move_left: "Move left",
+  move_right: "Move right",
+  move_up: "Move up",
+  open_command_picker: "Open command palette",
+  open_external_editor: "Open external editor",
+  open_mode_picker: "Switch mode",
+  open_model_picker: "Switch model",
+  open_review: "Review changes",
+  open_session_picker: "Switch session",
+  open_subagent_picker: "Open child agents",
+  page_down: "Scroll transcript down",
+  page_up: "Scroll transcript up",
+  paste_image: "Paste image",
+  select_current: "Select current item",
+  view_bottom: "Jump to transcript bottom",
+  view_top: "Jump to transcript top",
+  word_backward: "Move word backward",
+  word_forward: "Move word forward",
+}
+
 const STANDARD_DEFAULTS = {
   global: {
     open_review: ["ctrl+r"],
@@ -365,6 +398,28 @@ export function keyStrokeFromEvent(event: KeyEvent): string {
     ...(event.shift ? ["shift"] : []),
   ]
   return [...modifiers, name].join("+")
+}
+
+/** Render a canonical key stroke as the keycap copy shown throughout the TUI. */
+export function formatKeycap(stroke: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    alt: "Alt",
+    ctrl: "Ctrl",
+    meta: "Meta",
+    super: "Super",
+    hyper: "Hyper",
+    shift: "Shift",
+    escape: "Escape",
+    return: "Enter",
+    pageup: "PageUp",
+    pagedown: "PageDown",
+    space: "Space",
+    tab: "Tab",
+  }
+  return stroke
+    .split("+")
+    .map((part) => labels[part] ?? part.toLocaleUpperCase())
+    .join("+")
 }
 
 /**

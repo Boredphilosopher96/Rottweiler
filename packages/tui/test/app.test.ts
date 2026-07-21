@@ -7,6 +7,7 @@ import { createRottweilerApp, type PresentationFrameScheduler } from "../src/app
 import { colorContrast, pickerSelectionColors } from "../src/components/picker"
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../src/protocol"
 import { PROTOCOL_VERSION } from "../../../protocol/types"
+import { commandResultMarkdown } from "../src/render"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
 import {
   daylightTheme,
@@ -271,7 +272,7 @@ describe("Rottweiler OpenTUI shell", () => {
     }))
 
     const results = state.transcript.slice(-2).map((entry) =>
-      entry.turn.blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n")
+      entry.commandResult === undefined ? "" : commandResultMarkdown(entry.commandResult)
     )
     expect(results[0]).toContain("Api key: [redacted]")
     expect(results[0]).toContain("Access token: [redacted]")
@@ -1790,6 +1791,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(palette).toContain("provider.list")
     expect(palette).toContain("agent.children")
     expect(palette).toContain("mcp.manage")
+    expect(palette).toContain("keyboard.help")
     expect(palette).not.toContain("mcp.configure")
     expect(palette).toContain("permissions.manage")
     expect(palette.length).toBeGreaterThan(10)
@@ -1839,6 +1841,40 @@ describe("Rottweiler OpenTUI shell", () => {
       (option) => String(option.value).startsWith("palette.section."),
     )).toBeFalse()
     expect(app.picker.select.options.map((option) => option.value)).toContain("model.list")
+  })
+
+  test("lists searchable keyboard shortcuts from the active compiled bindings", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      keybindings: {
+        bindings: { global: { open_model_picker: "ctrl+k" } },
+      },
+    })
+    renderer.root.add(app)
+    app.openKeyboardHelpPicker()
+
+    expect(app.picker.title).toContain("Keyboard shortcuts")
+    expect(app.picker.select.options
+      .filter((option) => String(option.value).startsWith("keyboard-help.section."))
+      .map((option) => option.description)).toEqual(["Global", "Editing", "Review"])
+    const model = app.picker.select.options.find(
+      (option) => option.description === "Switch model",
+    )
+    expect(model?.name).toBe("Ctrl+K")
+
+    await setup.mockInput.typeText("switch model")
+    expect(app.picker.select.options.some(
+      (option) => String(option.value).startsWith("keyboard-help.section."),
+    )).toBeFalse()
+    expect(app.picker.select.options.map((option) => option.name)).toContain("Ctrl+K")
+
+    app.closePicker()
+    app.openKeyboardHelpPicker()
+    await setup.mockInput.typeText("ctrl+k")
+    expect(app.picker.select.options.map((option) => option.name)).toContain("Ctrl+K")
+    app.picker.select.selectCurrent()
+    expect(app.picker.visible).toBeFalse()
   })
 
   test("manages queued messages from the Conversation palette and refreshes after removal", async () => {
@@ -2428,6 +2464,25 @@ describe("Rottweiler OpenTUI shell", () => {
     })
   })
 
+  test("derives composer discovery hints and omits unbound actions", () => {
+    const setup = createTestRenderer({ width: 80, height: 18, useThread: false })
+    return setup.then(({ renderer: testRenderer }) => {
+      renderer = testRenderer
+      const app = createRottweilerApp(testRenderer, {
+        keybindings: {
+          bindings: {
+            global: { paste_image: "ctrl+k" },
+            standard: { open_external_editor: [] },
+          },
+        },
+      })
+      testRenderer.root.add(app)
+      expect(app.composer.editor.placeholder).toContain("Ctrl+K image")
+      expect(app.composer.editor.placeholder).not.toContain("Ctrl+V image")
+      expect(app.composer.editor.placeholder).not.toContain("$EDITOR")
+    })
+  })
+
   test("marks the current permission mode and confirms yolo before sending", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
@@ -2494,6 +2549,11 @@ describe("Rottweiler OpenTUI shell", () => {
     const app = createRottweilerApp(renderer, {
       sessionId: "parent-session",
       requestId: () => `request-${++request}`,
+      keybindings: {
+        bindings: {
+          global: { open_subagent_picker: "ctrl+y", open_command_picker: [] },
+        },
+      },
       initialState: {
         ...createInitialState(),
         turns: {
@@ -2687,6 +2747,9 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.visibleState.streamingTail?.text).toBe("Authentication uses a bounded token exchange.")
     expect(app.banner.plainText).toContain("◉ child agent · Audit authentication")
     expect(app.banner.plainText).toContain("running · using tool · grep · token exchange · 1m23s")
+    expect(app.banner.plainText).toContain("Esc parent · Ctrl+Y children")
+    expect(app.banner.plainText).not.toContain("Ctrl+G children")
+    expect(app.banner.plainText).not.toContain("palette")
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("reviewer · Streaming")
     expect(app.contextPanel.visible).toBeFalse()

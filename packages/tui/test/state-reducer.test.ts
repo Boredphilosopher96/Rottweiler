@@ -1420,7 +1420,7 @@ describe("pure TUI state reducer", () => {
     })
   })
 
-  test("renders structured command payloads as human copy without protocol fields", () => {
+  test("projects structured command payloads without protocol fields", () => {
     const state = reduce(createInitialState(), {
       type: "command_finished",
       meta: {
@@ -1438,36 +1438,91 @@ describe("pure TUI state reducer", () => {
       }),
       unrestorable_paths: [],
     })
-    const block = state.transcript.at(-1)?.turn.blocks[0]
-    expect(block?.type).toBe("text")
-    const text = block?.type === "text" ? block.text : ""
-    expect(text).toContain("Paths:")
-    expect(text).toContain("src/main.rs")
-    expect(text).toContain("Approval state: approval required")
-    expect(text).not.toContain("{")
-    expect(text).not.toContain("turn_id")
-    expect(text).not.toContain("stable_prefix_hash")
-    expect(text).not.toContain("hash-private")
-    expect(text).not.toContain("session-private")
+    const entry = state.transcript.at(-1)
+    expect(entry?.turn.blocks).toEqual([])
+    expect(entry?.commandResult).toEqual({
+      kind: "structured",
+      rows: [
+        { prefixes: [], label: "paths", value: { kind: "heading" } },
+        { prefixes: ["bullet"], label: null, value: { kind: "string", value: "src/main.rs" } },
+        { prefixes: [], label: "count", value: { kind: "number", value: 1 } },
+        { prefixes: [], label: "approval_state", value: { kind: "string", value: "approval_required" } },
+      ],
+      omittedRowCount: 0,
+    })
+    const retained = JSON.stringify(entry?.commandResult)
+    expect(retained).not.toContain("turn_id")
+    expect(retained).not.toContain("stable_prefix_hash")
+    expect(retained).not.toContain("hash-private")
+    expect(retained).not.toContain("session-private")
   })
 
-  test("presents built-in command results as bounded visual summaries", () => {
+  test("projects built-in command results as bounded semantic content", () => {
     const fixtures = [
-      ["help", "/status — Show agent status\n/mode [execute] — Switch mode", "| Command | What it does |"],
-      ["status", "Agent: working\nQueued messages: 2\nMode: execute", "**Working** · Execute mode · 2 queued messages"],
-      ["mode", "mode changed to plan", "**Plan mode enabled**"],
-      ["permissions", "Permission mode: yolo\nDefault permission: allow\nConfigured rules:\n- deny · bash(rm *)\nSession rules: none\nRemembered approvals: 1 for this session, 0 for this project", "| Scope | Decision | Applies to |"],
-      ["plan", "Ship safely\nKeep state durable.\n1. Update UI\n   Verify: bun test", "## Ship safely"],
-      ["review", "Session review: 2 changed file(s) · 1 awaiting review\n- src/app.ts · needs review\n- src/lib.rs · accepted", "| File | Status | Note |"],
-      ["trust", "folder trust granted for this workspace", "**Folder trusted**"],
-      ["mcp", "docs · ready · 4 tools\nsearch · disabled · 0 tools", "| Server | Status |"],
-      ["compact", "compaction started", "**Compaction started**"],
-      ["interrupt", "interrupt requested", "**Interrupt requested**"],
-      ["rewind", "rewound to turn 4", "**Session rewound**"],
-      ["add-dir", "added workspace root @root/2", "**Workspace updated**"],
+      ["help", "/status — Show agent status\n/mode [execute] — Switch mode", {
+        kind: "help",
+        commands: [
+          { usage: "/status", description: "Show agent status" },
+          { usage: "/mode [execute]", description: "Switch mode" },
+        ],
+        omittedCommandCount: 0,
+        fallback: null,
+      }],
+      ["status", "Agent: working\nQueued messages: 2\nMode: execute", {
+        kind: "status", agent: "working", mode: "execute", queuedMessages: "2",
+      }],
+      ["mode", "mode changed to plan", { kind: "mode", mode: "plan", active: false }],
+      ["permissions", "Permission mode: yolo\nDefault permission: allow\nConfigured rules:\n- deny · bash(rm *)\nSession rules: none\nRemembered approvals: 1 for this session, 0 for this project", {
+        kind: "permissions",
+        summary: null,
+        mode: "yolo",
+        defaultPermission: "allow",
+        rememberedApprovals: " 1 for this session, 0 for this project",
+        rules: [{ scope: "Project", decision: "deny", target: "bash(rm *)", remembered: false }],
+        omittedRuleCount: 0,
+      }],
+      ["plan", "Ship safely\nKeep state durable.\n1. Update UI\n   Verify: bun test", {
+        kind: "plan",
+        title: "Ship safely",
+        body: { lines: ["Keep state durable.", "1. Update UI", "   Verify: bun test"], omittedLineCount: 0 },
+      }],
+      ["review", "Session review: 2 changed file(s) · 1 awaiting review\n- src/app.ts · needs review\n- src/lib.rs · accepted", {
+        kind: "review",
+        summary: "Session review: 2 changed file(s) · 1 awaiting review",
+        files: [
+          { path: "src/app.ts", status: "needs review", note: "" },
+          { path: "src/lib.rs", status: "accepted", note: "" },
+        ],
+        omittedFileCount: 0,
+      }],
+      ["trust", "folder trust granted for this workspace", {
+        kind: "trust", trust: "trusted", message: "folder trust granted for this workspace",
+      }],
+      ["mcp", "docs · ready · 4 tools\nsearch · disabled · 0 tools", {
+        kind: "mcp",
+        updated: false,
+        servers: [
+          { name: "docs", status: "ready · 4 tools" },
+          { name: "search", status: "disabled · 0 tools" },
+        ],
+        omittedServerCount: 0,
+        fallback: null,
+      }],
+      ["compact", "compaction started", {
+        kind: "completion", title: "Compaction started", detail: "compaction started",
+      }],
+      ["interrupt", "interrupt requested", {
+        kind: "completion", title: "Interrupt requested", detail: "interrupt requested",
+      }],
+      ["rewind", "rewound to turn 4", {
+        kind: "completion", title: "Session rewound", detail: "rewound to turn 4",
+      }],
+      ["add-dir", "added workspace root @root/2", {
+        kind: "completion", title: "Workspace updated", detail: "added workspace root @root/2",
+      }],
     ] as const
     let state = createInitialState()
-    for (const [index, [name, message, expected]] of fixtures.entries()) {
+    for (const [index, [name, message, expectedProjection]] of fixtures.entries()) {
       state = reduce(state, {
         type: "command_finished",
         meta: {
@@ -1480,11 +1535,9 @@ describe("pure TUI state reducer", () => {
         message,
         unrestorable_paths: [],
       })
-      const block = state.transcript.at(-1)?.turn.blocks[0]
-      const text = block?.type === "text" ? block.text : ""
-      expect(text).toContain(expected)
-      expect(text).not.toContain("{\"")
-      expect(text.split("\n").length).toBeLessThanOrEqual(35)
+      const entry = state.transcript.at(-1)
+      expect(entry?.turn.blocks).toEqual([])
+      expect(entry?.commandResult).toEqual(expectedProjection)
     }
 
     state = reduce(state, {
@@ -1492,7 +1545,7 @@ describe("pure TUI state reducer", () => {
       meta: {
         protocol_version: PROTOCOL_VERSION,
         session_id: "session-command-cards",
-        sequence_id: "99",
+        sequence_id: String(fixtures.length + 1),
         emitted_at: "2026-01-01T00:00:00Z",
       },
       name: "extension-report",
@@ -1505,14 +1558,16 @@ describe("pure TUI state reducer", () => {
       }),
       unrestorable_paths: [],
     })
-    const block = state.transcript.at(-1)?.turn.blocks[0]
-    const text = block?.type === "text" ? block.text : ""
-    expect(text.split("\n").length).toBeLessThanOrEqual(26)
-    expect(text).not.toContain("stable_prefix_hash")
-    expect(text).not.toContain("private")
+    const projection = state.transcript.at(-1)?.commandResult
+    expect(projection?.kind).toBe("structured")
+    if (projection?.kind !== "structured") throw new Error("expected structured projection")
+    expect(projection.rows).toHaveLength(24)
+    expect(projection.omittedRowCount).toBe(57)
+    expect(JSON.stringify(projection)).not.toContain("stable_prefix_hash")
+    expect(JSON.stringify(projection)).not.toContain("private")
   })
 
-  test("renders context and cost commands as bounded visual summaries", () => {
+  test("projects context and cost commands as structured snapshots", () => {
     const ackMeta = (requestId: string) => ({
       protocol_version: PROTOCOL_VERSION,
       client_id: "client-summary",
@@ -1560,13 +1615,19 @@ describe("pure TUI state reducer", () => {
       message: "this long engine copy is intentionally ignored",
       unrestorable_paths: [],
     })
-    const contextBlock = state.transcript.at(-1)?.turn.blocks[0]
-    const contextText = contextBlock?.type === "text" ? contextBlock.text : ""
-    expect(contextText).toContain("**63.5k / 380k tokens**")
-    expect(contextText).toContain("`███░░░░░░░░░░░░░░░░░` 16%")
-    expect(contextText).toContain("| Conversation | 1 | 63.4k |")
-    expect(contextText).not.toContain("turn-private")
-    expect(contextText).not.toContain("hash-private")
+    expect(state.transcript.at(-1)?.turn.blocks).toEqual([])
+    expect(state.transcript.at(-1)?.commandResult).toEqual({
+      kind: "context",
+      usedTokens: "63552",
+      usableTokens: "380000",
+      reservedTokens: "20000",
+      contextWindowKnown: true,
+      itemCount: 2,
+      groups: [
+        { kind: "system", itemCount: 1, estimatedTokens: "152" },
+        { kind: "conversation", itemCount: 1, estimatedTokens: "63400" },
+      ],
+    })
 
     state = reduce(state, {
       type: "cost_snapshot_ready",
@@ -1613,11 +1674,21 @@ describe("pure TUI state reducer", () => {
       message: "another long engine copy",
       unrestorable_paths: [],
     })
-    const costBlock = state.transcript.at(-1)?.turn.blocks[0]
-    const costText = costBlock?.type === "text" ? costBlock.text : ""
-    expect(costText).toContain("**Covered by subscription quota**")
-    expect(costText).toContain("| 189.8k | 2.7k | 430 | 380k | 67% |")
-    expect(costText).not.toContain("another long engine copy")
+    expect(state.transcript.at(-1)?.turn.blocks).toEqual([])
+    expect(state.transcript.at(-1)?.commandResult).toEqual({
+      kind: "cost",
+      inputTokens: "189823",
+      outputTokens: "2771",
+      reasoningTokens: "430",
+      cacheReadTokens: "380096",
+      cacheHitBasisPoints: 6700,
+      subscriptionQuotaEntries: "1",
+      costUnavailableEntries: "0",
+      monetaryAccountingComplete: false,
+      costMicrosUsd: "0",
+      accountedTurnCount: 0,
+      utcDay: "2026-01-01",
+    })
   })
 
   test("projects turns, tools, questions, snapshots, mode, model, and shell state", () => {

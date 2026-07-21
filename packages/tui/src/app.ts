@@ -28,13 +28,16 @@ import {
 } from "./components"
 import {
   compileKeybindings,
+  formatKeycap,
   keyStrokeFromEvent,
   legacyMacNavigationAction,
+  KEYBINDING_ACTION_LABELS,
   type CompiledKeybindings,
   type InputMode,
   type KeybindingAction,
   type KeybindingConfiguration,
   type KeybindingContext,
+  type KeybindingPreset,
   type VimFocus,
 } from "./keybindings"
 import {
@@ -158,7 +161,7 @@ export interface TerminalHandoverAdapter {
 }
 
 type PickerKind =
-  | "palette" | "commands" | "files" | "attachments" | "mcp"
+  | "palette" | "keyboardHelp" | "commands" | "files" | "attachments" | "mcp"
   | "mcpActions" | "mcpInput" | "mcpRemoveConfirm"
   | "modes" | "models" | "providers" | "providerAuth" | "providerApiKey"
   | "providerRecovery"
@@ -298,6 +301,21 @@ const PALETTE_SECTIONS: readonly PaletteSection[] = [
   "Help & system",
   "Commands",
 ]
+
+const KEYBOARD_HELP_CONTEXT_NAMES: Record<KeybindingContext, string> = {
+  global: "Global",
+  standard: "Editing",
+  vim_normal: "Normal mode",
+  vim_insert: "Insert mode",
+  picker_normal: "Picker normal mode",
+  picker_insert: "Picker insert mode",
+  review: "Review",
+}
+
+const KEYBOARD_HELP_CONTEXTS: Record<KeybindingPreset, readonly KeybindingContext[]> = {
+  standard: ["global", "standard", "review"],
+  vim: ["global", "vim_normal", "vim_insert", "picker_normal", "picker_insert", "review"],
+}
 
 const PERMISSION_MODE_CHOICES: readonly PermissionModeChoice[] = [
   { mode: "strict", description: "Ask before every tool use" },
@@ -828,9 +846,13 @@ export class RottweilerApp extends BoxRenderable {
     this.picker.top = 2
     this.picker.left = "15%"
     this.picker.width = "70%"
+    const pasteImageKeycap = this.#bindingHint("paste_image", ["global", this.#composerKeybindingContext()])
+    const externalEditorKeycap = this.#bindingHint("open_external_editor", ["global", this.#composerKeybindingContext()])
     this.composer = new ComposerRenderable(this.ctx, theme, {
       editor: this.#options.editor,
       imagePaste: this.#options.imagePaste,
+      ...(pasteImageKeycap === null ? {} : { pasteImageKeycap }),
+      ...(externalEditorKeycap === null ? {} : { externalEditorKeycap }),
       onSubmit: async (content, submittedAttachments) => {
         this.#composerSubmissionsInFlight += 1
         return await this.#sendMessage(content, submittedAttachments)
@@ -1710,6 +1732,14 @@ export class RottweilerApp extends BoxRenderable {
     if (!this.#commandsRequested) {
       this.#requestCommands()
     }
+    this.#refreshPicker()
+  }
+
+  openKeyboardHelpPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "keyboardHelp"
     this.#refreshPicker()
   }
 
@@ -2710,6 +2740,34 @@ export class RottweilerApp extends BoxRenderable {
           (item) => item.value?.run(),
         )
         break
+      case "keyboardHelp": {
+        const items: PickerItem<null>[] = []
+        for (const context of KEYBOARD_HELP_CONTEXTS[this.#keybindings.preset]) {
+          const bindings = this.#keybindings.bindings(context)
+          if (bindings.size === 0) continue
+          items.push({
+            id: `keyboard-help.section.${context}`,
+            label: KEYBOARD_HELP_CONTEXT_NAMES[context],
+            description: "",
+            value: null,
+            selectable: false,
+            sectionHeader: true,
+          })
+          for (const [stroke, action] of bindings) {
+            const keycap = formatKeycap(stroke)
+            const label = KEYBINDING_ACTION_LABELS[action]
+            items.push({
+              id: `keyboard-help.${context}.${stroke}`,
+              label: keycap,
+              description: label,
+              searchText: `${keycap} ${label}`,
+              value: null,
+            })
+          }
+        }
+        this.#openPicker("Keyboard shortcuts", items, () => this.closePicker())
+        break
+      }
       case "commands":
         const commandError = this.#projectionErrors.commands
         const commandItems: PickerItem<CommandChoice | null>[] = [
@@ -4265,10 +4323,20 @@ export class RottweilerApp extends BoxRenderable {
   }
 
   #paletteBinding(action: KeybindingAction): string | null {
-    for (const [stroke, boundAction] of this.#keybindings.bindings("global")) {
-      if (boundAction === action) return keycapLabel(stroke)
+    return this.#bindingHint(action, ["global"])
+  }
+
+  #bindingHint(action: KeybindingAction, contexts: readonly KeybindingContext[]): string | null {
+    for (const context of contexts) {
+      for (const [stroke, boundAction] of this.#keybindings.bindings(context)) {
+        if (boundAction === action) return formatKeycap(stroke)
+      }
     }
     return null
+  }
+
+  #composerKeybindingContext(): Extract<KeybindingContext, "standard" | "vim_insert"> {
+    return this.#keybindings.preset === "vim" ? "vim_insert" : "standard"
   }
 
   #paletteDescription(description: string, binding?: KeybindingAction): string {
@@ -4328,6 +4396,7 @@ export class RottweilerApp extends BoxRenderable {
       { id: "settings.open", title: "Settings", section: "Appearance & settings", description: "Change safe persisted user settings", run: open(() => this.openSettingsPicker()) },
       { id: "mcp.manage", title: "MCP connections", section: "Appearance & settings", description: "Add, review, enable, disable, or remove MCP servers", run: open(() => this.openMcpPicker()) },
 
+      { id: "keyboard.help", title: "Keyboard shortcuts", section: "Help & system", description: "Every binding for the active preset", run: open(() => this.openKeyboardHelpPicker()) },
       { id: "help.show", title: "Command help", section: "Help & system", description: "List every available slash command", run: submit("/help") },
       { id: "app.exit", title: "Exit Rottweiler", section: "Help & system", description: "Close the TUI and its supervised engine", run: open(() => this.#options.onExit?.()) },
     ]
@@ -4749,7 +4818,14 @@ export class RottweilerApp extends BoxRenderable {
       : approval
         ? this.#theme.warning
         : this.#theme.info
-    this.banner.content = t`${fg(this.#theme.accentStrong)("◉ child agent")} · ${descriptor.task} · ${detail}${context === null ? "" : ` · ${context}`} · Esc parent · Ctrl+G children · Ctrl+P palette`
+    const childrenHint = this.#paletteBinding("open_subagent_picker")
+    const paletteHint = this.#paletteBinding("open_command_picker")
+    const hints = [
+      "Esc parent",
+      ...(childrenHint === null ? [] : [`${childrenHint} children`]),
+      ...(paletteHint === null ? [] : [`${paletteHint} palette`]),
+    ]
+    this.banner.content = t`${fg(this.#theme.accentStrong)("◉ child agent")} · ${descriptor.task} · ${detail}${context === null ? "" : ` · ${context}`} · ${hints.join(" · ")}`
   }
 
   async #interruptSubagent(subagentId: string): Promise<void> {
@@ -6132,27 +6208,6 @@ function commandSourceLabel(source: CommandChoice["source"]): string {
     case undefined:
       return "Built-in"
   }
-}
-
-function keycapLabel(stroke: string): string {
-  const labels: Readonly<Record<string, string>> = {
-    alt: "Alt",
-    ctrl: "Ctrl",
-    meta: "Meta",
-    super: "Super",
-    hyper: "Hyper",
-    shift: "Shift",
-    escape: "Escape",
-    return: "Enter",
-    pageup: "PageUp",
-    pagedown: "PageDown",
-    space: "Space",
-    tab: "Tab",
-  }
-  return stroke
-    .split("+")
-    .map((part) => labels[part] ?? part.toLocaleUpperCase())
-    .join("+")
 }
 
 function providerDisplayName(provider: ProviderIdentity): string {

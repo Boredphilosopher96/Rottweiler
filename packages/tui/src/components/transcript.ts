@@ -12,6 +12,7 @@ import {
 
 import {
   commandPreview,
+  commandResultMarkdown,
   COMMAND_PREVIEW_MAX_LINES,
   diffStats,
   displayPath,
@@ -827,7 +828,12 @@ class TurnCardRenderable extends BoxRenderable {
   ) {
     const shell = entry.presentation === "shell_result" ? entry.shell : undefined
     const markdown = shell === undefined
-      ? terminalMarkdown(turnMarkdown(entry.turn), Math.max(20, width - 4))
+      ? terminalMarkdown(
+          entry.presentation === "command_result" && entry.commandResult !== undefined
+            ? commandResultMarkdown(entry.commandResult)
+            : turnMarkdown(entry.turn),
+          Math.max(20, width - 4),
+        )
       : ""
     const reasoning = shell === undefined ? turnReasoningMarkdown(entry.turn) : ""
     const toolOnly = entry.turn.role === "tool" && markdown === ""
@@ -1549,6 +1555,7 @@ function presentableTranscript(state: RottweilerState): TranscriptEntry[] {
   )
   return state.transcript.filter((entry) => {
     if (entry.presentation === "shell_result" && entry.shell !== undefined) return true
+    if (entry.presentation === "command_result" && entry.commandResult !== undefined) return true
     if (turnMarkdown(entry.turn).trim() !== "") return true
     if (turnReasoningMarkdown(entry.turn) !== "") return true
     if (entry.turn.role === "tool" && toolTurns.has(entry.agentTurn)) return true

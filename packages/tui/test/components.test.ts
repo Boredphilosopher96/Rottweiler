@@ -606,6 +606,41 @@ describe("M4 retained components", () => {
     expect(app.transcript.mountedKeys.at(-1)).toBe("120:120:assistant")
   })
 
+  test("retains a command-result card for an identical structured projection", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 18, useThread: false })
+    renderer = setup.renderer
+    const entry = {
+      sequenceId: "1",
+      agentTurn: "command:mode:1",
+      turn: {
+        role: "system" as const,
+        blocks: [],
+        meta: { synthetic: true, summary: false },
+      },
+      presentation: "command_result" as const,
+      title: "/mode",
+      commandResult: { kind: "mode" as const, mode: "plan", active: false },
+    }
+    const initial = { ...createInitialState(), transcript: [entry] }
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    const retained = app.transcript.mountedCards.get("1:command:mode:1:system")
+    expect(retained?.markdown.content).toContain("Plan mode enabled")
+
+    app.setState({
+      ...initial,
+      transcript: [{
+        ...entry,
+        commandResult: { ...entry.commandResult },
+      }],
+    })
+    await setup.renderOnce()
+
+    expect(app.transcript.mountedCards.get("1:command:mode:1:system")).toBe(retained)
+  })
+
   test("keeps retained transcript identities stable during native mouse scrolling", async () => {
     const setup = await createTestRenderer({ width: 86, height: 18, useThread: false })
     renderer = setup.renderer

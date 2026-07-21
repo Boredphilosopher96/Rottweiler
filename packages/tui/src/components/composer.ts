@@ -11,12 +11,14 @@ import type { ClipboardImage, EditorAdapter, ImagePasteAdapter } from "../platfo
 import type { RottweilerTheme } from "../theme"
 import { ImageAttachmentRenderable } from "./image"
 
-const COMPOSER_PLACEHOLDER =
-  "Message Rottweiler · / commands · ! shell · @ files · Ctrl+V image"
+const COMPOSER_PLACEHOLDER_PREFIX = "Message Rottweiler · / commands · ! shell · @ files"
+const MAX_DISCOVERY_PLACEHOLDER_CELLS = 83
 
 export interface ComposerOptions {
   readonly editor: EditorAdapter
   readonly imagePaste: ImagePasteAdapter
+  readonly pasteImageKeycap?: string
+  readonly externalEditorKeycap?: string
   readonly onSubmit: (
     content: string,
     attachments: readonly Attachment[],
@@ -58,6 +60,7 @@ export class ComposerRenderable extends BoxRenderable {
   #historyDraft = ""
   #restoringHistory = false
   #pendingHistoryRestore: string | null = null
+  #placeholder: string
 
   constructor(ctx: RenderContext, theme: RottweilerTheme, options: ComposerOptions) {
     super(ctx, {
@@ -78,6 +81,7 @@ export class ComposerRenderable extends BoxRenderable {
     })
     this.#options = options
     this.#theme = theme
+    this.#placeholder = composerPlaceholder(options)
     this.attachmentsText = new TextRenderable(ctx, {
       id: "composer-attachments",
       content: "",
@@ -94,9 +98,9 @@ export class ComposerRenderable extends BoxRenderable {
       minHeight: 2,
       maxHeight: 5,
       initialValue: "",
-      // The full discovery copy is 83 cells, but this editor has 76 usable
-      // cells at an 80-column terminal after border and horizontal padding.
-      placeholder: COMPOSER_PLACEHOLDER,
+      // Keep the binding-derived discovery copy within the measured 83-cell
+      // budget; this editor has 76 usable cells at an 80-column terminal.
+      placeholder: this.#placeholder,
       backgroundColor: theme.panel,
       textColor: theme.foreground,
       focusedBackgroundColor: theme.panelRaised,
@@ -216,7 +220,7 @@ export class ComposerRenderable extends BoxRenderable {
     this.focusedBorderColor = active ? this.#theme.warning : this.#theme.focus
     this.editor.placeholder = active
       ? "Shell command · Enter to run in foreground"
-      : COMPOSER_PLACEHOLDER
+      : this.#placeholder
   }
 
   currentFileMention(): ComposerFileMention | null {
@@ -530,6 +534,21 @@ export class ComposerRenderable extends BoxRenderable {
     this.height = nextHeight
     if (heightChanged) this.#options.onHeightChange?.(nextHeight)
   }
+}
+
+function composerPlaceholder(options: Pick<ComposerOptions, "pasteImageKeycap" | "externalEditorKeycap">): string {
+  const hints = [
+    options.pasteImageKeycap === undefined ? null : `${options.pasteImageKeycap} image`,
+    options.externalEditorKeycap === undefined ? null : `${options.externalEditorKeycap} $EDITOR`,
+  ]
+  let placeholder = COMPOSER_PLACEHOLDER_PREFIX
+  for (const hint of hints) {
+    if (hint === null) continue
+    const candidate = `${placeholder} · ${hint}`
+    if (candidate.length > MAX_DISCOVERY_PLACEHOLDER_CELLS) continue
+    placeholder = candidate
+  }
+  return placeholder
 }
 
 function estimateWrappedRows(value: string, columns: number): number {

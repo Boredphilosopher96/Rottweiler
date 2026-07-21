@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises"
 import { createTestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
+import { commandResultMarkdown } from "../src/render"
 import { createEngineRuntimeFromEnvironment, type TuiEngineRuntime } from "../src/runtime"
 
 const reportFile = process.env.ROTTWEILER_TEST_REPORT_FILE
@@ -57,9 +58,9 @@ try {
 function commandResult(app: ReturnType<typeof createRottweilerApp>): string {
   return app.state.transcript
     .filter((entry) => entry.presentation === "command_result" && entry.title === "/status")
-    .flatMap((entry) => entry.turn.blocks)
-    .filter((block) => block.type === "text")
-    .map((block) => block.text)
+    .flatMap((entry) => entry.commandResult === undefined
+      ? []
+      : [commandResultMarkdown(entry.commandResult)])
     .join("\n")
 }
 
