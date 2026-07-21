@@ -1,22 +1,20 @@
 //! Read-only session replay, search, and export surfaces.
 
-use std::{fmt::Write as _, path::Path};
+use std::{
+    fmt::Write as _,
+    fs,
+    io::Write as _,
+    path::{Path, PathBuf},
+};
 
 use miette::{IntoDiagnostic as _, Result, miette};
-use rw_core::{EngineEvent, runtime_support::FixtureRedactor};
+use rw_core::{EngineEvent, TranscriptFormat, runtime_support::FixtureRedactor};
 use rw_store::session::{EventEnvelope, SessionEventLog, SessionIndex, SessionSummary};
 use serde_json::Value;
 
 pub(crate) const MAX_HISTORY_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_HISTORY_EVENTS: usize = 250_000;
 const MAX_RENDERED_BYTES: usize = 96 * 1024 * 1024;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TranscriptFormat {
-    Markdown,
-    Html,
-    Json,
-}
 
 pub(crate) fn load_events(
     storage_root: &Path,
@@ -91,6 +89,162 @@ pub(crate) fn export_transcript(
     }
     enforce_render_limit(&output)?;
     Ok(output)
+}
+
+/// Writes an export beside an already-existing directory entry without following
+/// a destination symlink. Forced replacement is limited to regular, single-link files.
+pub(crate) fn write_transcript_export(
+    storage_root: &Path,
+    output: &Path,
+    bytes: &[u8],
+    force: bool,
+) -> Result<PathBuf> {
+    let parent = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent = fs::canonicalize(parent).into_diagnostic()?;
+    let filename = output
+        .file_name()
+        .ok_or_else(|| miette!("export output must name a file"))?;
+    if let Ok(canonical_storage) = fs::canonicalize(storage_root)
+        && parent.starts_with(canonical_storage)
+    {
+        return Err(miette!("export output cannot modify Rottweiler storage"));
+    }
+
+    #[cfg(unix)]
+    write_transcript_export_unix(&parent, filename, bytes, force, || Ok(()))?;
+
+    #[cfg(not(unix))]
+    write_transcript_export_portable(storage_root, &parent, filename, bytes, force)?;
+
+    Ok(parent.join(filename))
+}
+
+#[cfg(unix)]
+fn write_transcript_export_unix(
+    parent: &Path,
+    filename: &std::ffi::OsStr,
+    bytes: &[u8],
+    force: bool,
+    before_commit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
+
+    let expected = fs::metadata(parent).into_diagnostic()?;
+    let directory = rustix::fs::open(
+        parent,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .into_diagnostic()?;
+    let opened = rustix::fs::fstat(&directory)
+        .map_err(std::io::Error::from)
+        .into_diagnostic()?;
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if Some(expected.dev()) != crate::rustix_device_id(opened.st_dev)
+            || expected.ino() != opened.st_ino
+        {
+            return Err(miette!(
+                "export output directory changed while it was opened"
+            ));
+        }
+    }
+    match rustix::fs::statat(&directory, filename, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => {
+            if !force {
+                return Err(miette!(
+                    "export output already exists; pass --force to replace it"
+                ));
+            }
+            if !FileType::from_raw_mode(stat.st_mode).is_file() {
+                return Err(miette!("export output is not a regular file"));
+            }
+            if stat.st_nlink != 1 {
+                return Err(miette!("export output has multiple hard links"));
+            }
+        }
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(error) => return Err(std::io::Error::from(error)).into_diagnostic(),
+    }
+    let mut random = [0_u8; 8];
+    getrandom::fill(&mut random).into_diagnostic()?;
+    let temporary = format!(
+        ".rottweiler-export-{}-{}",
+        std::process::id(),
+        u64::from_ne_bytes(random)
+    );
+    let descriptor = rustix::fs::openat(
+        &directory,
+        temporary.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .map_err(std::io::Error::from)
+    .into_diagnostic()?;
+    let result = (|| -> Result<()> {
+        let mut file = fs::File::from(descriptor);
+        file.write_all(bytes).into_diagnostic()?;
+        file.sync_all().into_diagnostic()?;
+        before_commit()?;
+        if force {
+            rustix::fs::renameat(&directory, temporary.as_str(), &directory, filename)
+        } else {
+            rustix::fs::renameat_with(
+                &directory,
+                temporary.as_str(),
+                &directory,
+                filename,
+                RenameFlags::NOREPLACE,
+            )
+        }
+        .map_err(std::io::Error::from)
+        .into_diagnostic()?;
+        rustix::fs::fsync(&directory)
+            .map_err(std::io::Error::from)
+            .into_diagnostic()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = rustix::fs::unlinkat(&directory, temporary.as_str(), AtFlags::empty());
+    }
+    result
+}
+
+#[cfg(not(unix))]
+fn write_transcript_export_portable(
+    storage_root: &Path,
+    parent: &Path,
+    filename: &std::ffi::OsStr,
+    bytes: &[u8],
+    force: bool,
+) -> Result<()> {
+    let destination = parent.join(filename);
+    if destination.exists() {
+        let message = if force {
+            "safe --force replacement is unavailable on this platform"
+        } else {
+            "export output already exists; pass --force to replace it"
+        };
+        return Err(miette!(message));
+    }
+    let parent = fs::canonicalize(parent).into_diagnostic()?;
+    if let Ok(canonical_storage) = fs::canonicalize(storage_root)
+        && parent.starts_with(canonical_storage)
+    {
+        return Err(miette!("export output cannot modify Rottweiler storage"));
+    }
+    let destination = parent.join(filename);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .into_diagnostic()?;
+    file.write_all(bytes).into_diagnostic()?;
+    file.sync_all().into_diagnostic()
 }
 
 pub(crate) fn search_sessions(
@@ -1183,5 +1337,101 @@ mod tests {
         assert!(sections[4].body.contains("Verify: cargo test"));
         assert!(sections[5].body.contains("input: 10"));
         assert!(sections[5].body.contains("42 micros USD"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_refuses_symlink_or_storage_targets_without_mutating_events() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::tempdir().expect("storage");
+        let session = storage.path().join("sessions/history");
+        fs::create_dir_all(&session).expect("session directory");
+        let events = session.join("events.jsonl");
+        fs::write(&events, b"canary").expect("events");
+        let output = tempfile::tempdir().expect("output");
+        let planted = output.path().join("transcript.md");
+        symlink(&events, &planted).expect("planted symlink");
+        assert!(write_transcript_export(storage.path(), &planted, b"replacement", true).is_err());
+        assert_eq!(fs::read(&events).expect("events unchanged"), b"canary");
+        assert!(
+            write_transcript_export(storage.path(), &session.join("export.md"), b"x", false)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read(&events).expect("events still unchanged"),
+            b"canary"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_parent_swap_stays_bound_to_the_opened_directory_descriptor() {
+        use std::os::unix::fs::symlink;
+
+        let storage = tempfile::tempdir().expect("storage");
+        let session = storage.path().join("sessions/history");
+        fs::create_dir_all(&session).expect("session directory");
+        let events = session.join("events.jsonl");
+        fs::write(&events, b"event-canary").expect("events");
+
+        let output = tempfile::tempdir().expect("output");
+        let parent = output.path().join("safe");
+        let moved = output.path().join("moved");
+        fs::create_dir(&parent).expect("safe parent");
+        let canonical_parent = fs::canonicalize(&parent).expect("canonical parent");
+        let parent_for_swap = parent.clone();
+        let moved_for_swap = moved.clone();
+        let session_for_swap = session.clone();
+        write_transcript_export_unix(
+            &canonical_parent,
+            std::ffi::OsStr::new("transcript.md"),
+            b"safe export",
+            false,
+            move || {
+                fs::rename(&parent_for_swap, &moved_for_swap).into_diagnostic()?;
+                symlink(&session_for_swap, &parent_for_swap).into_diagnostic()?;
+                Ok(())
+            },
+        )
+        .expect("descriptor-bound export");
+
+        assert_eq!(
+            fs::read(moved.join("transcript.md")).expect("export"),
+            b"safe export"
+        );
+        assert_eq!(
+            fs::read(&events).expect("events unchanged"),
+            b"event-canary"
+        );
+        assert!(!session.join("transcript.md").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_no_clobber_is_atomic_against_a_destination_creation_race() {
+        let output = tempfile::tempdir().expect("output");
+        let parent = fs::canonicalize(output.path()).expect("canonical output");
+        let destination = parent.join("transcript.md");
+        let destination_for_race = destination.clone();
+        let result = write_transcript_export_unix(
+            &parent,
+            std::ffi::OsStr::new("transcript.md"),
+            b"replacement",
+            false,
+            move || {
+                fs::write(&destination_for_race, b"planted").into_diagnostic()?;
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read(destination).expect("planted output"), b"planted");
+        assert!(fs::read_dir(&parent).expect("output entries").all(|entry| {
+            !entry
+                .expect("output entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".rottweiler-export-")
+        }));
     }
 }

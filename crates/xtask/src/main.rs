@@ -25,9 +25,9 @@ use rw_types::{
     SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
     SubagentDescriptor, SubagentId, SubagentIsolation, SubagentReplayItem, SubagentResult,
     SubagentStatus, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart, ToolOutputStream,
-    TouchedFile, TouchedFileStatus, Turn, TurnAccounting, TurnId, TurnMeta, TurnStatus,
-    UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
+    TouchedFile, TouchedFileStatus, TranscriptFormat, Turn, TurnAccounting, TurnId, TurnMeta,
+    TurnStatus, UnifiedDiff, UnrestorablePath, Usage, UserSettingDescriptor, WorkspaceDiff,
+    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceRootDescriptor, WorkspaceStatus,
 };
 use schemars::{JsonSchema, schema_for};
 use semver::Version;
@@ -1773,6 +1773,7 @@ fn generate_typescript() -> String {
     declaration!(PermissionApprovalDescriptor);
     declaration!(PermissionStateDescriptor);
     declaration!(ClientCommand);
+    declaration!(TranscriptFormat);
     declaration!(ToolCapability);
     declaration!(ToolOutputStream);
     declaration!(TurnStatus);

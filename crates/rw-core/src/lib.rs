@@ -106,8 +106,8 @@ pub use rw_types::{
     Answer, ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandMeta, CommandOutcome, Cost,
     EngineError, EngineErrorCategory, EngineEvent, EventMeta, QuestionId, RequestId, SequenceId,
     SessionDescriptor, SessionId, ShellId, SubagentActivity, SubagentDescriptor, SubagentId,
-    SubagentIsolation, SubagentResult, ToolOutputStream, TurnId, TurnStatus, UnrestorablePath,
-    Usage,
+    SubagentIsolation, SubagentResult, ToolOutputStream, TranscriptFormat, TurnId, TurnStatus,
+    UnrestorablePath, Usage,
 };
 pub use update::{
     EMBEDDED_ROOT_KEY_ID, EMBEDDED_ROOT_KEYS_JSON, EMBEDDED_ROOT_PUBLIC_KEY,

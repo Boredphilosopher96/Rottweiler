@@ -253,6 +253,48 @@ describe("pure TUI state reducer", () => {
     expect(state.model).toBeNull()
   })
 
+  test("projects session title updates into the matching sessions-picker row", () => {
+    const listed = reduce(createInitialState(), {
+      type: "sessions_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client",
+        request_id: "sessions",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      sessions: [
+        {
+          session_id: "session-state",
+          title: "Old title",
+          workspace_name: "Rottweiler",
+          model: "fast",
+          driver_client_id: null,
+          shell_active: false,
+        },
+        {
+          session_id: "other-session",
+          title: "Keep me",
+          workspace_name: "Other",
+          model: "fast",
+          driver_client_id: null,
+          shell_active: false,
+        },
+      ],
+    })
+    const renamed = reduce(listed, {
+      type: "session_title_updated",
+      meta: meta("0"),
+      title: "Auth refactor",
+      usage: null,
+      cost: null,
+    })
+
+    expect(renamed.sessions.map((session) => [session.sessionId, session.title])).toEqual([
+      ["session-state", "Auth refactor"],
+      ["other-session", "Keep me"],
+    ])
+  })
+
   test("model catalog refresh does not overwrite a newer durable model event", () => {
     const durable = reduce(createInitialState(), {
       type: "model_changed",

@@ -171,6 +171,7 @@ export interface CommandAcknowledgement {
     | "prompt_dump_ready"
     | "session_replay_completed"
     | "session_forked"
+    | "session_exported"
     | "sessions_listed"
     | "subagents_listed"
     | "subagent_replay_batch"

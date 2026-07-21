@@ -31,6 +31,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "prompt_dump_ready",
   "session_replay_completed",
   "session_forked",
+  "session_exported",
   "sessions_listed",
   "subagents_listed",
   "subagent_replay_batch",
@@ -112,6 +113,7 @@ const ACK_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "prompt_dump_ready",
   "session_replay_completed",
   "session_forked",
+  "session_exported",
   "sessions_listed",
   "subagents_listed",
   "subagent_replay_batch",
@@ -268,6 +270,20 @@ export function reduceWireEvent(
   return applyKnownEvent(ready, event as EngineEvent, sequenceText)
 }
 
+export function projectSessionTitleUpdate(
+  state: RottweilerState,
+  event: Extract<EngineEvent, { type: "session_title_updated" }>,
+): RottweilerState {
+  return {
+    ...state,
+    sessions: state.sessions.map((session) =>
+      session.sessionId === event.meta.session_id
+        ? { ...session, title: event.title }
+        : session,
+    ),
+  }
+}
+
 function applyKnownEvent(
   state: RottweilerState,
   event: EngineEvent,
@@ -340,6 +356,11 @@ function applyKnownEvent(
           event.type,
           event.child.session_id,
         ),
+      }
+    case "session_exported":
+      return {
+        ...state,
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
       }
     case "sessions_listed":
       const activeSession =
@@ -1191,7 +1212,7 @@ function applyKnownEvent(
         },
       }
     case "session_title_updated":
-      return state
+      return projectSessionTitleUpdate(state, event)
     case "compaction_attempt_finished":
     case "tool_output_pruned":
     case "model_context_cleared":
@@ -1979,6 +2000,7 @@ function responseAck(
     | "prompt_dump_ready"
     | "session_replay_completed"
     | "session_forked"
+    | "session_exported"
     | "sessions_listed"
     | "subagents_listed"
     | "subagent_replay_batch"

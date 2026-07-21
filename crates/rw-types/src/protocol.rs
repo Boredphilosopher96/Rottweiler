@@ -912,6 +912,16 @@ pub struct PromptDump {
     pub estimated_tokens: u64,
 }
 
+/// Stable transcript formats shared by CLI and authenticated clients.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum TranscriptFormat {
+    Markdown,
+    Html,
+    Json,
+}
+
 /// Commands accepted by the headless engine from any client.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1132,6 +1142,18 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
+    RenameSession {
+        meta: CommandMeta,
+        session_id: SessionId,
+        title: String,
+    },
+    ExportSession {
+        meta: CommandMeta,
+        session_id: SessionId,
+        format: TranscriptFormat,
+        output_path: String,
+        force: bool,
+    },
     RevokePermissionApproval {
         meta: CommandMeta,
         session_id: SessionId,
@@ -1260,6 +1282,8 @@ impl ClientCommand {
             | Self::RemoveSessionPermissionRule { meta, .. }
             | Self::RemoveQueuedMessage { meta, .. }
             | Self::ClearQueuedMessages { meta, .. }
+            | Self::RenameSession { meta, .. }
+            | Self::ExportSession { meta, .. }
             | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
@@ -1323,6 +1347,8 @@ impl ClientCommand {
             | Self::RemoveSessionPermissionRule { meta, .. }
             | Self::RemoveQueuedMessage { meta, .. }
             | Self::ClearQueuedMessages { meta, .. }
+            | Self::RenameSession { meta, .. }
+            | Self::ExportSession { meta, .. }
             | Self::RevokePermissionApproval { meta, .. }
             | Self::BeginProviderAuth { meta, .. }
             | Self::ConfigureBuiltinProvider { meta, .. }
@@ -1675,6 +1701,11 @@ pub enum EngineEvent {
         parent_session_id: SessionId,
         child: SessionDescriptor,
         at_turn: TurnId,
+    },
+    SessionExported {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        output_path: String,
     },
     SessionsListed {
         meta: CommandAckMeta,
@@ -2230,6 +2261,7 @@ impl EngineEvent {
             | Self::PromptDumpReady { .. }
             | Self::SessionReplayCompleted { .. }
             | Self::SessionForked { .. }
+            | Self::SessionExported { .. }
             | Self::SessionsListed { .. }
             | Self::SubagentsListed { .. }
             | Self::SubagentReplayBatch { .. }
@@ -2318,6 +2350,7 @@ impl EngineEvent {
             | Self::PromptDumpReady { .. }
             | Self::SessionReplayCompleted { .. }
             | Self::SessionForked { .. }
+            | Self::SessionExported { .. }
             | Self::SessionsListed { .. }
             | Self::SubagentsListed { .. }
             | Self::SubagentReplayBatch { .. }
@@ -2398,7 +2431,7 @@ impl EngineEvent {
 mod tests {
     use super::{
         ClientCommand, ClientId, CommandAckMeta, CommandMeta, EngineEvent, RequestId, SequenceId,
-        SessionId, SubagentId,
+        SessionId, SubagentId, TranscriptFormat,
     };
 
     #[test]
@@ -2412,6 +2445,60 @@ mod tests {
         };
         command.meta_mut().client_id = ClientId("bound-connection".to_owned());
         assert_eq!(command.meta().client_id.0, "bound-connection");
+    }
+
+    #[test]
+    fn session_export_command_and_result_have_stable_wire_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let command = ClientCommand::ExportSession {
+            meta: CommandMeta {
+                protocol_version: 1,
+                client_id: ClientId("driver".to_owned()),
+                request_id: RequestId("export".to_owned()),
+            },
+            session_id: SessionId("session".to_owned()),
+            format: TranscriptFormat::Markdown,
+            output_path: "/tmp/transcript.md".to_owned(),
+            force: true,
+        };
+        let command = serde_json::to_value(command)?;
+        assert_eq!(command["type"], "export_session");
+        assert_eq!(command["format"], "markdown");
+        assert_eq!(command["output_path"], "/tmp/transcript.md");
+        assert_eq!(command["force"], true);
+
+        let event = EngineEvent::SessionExported {
+            meta: CommandAckMeta {
+                protocol_version: 1,
+                client_id: ClientId("driver".to_owned()),
+                request_id: RequestId("export".to_owned()),
+                emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+            },
+            session_id: SessionId("session".to_owned()),
+            output_path: "/private/tmp/transcript.md".to_owned(),
+        };
+        let event = serde_json::to_value(event)?;
+        assert_eq!(event["type"], "session_exported");
+        assert_eq!(event["output_path"], "/private/tmp/transcript.md");
+        Ok(())
+    }
+
+    #[test]
+    fn session_rename_command_has_a_stable_wire_shape() -> Result<(), Box<dyn std::error::Error>> {
+        let command = ClientCommand::RenameSession {
+            meta: CommandMeta {
+                protocol_version: 1,
+                client_id: ClientId("picker".to_owned()),
+                request_id: RequestId("rename".to_owned()),
+            },
+            session_id: SessionId("session".to_owned()),
+            title: "Auth refactor".to_owned(),
+        };
+        let command = serde_json::to_value(command)?;
+        assert_eq!(command["type"], "rename_session");
+        assert_eq!(command["session_id"], "session");
+        assert_eq!(command["title"], "Auth refactor");
+        Ok(())
     }
 
     #[test]

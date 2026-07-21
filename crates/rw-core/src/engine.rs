@@ -1783,6 +1783,7 @@ fn recovered_pending_event(
         | EngineEvent::PromptDumpReady { .. }
         | EngineEvent::SessionReplayCompleted { .. }
         | EngineEvent::SessionForked { .. }
+        | EngineEvent::SessionExported { .. }
         | EngineEvent::SessionsListed { .. }
         | EngineEvent::SubagentsListed { .. }
         | EngineEvent::SubagentReplayBatch { .. }
@@ -6079,6 +6080,8 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::RemoveSessionPermissionRule { meta, .. }
         | ClientCommand::RemoveQueuedMessage { meta, .. }
         | ClientCommand::ClearQueuedMessages { meta, .. }
+        | ClientCommand::RenameSession { meta, .. }
+        | ClientCommand::ExportSession { meta, .. }
         | ClientCommand::RevokePermissionApproval { meta, .. }
         | ClientCommand::BeginProviderAuth { meta, .. }
         | ClientCommand::ConfigureBuiltinProvider { meta, .. }
@@ -6144,6 +6147,8 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::RemoveSessionPermissionRule { session_id, .. }
         | ClientCommand::RemoveQueuedMessage { session_id, .. }
         | ClientCommand::ClearQueuedMessages { session_id, .. }
+        | ClientCommand::RenameSession { session_id, .. }
+        | ClientCommand::ExportSession { session_id, .. }
         | ClientCommand::RevokePermissionApproval { session_id, .. }
         | ClientCommand::BeginProviderAuth { session_id, .. }
         | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
@@ -7029,6 +7034,7 @@ fn requires_driver(command: &ClientCommand) -> bool {
             | ClientCommand::GetSessionReview { .. }
             | ClientCommand::DumpPrompt { .. }
             | ClientCommand::ListPermissions { .. }
+            | ClientCommand::RenameSession { .. }
     )
 }
 
@@ -7569,6 +7575,20 @@ async fn handle_actor_command(
                 *captured_output = captured_output
                     .take()
                     .map(|output| config.secret_redactor.redact(&output));
+            }
+            if let ClientCommand::RenameSession { title, .. } = &mut command {
+                let Some(normalized) = normalize_manual_session_title(title) else {
+                    let outcome = protocol_rejection(
+                        "invalid_session_title",
+                        format!(
+                            "session title must be non-empty, contain no control characters, and contain at most {SESSION_TITLE_MAX_CHARS} characters"
+                        ),
+                    );
+                    send_ack(state, events, &meta, session, outcome.clone());
+                    let _ = respond.send(outcome);
+                    return;
+                };
+                *title = normalized;
             }
 
             match &command {
@@ -8523,6 +8543,7 @@ async fn handle_actor_command(
                 | ClientCommand::RemoveSessionPermissionRule { .. }
                 | ClientCommand::RemoveQueuedMessage { .. }
                 | ClientCommand::ClearQueuedMessages { .. }
+                | ClientCommand::ExportSession { .. }
                 | ClientCommand::RevokePermissionApproval { .. }
                 | ClientCommand::ListMcpServers { .. }
                 | ClientCommand::ListRuntimeServices { .. }
@@ -8531,6 +8552,28 @@ async fn handle_actor_command(
                 | ClientCommand::ApproveMcpServer { .. }
                 | ClientCommand::SetMcpServerEnabled { .. } => {
                     unreachable!("host query commands return through their typed query branch")
+                }
+                ClientCommand::RenameSession { title, .. } => {
+                    state.transient_cause = Some(meta.request_id.clone());
+                    let result = emit(
+                        state,
+                        events,
+                        &config.event_sink,
+                        PendingEvent::SessionTitleUpdated {
+                            title: title.clone(),
+                            usage: None,
+                            cost: None,
+                        },
+                    )
+                    .await;
+                    state.transient_cause = None;
+                    if result.is_ok() {
+                        state.session_title = Some(title);
+                        state.title_generation_started = true;
+                    }
+                    if let Some(complete) = completion.take() {
+                        let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
+                    }
                 }
                 ClientCommand::AttachSession { role, .. } => {
                     state
@@ -10428,6 +10471,17 @@ fn normalize_generated_session_title(raw: &str) -> Option<String> {
         return None;
     }
     Some(unquoted.to_owned())
+}
+
+fn normalize_manual_session_title(raw: &str) -> Option<String> {
+    if raw.chars().any(char::is_control) {
+        return None;
+    }
+    let title = raw.trim();
+    if title.is_empty() || title.chars().count() > SESSION_TITLE_MAX_CHARS {
+        return None;
+    }
+    Some(title.to_owned())
 }
 
 fn unavailable_session_title() -> (Option<String>, SessionUsage, Cost) {
@@ -18262,6 +18316,117 @@ mod tests {
                 && entry.turn_id == TurnId("title".to_owned())
                 && entry.usage.output_tokens > 0
         }));
+    }
+
+    #[tokio::test]
+    async fn manual_rename_before_first_turn_completion_prevents_auto_title_overwrite() {
+        let root = TempDir::new().expect("tempdir");
+        let sink = Arc::new(RecordingSink::default());
+        let mut actor_config = config(
+            root.path(),
+            Arc::new(DelayedFinishModel {
+                delay: Duration::from_millis(100),
+            }),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        );
+        actor_config.event_sink = sink.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .send_message("explain the project structure")
+            .await
+            .expect("message");
+        assert!(handle.snapshot().await.expect("running snapshot").running);
+
+        handle
+            .dispatch_durably(ClientCommand::RenameSession {
+                meta: CommandMeta {
+                    protocol_version: PROTOCOL_VERSION,
+                    client_id: ClientId("local".to_owned()),
+                    request_id: RequestId("manual-title".to_owned()),
+                },
+                session_id: handle.session_id().clone(),
+                title: "  Manual auth refactor  ".to_owned(),
+            })
+            .await
+            .expect("manual rename");
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if matches!(
+                    events.recv().await.expect("turn event"),
+                    EngineEvent::TurnFinished { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("first turn completion");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let durable = sink
+            .events
+            .lock()
+            .expect("events")
+            .iter()
+            .map(|event| event.wire.clone())
+            .collect::<Vec<_>>();
+        let titles = durable
+            .iter()
+            .filter_map(|event| match event {
+                EngineEvent::SessionTitleUpdated { title, .. } => Some(title.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(titles, ["Manual auth refactor"]);
+        assert_eq!(
+            project_session_events(&durable)
+                .expect("replay manual title")
+                .title
+                .as_deref(),
+            Some("Manual auth refactor")
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_session_title_validation_rejects_empty_long_and_control_text() {
+        let root = TempDir::new().expect("tempdir");
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            Arc::new(PendingModel),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        for (request, title) in [
+            ("empty-title", "   ".to_owned()),
+            (
+                "long-title",
+                "x".repeat(SESSION_TITLE_MAX_CHARS.saturating_add(1)),
+            ),
+            ("control-title", "auth\nrefactor".to_owned()),
+        ] {
+            let outcome = handle
+                .dispatch(ClientCommand::RenameSession {
+                    meta: CommandMeta {
+                        protocol_version: PROTOCOL_VERSION,
+                        client_id: ClientId("picker".to_owned()),
+                        request_id: RequestId(request.to_owned()),
+                    },
+                    session_id: handle.session_id().clone(),
+                    title,
+                })
+                .await
+                .expect("validation outcome");
+            assert!(matches!(
+                outcome,
+                CommandOutcome::Rejected { error } if error.code == "invalid_session_title"
+            ));
+        }
     }
 
     #[tokio::test]

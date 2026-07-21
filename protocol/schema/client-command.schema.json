@@ -1058,6 +1058,62 @@
         "session_id": {
           "$ref": "#/$defs/SessionId"
         },
+        "title": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "rename_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "title"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "format": {
+          "$ref": "#/$defs/TranscriptFormat"
+        },
+        "output_path": {
+          "type": "string"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "export_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "format",
+        "output_path",
+        "force"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
         "approval_id": {
           "type": "string"
         },
@@ -1691,6 +1747,15 @@
         "ask",
         "allow",
         "deny"
+      ]
+    },
+    "TranscriptFormat": {
+      "description": "Stable transcript formats shared by CLI and authenticated clients.",
+      "type": "string",
+      "enum": [
+        "markdown",
+        "html",
+        "json"
       ]
     },
     "PermissionApprovalScope": {

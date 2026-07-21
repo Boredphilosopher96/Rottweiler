@@ -225,6 +225,30 @@
         "meta": {
           "$ref": "#/$defs/CommandAckMeta"
         },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "output_path": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "session_exported"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "output_path"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
         "sessions": {
           "type": "array",
           "items": {

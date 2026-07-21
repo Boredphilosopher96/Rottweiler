@@ -30,7 +30,7 @@ pub use protocol::{
     SessionMode, SessionReview, SessionReviewFile, ShellId, StoredAttachment, SubagentActivity,
     SubagentDescriptor, SubagentId, SubagentIsolation, SubagentReplayItem, SubagentResult,
     SubagentStatus, ToolCapability, ToolOutputStream, TouchedFile, TouchedFileStatus,
-    TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
+    TranscriptFormat, TurnAccounting, TurnId, TurnStatus, UnifiedDiff, UnrestorablePath, Usage,
     UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
     WorkspaceRootDescriptor, WorkspaceStatus,
 };

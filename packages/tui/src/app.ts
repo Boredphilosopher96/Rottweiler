@@ -10,6 +10,7 @@ import {
   type ThemeMode,
   type TreeSitterClient,
 } from "@opentui/core"
+import { homedir } from "node:os"
 
 import {
   ComposerRenderable,
@@ -66,6 +67,7 @@ import {
   createInitialState,
   enterReplayMode,
   engineEvent,
+  projectSessionTitleUpdate,
   reduceRottweilerState,
   type QuestionProjection,
   type RottweilerState,
@@ -162,8 +164,10 @@ type PickerKind =
   | "permissions" | "permissionMode" | "permissionYoloConfirm" | "trust"
   | "permissionInput"
   | "queuedMessages"
+  | "exportFormat" | "exportPath" | "exportOverwrite"
+  | "workspaceRoots"
   | "budgets" | "budgetPresets" | "budgetInput"
-  | "sessions" | "settings"
+  | "sessions" | "sessionActions" | "sessionRename" | "settings"
   | "agents" | "agentActions"
   | "timeline" | "timelineActions"
   | "themes"
@@ -223,6 +227,17 @@ type PermissionPickerAction =
 type QueuedMessagePickerAction =
   | { readonly kind: "remove"; readonly position: string }
   | { readonly kind: "clear" }
+type SessionProjection = RottweilerState["sessions"][number]
+type SessionPickerAction =
+  | { readonly kind: "resume"; readonly session: SessionProjection }
+  | { readonly kind: "rename"; readonly session: SessionProjection }
+type ExportFormat = "markdown" | "html" | "json"
+interface PendingExport {
+  readonly format: ExportFormat
+  readonly outputPath: string
+  readonly force: boolean
+  readonly requestId: string | null
+}
 type PermissionModePickerAction = Extract<PermissionPickerAction, { readonly kind: "mode" }>
 
 const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
@@ -287,6 +302,17 @@ const PERMISSION_MODE_CHOICES: readonly PermissionModeChoice[] = [
   { mode: "auto-safe", description: "Ask only for risky actions" },
   { mode: "yolo", description: "Never ask · dangerous" },
   { mode: "default", description: "Follow the launch policy" },
+]
+
+const EXPORT_FORMAT_CHOICES: readonly {
+  readonly format: ExportFormat
+  readonly label: string
+  readonly description: string
+  readonly extension: string
+}[] = [
+  { format: "markdown", label: "Markdown", description: "Readable text", extension: "md" },
+  { format: "html", label: "HTML", description: "Formatted for a browser", extension: "html" },
+  { format: "json", label: "JSON", description: "Structured data", extension: "json" },
 ]
 
 type ProviderAuthPickerAction =
@@ -405,13 +431,16 @@ export class RottweilerApp extends BoxRenderable {
   #runtimeServicesTimer: ReturnType<typeof setTimeout> | null = null
   #interruptEscapeTimer: ReturnType<typeof setTimeout> | null = null
   #clipboardNoticeTimer: ReturnType<typeof setTimeout> | null = null
+  #exportNoticeTimer: ReturnType<typeof setTimeout> | null = null
   #interruptEscapeArmed = false
   #pendingForkRequests = new Set<string>()
   #pendingReviewPaths = new Set<string>()
   #pendingModelSwitchRequests = new Set<string>()
+  #sessionActionId: string | null = null
   #timelineTurn: TimelineTurnChoice | null = null
   #pendingRewindIntent: PendingRewindIntent | null = null
   #composerNotice: string | null = null
+  #pendingExport: PendingExport | null = null
   #lastComposerValue = ""
   #keybindings: CompiledKeybindings
   #inputMode: InputMode
@@ -911,6 +940,8 @@ export class RottweilerApp extends BoxRenderable {
       this.#timelineTurn = null
       this.#pendingRewindIntent = null
       this.#composerNotice = null
+      this.#pendingExport = null
+      this.#clearExportNotice()
       this.#providerApiKeyProvider = null
       this.#providerRecoveryProvider = null
       this.#storedProviderKeys.clear()
@@ -1135,7 +1166,17 @@ export class RottweilerApp extends BoxRenderable {
       this.#pendingWorkspaceSearchRequest = null
     }
     const previous = this.#state
-    let next = reduceRottweilerState(previous, engineEvent(event))
+    const crossSessionTitle =
+      event.type === "session_title_updated" &&
+      isRecord(event.meta) &&
+      event.meta.session_id !== this.#sessionId
+    let next =
+      crossSessionTitle
+        ? projectSessionTitleUpdate(
+            previous,
+            event as Extract<EngineEvent, { type: "session_title_updated" }>,
+          )
+        : reduceRottweilerState(previous, engineEvent(event))
     if (event.type === "sessions_listed" && Array.isArray(eventRecord.sessions)) {
       const active = eventRecord.sessions.find(
         (session) => isRecord(session) && session.session_id === this.#sessionId,
@@ -1273,6 +1314,30 @@ export class RottweilerApp extends BoxRenderable {
         : null
     if (modelSwitchOutcome?.type === "rejected") {
       this.#projectRejection(modelSwitchOutcome)
+    }
+    const pendingExport = this.#pendingExport
+    if (
+      event.type === "command_acknowledged" &&
+      pendingExport !== null &&
+      pendingExport.requestId !== null &&
+      commandRequestId === pendingExport.requestId &&
+      (event as Extract<EngineEvent, { type: "command_acknowledged" }>).outcome.type === "rejected"
+    ) {
+      this.#handleExportRejection(
+        (event as Extract<EngineEvent, { type: "command_acknowledged" }>).outcome as Extract<CommandOutcome, { type: "rejected" }>,
+        pendingExport,
+      )
+    } else if (
+      event.type === "session_exported" &&
+      (event as Extract<EngineEvent, { type: "session_exported" }>).session_id === this.#sessionId &&
+      pendingExport !== null &&
+      pendingExport.requestId !== null &&
+      commandRequestId === pendingExport.requestId
+    ) {
+      this.#pendingExport = null
+      this.#showExportNotice(
+        (event as Extract<EngineEvent, { type: "session_exported" }>).output_path,
+      )
     }
     this.#notify(previous, next)
     if (
@@ -1773,6 +1838,97 @@ export class RottweilerApp extends BoxRenderable {
     this.#refreshPicker()
   }
 
+  openExportSessionPicker(): void {
+    if (this.#state.replay.active) return
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "exportFormat"
+    this.#refreshPicker()
+  }
+
+  #openExportPathPrompt(format: ExportFormat): void {
+    const choice = EXPORT_FORMAT_CHOICES.find((item) => item.format === format)
+    if (choice === undefined) return
+    this.#pickerKind = "exportPath"
+    this.picker.openTextPrompt(
+      "Save to path, e.g. ~/transcript.md",
+      `~/rottweiler-export.${choice.extension}`,
+      (value) => {
+        this.closePicker()
+        const outputPath = expandLeadingHome(value.trim())
+        void this.#submitSessionExport(format, outputPath, false)
+      },
+      4_096,
+    )
+  }
+
+  async #submitSessionExport(
+    format: ExportFormat,
+    outputPath: string,
+    force: boolean,
+  ): Promise<void> {
+    if (this.#state.replay.active) return
+    const meta = this.#meta()
+    const pending: PendingExport = {
+      format,
+      outputPath,
+      force,
+      requestId: meta.request_id,
+    }
+    this.#pendingExport = pending
+    try {
+      const outcome = await this.#emit({
+        type: "export_session",
+        meta,
+        session_id: this.#sessionId,
+        format,
+        output_path: outputPath,
+        force,
+      })
+      if (outcome?.type === "rejected" && this.#pendingExport?.requestId === meta.request_id) {
+        this.#handleExportRejection(outcome, pending)
+      } else if (outcome === null && this.#pendingExport?.requestId === meta.request_id) {
+        this.#pendingExport = null
+        this.#projectClientError(
+          "session_export_unavailable",
+          "the session export was not acknowledged by the engine",
+          true,
+        )
+      }
+    } catch (error) {
+      if (this.#pendingExport?.requestId !== meta.request_id) return
+      this.#pendingExport = null
+      this.#projectClientError(
+        "session_export_failed",
+        `session export failed: ${safeErrorMessage(error)}`,
+        true,
+      )
+    }
+  }
+
+  #handleExportRejection(outcome: Extract<CommandOutcome, { type: "rejected" }>, pending: PendingExport): void {
+    this.#projectRejection(outcome)
+    if (!pending.force && outcome.error.message.includes("export output already exists")) {
+      this.#pendingExport = { ...pending, requestId: null }
+      this.#pickerAnchored = false
+      this.#pickerQuery = ""
+      this.#positionPicker(false)
+      this.#pickerKind = "exportOverwrite"
+      this.#refreshPicker()
+      return
+    }
+    this.#pendingExport = null
+  }
+
+  openWorkspaceRootsPicker(): void {
+    this.#pickerAnchored = false
+    this.#pickerQuery = ""
+    this.#positionPicker(false)
+    this.#pickerKind = "workspaceRoots"
+    this.#refreshPicker()
+  }
+
   openMcpPicker(): void {
     this.#pickerAnchored = false
     this.#pickerQuery = ""
@@ -1900,10 +2056,36 @@ export class RottweilerApp extends BoxRenderable {
   openSessionPicker(): void {
     this.#pickerAnchored = false
     this.#pickerQuery = ""
+    this.#sessionActionId = null
     this.#positionPicker(false)
     this.#pickerKind = "sessions"
     this.#command({ type: "list_sessions" })
     this.#refreshPicker()
+  }
+
+  #openSessionActionPicker(session: SessionProjection): void {
+    this.#sessionActionId = session.sessionId
+    this.#pickerKind = "sessionActions"
+    this.#refreshPicker()
+  }
+
+  #openSessionRenamePrompt(session: SessionProjection): void {
+    this.#sessionActionId = session.sessionId
+    this.#pickerKind = "sessionRename"
+    this.picker.openTextPrompt(
+      "Rename session, e.g. Auth refactor",
+      session.title ?? session.workspaceName,
+      (title) => {
+        const sessionId = this.#sessionActionId
+        this.#pickerKind = "sessions"
+        this.#pickerQuery = ""
+        if (sessionId !== null) {
+          this.#command({ type: "rename_session", sessionId, title })
+        }
+        this.#refreshPicker()
+      },
+      288,
+    )
   }
 
   openSubagentPicker(): void {
@@ -1963,6 +2145,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#providerRecoveryProvider = null
     this.#budgetSettingKey = null
     this.#subagentActionId = null
+    this.#sessionActionId = null
     this.#themeBeforePreview = null
     this.#themePreviewCommitted = false
     if (
@@ -2009,6 +2192,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#clearRuntimeServicesTimer()
     this.#clearInterruptEscape(false)
     this.#clearClipboardNotice()
+    this.#clearExportNotice()
     this.ctx.off(CliRenderEvents.FOCUS, this.#onTerminalFocus)
     this.ctx.off(CliRenderEvents.BLUR, this.#onTerminalBlur)
     this.ctx.off(CliRenderEvents.THEME_MODE, this.#onTerminalThemeMode)
@@ -2033,6 +2217,23 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#clipboardNoticeTimer === null) return
     clearTimeout(this.#clipboardNoticeTimer)
     this.#clipboardNoticeTimer = null
+  }
+
+  #showExportNotice(path: string): void {
+    this.#clearExportNotice()
+    this.banner.visible = true
+    this.banner.fg = this.#theme.success
+    this.banner.content = `Exported to ${path}`
+    this.#exportNoticeTimer = setTimeout(() => {
+      this.#exportNoticeTimer = null
+      if (!this.#destroyed) this.setState(this.#state)
+    }, 3_000)
+  }
+
+  #clearExportNotice(): void {
+    if (this.#exportNoticeTimer === null) return
+    clearTimeout(this.#exportNoticeTimer)
+    this.#exportNoticeTimer = null
   }
 
   #keybindingContext(): KeybindingContext {
@@ -2540,6 +2741,75 @@ export class RottweilerApp extends BoxRenderable {
             position: item.value.position,
           })
         })
+        break
+      }
+      case "exportFormat": {
+        if (this.#state.replay.active) {
+          this.closePicker()
+          break
+        }
+        this.#openPicker(
+          "Export session",
+          EXPORT_FORMAT_CHOICES.map((choice) => ({
+            id: `export.format.${choice.format}`,
+            label: choice.label,
+            description: choice.description,
+            value: choice.format,
+          })),
+          (item) => this.#openExportPathPrompt(item.value),
+        )
+        break
+      }
+      case "exportOverwrite": {
+        const pending = this.#pendingExport
+        if (this.#state.replay.active || pending === null) {
+          this.closePicker()
+          break
+        }
+        this.#openPicker(
+          "Overwrite existing file?",
+          [
+            {
+              id: "export.overwrite.confirm",
+              label: "Overwrite",
+              description: "Replace the existing file atomically",
+              value: true,
+            },
+            {
+              id: "export.overwrite.cancel",
+              label: "Cancel",
+              description: "Keep the existing file",
+              value: false,
+            },
+          ],
+          (item) => {
+            this.closePicker()
+            this.#pendingExport = null
+            if (item.value) {
+              void this.#submitSessionExport(pending.format, pending.outputPath, true)
+            }
+          },
+        )
+        break
+      }
+      case "exportPath":
+        break
+      case "workspaceRoots": {
+        const workspaceRoots = this.#state.workspaceRoots
+        if (workspaceRoots === null) {
+          this.#showPickerLoading("Workspace roots", "Loading workspace roots")
+          break
+        }
+        this.#openPicker(
+          "Workspace roots",
+          workspaceRoots.roots.map((root, index) => ({
+            id: `workspace.root.${index}`,
+            label: root,
+            description: index === 0 ? "primary" : "additional",
+            value: root,
+          })),
+          () => this.closePicker(),
+        )
         break
       }
       case "files":
@@ -3551,10 +3821,47 @@ export class RottweilerApp extends BoxRenderable {
                   : this.#command({ type: "search_sessions", query, limit: 100 })
               return
             }
-            void this.#options.onSessionSelect?.(session.sessionId)
-            this.closePicker()
+            this.#openSessionActionPicker(session)
           },
         )
+        break
+      case "sessionActions": {
+        const session = this.#state.sessions.find(
+          (candidate) => candidate.sessionId === this.#sessionActionId,
+        )
+        if (session === undefined) {
+          this.closePicker()
+          break
+        }
+        const items: PickerItem<SessionPickerAction>[] = [
+          {
+            id: "resume",
+            label: "Resume session",
+            description: "Switch to this session",
+            value: { kind: "resume", session },
+          },
+          {
+            id: "rename",
+            label: "Rename session",
+            description: "Change its picker title without switching",
+            value: { kind: "rename", session },
+          },
+        ]
+        this.#openPicker(
+          `Session actions · ${boundedUiText(session.title ?? session.workspaceName, 64)}`,
+          items,
+          (item) => {
+            if (item.value.kind === "resume") {
+              this.closePicker()
+              void this.#options.onSessionSelect?.(item.value.session.sessionId)
+            } else {
+              this.#openSessionRenamePrompt(item.value.session)
+            }
+          },
+        )
+        break
+      }
+      case "sessionRename":
         break
       case null:
         break
@@ -3745,6 +4052,7 @@ export class RottweilerApp extends BoxRenderable {
       { id: "fork.run", title: "Fork session", section: "Conversation", description: "Fork at the latest completed turn", run: open(() => void this.#requestFork(null)) },
       { id: "session.list", title: "Switch session", section: "Conversation", description: this.#paletteDescription("Resume another durable session", "open_session_picker"), run: open(() => this.openSessionPicker()) },
       { id: "review.open", title: "Review changes", section: "Conversation", description: this.#paletteDescription("Open the cumulative session diff", "open_review"), run: open(() => this.openReview()) },
+      { id: "session.export", title: "Export session", section: "Conversation", description: "Save this session's transcript to a file", run: open(() => this.openExportSessionPicker()) },
       { id: "plan.show", title: "Show plan", section: "Conversation", description: "Display the pending or approved plan", run: submit("/plan") },
       { id: "queue.manage", title: "Manage queued messages", section: "Conversation", description: "Review, remove, or clear queued messages", run: open(() => this.openQueuedMessagesPicker()) },
       { id: "cost.show", title: "Show usage & cost", section: "Conversation", description: "Display tokens, cost, and budget", run: submit("/cost") },
@@ -3763,6 +4071,7 @@ export class RottweilerApp extends BoxRenderable {
       { id: "status.show", title: "Show agent status", section: "Agents & models", description: "Display running and queue state", run: submit("/status") },
 
       { id: "workspace.add", title: "Add workspace directory", section: "Workspace", description: "Prefills /add-dir · give a directory path", run: prefill("/add-dir") },
+      { id: "workspace.roots", title: "Workspace roots", section: "Workspace", description: "See every live workspace root", run: open(() => this.openWorkspaceRootsPicker()) },
       { id: "trust.manage", title: "Folder trust", section: "Workspace", description: "Show, grant, or revoke folder trust", run: open(() => this.openTrustPicker()) },
       { id: "context.manage", title: "Manage context", section: "Workspace", description: "Inspect, pin, or evict context items", run: submit("/context") },
 
@@ -4838,6 +5147,7 @@ export class RottweilerApp extends BoxRenderable {
       | { readonly type: "get_session_review" | "get_workspace_status" | "get_context" | "get_cost" }
       | { readonly type: "get_workspace_diff"; readonly path: string; readonly max_bytes: number }
       | { readonly type: "search_sessions"; readonly query: string; readonly limit: number }
+      | { readonly type: "rename_session"; readonly sessionId: string; readonly title: string }
       | { readonly type: "list_models"; readonly refresh: boolean }
       | { readonly type: "list_settings" }
       | { readonly type: "set_setting"; readonly key: string; readonly value: string }
@@ -4959,6 +5269,14 @@ export class RottweilerApp extends BoxRenderable {
         break
       case "search_sessions":
         dispatched = { ...command, meta }
+        break
+      case "rename_session":
+        dispatched = {
+          type: command.type,
+          meta,
+          session_id: command.sessionId,
+          title: command.title,
+        }
         break
       case "get_session_review":
       case "get_workspace_status":
@@ -5538,6 +5856,11 @@ function safeErrorMessage(error: unknown): string {
   return error instanceof Error && error.message.length > 0
     ? error.message
     : "the request could not be delivered to the engine"
+}
+
+function expandLeadingHome(path: string): string {
+  if (path === "~") return homedir()
+  return path.startsWith("~/") ? `${homedir()}${path.slice(1)}` : path
 }
 
 function commandSourceLabel(source: CommandChoice["source"]): string {

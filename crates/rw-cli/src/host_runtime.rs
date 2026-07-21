@@ -39,9 +39,9 @@ use rw_core::{
     ModelCatalogSnapshot, ModelCatalogSource, PermissionDecision, PreparedForkOperation,
     ProviderAuthAttempt, ProviderAuthChallenge, ProviderAuthCompletion, ProviderLogin,
     ProviderLoginCancellation, ProviderModelCatalogSource, SessionDescriptor, SessionFactory,
-    SessionId, ThinkingLevel, UserSettingDescriptor, WorkspaceDiff, WorkspaceFileMatch,
-    WorkspaceFilePreview, WorkspaceStatus, begin_provider_login, builtin_command_registry,
-    project_session_events,
+    SessionId, ThinkingLevel, TranscriptFormat, UserSettingDescriptor, WorkspaceDiff,
+    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus, begin_provider_login,
+    builtin_command_registry, project_session_events,
 };
 use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;
@@ -86,6 +86,7 @@ const MAX_PREVIEW_BYTES: usize = 5 * 1024 * 1024;
 const QUERY_DEADLINE: Duration = Duration::from_millis(100);
 const WORKSPACE_STATUS_DEADLINE: Duration = Duration::from_millis(750);
 const WORKSPACE_DIFF_DEADLINE: Duration = Duration::from_secs(2);
+const SESSION_EXPORT_DEADLINE: Duration = Duration::from_secs(30);
 const FORK_JOURNAL_VERSION: u16 = 1;
 const MAX_COMPLETED_FORK_OPERATIONS: usize = 4_096;
 const MAX_PENDING_FORK_OPERATIONS: usize = 32;
@@ -337,6 +338,32 @@ impl CliSessionFactory {
         };
         factory.recover_fork_operations()?;
         Ok(factory)
+    }
+
+    fn export_session_blocking(
+        &self,
+        session: &SessionDescriptor,
+        format: TranscriptFormat,
+        output_path: &Path,
+        force: bool,
+    ) -> Result<String, HostError> {
+        let events = crate::history::load_events(&self.options.storage_root, &session.session_id.0)
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        let redactor = rw_core::runtime_support::FixtureRedactor::default();
+        crate::runtime::register_credential_environment(&redactor);
+        let exported =
+            crate::history::export_transcript(&session.session_id.0, &events, format, &redactor)
+                .map_err(|error| HostError::Query(error.to_string()))?;
+        let resolved = crate::history::write_transcript_export(
+            &self.options.storage_root,
+            output_path,
+            &exported,
+            force,
+        )
+        .map_err(|error| HostError::Query(error.to_string()))?;
+        resolved.into_os_string().into_string().map_err(|_| {
+            HostError::Query("resolved export output path is not valid UTF-8".to_owned())
+        })
     }
 
     fn fork_journal_directory(&self) -> PathBuf {
@@ -2171,6 +2198,32 @@ impl HostQueryService for CliSessionFactory {
         .map_err(|_| HostError::Query("workspace diff deadline exceeded".to_owned()))?
         .map_err(|_| HostError::Query("workspace diff worker failed".to_owned()))?
     }
+
+    async fn export_session(
+        &self,
+        session: &SessionDescriptor,
+        format: TranscriptFormat,
+        output_path: &str,
+        force: bool,
+    ) -> Result<String, HostError> {
+        let output_path = PathBuf::from(output_path);
+        if !output_path.is_absolute() {
+            return Err(HostError::Query(
+                "export output path must be absolute".to_owned(),
+            ));
+        }
+        let factory = self.clone();
+        let session = session.clone();
+        tokio::time::timeout(
+            SESSION_EXPORT_DEADLINE,
+            tokio::task::spawn_blocking(move || {
+                factory.export_session_blocking(&session, format, &output_path, force)
+            }),
+        )
+        .await
+        .map_err(|_| HostError::Query("session export deadline exceeded".to_owned()))?
+        .map_err(|_| HostError::Query("session export worker failed".to_owned()))?
+    }
 }
 
 fn overlay_catalog_current(
@@ -3588,6 +3641,79 @@ mod tests {
             driver_client_id: None,
             shell_active: false,
         }
+    }
+
+    #[test]
+    fn session_export_uses_cli_renderer_redaction_and_atomic_force_semantics() {
+        use rw_core::{EventMeta, PROTOCOL_VERSION, SequenceId};
+
+        let root = tempdir().expect("root");
+        let workspace = private_test_directory(&root.path().join("workspace"));
+        let factory = factory(root.path(), &workspace);
+        let session = SessionDescriptor {
+            session_id: SessionId("golden".to_owned()),
+            title: "Golden".to_owned(),
+            workspace_name: workspace_name(&workspace),
+            model: ModelAlias("fast".to_owned()),
+            driver_client_id: Some(rw_core::ClientId("driver".to_owned())),
+            shell_active: false,
+        };
+        let mut log = SessionEventLog::open(&factory.options.storage_root, "golden")
+            .expect("session event log");
+        log.append(EngineEvent::UiNotification {
+            meta: EventMeta {
+                protocol_version: PROTOCOL_VERSION,
+                session_id: session.session_id.clone(),
+                sequence_id: SequenceId(0),
+                emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                caused_by: None,
+            },
+            plugin_id: "fixture".to_owned(),
+            title: "<script>alert(1)</script>".to_owned(),
+            message: "key sk-AbCdEf0123456789GhIjKlMn at /Users/alice/private".to_owned(),
+        })
+        .expect("fixture event");
+        drop(log);
+
+        let output_dir = tempdir().expect("output");
+        let output = output_dir.path().join("transcript.md");
+        let resolved = factory
+            .export_session_blocking(&session, TranscriptFormat::Markdown, &output, false)
+            .expect("first export");
+        assert_eq!(
+            resolved,
+            fs::canonicalize(output_dir.path())
+                .expect("canonical output")
+                .join("transcript.md")
+                .display()
+                .to_string()
+        );
+        assert_eq!(
+            fs::read(&output).expect("exported transcript"),
+            include_bytes!("../tests/golden/history.md")
+        );
+        let rendered = fs::read_to_string(&output).expect("UTF-8 transcript");
+        assert!(!rendered.contains("sk-AbCd"));
+        assert!(!rendered.contains("/Users/alice"));
+
+        let error = factory
+            .export_session_blocking(&session, TranscriptFormat::Markdown, &output, false)
+            .expect_err("existing output requires force");
+        assert!(error.to_string().contains("pass --force"));
+        fs::write(&output, b"replace me").expect("replacement canary");
+        factory
+            .export_session_blocking(&session, TranscriptFormat::Markdown, &output, true)
+            .expect("forced export");
+        assert_eq!(
+            fs::read(&output).expect("forced transcript"),
+            include_bytes!("../tests/golden/history.md")
+        );
+
+        assert!(
+            factory
+                .export_session_blocking(&session, TranscriptFormat::Json, Path::new("/"), false,)
+                .is_err()
+        );
     }
 
     #[cfg(unix)]

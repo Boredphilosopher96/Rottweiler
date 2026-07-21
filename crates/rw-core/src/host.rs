@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt,
     future::Future,
+    path::Path,
     pin::Pin,
     sync::{
         Arc, Mutex, RwLock,
@@ -15,8 +16,8 @@ use rw_types::{
     CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, McpApprovalReview,
     McpServerDescriptor, ModelAlias, ModelCatalogSnapshot, ProviderAuthAttemptId,
     ProviderAuthChallenge, RequestId, RuntimeServiceDescriptor, SequenceId, SessionDescriptor,
-    SessionId, ShellId, SubagentDescriptor, SubagentId, SubagentReplayItem, TurnId, WorkspaceDiff,
-    WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    SessionId, ShellId, SubagentDescriptor, SubagentId, SubagentReplayItem, TranscriptFormat,
+    TurnId, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -433,6 +434,17 @@ pub trait HostQueryService: Send + Sync + 'static {
         path: &str,
         max_bytes: u32,
     ) -> Result<WorkspaceDiff, HostError>;
+    async fn export_session(
+        &self,
+        _session: &SessionDescriptor,
+        _format: TranscriptFormat,
+        _output_path: &str,
+        _force: bool,
+    ) -> Result<String, HostError> {
+        Err(HostError::Query(
+            "session export is unavailable on this host".to_owned(),
+        ))
+    }
 }
 
 /// Session-scoped live MCP operations. Implementations own the transaction
@@ -1719,6 +1731,58 @@ impl EngineHost {
                     }],
                 ))
             }
+            ClientCommand::RenameSession {
+                meta,
+                session_id,
+                title,
+            } => {
+                // Resuming through this factory is the same storage-root and
+                // workspace authorization boundary used by list/search. A
+                // driver lease is deliberately not consulted: picker rename
+                // applies to any session visible within that local scope.
+                let session = self.resume_session(&session_id).await?;
+                let _lifecycle = Arc::clone(&session.lifecycle).lock_owned().await;
+                let tail = session.handle().last_sequence().await?;
+                let mut events = session
+                    .handle()
+                    .subscribe_client(meta.client_id.clone(), tail);
+                let request_id = meta.request_id.clone();
+                let outcome = session
+                    .handle()
+                    .dispatch_durably(ClientCommand::RenameSession {
+                        meta: meta.clone(),
+                        session_id: session_id.clone(),
+                        title,
+                    })
+                    .await?;
+                let updated = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let event = events.recv().await.map_err(HostError::from)?;
+                        if matches!(
+                            &event,
+                            EngineEvent::SessionTitleUpdated { meta, .. }
+                                if meta.caused_by.as_ref() == Some(&request_id)
+                        ) {
+                            break Ok::<_, HostError>(event);
+                        }
+                    }
+                })
+                .await
+                .map_err(|_| {
+                    HostError::Persistence(
+                        "committed session title update was not observable".to_owned(),
+                    )
+                })??;
+                if let EngineEvent::SessionTitleUpdated { title, .. } = &updated {
+                    session
+                        .descriptor
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .title
+                        .clone_from(title);
+                }
+                Ok((outcome, Some(session_id), vec![updated]))
+            }
             ClientCommand::ListCommands { meta, session_id } => {
                 let session = self.ready_session(&session_id).await?;
                 let descriptors = session.handle().command_descriptors();
@@ -2304,6 +2368,40 @@ impl EngineHost {
                         success: false,
                         message: "provider authentication cancelled".to_owned(),
                         warnings: Vec::new(),
+                    }],
+                ))
+            }
+            ClientCommand::ExportSession {
+                meta,
+                session_id,
+                format,
+                output_path,
+                force,
+            } => {
+                if !Path::new(&output_path).is_absolute() {
+                    return Err(HostError::Protocol(
+                        "export output path must be absolute".to_owned(),
+                    ));
+                }
+                let session = self.ready_session(&session_id).await?;
+                let _lifecycle = Arc::clone(&session.lifecycle).lock_owned().await;
+                let snapshot = session.handle().snapshot().await?;
+                if snapshot.driver_client_id.as_ref() != Some(&meta.client_id) {
+                    return Err(HostError::Protocol(
+                        "only the current driver may export this session".to_owned(),
+                    ));
+                }
+                let resolved_path = self
+                    .queries
+                    .export_session(&session.descriptor(), format, &output_path, force)
+                    .await?;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::SessionExported {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        output_path: resolved_path,
                     }],
                 ))
             }
@@ -3460,6 +3558,8 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::RemoveSessionPermissionRule { session_id, .. }
         | ClientCommand::RemoveQueuedMessage { session_id, .. }
         | ClientCommand::ClearQueuedMessages { session_id, .. }
+        | ClientCommand::RenameSession { session_id, .. }
+        | ClientCommand::ExportSession { session_id, .. }
         | ClientCommand::RevokePermissionApproval { session_id, .. }
         | ClientCommand::BeginProviderAuth { session_id, .. }
         | ClientCommand::ConfigureBuiltinProvider { session_id, .. }
@@ -4144,6 +4244,7 @@ mod tests {
     struct StubQueries {
         auth: Option<Arc<AuthFixture>>,
         persisted_models: std::sync::Mutex<Vec<String>>,
+        exports: std::sync::Mutex<Vec<(SessionId, TranscriptFormat, String, bool)>>,
         fail_model_catalog: bool,
         fail_model_persistence: bool,
     }
@@ -4356,6 +4457,25 @@ mod tests {
                 binary: false,
             })
         }
+
+        async fn export_session(
+            &self,
+            session: &SessionDescriptor,
+            format: TranscriptFormat,
+            output_path: &str,
+            force: bool,
+        ) -> Result<String, HostError> {
+            self.exports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((
+                    session.session_id.clone(),
+                    format,
+                    output_path.to_owned(),
+                    force,
+                ));
+            Ok(output_path.to_owned())
+        }
     }
 
     fn meta(client: &str, request: &str) -> CommandMeta {
@@ -4378,6 +4498,265 @@ mod tests {
         )
         .expect("host");
         (host, factory)
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn export_session_requires_an_absolute_path_and_current_driver() {
+        let factory = Arc::new(StubFactory::new());
+        let queries = Arc::new(StubQueries::default());
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 1,
+                max_deduplicated_requests: 32,
+            },
+            factory,
+            queries.clone(),
+        )
+        .expect("host");
+        let session_id = SessionId("export-session".to_owned());
+        let driver = BoundClient {
+            client_id: ClientId("export-driver".to_owned()),
+        };
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::ResumeSession {
+                    meta: meta("spoofed", "export-resume"),
+                    session_id: session_id.clone(),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+
+        let mut events = host
+            .subscribe(driver.clone(), None, None)
+            .await
+            .expect("export events");
+        let output = tempfile::tempdir()
+            .expect("output")
+            .path()
+            .join("transcript.md");
+        assert_eq!(
+            host.dispatch(
+                driver.clone(),
+                ClientCommand::ExportSession {
+                    meta: meta("spoofed", "export-success"),
+                    session_id: session_id.clone(),
+                    format: TranscriptFormat::Markdown,
+                    output_path: output.display().to_string(),
+                    force: false,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let exported_path = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::SessionExported { output_path, .. } = events
+                    .recv()
+                    .await
+                    .expect("export event")
+                    .expect("export result")
+                {
+                    break output_path;
+                }
+            }
+        })
+        .await
+        .expect("typed export result");
+        assert_eq!(exported_path, output.display().to_string());
+        assert_eq!(
+            *queries
+                .exports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![(
+                session_id.clone(),
+                TranscriptFormat::Markdown,
+                output.display().to_string(),
+                false,
+            )]
+        );
+
+        assert!(matches!(
+            host.dispatch(
+                driver,
+                ClientCommand::ExportSession {
+                    meta: meta("spoofed", "export-relative"),
+                    session_id: session_id.clone(),
+                    format: TranscriptFormat::Json,
+                    output_path: "transcript.json".to_owned(),
+                    force: false,
+                },
+            )
+            .await,
+            CommandOutcome::Rejected { error }
+                if error.code == "host_protocol_failure"
+                    && error.message.contains("absolute")
+        ));
+        assert!(matches!(
+            host.dispatch(
+                BoundClient {
+                    client_id: ClientId("other-client".to_owned()),
+                },
+                ClientCommand::ExportSession {
+                    meta: meta("spoofed", "export-unowned"),
+                    session_id,
+                    format: TranscriptFormat::Html,
+                    output_path: output.display().to_string(),
+                    force: true,
+                },
+            )
+            .await,
+            CommandOutcome::Rejected { error }
+                if error.code == "host_protocol_failure"
+                    && error.message.contains("current driver")
+        ));
+        assert_eq!(
+            queries
+                .exports
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn rename_persists_and_lists_a_session_without_its_driver_lease() {
+        let (host, _factory) = host(2);
+        let picker = BoundClient {
+            client_id: ClientId("picker-client".to_owned()),
+        };
+        let active = SessionId("active-session".to_owned());
+        let past = SessionId("past-session".to_owned());
+        assert_eq!(
+            host.dispatch(
+                picker.clone(),
+                ClientCommand::ResumeSession {
+                    meta: meta("spoofed", "resume-active"),
+                    session_id: active,
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        assert_eq!(
+            host.dispatch(
+                picker.clone(),
+                ClientCommand::ResumeSession {
+                    meta: meta("spoofed", "resume-past"),
+                    session_id: past.clone(),
+                    last_seen_sequence: None,
+                    role: ClientRole::Observer,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let past_session = host.ready_session(&past).await.expect("past session");
+        assert_eq!(
+            past_session
+                .handle()
+                .snapshot()
+                .await
+                .expect("past snapshot")
+                .driver_client_id,
+            None,
+            "the renamed session must not be driven by the caller"
+        );
+        let mut host_events = host
+            .subscribe(picker.clone(), None, None)
+            .await
+            .expect("picker events");
+
+        assert_eq!(
+            host.dispatch(
+                picker.clone(),
+                ClientCommand::RenameSession {
+                    meta: meta("spoofed", "rename-past"),
+                    session_id: past.clone(),
+                    title: "Past auth refactor".to_owned(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let title_event = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let event = host_events
+                    .recv()
+                    .await
+                    .expect("host event")
+                    .expect("host result");
+                if matches!(
+                    &event,
+                    EngineEvent::SessionTitleUpdated { meta, title, .. }
+                        if meta.session_id == past && title == "Past auth refactor"
+                ) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("forwarded title update");
+        assert!(matches!(
+            title_event,
+            EngineEvent::SessionTitleUpdated { .. }
+        ));
+
+        let mut durable = past_session
+            .handle()
+            .subscribe_client(ClientId("durable-reader".to_owned()), None);
+        let persisted_title = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::SessionTitleUpdated { title, .. } =
+                    durable.recv().await.expect("durable event")
+                {
+                    break title;
+                }
+            }
+        })
+        .await
+        .expect("persisted title event");
+        assert_eq!(persisted_title, "Past auth refactor");
+
+        assert_eq!(
+            host.dispatch(
+                picker,
+                ClientCommand::ListSessions {
+                    meta: meta("spoofed", "list-after-rename"),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let listed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let event = host_events
+                    .recv()
+                    .await
+                    .expect("host event")
+                    .expect("host result");
+                if let EngineEvent::SessionsListed { meta, sessions } = event
+                    && meta.request_id.0 == "list-after-rename"
+                {
+                    break sessions;
+                }
+            }
+        })
+        .await
+        .expect("listed renamed session");
+        assert!(listed.iter().any(|session| {
+            session.session_id == past && session.title == "Past auth refactor"
+        }));
     }
 
     #[tokio::test]

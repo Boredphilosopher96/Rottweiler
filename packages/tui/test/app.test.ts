@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { CliRenderEvents, type Selection } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
+import { homedir } from "node:os"
 
 import { createRottweilerApp, type PresentationFrameScheduler } from "../src/app"
 import { colorContrast, pickerSelectionColors } from "../src/components/picker"
@@ -1979,6 +1980,207 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(emitted.filter((command) =>
       command.type === "remove_queued_message" || command.type === "clear_queued_messages"
     )).toEqual([])
+  })
+
+  test("exports the live session through the Conversation palette picker and path prompt", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      requestId: () => `export-request-${request++}`,
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openCommandPicker()
+    const paletteOptions = app.picker.select.options
+    const reviewIndex = paletteOptions.findIndex((option) => option.value === "review.open")
+    const exportIndex = paletteOptions.findIndex((option) => option.value === "session.export")
+    expect(exportIndex).toBe(reviewIndex + 1)
+    expect(paletteOptions[exportIndex]?.name).toBe("Export session")
+    expect(paletteOptions[exportIndex]?.description).toBe(
+      "Save this session's transcript to a file",
+    )
+    app.picker.select.setSelectedIndex(exportIndex)
+    app.picker.select.selectCurrent()
+
+    expect(app.picker.title).toContain("Export session")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "Markdown",
+      "HTML",
+      "JSON",
+    ])
+    expect(app.picker.select.options.map((option) => option.description)).toEqual([
+      "Readable text",
+      "Formatted for a browser",
+      "Structured data",
+    ])
+    app.picker.select.setSelectedIndex(1)
+    app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("Save to path, e.g. ~/transcript.md")
+    expect(app.picker.input.placeholder).toBe("~/rottweiler-export.html")
+
+    await setup.mockInput.typeText("~/rottweiler-session-export.html")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    const exportCommand = emitted.find((command) => command.type === "export_session")
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "export_session",
+      session_id: "session-local",
+      format: "html",
+      output_path: `${homedir()}/rottweiler-session-export.html`,
+      force: false,
+    }))
+
+    app.handleEvent({
+      type: "session_exported",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui-client",
+        request_id: exportCommand?.meta.request_id ?? "missing-export-request",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      output_path: "/private/tmp/rottweiler-session-export.html",
+    })
+    expect(app.banner.visible).toBeTrue()
+    expect(app.banner.plainText).toBe(
+      "Exported to /private/tmp/rottweiler-session-export.html",
+    )
+  })
+
+  test("surfaces export failures and retries an existing file with atomic force replacement", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      requestId: () => `export-${request++}`,
+      onCommand(command) {
+        emitted.push(command)
+        if (command.type === "export_session" && !command.force) {
+          return {
+            type: "rejected",
+            error: {
+              category: "protocol",
+              code: "host_query_failure",
+              message: "export output already exists; pass --force to replace it",
+              retryable: false,
+            },
+          }
+        }
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openExportSessionPicker()
+    app.picker.select.selectCurrent()
+    await setup.mockInput.typeText("/tmp/existing-transcript.md")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+
+    expect(app.state.errors.at(-1)).toMatchObject({
+      code: "host_query_failure",
+      message: "export output already exists; pass --force to replace it",
+    })
+    expect(app.picker.title).toContain("Overwrite existing file?")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "Overwrite",
+      "Cancel",
+    ])
+    app.picker.select.selectCurrent()
+    await Bun.sleep(0)
+    expect(emitted.filter((command) => command.type === "export_session")).toEqual([
+      expect.objectContaining({
+        type: "export_session",
+        output_path: "/tmp/existing-transcript.md",
+        force: false,
+      }),
+      expect.objectContaining({
+        type: "export_session",
+        output_path: "/tmp/existing-transcript.md",
+        force: true,
+      }),
+    ])
+  })
+
+  test("does not open or send session export controls during historical replay", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      replaySessionId: "historical-export",
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+
+    app.openExportSessionPicker()
+    expect(app.picker.visible).toBeFalse()
+    expect(emitted.filter((command) => command.type === "export_session")).toEqual([])
+  })
+
+  test("shows ordered live workspace roots from the Workspace palette", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        workspaceRoots: {
+          generation: "2",
+          effectiveFromTurn: "5",
+          roots: ["/workspace/primary", "/workspace/additional"],
+        },
+      },
+    })
+    renderer.root.add(app)
+
+    app.openCommandPicker()
+    const paletteOptions = app.picker.select.options
+    const addIndex = paletteOptions.findIndex((option) => option.value === "workspace.add")
+    const rootsIndex = paletteOptions.findIndex((option) => option.value === "workspace.roots")
+    const trustIndex = paletteOptions.findIndex((option) => option.value === "trust.manage")
+    expect(rootsIndex).toBe(addIndex + 1)
+    expect(trustIndex).toBe(rootsIndex + 1)
+    expect(paletteOptions[rootsIndex]?.name).toBe("Workspace roots")
+    expect(paletteOptions[rootsIndex]?.description).toBe("See every live workspace root")
+
+    app.picker.select.setSelectedIndex(rootsIndex)
+    app.picker.select.selectCurrent()
+
+    expect(app.picker.title).toContain("Workspace roots")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "/workspace/primary",
+      "/workspace/additional",
+    ])
+    expect(app.picker.select.options.map((option) => option.description)).toEqual([
+      "primary",
+      "additional",
+    ])
+    app.picker.select.selectCurrent()
+    expect(app.picker.visible).toBeFalse()
+  })
+
+  test("shows workspace-root loading state before the live inventory arrives", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+
+    app.openWorkspaceRootsPicker()
+
+    expect(app.picker.title).toContain("Workspace roots")
+    expect(app.picker.status.plainText).toContain("Loading workspace roots")
+    expect(app.picker.status.visible).toBeTrue()
+    expect(app.picker.select.visible).toBeFalse()
+    expect(app.picker.select.options).toHaveLength(0)
   })
 
   test("configures human-friendly budget limits from palette presets and custom prompts", async () => {
@@ -6241,6 +6443,79 @@ describe("Rottweiler OpenTUI shell", () => {
     app.openSessionPicker()
     expect(app.picker.select.options[0]?.name).toBe("Fix login")
     expect(app.picker.select.options[0]?.description).toContain("payments-service")
+  })
+
+  test("renames a listed session through per-row actions without switching", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const commands: ClientCommand[] = []
+    const selected: string[] = []
+    let request = 0
+    const app = createRottweilerApp(renderer, {
+      sessionId: "active-session",
+      initialState: {
+        ...createInitialState(),
+        sessions: [{
+          sessionId: "past-session",
+          title: "Fix login",
+          workspaceName: "payments-service",
+          model: "fast",
+          driverClientId: null,
+          shellActive: false,
+        }],
+      },
+      requestId: () => `rename-${++request}`,
+      onCommand(command) {
+        commands.push(command)
+        return { type: "accepted" }
+      },
+      onSessionSelect(sessionId) {
+        selected.push(sessionId)
+      },
+    })
+    renderer.root.add(app)
+
+    app.openSessionPicker()
+    app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("Session actions · Fix login")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "Resume session",
+      "Rename session",
+    ])
+    app.picker.select.setSelectedIndex(1)
+    app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("Rename session, e.g. Auth refactor")
+    expect(app.picker.input.value).toBe("")
+    expect(app.picker.input.placeholder).toBe("Fix login")
+
+    await setup.mockInput.typeText("Auth refactor")
+    setup.mockInput.pressEnter()
+    await Bun.sleep(0)
+    expect(selected).toEqual([])
+    expect(commands).toContainEqual(expect.objectContaining({
+      type: "rename_session",
+      session_id: "past-session",
+      title: "Auth refactor",
+    }))
+
+    app.handleEvent({
+      type: "session_title_updated",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "past-session",
+        sequence_id: "7",
+        emitted_at: "2026-01-01T00:00:00Z",
+        caused_by: "rename-2",
+      },
+      title: "Auth refactor",
+      usage: null,
+      cost: null,
+    })
+    expect(app.picker.title).toContain("Sessions")
+    expect(app.picker.select.options[0]?.name).toBe("Auth refactor")
+    expect(app.state.sessions[0]?.title).toBe("Auth refactor")
+    expect(app.state.lastSequence).toBeNull()
+    expect(selected).toEqual([])
   })
 
   test("offers activation retry and credential replacement for unreachable providers", async () => {
