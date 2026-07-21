@@ -344,7 +344,7 @@ describe("M4 retained components", () => {
     expect(app.transcript.scroller.scrollTop).toBeGreaterThan(0)
   })
 
-  test("retains selection and expansion memory when a selected tool card is recreated", async () => {
+  test("retains selection and expansion memory when entry identity recreates a selected tool card", async () => {
     const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
     renderer = setup.renderer
     const initial = transcriptBlockState()
@@ -364,7 +364,9 @@ describe("M4 retained components", () => {
     expect(previousTool?.body.visible).toBeTrue()
     app.setState({
       ...initial,
-      workspaceRoots: { generation: "recreate", effectiveFromTurn: "0", roots: [] },
+      transcript: initial.transcript.map((entry) => entry.sequenceId === "2"
+        ? { ...entry, sequenceId: "2-recreated" }
+        : entry),
     })
     await setup.renderOnce()
 
@@ -377,6 +379,73 @@ describe("M4 retained components", () => {
     expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
     expect(recreatedTool?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
     expect(recreatedTool?.body.visible).toBeTrue()
+  })
+
+  test("preserves historical card, markdown, tool, and selection identity through tool updates and resize", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    const base = transcriptBlockState()
+    const firstTool = base.tools["block-tool-first"]!
+    const runningTool = { ...firstTool, status: "running" as const }
+    const assistantEntry = base.transcript[0]!
+    const initial: RottweilerState = {
+      ...base,
+      transcript: [{
+        ...assistantEntry,
+        turn: {
+          ...assistantEntry.turn,
+          blocks: [
+            ...assistantEntry.turn.blocks,
+            { type: "text", text: "Stable markdown body." },
+          ],
+        },
+      }],
+      tools: { [runningTool.toolCallId]: runningTool },
+    }
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    app.transcript.selectNextBlock()
+    app.transcript.selectNextBlock()
+    const card = [...app.transcript.mountedCards.values()][0]!
+    const markdown = card.markdown
+    const tool = card.getChildren()
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)!
+    expect(card.getChildren()).toContain(markdown)
+    expect(markdown.content).toContain("Stable markdown body.")
+    expect(tool.header.plainText).toContain("◌")
+    expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
+
+    const finishedTool = { ...runningTool, status: "finished" as const }
+    app.setState({
+      ...initial,
+      tools: { [finishedTool.toolCallId]: finishedTool },
+    })
+    await setup.renderOnce()
+
+    const updatedCard = [...app.transcript.mountedCards.values()][0]!
+    const updatedTool = updatedCard.getChildren()
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)!
+    expect(updatedCard).toBe(card)
+    expect(updatedCard.markdown).toBe(markdown)
+    expect(updatedCard.markdown.content).toContain("Stable markdown body.")
+    expect(updatedTool).toBe(tool)
+    expect(updatedTool.header.plainText).toContain("✓")
+    expect(updatedTool.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+
+    setup.resize(64, 24)
+    await setup.renderOnce()
+
+    const resizedCard = [...app.transcript.mountedCards.values()][0]!
+    const resizedTool = resizedCard.getChildren()
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)!
+    expect(resizedCard).toBe(card)
+    expect(resizedCard.markdown).toBe(markdown)
+    expect(resizedCard.markdown.content).toContain("Stable markdown body.")
+    expect(resizedTool).toBe(tool)
+    expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
+    expect(resizedTool.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
   })
 
   test("clears block selection when the selected block disappears", async () => {
@@ -1284,7 +1353,8 @@ describe("M4 retained components", () => {
     const updatedCard = [...app.transcript.mountedCards.values()][0]
     const updatedTool = updatedCard?.getChildren()
       .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
-    expect(updatedCard).not.toBe(previousCard)
+    expect(updatedCard).toBe(previousCard)
+    expect(updatedTool).toBe(previousTool)
     expect(updatedTool?.header.plainText).toContain("src/main.rs")
   })
 

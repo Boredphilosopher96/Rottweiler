@@ -260,6 +260,7 @@ export class ToolBlockRenderable extends BoxRenderable {
   #rendering: TranscriptRenderableOptions | undefined
   #userSetExpansion: boolean
   #selected = false
+  #availableWidth: number
   readonly #startedAt = Date.now()
   readonly blockId: string
 
@@ -288,6 +289,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.blockId = blockId
     this.#theme = theme
     this.#tool = tool
+    this.#availableWidth = Math.max(20, ctx.width)
     const successfulFileEdit =
       tool.status === "finished" && tool.isError !== true && tool.diff !== null
     this.#collapsed = expanded === undefined
@@ -355,10 +357,11 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.update(tool)
   }
 
-  update(tool: ToolProjection): void {
+  update(tool: ToolProjection, availableWidth = this.#availableWidth): void {
     const previousStatus = this.#tool.status
     const previousDiff = this.#tool.diff
     this.#tool = tool
+    this.#availableWidth = Math.max(20, availableWidth)
     if (tool.status === "awaiting_approval" && previousStatus !== "awaiting_approval") {
       this.#collapsed = false
       this.#bodyContainer.visible = true
@@ -498,7 +501,8 @@ export class ToolBlockRenderable extends BoxRenderable {
 
   #syncDiff(tool: ToolProjection): void {
     const proposal = readToolDiff(tool)
-    const signature = proposal === null ? "" : `${proposal.path}\u0000${proposal.unifiedDiff}`
+    const view = this.#availableWidth < 100 ? "unified" : "split"
+    const signature = proposal === null ? "" : `${view}\u0000${proposal.path}\u0000${proposal.unifiedDiff}`
     if (signature === this.#diffSignature) return
     this.#diffSignature = signature
     if (this.#diffContainer !== null) {
@@ -509,7 +513,10 @@ export class ToolBlockRenderable extends BoxRenderable {
     }
     if (proposal === null) return
     const inlineDiff = minimalUnifiedDiff(proposal.path, proposal.unifiedDiff)
-    const view = (this.width || this.ctx.width) < 100 ? "unified" : "split"
+    // DiffRenderable itself resizes in place, but crossing the view threshold
+    // also changes the pre-truncated diff and its surrounding marker rows. Keep
+    // that exceptional rebuild local to the diff subregion instead of replacing
+    // the ToolBlockRenderable or its containing turn card.
     // The diff is changed-lines-only, so give it its natural height. The
     // transcript remains the sole vertical scroll owner; the inline diff never
     // traps the wheel in a nested viewport.
@@ -841,25 +848,72 @@ export function subagentGlyph(status: SubagentProjection["status"]): string {
   }
 }
 
+interface TurnCardViewModel {
+  readonly key: string
+  readonly width: number
+  readonly entry: TranscriptEntry
+  readonly detail: string | null
+  readonly tools: readonly ToolProjection[]
+  readonly visibleSubagents: readonly SubagentProjection[]
+  readonly subagentTotal: number
+  readonly toolExpansion: readonly (boolean | undefined)[]
+  readonly reasoningExpanded: boolean
+  readonly rootsGeneration: string
+}
+
+function reuseReferenceArray<T>(
+  previous: readonly T[] | undefined,
+  next: readonly T[],
+): readonly T[] {
+  if (
+    previous !== undefined &&
+    previous.length === next.length &&
+    next.every((value, index) => value === previous[index])
+  ) return previous
+  return next
+}
+
+function sameTurnCardViewModel(
+  previous: TurnCardViewModel,
+  next: TurnCardViewModel,
+): boolean {
+  return previous.key === next.key &&
+    previous.width === next.width &&
+    previous.entry === next.entry &&
+    previous.detail === next.detail &&
+    previous.tools === next.tools &&
+    previous.visibleSubagents === next.visibleSubagents &&
+    previous.subagentTotal === next.subagentTotal &&
+    previous.toolExpansion === next.toolExpansion &&
+    previous.reasoningExpanded === next.reasoningExpanded &&
+    previous.rootsGeneration === next.rootsGeneration
+}
+
 class TurnCardRenderable extends BoxRenderable {
   readonly header: TextRenderable
-  readonly markdown: MarkdownRenderable
-  readonly reasoning: ReasoningBlockRenderable | null
-  shellCommand: CodeRenderable | TextRenderable | null
-  shellOutput: TextRenderable | null
+  markdown!: MarkdownRenderable
+  reasoning: ReasoningBlockRenderable | null = null
+  shellCommand: CodeRenderable | TextRenderable | null = null
+  shellOutput: TextRenderable | null = null
+  readonly #theme: RottweilerTheme
+  readonly #syntaxStyle: SyntaxStyle
+  readonly #treeSitterClient: TreeSitterClient | undefined
+  readonly #onToolExpansionChange: (toolCallId: string, expanded: boolean) => void
+  readonly #onReasoningExpansionChange: (expanded: boolean) => void
+  readonly #onInteraction: (() => void) | undefined
+  readonly #onOpenSubagent: ((subagentId: string) => void) | undefined
+  readonly #onOpenToolOutput: ((toolCallId: string) => void) | undefined
+  readonly #toolCards = new Map<string, ToolBlockRenderable>()
+  #toolOrder: readonly string[] = []
+  #subagentPanel: SubagentPanelRenderable | null = null
+  #entryRenderables: BaseRenderable[] = []
+  #viewModel: TurnCardViewModel
 
   constructor(
     ctx: RenderContext,
     theme: RottweilerTheme,
     syntaxStyle: SyntaxStyle,
-    entry: TranscriptEntry,
-    width: number,
-    detail: string | null,
-    tools: readonly ToolProjection[],
-    subagents: readonly SubagentProjection[],
-    subagentTotal: number,
-    toolExpansion: Map<string, boolean>,
-    reasoningExpanded: boolean,
+    viewModel: TurnCardViewModel,
     onToolExpansionChange: (toolCallId: string, expanded: boolean) => void,
     onReasoningExpansionChange: (expanded: boolean) => void,
     onInteraction: (() => void) | undefined,
@@ -867,29 +921,14 @@ class TurnCardRenderable extends BoxRenderable {
     onOpenToolOutput: ((toolCallId: string) => void) | undefined,
     treeSitterClient?: TreeSitterClient,
   ) {
-    const shell = entry.presentation === "shell_result" ? entry.shell : undefined
-    const markdown = shell === undefined
-      ? terminalMarkdown(
-          entry.presentation === "command_result" && entry.commandResult !== undefined
-            ? commandResultMarkdown(entry.commandResult)
-            : turnMarkdown(entry.turn),
-          Math.max(20, width - 4),
-        )
-      : ""
-    const reasoning = shell === undefined ? turnReasoningMarkdown(entry.turn) : ""
-    const toolOnly = entry.turn.role === "tool" && markdown === ""
-    const role = shell !== undefined
-      ? "Shell"
-      : entry.presentation === "command_result"
-      ? "Command result"
-      : entry.turn.role === "assistant"
-        ? "Rottweiler"
-        : entry.turn.role === "user"
-          ? "You"
-          : "Tools"
+    const shell = viewModel.entry.presentation === "shell_result"
+      ? viewModel.entry.shell
+      : undefined
+    const markdown = turnCardMarkdown(viewModel.entry, viewModel.width)
+    const toolOnly = viewModel.entry.turn.role === "tool" && markdown === ""
     super(ctx, {
-      id: `turn-${entryKey(entry)}`,
-      width,
+      id: `turn-${viewModel.key}`,
+      width: viewModel.width,
       flexDirection: "column",
       flexShrink: 0,
       border: shell !== undefined,
@@ -907,71 +946,136 @@ class TurnCardRenderable extends BoxRenderable {
           }),
       backgroundColor: shell !== undefined
         ? theme.panel
-        : entry.turn.role === "user"
+        : viewModel.entry.turn.role === "user"
           ? theme.panelRaised
           : theme.background,
       paddingX: 1,
       paddingY: toolOnly ? 0 : 1,
       marginTop: shell === undefined ? 0 : 1,
     })
+    this.#theme = theme
+    this.#syntaxStyle = syntaxStyle
+    this.#treeSitterClient = treeSitterClient
+    this.#viewModel = viewModel
+    this.#onToolExpansionChange = onToolExpansionChange
+    this.#onReasoningExpansionChange = onReasoningExpansionChange
+    this.#onInteraction = onInteraction
+    this.#onOpenSubagent = onOpenSubagent
+    this.#onOpenToolOutput = onOpenToolOutput
     this.header = new TextRenderable(ctx, {
-      content: shell === undefined
-        ? entry.presentation === "command_result"
-          ? `${role} · ${entry.title ?? "completed"}`
-          : `${role}${detail === null ? "" : ` · ${detail}`}`
-        : shellHeader(shell.active, shell.status),
-      fg: shell === undefined
-        ? entry.turn.role === "assistant" ? theme.accentStrong : theme.info
-        : shell.active
-          ? theme.info
-          : shell.status === 0
-            ? theme.success
-            : shell.status === null
-              ? theme.muted
-              : theme.danger,
-      height: toolOnly ? 0 : 1,
+      content: "",
+      fg: theme.info,
+      height: 1,
       flexShrink: 0,
-      visible: shell !== undefined || (!toolOnly && markdown !== ""),
+      visible: false,
       selectable: true,
     })
-    this.markdown = new MarkdownRenderable(ctx, {
-      id: `markdown-${entryKey(entry)}`,
-      content: markdown,
-      syntaxStyle,
-      ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
-      fg: theme.markdownText,
+    // Selection can focus a retained transcript node. The app restores its
+    // configured keyboard-input target after the pointer interaction ends.
+    this.onMouseUp = () => this.#onInteraction?.()
+    this.#mountEntryRegion(viewModel)
+    this.#reconcileTools(viewModel, undefined)
+    this.#reconcileSubagents(viewModel)
+  }
+
+  get viewModel(): TurnCardViewModel {
+    return this.#viewModel
+  }
+
+  update(viewModel: TurnCardViewModel): void {
+    const previous = this.#viewModel
+    if (previous === viewModel) return
+    const entryChanged = previous.entry !== viewModel.entry
+    const widthChanged = previous.width !== viewModel.width
+    const rootsChanged = previous.rootsGeneration !== viewModel.rootsGeneration
+    this.#viewModel = viewModel
+
+    if (widthChanged) {
+      this.width = viewModel.width
+      this.markdown.width = Math.max(1, viewModel.width - 2)
+      if (this.reasoning !== null) {
+        this.reasoning.update(
+          turnReasoningMarkdown(viewModel.entry.turn),
+          false,
+          viewModel.width,
+        )
+      }
+    }
+    if (entryChanged) {
+      // Committed entries are normally immutable. If one is replaced under the
+      // same stable key, rebuild only its content region; keyed tool cards and
+      // the subagent panel remain mounted.
+      this.#clearEntryRegion()
+      this.#mountEntryRegion(viewModel)
+    } else {
+      if (rootsChanged) this.markdown.content = turnCardMarkdown(viewModel.entry, viewModel.width)
+      if (previous.detail !== viewModel.detail) this.#updateHeader(viewModel)
+    }
+    this.#reconcileTools(viewModel, previous)
+    if (
+      previous.visibleSubagents !== viewModel.visibleSubagents ||
+      previous.subagentTotal !== viewModel.subagentTotal
+    ) this.#reconcileSubagents(viewModel)
+  }
+
+  #clearEntryRegion(): void {
+    if (this.header.parent === this) this.remove(this.header)
+    for (const renderable of this.#entryRenderables) {
+      if (renderable.parent === this) this.remove(renderable)
+      renderable.destroyRecursively()
+    }
+    this.#entryRenderables = []
+    this.reasoning = null
+    this.shellCommand = null
+    this.shellOutput = null
+  }
+
+  #mountEntryRegion(viewModel: TurnCardViewModel): void {
+    const entry = viewModel.entry
+    const shell = entry.presentation === "shell_result" ? entry.shell : undefined
+    const markdownContent = turnCardMarkdown(entry, viewModel.width)
+    const reasoningContent = shell === undefined ? turnReasoningMarkdown(entry.turn) : ""
+    const toolOnly = entry.turn.role === "tool" && markdownContent === ""
+    this.#applyCardStyle(entry, toolOnly)
+    this.#updateHeader(viewModel)
+    this.markdown = new MarkdownRenderable(this.ctx, {
+      id: `markdown-${viewModel.key}`,
+      content: markdownContent,
+      syntaxStyle: this.#syntaxStyle,
+      ...(this.#treeSitterClient === undefined ? {} : { treeSitterClient: this.#treeSitterClient }),
+      fg: this.#theme.markdownText,
       conceal: true,
       concealCode: false,
       streaming: false,
-      width: Math.max(1, width - 2),
+      width: Math.max(1, viewModel.width - 2),
       flexShrink: 0,
       visible: !toolOnly,
       internalBlockMode: "top-level",
       tableOptions: { style: "grid", widthMode: "full", wrapMode: "word" },
     })
     this.markdown.selectable = true
-    this.reasoning = reasoning === ""
+    this.#entryRenderables.push(this.markdown)
+    this.reasoning = reasoningContent === ""
       ? null
-      : new ReasoningBlockRenderable(ctx, theme, syntaxStyle, {
-          blockId: `reasoning:${entryKey(entry)}`,
-          content: reasoning,
-          expanded: reasoningExpanded,
+      : new ReasoningBlockRenderable(this.ctx, this.#theme, this.#syntaxStyle, {
+          blockId: `reasoning:${viewModel.key}`,
+          content: reasoningContent,
+          expanded: viewModel.reasoningExpanded,
           streaming: false,
-          width,
-          ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
-          onExpansionChange: onReasoningExpansionChange,
-          ...(onInteraction === undefined ? {} : { onInteraction }),
+          width: viewModel.width,
+          ...(this.#treeSitterClient === undefined
+            ? {}
+            : { treeSitterClient: this.#treeSitterClient }),
+          onExpansionChange: this.#onReasoningExpansionChange,
+          ...(this.#onInteraction === undefined ? {} : { onInteraction: this.#onInteraction }),
         })
-    this.shellCommand = null
-    this.shellOutput = null
-    // Selection can focus a retained transcript node. The app restores its
-    // configured keyboard-input target after the pointer interaction ends.
-    this.onMouseUp = () => onInteraction?.()
+    if (this.reasoning !== null) this.#entryRenderables.push(this.reasoning)
+
     if (shell !== undefined) {
-      this.add(this.header)
+      this.#insertBeforeProjections(this.header)
       const content = visibleBashCommand(shell.command)
       const rows = Math.max(1, content.split("\n").length)
-      const commandRow = new BoxRenderable(ctx, {
+      const commandRow = new BoxRenderable(this.ctx, {
         id: `shell-command-row-${shell.shellId}`,
         width: "100%",
         height: rows,
@@ -979,30 +1083,30 @@ class TurnCardRenderable extends BoxRenderable {
         flexShrink: 0,
         marginTop: 1,
       })
-      commandRow.add(new TextRenderable(ctx, {
+      commandRow.add(new TextRenderable(this.ctx, {
         content: bashPrompt(shell.command),
-        fg: theme.muted,
+        fg: this.#theme.muted,
         width: 2,
         height: rows,
         wrapMode: "none",
       }))
-      const renderedCommand = treeSitterClient === undefined
-        ? new TextRenderable(ctx, {
+      const renderedCommand = this.#treeSitterClient === undefined
+        ? new TextRenderable(this.ctx, {
             content,
-            fg: theme.foreground,
+            fg: this.#theme.foreground,
             flexGrow: 1,
             height: rows,
             wrapMode: "none",
             selectable: true,
           })
-        : new CodeRenderable(ctx, {
+        : new CodeRenderable(this.ctx, {
             id: `shell-command-${shell.shellId}`,
             flexGrow: 1,
             height: rows,
             content,
             filetype: "bash",
-            syntaxStyle,
-            treeSitterClient,
+            syntaxStyle: this.#syntaxStyle,
+            treeSitterClient: this.#treeSitterClient,
             drawUnstyledText: true,
             wrapMode: "none",
             streaming: false,
@@ -1010,48 +1114,186 @@ class TurnCardRenderable extends BoxRenderable {
           })
       this.shellCommand = renderedCommand
       commandRow.add(renderedCommand)
-      this.add(commandRow)
+      this.#entryRenderables.push(commandRow)
+      this.#insertBeforeProjections(commandRow)
       const output = shell.capturedOutput.trimEnd()
-      const renderedOutput = new TextRenderable(ctx, {
+      const renderedOutput = new TextRenderable(this.ctx, {
         id: `shell-output-${shell.shellId}`,
         content: output === ""
           ? shell.active ? "Running in the foreground terminal…" : "Completed with no output."
           : `Output${shell.outputTruncated ? " · truncated" : ""}\n${output}`,
-        fg: output === "" ? theme.muted : theme.foreground,
+        fg: output === "" ? this.#theme.muted : this.#theme.foreground,
         wrapMode: "word",
         flexShrink: 0,
         marginTop: 1,
         selectable: true,
       })
       this.shellOutput = renderedOutput
-      this.add(renderedOutput)
+      this.#entryRenderables.push(renderedOutput)
+      this.#insertBeforeProjections(renderedOutput)
       return
     }
     if (!toolOnly) {
-      this.add(this.header)
-      if (this.reasoning !== null) this.add(this.reasoning)
-      this.add(this.markdown)
-    }
-    for (const tool of tools) {
-      this.add(new ToolBlockRenderable(
-        ctx,
-        theme,
-        tool,
-        toolExpansion.get(tool.toolCallId),
-        (expanded) => onToolExpansionChange(tool.toolCallId, expanded),
-        {
-          syntaxStyle,
-          ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
-          ...(onOpenToolOutput === undefined ? {} : { onOpenToolOutput }),
-        },
-      ))
-    }
-    if (subagents.length > 0) {
-      const panel = new SubagentPanelRenderable(ctx, theme, onOpenSubagent)
-      panel.update(subagents, subagentTotal)
-      this.add(panel)
+      this.#insertBeforeProjections(this.header)
+      if (this.reasoning !== null) this.#insertBeforeProjections(this.reasoning)
+      this.#insertBeforeProjections(this.markdown)
     }
   }
+
+  #applyCardStyle(entry: TranscriptEntry, toolOnly: boolean): void {
+    const shell = entry.presentation === "shell_result" ? entry.shell : undefined
+    this.border = shell !== undefined
+    if (shell !== undefined) {
+      this.borderStyle = "single"
+      this.borderColor = shell.active
+        ? this.#theme.info
+        : shell.status === 0
+          ? this.#theme.success
+        : shell.status === null
+          ? this.#theme.muted
+          : this.#theme.danger
+    }
+    this.backgroundColor = shell !== undefined
+      ? this.#theme.panel
+      : entry.turn.role === "user"
+        ? this.#theme.panelRaised
+        : this.#theme.background
+    this.paddingX = 1
+    this.paddingY = toolOnly ? 0 : 1
+    this.marginTop = shell === undefined ? 0 : 1
+  }
+
+  #updateHeader(viewModel: TurnCardViewModel): void {
+    const entry = viewModel.entry
+    const shell = entry.presentation === "shell_result" ? entry.shell : undefined
+    const markdown = turnCardMarkdown(entry, viewModel.width)
+    const toolOnly = entry.turn.role === "tool" && markdown === ""
+    const role = shell !== undefined
+      ? "Shell"
+      : entry.presentation === "command_result"
+      ? "Command result"
+      : entry.turn.role === "assistant"
+        ? "Rottweiler"
+        : entry.turn.role === "user"
+          ? "You"
+          : "Tools"
+    this.header.content = shell === undefined
+      ? entry.presentation === "command_result"
+        ? `${role} · ${entry.title ?? "completed"}`
+        : `${role}${viewModel.detail === null ? "" : ` · ${viewModel.detail}`}`
+      : shellHeader(shell.active, shell.status)
+    this.header.fg = shell === undefined
+      ? entry.turn.role === "assistant" ? this.#theme.accentStrong : this.#theme.info
+      : shell.active
+        ? this.#theme.info
+        : shell.status === 0
+          ? this.#theme.success
+          : shell.status === null
+            ? this.#theme.muted
+            : this.#theme.danger
+    this.header.height = toolOnly ? 0 : 1
+    this.header.visible = shell !== undefined || (!toolOnly && markdown !== "")
+  }
+
+  #reconcileTools(
+    viewModel: TurnCardViewModel,
+    previous: TurnCardViewModel | undefined,
+  ): void {
+    const retained = new Set(viewModel.tools.map((tool) => tool.toolCallId))
+    for (const [toolCallId, card] of this.#toolCards) {
+      if (retained.has(toolCallId)) continue
+      if (card.parent === this) this.remove(card)
+      card.destroyRecursively()
+      this.#toolCards.delete(toolCallId)
+    }
+    const previousTools = new Map(
+      (previous?.tools ?? []).map((tool) => [tool.toolCallId, tool] as const),
+    )
+    for (const [index, tool] of viewModel.tools.entries()) {
+      let card = this.#toolCards.get(tool.toolCallId)
+      if (card === undefined) {
+        card = new ToolBlockRenderable(
+          this.ctx,
+          this.#theme,
+          tool,
+          viewModel.toolExpansion[index],
+          (expanded) => this.#onToolExpansionChange(tool.toolCallId, expanded),
+          {
+            syntaxStyle: this.#syntaxStyle,
+            ...(this.#treeSitterClient === undefined
+              ? {}
+              : { treeSitterClient: this.#treeSitterClient }),
+            ...(this.#onOpenToolOutput === undefined
+              ? {}
+              : { onOpenToolOutput: this.#onOpenToolOutput }),
+          },
+        )
+        this.#toolCards.set(tool.toolCallId, card)
+        card.update(tool, viewModel.width)
+      } else if (
+        previousTools.get(tool.toolCallId) !== tool ||
+        previous?.width !== viewModel.width ||
+        previous?.rootsGeneration !== viewModel.rootsGeneration
+      ) {
+        card.update(tool, viewModel.width)
+      }
+    }
+    const nextOrder = viewModel.tools.map((tool) => tool.toolCallId)
+    const orderChanged =
+      nextOrder.length !== this.#toolOrder.length ||
+      nextOrder.some((toolCallId, index) => toolCallId !== this.#toolOrder[index])
+    if (orderChanged) {
+      let anchor: BaseRenderable | null = this.#subagentPanel
+      for (let index = nextOrder.length - 1; index >= 0; index -= 1) {
+        const card = this.#toolCards.get(nextOrder[index]!)
+        if (card === undefined) continue
+        if (card.parent === this) this.remove(card)
+        if (anchor === null) this.add(card)
+        else this.insertBefore(card, anchor)
+        anchor = card
+      }
+      this.#toolOrder = nextOrder
+    }
+  }
+
+  #reconcileSubagents(viewModel: TurnCardViewModel): void {
+    if (viewModel.visibleSubagents.length === 0) {
+      if (this.#subagentPanel !== null) {
+        if (this.#subagentPanel.parent === this) this.remove(this.#subagentPanel)
+        this.#subagentPanel.destroyRecursively()
+        this.#subagentPanel = null
+      }
+      return
+    }
+    if (this.#subagentPanel === null) {
+      this.#subagentPanel = new SubagentPanelRenderable(
+        this.ctx,
+        this.#theme,
+        this.#onOpenSubagent,
+      )
+      this.add(this.#subagentPanel)
+    }
+    this.#subagentPanel.update(viewModel.visibleSubagents, viewModel.subagentTotal)
+  }
+
+  #insertBeforeProjections(renderable: BaseRenderable): void {
+    const firstToolId = this.#toolOrder[0]
+    const anchor = firstToolId === undefined
+      ? this.#subagentPanel
+      : this.#toolCards.get(firstToolId) ?? this.#subagentPanel
+    if (anchor === null) this.add(renderable)
+    else this.insertBefore(renderable, anchor)
+  }
+}
+
+function turnCardMarkdown(entry: TranscriptEntry, width: number): string {
+  if (entry.presentation === "shell_result" && entry.shell !== undefined) return ""
+  return terminalMarkdown(
+    entry.presentation === "command_result" && entry.commandResult !== undefined
+      ? commandResultMarkdown(entry.commandResult)
+      : turnMarkdown(entry.turn),
+    Math.max(20, width - 4),
+  )
 }
 
 function shellHeader(active: boolean, status: number | null): string {
@@ -1083,7 +1325,6 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #toolExpansion = new Map<string, boolean>()
   readonly #tailToolCards = new Map<string, ToolBlockRenderable>()
   readonly #reasoningExpansion = new Map<string, boolean>()
-  readonly #cardSignatures = new Map<string, string>()
   #selectedBlockId: string | null = null
   #state: RottweilerState | null = null
   #transcript: readonly TranscriptEntry[] | null = null
@@ -1370,7 +1611,6 @@ export class TranscriptRenderable extends BoxRenderable {
       this.scroller.remove(card)
       card.destroyRecursively()
       this.mountedCards.delete(key)
-      this.#cardSignatures.delete(key)
     }
     const toolEntryKeys = projectionEntryKeys(transcript, "tool")
     const subagentEntryKeys = projectionEntryKeys(transcript, "assistant")
@@ -1385,7 +1625,7 @@ export class TranscriptRenderable extends BoxRenderable {
       const entry = transcript[index]
       if (entry === undefined) continue
       const key = entryKey(entry)
-      const tools = toolEntryKeys.has(key)
+      const candidateTools = toolEntryKeys.has(key)
         ? Object.values(state.tools).filter((tool) => tool.turnId === entry.agentTurn)
         : []
       const turnSubagents = subagentEntryKeys.has(key)
@@ -1393,44 +1633,48 @@ export class TranscriptRenderable extends BoxRenderable {
             (subagent) => subagent.status !== "running",
           )
         : []
-      const visibleSubagents = boundedSubagents(turnSubagents)
+      const candidateSubagents = boundedSubagents(turnSubagents)
       const detail = entry.turn.role === "assistant" &&
           lastAssistantEntryByTurn.get(entry.agentTurn) === key &&
           state.turns[entry.agentTurn]?.cost != null
         ? turnDetail(state.turns[entry.agentTurn]?.cost, state.turns[entry.agentTurn]?.usage)
         : null
-      const signature = JSON.stringify([
+      const retained = this.mountedCards.get(key)
+      const previous = retained?.viewModel
+      const tools = reuseReferenceArray(previous?.tools, candidateTools)
+      const visibleSubagents = reuseReferenceArray(
+        previous?.visibleSubagents,
+        candidateSubagents,
+      )
+      const toolExpansion = reuseReferenceArray(
+        previous?.toolExpansion,
+        tools.map((tool) => this.#toolExpansion.get(tool.toolCallId)),
+      )
+      const candidateViewModel: TurnCardViewModel = {
+        key,
         width,
         entry,
         detail,
         tools,
         visibleSubagents,
-        turnSubagents.length,
-        tools.map((tool) => this.#toolExpansion.get(tool.toolCallId) === true),
-        this.#reasoningExpansion.get(key) === true,
-        state.workspaceRoots?.generation ?? "",
-      ])
-      const retained = this.mountedCards.get(key)
-      if (retained !== undefined && this.#cardSignatures.get(key) === signature) {
+        subagentTotal: turnSubagents.length,
+        toolExpansion,
+        reasoningExpanded: this.#reasoningExpansion.get(key) ?? false,
+        rootsGeneration: state.workspaceRoots?.generation ?? "",
+      }
+      const viewModel = previous !== undefined && sameTurnCardViewModel(previous, candidateViewModel)
+        ? previous
+        : candidateViewModel
+      if (retained !== undefined) {
+        retained.update(viewModel)
         reference = retained
         continue
-      }
-      if (retained !== undefined) {
-        this.scroller.remove(retained)
-        retained.destroyRecursively()
       }
       const card = new TurnCardRenderable(
         this.ctx,
         this.#theme,
         this.#syntaxStyle,
-        entry,
-        width,
-        detail,
-        tools,
-        visibleSubagents,
-        turnSubagents.length,
-        this.#toolExpansion,
-        this.#reasoningExpansion.get(key) ?? false,
+        viewModel,
         (toolCallId, expanded) => this.#rememberToolExpansion(toolCallId, expanded),
         (expanded) => this.#rememberReasoningExpansion(key, expanded),
         this.#onInteraction,
@@ -1440,7 +1684,6 @@ export class TranscriptRenderable extends BoxRenderable {
       )
       this.scroller.insertBefore(card, reference)
       this.mountedCards.set(key, card)
-      this.#cardSignatures.set(key, signature)
       reference = card
     }
     this.#syncBlockSelection()
