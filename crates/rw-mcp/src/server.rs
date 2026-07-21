@@ -458,6 +458,13 @@ mod tests {
             .await
             .expect("create");
         assert_eq!(created.is_error, Some(false));
+        assert_eq!(
+            created
+                .structured_content
+                .as_ref()
+                .expect("structured session result")["id"],
+            "owned"
+        );
         let sent = client_service
             .peer()
             .call_tool(

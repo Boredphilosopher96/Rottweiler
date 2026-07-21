@@ -16,10 +16,16 @@ fn arguments(value: &Value) -> rmcp::model::JsonObject {
 }
 
 fn structured(result: &rmcp::model::CallToolResult) -> &Value {
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "tool returned an error: {:?}",
+        result.content
+    );
     result
         .structured_content
         .as_ref()
-        .expect("structured tool result")
+        .unwrap_or_else(|| panic!("tool returned no structured result: {:?}", result.content))
 }
 
 fn private_directory(path: &Path) {

@@ -4713,7 +4713,7 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(emitted.filter((command) => command.type === "list_models")).toHaveLength(2)
   })
 
-  test("offers provider onboarding once on the first unready model catalog", async () => {
+  test("offers provider onboarding once when sessions arrive before the first unready model catalog", async () => {
     const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
@@ -4725,8 +4725,15 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
 
     app.handleEvent({
+      type: "sessions_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "fresh-sessions", emitted_at: "2026-01-01T00:00:00Z" },
+      sessions: [],
+    })
+    expect(app.picker.visible).toBeFalse()
+
+    app.handleEvent({
       type: "models_listed",
-      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "first-models", emitted_at: "2026-01-01T00:00:00Z" },
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "first-models", emitted_at: "2026-01-01T00:00:01Z" },
       models: [],
       providers: [{
         name: "openai",
@@ -4743,7 +4750,7 @@ describe("Rottweiler OpenTUI shell", () => {
     app.closePicker()
     app.handleEvent({
       type: "models_listed",
-      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "refreshed-models", emitted_at: "2026-01-01T00:00:01Z" },
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "refreshed-models", emitted_at: "2026-01-01T00:00:02Z" },
       models: [],
       providers: [{
         name: "openai",
@@ -4770,8 +4777,13 @@ describe("Rottweiler OpenTUI shell", () => {
     renderer.root.add(app)
 
     app.handleEvent({
+      type: "sessions_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "ready-sessions", emitted_at: "2026-01-01T00:00:00Z" },
+      sessions: [],
+    })
+    app.handleEvent({
       type: "models_listed",
-      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "ready-models", emitted_at: "2026-01-01T00:00:00Z" },
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "ready-models", emitted_at: "2026-01-01T00:00:01Z" },
       models: [],
       providers: [{
         name: "openai",
@@ -4782,6 +4794,77 @@ describe("Rottweiler OpenTUI shell", () => {
         reachable: true,
         model_count: 1,
       }],
+    })
+    expect(app.picker.visible).toBeFalse()
+  })
+
+  test("defers provider onboarding until models-first session restoration completes", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      sessionId: "session-restored",
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+      },
+    })
+    renderer.root.add(app)
+
+    app.handleEvent({
+      type: "models_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "premature-models", emitted_at: "2026-01-01T00:00:00Z" },
+      models: [],
+      providers: [],
+    })
+    expect(app.picker.visible).toBeFalse()
+
+    app.handleEvent({
+      type: "sessions_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "restored-session", emitted_at: "2026-01-01T00:00:01Z" },
+      sessions: [{
+        session_id: "session-restored",
+        title: "Restored session",
+        workspace_name: "Rottweiler",
+        model: "fast",
+        driver_client_id: "ui",
+        shell_active: false,
+      }],
+    })
+    expect(app.state.model).toBe("fast")
+    expect(app.picker.visible).toBeFalse()
+  })
+
+  test("does not offer provider onboarding for a restored session with an active model", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 18, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      sessionId: "session-restored",
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+      },
+    })
+    renderer.root.add(app)
+
+    app.handleEvent({
+      type: "sessions_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "restored-session", emitted_at: "2026-01-01T00:00:00Z" },
+      sessions: [{
+        session_id: "session-restored",
+        title: "Restored session",
+        workspace_name: "Rottweiler",
+        model: "fast",
+        driver_client_id: "ui",
+        shell_active: false,
+      }],
+    })
+    expect(app.state.model).toBe("fast")
+
+    app.handleEvent({
+      type: "models_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "reconnected-models", emitted_at: "2026-01-01T00:00:01Z" },
+      models: [],
+      providers: [],
     })
     expect(app.picker.visible).toBeFalse()
   })
@@ -4799,8 +4882,13 @@ describe("Rottweiler OpenTUI shell", () => {
     app.composer.value = "already typing"
 
     app.handleEvent({
+      type: "sessions_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "typed-sessions", emitted_at: "2026-01-01T00:00:00Z" },
+      sessions: [],
+    })
+    app.handleEvent({
       type: "models_listed",
-      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "typed-models", emitted_at: "2026-01-01T00:00:00Z" },
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: "typed-models", emitted_at: "2026-01-01T00:00:01Z" },
       models: [],
       providers: [],
     })

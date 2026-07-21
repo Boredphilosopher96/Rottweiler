@@ -378,7 +378,8 @@ export class RottweilerApp extends BoxRenderable {
   #commandCatalogTruncationNotified = false
   #modelsRequested = false
   #providerOnboardingOffered = false
-  #providerOnboardingModelsResponseHandled = false
+  #providerOnboardingModelsResponseReceived = false
+  #providerOnboardingSessionsResponseReceived = false
   #providerPickerOnboarding = false
   #providerActivationModelsRequest: string | null = null
   #projectionErrors: Partial<Record<ProjectionKind, string>> = {}
@@ -1372,25 +1373,20 @@ export class RottweilerApp extends BoxRenderable {
         }
       }
       if (
-        !this.#providerOnboardingModelsResponseHandled &&
+        !this.#providerOnboardingModelsResponseReceived &&
         next.connection.phase === "connected"
       ) {
-        this.#providerOnboardingModelsResponseHandled = true
-        const ready = next.providers.some(
-          (provider) => provider.configured && provider.authenticated && provider.reachable,
-        )
-        if (
-          !ready &&
-          !this.#providerOnboardingOffered &&
-          !next.replay.active &&
-          this.#activeSubagentId === null &&
-          this.composer.value.length === 0 &&
-          this.#pickerKind === null
-        ) {
-          this.#providerOnboardingOffered = true
-          this.openProviderPicker(true)
-        }
+        this.#providerOnboardingModelsResponseReceived = true
+        this.#maybeOfferProviderOnboarding(next)
       }
+    }
+    if (
+      event.type === "sessions_listed" &&
+      !this.#providerOnboardingSessionsResponseReceived &&
+      next.connection.phase === "connected"
+    ) {
+      this.#providerOnboardingSessionsResponseReceived = true
+      this.#maybeOfferProviderOnboarding(next)
     }
     if (event.type === "provider_auth_started") {
       const provider = typeof eventRecord.provider === "string" ? eventRecord.provider : null
@@ -1482,6 +1478,32 @@ export class RottweilerApp extends BoxRenderable {
     ) {
       this.#command({ type: "get_context" })
       this.#command({ type: "get_cost" })
+    }
+  }
+
+  #maybeOfferProviderOnboarding(state: RottweilerState): void {
+    if (
+      !this.#providerOnboardingModelsResponseReceived ||
+      !this.#providerOnboardingSessionsResponseReceived
+    ) return
+    const ready = state.providers.some(
+      (provider) => provider.configured && provider.authenticated && provider.reachable,
+    )
+    // Waiting for both projections closes their ordering gap, but durable turn replay is
+    // independently timed; state.model remains the final guard if replay restores it first,
+    // with accepted residual risk only when neither restoration path has populated it before
+    // a transiently unready provider catalog is evaluated.
+    if (
+      !ready &&
+      state.model === null &&
+      !this.#providerOnboardingOffered &&
+      !state.replay.active &&
+      this.#activeSubagentId === null &&
+      this.composer.value.length === 0 &&
+      this.#pickerKind === null
+    ) {
+      this.#providerOnboardingOffered = true
+      this.openProviderPicker(true)
     }
   }
 
