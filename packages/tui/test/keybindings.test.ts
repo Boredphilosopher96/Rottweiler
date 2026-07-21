@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { parseKeypress } from "@opentui/core"
+import { parseKeypress, type KeyEvent } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
+import { ToolBlockRenderable } from "../src/components"
 import type { ClientCommand } from "../src/protocol"
 import {
   KeybindingConfigurationError,
+  KEYBINDING_ACTION_LABELS,
   compileKeybindings,
   enhancedKeyboardOptions,
   legacyMacNavigationAction,
@@ -26,6 +28,9 @@ describe("configurable TUI keybindings", () => {
     expect(standard.bindings("standard").get("pagedown")).toBe("page_down")
     expect(standard.bindings("standard").get("shift+pageup")).toBe("view_top")
     expect(standard.bindings("standard").get("shift+pagedown")).toBe("view_bottom")
+    expect(standard.bindings("standard").get("ctrl+up")).toBe("block_previous")
+    expect(standard.bindings("standard").get("ctrl+down")).toBe("block_next")
+    expect(standard.bindings("standard").get("ctrl+space")).toBe("block_toggle")
 
     const rebound = compileKeybindings({
       bindings: { global: { open_command_picker: ["ctrl+k"], open_review: [] } },
@@ -92,6 +97,22 @@ focus_next = []
     expect(compiled.bindings("vim_normal").get("space")).toBe("open_command_picker")
     expect(compiled.bindings("vim_normal").has("tab")).toBeFalse()
   })
+
+  test("compiles conflict-free block defaults and complete labels for both presets", () => {
+    const standard = compileKeybindings({ preset: "standard" })
+    const vim = compileKeybindings({ preset: "vim" })
+
+    expect(standard.bindings("standard").get("ctrl+up")).toBe("block_previous")
+    expect(standard.bindings("standard").get("ctrl+down")).toBe("block_next")
+    expect(standard.bindings("standard").get("ctrl+space")).toBe("block_toggle")
+    expect(vim.bindings("vim_normal").get("shift+k")).toBe("block_previous")
+    expect(vim.bindings("vim_normal").get("shift+j")).toBe("block_next")
+    expect(vim.bindings("vim_normal").get("return")).toBe("block_toggle")
+    expect(KEYBINDING_ACTION_LABELS.block_previous).toBe("Select previous block")
+    expect(KEYBINDING_ACTION_LABELS.block_next).toBe("Select next block")
+    expect(KEYBINDING_ACTION_LABELS.block_toggle).toBe("Expand or collapse block")
+    expect(Object.values(KEYBINDING_ACTION_LABELS).every((label) => label.length > 0)).toBeTrue()
+  })
 })
 
 describe("standard TUI keyboard safety", () => {
@@ -112,6 +133,17 @@ describe("standard TUI keyboard safety", () => {
     expect(commandLeft).toMatchObject({ name: "left", super: true, ctrl: false })
     expect(controlE).toMatchObject({ name: "e", ctrl: true, source: "kitty" })
     expect(controlE?.super).not.toBe(true)
+  })
+
+  test("decodes enhanced and legacy Ctrl+Space as the canonical block toggle binding", () => {
+    const controlSpace = parseKeypress("\u001b[32;5u", { useKittyKeyboard: true })
+    const legacyControlSpace = parseKeypress("\u0000", { useKittyKeyboard: true })
+    const bindings = compileKeybindings()
+
+    expect(controlSpace).toMatchObject({ name: "space", ctrl: true, source: "kitty" })
+    expect(legacyControlSpace).toMatchObject({ name: "space", ctrl: true, source: "raw" })
+    expect(bindings.resolve("standard", controlSpace as unknown as KeyEvent)).toBe("block_toggle")
+    expect(bindings.resolve("standard", legacyControlSpace as unknown as KeyEvent)).toBe("block_toggle")
   })
 
   test("treats ambiguous legacy macOS Ctrl+A/E bytes as Command-arrow navigation", () => {
@@ -338,6 +370,61 @@ describe("Vim TUI interaction", () => {
     setup.mockInput.pressKey("x")
     expect(app.composer.value).toBe("houn")
     expect(app.statusLine.plainText).toContain("NORMAL · composer")
+  })
+
+  test("toggles the selected block with Return only while the transcript owns focus", async () => {
+    const setup = await createTestRenderer({
+      width: 88,
+      height: 18,
+      useThread: false,
+      kittyKeyboard: true,
+    })
+    renderer = setup.renderer
+    const tool = {
+      toolCallId: "vim-keyboard-block",
+      turnId: "1",
+      name: "read",
+      args: { path: "vim.txt" },
+      status: "finished" as const,
+      capabilities: ["read_filesystem" as const],
+      rationale: null,
+      diff: null,
+      chunks: [],
+      output: { type: "text" as const, text: "vim output" },
+      isError: false,
+      callIndex: 0,
+    }
+    const app = createRottweilerApp(renderer, {
+      keybindings: { preset: "vim" },
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "1",
+          agentTurn: "1",
+          turn: {
+            role: "tool",
+            blocks: [{ type: "tool_result", id: tool.toolCallId, output: tool.output, is_error: false }],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+        tools: { [tool.toolCallId]: tool },
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    const block = [...app.transcript.mountedCards.values()]
+      .flatMap((card) => card.getChildren())
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    app.transcript.selectNextBlock()
+
+    setup.mockInput.pressEnter()
+    expect(block?.body.visible).toBeFalse()
+    expect(app.composer.value).toBe("")
+
+    setup.mockInput.pressTab()
+    expect(app.statusLine.plainText).toContain("NORMAL · transcript")
+    setup.mockInput.pressEnter()
+    expect(block?.body.visible).toBeTrue()
   })
 
   test("leaves insert mode before double Escape interrupts", async () => {

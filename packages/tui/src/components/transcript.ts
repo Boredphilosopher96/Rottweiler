@@ -1,4 +1,5 @@
 import {
+  type BaseRenderable,
   BoxRenderable,
   CodeRenderable,
   DiffRenderable,
@@ -55,20 +56,24 @@ function entryKey(entry: TranscriptEntry): string {
 export class ReasoningBlockRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly body: MarkdownRenderable
+  #blockId: string
   #content = ""
   #expanded = false
   #streaming = false
+  #selected = false
   #startedAt: number | null = null
   #elapsedMs: number | null = null
   #width = 80
   readonly #onExpansionChange: (expanded: boolean) => void
   readonly #onInteraction: (() => void) | undefined
+  readonly #theme: RottweilerTheme
 
   constructor(
     ctx: RenderContext,
     theme: RottweilerTheme,
     syntaxStyle: SyntaxStyle,
     options: {
+      readonly blockId: string
       readonly content: string
       readonly expanded?: boolean
       readonly streaming?: boolean
@@ -79,20 +84,26 @@ export class ReasoningBlockRenderable extends BoxRenderable {
     },
   ) {
     super(ctx, {
+      id: options.blockId,
       width: "100%",
       flexDirection: "column",
       flexShrink: 0,
       backgroundColor: theme.background,
       focusable: false,
     })
+    this.#blockId = options.blockId
+    this.#theme = theme
     this.#expanded = options.expanded ?? false
     this.#streaming = options.streaming ?? false
     this.#width = options.width
     this.#onExpansionChange = options.onExpansionChange
     this.#onInteraction = options.onInteraction
     this.header = new TextRenderable(ctx, {
+      id: `${options.blockId}:header`,
       content: "",
       fg: theme.muted,
+      bg: theme.background,
+      width: "100%",
       height: 1,
       flexShrink: 0,
       wrapMode: "none",
@@ -122,6 +133,23 @@ export class ReasoningBlockRenderable extends BoxRenderable {
 
   get expanded(): boolean {
     return this.#expanded
+  }
+
+  get blockId(): string {
+    return this.#blockId
+  }
+
+  setBlockId(blockId: string): void {
+    if (blockId === this.#blockId) return
+    this.#blockId = blockId
+    this.id = blockId
+    this.header.id = `${blockId}:header`
+  }
+
+  setSelected(selected: boolean): void {
+    if (selected === this.#selected) return
+    this.#selected = selected
+    this.header.bg = selected ? this.#theme.selection : this.#theme.background
   }
 
   update(content: string, streaming = this.#streaming, width = this.#width): void {
@@ -231,7 +259,9 @@ export class ToolBlockRenderable extends BoxRenderable {
   #onExpansionChange: ((expanded: boolean) => void) | undefined
   #rendering: TranscriptRenderableOptions | undefined
   #userSetExpansion: boolean
+  #selected = false
   readonly #startedAt = Date.now()
+  readonly blockId: string
 
   constructor(
     ctx: RenderContext,
@@ -241,6 +271,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     onExpansionChange?: (expanded: boolean) => void,
     rendering?: TranscriptRenderableOptions,
   ) {
+    const blockId = `tool:${tool.toolCallId}`
     super(ctx, {
       id: `tool-${tool.toolCallId}`,
       width: "100%",
@@ -254,6 +285,7 @@ export class ToolBlockRenderable extends BoxRenderable {
       paddingX: 0,
       marginTop: 0,
     })
+    this.blockId = blockId
     this.#theme = theme
     this.#tool = tool
     const successfulFileEdit =
@@ -265,8 +297,11 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#onExpansionChange = onExpansionChange
     this.#rendering = rendering
     this.header = new TextRenderable(ctx, {
+      id: `${blockId}:header`,
       content: "",
       fg: theme.foreground,
+      bg: theme.background,
+      width: "100%",
       height: 1,
       selectable: true,
     })
@@ -551,6 +586,12 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#bodyContainer.visible = !this.#collapsed
     this.update(this.#tool)
     this.#onExpansionChange?.(!this.#collapsed)
+  }
+
+  setSelected(selected: boolean): void {
+    if (selected === this.#selected) return
+    this.#selected = selected
+    this.header.bg = selected ? this.#theme.selection : this.#theme.background
   }
 }
 
@@ -912,6 +953,7 @@ class TurnCardRenderable extends BoxRenderable {
     this.reasoning = reasoning === ""
       ? null
       : new ReasoningBlockRenderable(ctx, theme, syntaxStyle, {
+          blockId: `reasoning:${entryKey(entry)}`,
           content: reasoning,
           expanded: reasoningExpanded,
           streaming: false,
@@ -1042,6 +1084,7 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #tailToolCards = new Map<string, ToolBlockRenderable>()
   readonly #reasoningExpansion = new Map<string, boolean>()
   readonly #cardSignatures = new Map<string, string>()
+  #selectedBlockId: string | null = null
   #state: RottweilerState | null = null
   #transcript: readonly TranscriptEntry[] | null = null
   #presentableTranscript: readonly TranscriptEntry[] = []
@@ -1103,6 +1146,7 @@ export class TranscriptRenderable extends BoxRenderable {
       flexShrink: 0,
     })
     this.#tailReasoning = new ReasoningBlockRenderable(ctx, theme, options.syntaxStyle, {
+      blockId: "reasoning:tail",
       content: "",
       expanded: true,
       streaming: true,
@@ -1170,6 +1214,7 @@ export class TranscriptRenderable extends BoxRenderable {
       flexShrink: 0,
     })
     this.#compactionReasoning = new ReasoningBlockRenderable(ctx, theme, options.syntaxStyle, {
+      blockId: "reasoning:compaction",
       content: "",
       expanded: true,
       streaming: true,
@@ -1212,6 +1257,48 @@ export class TranscriptRenderable extends BoxRenderable {
     return this.#presentableTranscript.map(entryKey)
   }
 
+  get selectedBlockId(): string | null {
+    return this.#selectedBlockId
+  }
+
+  selectNextBlock(): void {
+    this.#syncBlockSelection()
+    const blocks = this.#blocksInVisualOrder()
+    if (blocks.length === 0) return
+    const selectedIndex = blocks.findIndex((block) => block.blockId === this.#selectedBlockId)
+    const nextIndex = selectedIndex < 0 ? 0 : Math.min(selectedIndex + 1, blocks.length - 1)
+    this.#selectedBlockId = blocks[nextIndex]?.blockId ?? null
+    this.#syncBlockSelection(true)
+  }
+
+  selectPreviousBlock(): void {
+    this.#syncBlockSelection()
+    const blocks = this.#blocksInVisualOrder()
+    if (blocks.length === 0) return
+    const selectedIndex = blocks.findIndex((block) => block.blockId === this.#selectedBlockId)
+    const previousIndex = selectedIndex < 0 ? blocks.length - 1 : Math.max(selectedIndex - 1, 0)
+    this.#selectedBlockId = blocks[previousIndex]?.blockId ?? null
+    this.#syncBlockSelection(true)
+  }
+
+  toggleSelectedBlock(): void {
+    this.#syncBlockSelection()
+    const selected = this.#blocksInVisualOrder()
+      .find((block) => block.blockId === this.#selectedBlockId)
+    if (selected === undefined) return
+    selected.toggle()
+    this.#syncBlockSelection(true)
+  }
+
+  clearBlockSelection(): void {
+    if (this.#selectedBlockId === null) return
+    const selectedBlockId = this.#selectedBlockId
+    this.#selectedBlockId = null
+    this.#blocksInVisualOrder()
+      .find((block) => block.blockId === selectedBlockId)
+      ?.setSelected(false)
+  }
+
   update(state: RottweilerState, agentName = "Rottweiler"): void {
     this.#state = state
     this.#agentName = truncateToCells(agentName.replace(/\s+/g, " ").trim(), 48) || "Child agent"
@@ -1249,6 +1336,7 @@ export class TranscriptRenderable extends BoxRenderable {
     if (transcriptChanged || cardProjectionChanged || turnProjectionChanged) {
       this.#reconcileHistory()
     }
+    this.#syncBlockSelection()
   }
 
   setScrollOffset(scrollTop: number): void {
@@ -1355,6 +1443,7 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#cardSignatures.set(key, signature)
       reference = card
     }
+    this.#syncBlockSelection()
   }
 
   #updateTail(state: RottweilerState): void {
@@ -1374,6 +1463,7 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#replaceTailTools([])
       return
     }
+    this.#tailReasoning.setBlockId(`reasoning:tail:${tail.turnId}`)
     const tools = tail.toolCallIds
       .map((toolCallId) => state.tools[toolCallId])
       .filter((tool): tool is ToolProjection => tool !== undefined)
@@ -1425,6 +1515,7 @@ export class TranscriptRenderable extends BoxRenderable {
       this.#compactionAttempt = null
       return
     }
+    this.#compactionReasoning.setBlockId(`reasoning:compaction:${compaction.attempt}`)
     if (this.#compactionAttempt !== compaction.attempt) {
       this.#compactionReasoning.expand(false)
       this.#compactionAttempt = compaction.attempt
@@ -1489,6 +1580,36 @@ export class TranscriptRenderable extends BoxRenderable {
   #rememberReasoningExpansion(key: string, expanded: boolean): void {
     if ((this.#reasoningExpansion.get(key) ?? false) === expanded) return
     this.#reasoningExpansion.set(key, expanded)
+  }
+
+  #blocksInVisualOrder(): Array<ToolBlockRenderable | ReasoningBlockRenderable> {
+    const blocks: Array<ToolBlockRenderable | ReasoningBlockRenderable> = []
+    const visit = (renderable: BaseRenderable): void => {
+      if (!renderable.visible) return
+      if (
+        renderable instanceof ToolBlockRenderable ||
+        renderable instanceof ReasoningBlockRenderable
+      ) {
+        blocks.push(renderable)
+        return
+      }
+      for (const child of renderable.getChildren()) visit(child)
+    }
+    for (const child of this.scroller.getChildren()) visit(child)
+    return blocks
+  }
+
+  #syncBlockSelection(ensureVisible = false): void {
+    if (this.#selectedBlockId === null) return
+    const blocks = this.#blocksInVisualOrder()
+    const selected = blocks.find((block) => block.blockId === this.#selectedBlockId)
+    if (selected === undefined) {
+      this.#selectedBlockId = null
+    }
+    for (const block of blocks) block.setSelected(block === selected)
+    if (ensureVisible && selected !== undefined) {
+      this.scroller.scrollChildIntoView(selected.header.id)
+    }
   }
 }
 

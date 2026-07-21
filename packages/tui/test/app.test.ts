@@ -4,6 +4,7 @@ import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { homedir } from "node:os"
 
 import { createRottweilerApp, type PresentationFrameScheduler } from "../src/app"
+import { ToolBlockRenderable } from "../src/components"
 import { colorContrast, pickerSelectionColors } from "../src/components/picker"
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../src/protocol"
 import { PROTOCOL_VERSION } from "../../../protocol/types"
@@ -94,6 +95,63 @@ describe("Rottweiler OpenTUI shell", () => {
   afterEach(() => {
     renderer?.destroy()
     renderer = undefined
+  })
+
+  test("selects and toggles a transcript block from the focused composer, then clears on typing", async () => {
+    const setup = await createTestRenderer({
+      width: 88,
+      height: 18,
+      useThread: false,
+      kittyKeyboard: true,
+    })
+    renderer = setup.renderer
+    const tool = {
+      toolCallId: "keyboard-block",
+      turnId: "1",
+      name: "read",
+      args: { path: "keyboard.txt" },
+      status: "finished" as const,
+      capabilities: ["read_filesystem" as const],
+      rationale: null,
+      diff: null,
+      chunks: [],
+      output: { type: "text" as const, text: "keyboard output" },
+      isError: false,
+      callIndex: 0,
+    }
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        transcript: [{
+          sequenceId: "1",
+          agentTurn: "1",
+          turn: {
+            role: "tool",
+            blocks: [{ type: "tool_result", id: tool.toolCallId, output: tool.output, is_error: false }],
+            meta: { synthetic: false, summary: false },
+          },
+        }],
+        tools: { [tool.toolCallId]: tool },
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    const block = [...app.transcript.mountedCards.values()]
+      .flatMap((card) => card.getChildren())
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+
+    setup.mockInput.pressArrow("down", { ctrl: true })
+    expect(app.transcript.selectedBlockId).toBe("tool:keyboard-block")
+    expect(block?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+    expect(renderer.currentFocusedRenderable?.id).toBe("composer-editor")
+
+    setup.mockInput.pressKey(" ", { ctrl: true })
+    expect(block?.body.visible).toBeTrue()
+    expect(renderer.currentFocusedRenderable?.id).toBe("composer-editor")
+
+    await setup.mockInput.typeText("x")
+    expect(app.transcript.selectedBlockId).toBeNull()
+    expect(block?.header.bg.toInts()).toEqual(rgba(kennelTheme.background))
   })
 
   test("copies a completed mouse selection once, clears it, and restores composer focus", async () => {
@@ -1862,6 +1920,15 @@ describe("Rottweiler OpenTUI shell", () => {
       (option) => option.description === "Switch model",
     )
     expect(model?.name).toBe("Ctrl+K")
+    expect(app.picker.select.options.find(
+      (option) => option.description === "Select previous block",
+    )?.name).toBe("Ctrl+UP")
+    expect(app.picker.select.options.find(
+      (option) => option.description === "Select next block",
+    )?.name).toBe("Ctrl+DOWN")
+    expect(app.picker.select.options.find(
+      (option) => option.description === "Expand or collapse block",
+    )?.name).toBe("Ctrl+Space")
 
     await setup.mockInput.typeText("switch model")
     expect(app.picker.select.options.some(

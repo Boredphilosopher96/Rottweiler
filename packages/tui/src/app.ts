@@ -2460,6 +2460,17 @@ export class RottweilerApp extends BoxRenderable {
       this.openSubagentPicker()
       return true
     }
+    if (action === "block_previous" || action === "block_next" || action === "block_toggle") {
+      const focusOwner = this.#visibleFocusOwner()
+      if (
+        (this.#keybindings.preset === "vim" && focusOwner !== "transcript") ||
+        (this.#keybindings.preset === "standard" && focusOwner !== "composer")
+      ) return false
+      if (action === "block_previous") this.transcript.selectPreviousBlock()
+      else if (action === "block_next") this.transcript.selectNextBlock()
+      else this.transcript.toggleSelectedBlock()
+      return true
+    }
     if (this.#state.replay.active) {
       return this.#handleReplayNavigation(action)
     }
@@ -4428,6 +4439,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#updateComposerAutocomplete(value)
       return
     }
+    this.transcript.clearBlockSelection()
     const hadPendingIntent = this.#pendingRewindIntent !== null
     this.#pendingRewindIntent = null
     const hadNotice = this.#composerNotice !== null

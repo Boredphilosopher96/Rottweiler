@@ -51,6 +51,69 @@ function permissionState(runtimeMode: PermissionModeDescriptor): PermissionState
   }
 }
 
+function transcriptBlockState(): RottweilerState {
+  const firstTool = {
+    toolCallId: "block-tool-first",
+    turnId: "1",
+    name: "read",
+    args: { path: "first.txt" },
+    status: "finished" as const,
+    capabilities: ["read_filesystem" as const],
+    rationale: null,
+    diff: null,
+    chunks: [],
+    output: { type: "text" as const, text: "first output" },
+    isError: false,
+    callIndex: 0,
+  }
+  const secondTool = {
+    ...firstTool,
+    toolCallId: "block-tool-second",
+    args: { path: "second.txt" },
+    output: { type: "text" as const, text: "second output" },
+    callIndex: 1,
+  }
+  return {
+    ...createInitialState(),
+    transcript: [
+      {
+        sequenceId: "1",
+        agentTurn: "1",
+        turn: {
+          role: "assistant",
+          blocks: [{ type: "thinking", content: "**Plan**\n\nInspect both files.", signature: null }],
+          meta: { synthetic: false, summary: false },
+        },
+      },
+      {
+        sequenceId: "2",
+        agentTurn: "1",
+        turn: {
+          role: "tool",
+          blocks: [
+            { type: "tool_result", id: firstTool.toolCallId, output: firstTool.output, is_error: false },
+            { type: "tool_result", id: secondTool.toolCallId, output: secondTool.output, is_error: false },
+          ],
+          meta: { synthetic: false, summary: false },
+        },
+      },
+    ],
+    tools: {
+      [firstTool.toolCallId]: firstTool,
+      [secondTool.toolCallId]: secondTool,
+    },
+  }
+}
+
+function rgba(hex: string): [number, number, number, number] {
+  return [
+    Number.parseInt(hex.slice(1, 3), 16),
+    Number.parseInt(hex.slice(3, 5), 16),
+    Number.parseInt(hex.slice(5, 7), 16),
+    255,
+  ]
+}
+
 describe("M4 retained components", () => {
   let renderer: TestRenderer | undefined
 
@@ -176,6 +239,170 @@ describe("M4 retained components", () => {
     expect(visibleToolText).toContain("Read file")
     expect(visibleToolText).toContain("1 line")
     expect(visibleToolText).not.toContain("canary output")
+  })
+
+  test("navigates reasoning and tool blocks in visual order without wrapping", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, { initialState: transcriptBlockState() })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    const cards = [...app.transcript.mountedCards.values()]
+    const reasoning = cards.find((card) => card.reasoning !== null)?.reasoning
+    const tools = cards.flatMap((card) => card.getChildren())
+      .filter((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    expect(tools.map((tool) => tool.blockId)).toEqual([
+      "tool:block-tool-first",
+      "tool:block-tool-second",
+    ])
+
+    app.transcript.selectNextBlock()
+    expect(app.transcript.selectedBlockId).toBe("reasoning:1:1:assistant")
+    expect(reasoning?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+
+    app.transcript.selectNextBlock()
+    expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
+    expect(reasoning?.header.bg.toInts()).toEqual(rgba(kennelTheme.background))
+    expect(tools[0]?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+
+    app.transcript.selectNextBlock()
+    app.transcript.selectNextBlock()
+    expect(app.transcript.selectedBlockId).toBe("tool:block-tool-second")
+    app.transcript.selectPreviousBlock()
+    expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
+    app.transcript.selectPreviousBlock()
+    app.transcript.selectPreviousBlock()
+    expect(app.transcript.selectedBlockId).toBe("reasoning:1:1:assistant")
+  })
+
+  test("appends streaming-tail reasoning and tools to block navigation order", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    const initial = transcriptBlockState()
+    const tailTool = {
+      ...initial.tools["block-tool-first"]!,
+      toolCallId: "block-tool-tail",
+      turnId: "2",
+      args: { path: "tail.txt" },
+      output: { type: "text" as const, text: "tail output" },
+    }
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...initial,
+        tools: { ...initial.tools, [tailTool.toolCallId]: tailTool },
+        streamingTail: {
+          turnId: "2",
+          text: "",
+          thinking: "**Tail plan**\n\nInspect the streaming result.",
+          citations: [],
+          toolCallIds: [tailTool.toolCallId],
+          finished: null,
+        },
+      },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    const order: Array<string | null> = []
+    for (let index = 0; index < 5; index += 1) {
+      app.transcript.selectNextBlock()
+      order.push(app.transcript.selectedBlockId)
+    }
+    expect(order).toEqual([
+      "reasoning:1:1:assistant",
+      "tool:block-tool-first",
+      "tool:block-tool-second",
+      "reasoning:tail:2",
+      "tool:block-tool-tail",
+    ])
+  })
+
+  test("scrolls only as needed to reveal an off-screen selected block header", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 14, useThread: false })
+    renderer = setup.renderer
+    const initial = transcriptBlockState()
+    const leading = Array.from({ length: 12 }, (_, index) => ({
+      sequenceId: `leading-${index}`,
+      agentTurn: `leading-${index}`,
+      turn: {
+        role: "user" as const,
+        blocks: [{ type: "text" as const, text: `Leading transcript card ${index}` }],
+        meta: { synthetic: false, summary: false },
+      },
+    }))
+    const app = createRottweilerApp(renderer, {
+      initialState: { ...initial, transcript: [...leading, ...initial.transcript] },
+    })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    app.transcript.setScrollOffset(0)
+
+    app.transcript.selectNextBlock()
+
+    expect(app.transcript.selectedBlockId).toBe("reasoning:1:1:assistant")
+    expect(app.transcript.scroller.scrollTop).toBeGreaterThan(0)
+  })
+
+  test("retains selection and expansion memory when a selected tool card is recreated", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    const initial = transcriptBlockState()
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    app.transcript.selectNextBlock()
+    app.transcript.selectNextBlock()
+    const previousCard = [...app.transcript.mountedCards.values()]
+      .find((card) => card.getChildren().some((child) => child instanceof ToolBlockRenderable))
+    const previousTool = previousCard?.getChildren()
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    expect(previousTool?.body.visible).toBeFalse()
+
+    app.transcript.toggleSelectedBlock()
+    expect(previousTool?.body.visible).toBeTrue()
+    app.setState({
+      ...initial,
+      workspaceRoots: { generation: "recreate", effectiveFromTurn: "0", roots: [] },
+    })
+    await setup.renderOnce()
+
+    const recreatedCard = [...app.transcript.mountedCards.values()]
+      .find((card) => card.getChildren().some((child) => child instanceof ToolBlockRenderable))
+    const recreatedTool = recreatedCard?.getChildren()
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    expect(recreatedCard).not.toBe(previousCard)
+    expect(recreatedTool).not.toBe(previousTool)
+    expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
+    expect(recreatedTool?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
+    expect(recreatedTool?.body.visible).toBeTrue()
+  })
+
+  test("clears block selection when the selected block disappears", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    const initial = transcriptBlockState()
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    app.transcript.selectNextBlock()
+    app.transcript.selectNextBlock()
+    expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
+    const remaining = initial.tools["block-tool-second"]
+    app.setState({
+      ...initial,
+      tools: remaining === undefined ? {} : { [remaining.toolCallId]: remaining },
+    })
+    await setup.renderOnce()
+
+    expect(app.transcript.selectedBlockId).toBeNull()
+    const remainingCard = [...app.transcript.mountedCards.values()]
+      .find((card) => card.getChildren().some((child) => child instanceof ToolBlockRenderable))
+    const remainingTool = remainingCard?.getChildren()
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
+    expect(remainingTool?.header.bg.toInts()).toEqual(rgba(kennelTheme.background))
   })
   let treeSitter: MockTreeSitterClient | undefined
 

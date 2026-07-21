@@ -15,6 +15,9 @@ export type KeybindingContext =
 
 export type KeybindingAction =
   | "append_insert"
+  | "block_next"
+  | "block_previous"
+  | "block_toggle"
   | "close_overlay"
   | "cycle_agent_mode"
   | "delete_character"
@@ -95,6 +98,9 @@ const CONTEXTS: readonly KeybindingContext[] = [
 
 const ACTIONS: readonly KeybindingAction[] = [
   "append_insert",
+  "block_next",
+  "block_previous",
+  "block_toggle",
   "close_overlay",
   "cycle_agent_mode",
   "delete_character",
@@ -128,6 +134,9 @@ const ACTIONS: readonly KeybindingAction[] = [
 /** Short, user-facing descriptions for every configurable action. */
 export const KEYBINDING_ACTION_LABELS: Record<KeybindingAction, string> = {
   append_insert: "Enter insert mode after the cursor",
+  block_next: "Select next block",
+  block_previous: "Select previous block",
+  block_toggle: "Expand or collapse block",
   close_overlay: "Close the current overlay",
   cycle_agent_mode: "Cycle agent mode",
   delete_character: "Delete character",
@@ -170,6 +179,9 @@ const STANDARD_DEFAULTS = {
     paste_image: ["ctrl+v"],
   },
   standard: {
+    block_previous: ["ctrl+up"],
+    block_next: ["ctrl+down"],
+    block_toggle: ["ctrl+space"],
     close_overlay: ["escape"],
     open_external_editor: ["ctrl+e"],
     page_up: ["pageup"],
@@ -201,6 +213,9 @@ const VIM_DEFAULTS = {
     open_external_editor: ["ctrl+e"],
   },
   vim_normal: {
+    block_previous: ["shift+k"],
+    block_next: ["shift+j"],
+    block_toggle: ["return"],
     enter_insert: ["i"],
     append_insert: ["a"],
     move_left: ["h", "left"],
