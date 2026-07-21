@@ -14,10 +14,11 @@ use async_trait::async_trait;
 use rw_types::{
     ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta,
     CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, McpApprovalReview,
-    McpServerDescriptor, ModelAlias, ModelCatalogSnapshot, ProviderAuthAttemptId,
-    ProviderAuthChallenge, RequestId, RuntimeServiceDescriptor, SequenceId, SessionDescriptor,
-    SessionId, ShellId, SubagentDescriptor, SubagentId, SubagentReplayItem, TranscriptFormat,
-    TurnId, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus,
+    McpEnvironmentEntry, McpServerDescriptor, ModelAlias, ModelCatalogSnapshot,
+    ProviderAuthAttemptId, ProviderAuthChallenge, RequestId, RuntimeServiceDescriptor, SequenceId,
+    SessionDescriptor, SessionId, ShellId, SubagentDescriptor, SubagentId, SubagentReplayItem,
+    TranscriptFormat, TurnId, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
+    WorkspaceStatus,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -457,6 +458,14 @@ pub trait HostMcpService: Send + Sync + 'static {
         name: &str,
         endpoint: &str,
     ) -> Result<Vec<McpServerDescriptor>, HostError>;
+    async fn add_stdio(
+        &self,
+        name: &str,
+        executable: &str,
+        args: &[String],
+        environment: &[McpEnvironmentEntry],
+    ) -> Result<Vec<McpServerDescriptor>, HostError>;
+    async fn remove(&self, name: &str) -> Result<Vec<McpServerDescriptor>, HostError>;
     async fn review(&self, name: &str) -> Result<McpApprovalReview, HostError>;
     async fn approve(
         &self,
@@ -1953,6 +1962,77 @@ impl EngineHost {
                 })
                 .await
                 .map_err(|_| HostError::Query("MCP add task failed".to_owned()))??;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::McpServersListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        servers,
+                    }],
+                ))
+            }
+            ClientCommand::AddMcpStdioServer {
+                meta,
+                session_id,
+                name,
+                executable,
+                args,
+                environment,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let mcp = session.mcp().ok_or_else(|| {
+                    HostError::Query(
+                        "live MCP management is unavailable for this session".to_owned(),
+                    )
+                })?;
+                let actor = meta.client_id.clone();
+                let servers = tokio::spawn(async move {
+                    let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                    let snapshot = session.handle().snapshot().await?;
+                    if snapshot.driver_client_id.as_ref() != Some(&actor) {
+                        return Err(HostError::Protocol(
+                            "only the current driver may add MCP servers".to_owned(),
+                        ));
+                    }
+                    mcp.add_stdio(&name, &executable, &args, &environment).await
+                })
+                .await
+                .map_err(|_| HostError::Query("MCP add task failed".to_owned()))??;
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::McpServersListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        servers,
+                    }],
+                ))
+            }
+            ClientCommand::RemoveMcpServer {
+                meta,
+                session_id,
+                name,
+            } => {
+                let session = self.ready_session(&session_id).await?;
+                let mcp = session.mcp().ok_or_else(|| {
+                    HostError::Query(
+                        "live MCP management is unavailable for this session".to_owned(),
+                    )
+                })?;
+                let actor = meta.client_id.clone();
+                let servers = tokio::spawn(async move {
+                    let _lifecycle_guard = Arc::clone(&session.lifecycle).lock_owned().await;
+                    let snapshot = session.handle().snapshot().await?;
+                    if snapshot.driver_client_id.as_ref() != Some(&actor) {
+                        return Err(HostError::Protocol(
+                            "only the current driver may remove MCP servers".to_owned(),
+                        ));
+                    }
+                    mcp.remove(&name).await
+                })
+                .await
+                .map_err(|_| HostError::Query("MCP remove task failed".to_owned()))??;
                 Ok((
                     CommandOutcome::Accepted,
                     Some(session_id.clone()),
@@ -3550,6 +3630,8 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::ListMcpServers { session_id, .. }
         | ClientCommand::ListRuntimeServices { session_id, .. }
         | ClientCommand::AddMcpHttpServer { session_id, .. }
+        | ClientCommand::AddMcpStdioServer { session_id, .. }
+        | ClientCommand::RemoveMcpServer { session_id, .. }
         | ClientCommand::ReviewMcpServer { session_id, .. }
         | ClientCommand::ApproveMcpServer { session_id, .. }
         | ClientCommand::SetMcpServerEnabled { session_id, .. }

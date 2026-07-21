@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 use ts_rs::TS;
 
 use crate::{ToolCallId, ToolOutput};
@@ -261,6 +262,26 @@ pub struct McpApprovalReview {
     pub defer_tools: bool,
     pub fingerprint: String,
     pub previously_approved: bool,
+}
+
+/// One explicit environment entry for a stdio MCP server.
+///
+/// The value is carried on the authenticated command wire but never exposed by
+/// debug formatting.
+#[derive(Clone, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct McpEnvironmentEntry {
+    pub key: String,
+    pub value: String,
+}
+
+impl fmt::Debug for McpEnvironmentEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("McpEnvironmentEntry")
+            .field("key", &self.key)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// One credential-free process identity currently serving the active session.
@@ -1101,6 +1122,19 @@ pub enum ClientCommand {
         name: String,
         endpoint: String,
     },
+    AddMcpStdioServer {
+        meta: CommandMeta,
+        session_id: SessionId,
+        name: String,
+        executable: String,
+        args: Vec<String>,
+        environment: Vec<McpEnvironmentEntry>,
+    },
+    RemoveMcpServer {
+        meta: CommandMeta,
+        session_id: SessionId,
+        name: String,
+    },
     ReviewMcpServer {
         meta: CommandMeta,
         session_id: SessionId,
@@ -1274,6 +1308,8 @@ impl ClientCommand {
             | Self::ListMcpServers { meta, .. }
             | Self::ListRuntimeServices { meta, .. }
             | Self::AddMcpHttpServer { meta, .. }
+            | Self::AddMcpStdioServer { meta, .. }
+            | Self::RemoveMcpServer { meta, .. }
             | Self::ReviewMcpServer { meta, .. }
             | Self::ApproveMcpServer { meta, .. }
             | Self::SetMcpServerEnabled { meta, .. }
@@ -1339,6 +1375,8 @@ impl ClientCommand {
             | Self::ListMcpServers { meta, .. }
             | Self::ListRuntimeServices { meta, .. }
             | Self::AddMcpHttpServer { meta, .. }
+            | Self::AddMcpStdioServer { meta, .. }
+            | Self::RemoveMcpServer { meta, .. }
             | Self::ReviewMcpServer { meta, .. }
             | Self::ApproveMcpServer { meta, .. }
             | Self::SetMcpServerEnabled { meta, .. }
@@ -2430,8 +2468,8 @@ impl EngineEvent {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientCommand, ClientId, CommandAckMeta, CommandMeta, EngineEvent, RequestId, SequenceId,
-        SessionId, SubagentId, TranscriptFormat,
+        ClientCommand, ClientId, CommandAckMeta, CommandMeta, EngineEvent, McpEnvironmentEntry,
+        RequestId, SequenceId, SessionId, SubagentId, TranscriptFormat,
     };
 
     #[test]
@@ -2498,6 +2536,51 @@ mod tests {
         assert_eq!(command["type"], "rename_session");
         assert_eq!(command["session_id"], "session");
         assert_eq!(command["title"], "Auth refactor");
+        Ok(())
+    }
+
+    #[test]
+    fn mcp_stdio_management_commands_have_stable_redacted_wire_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let meta = CommandMeta {
+            protocol_version: 1,
+            client_id: ClientId("picker".to_owned()),
+            request_id: RequestId("mcp-stdio".to_owned()),
+        };
+        let secret = "wire-secret-canary";
+        let command = ClientCommand::AddMcpStdioServer {
+            meta: meta.clone(),
+            session_id: SessionId("session".to_owned()),
+            name: "docs".to_owned(),
+            executable: "/usr/local/bin/docs-mcp".to_owned(),
+            args: vec!["--stdio".to_owned()],
+            environment: vec![McpEnvironmentEntry {
+                key: "DOCS_TOKEN".to_owned(),
+                value: secret.to_owned(),
+            }],
+        };
+        let debug = format!("{command:?}");
+        assert!(debug.contains("DOCS_TOKEN"));
+        assert!(!debug.contains(secret));
+        let wire = serde_json::to_value(command)?;
+        assert_eq!(wire["type"], "add_mcp_stdio_server");
+        assert_eq!(wire["session_id"], "session");
+        assert_eq!(wire["name"], "docs");
+        assert_eq!(wire["executable"], "/usr/local/bin/docs-mcp");
+        assert_eq!(wire["args"], serde_json::json!(["--stdio"]));
+        assert_eq!(
+            wire["environment"],
+            serde_json::json!([{"key":"DOCS_TOKEN","value":secret}])
+        );
+
+        let remove = serde_json::to_value(ClientCommand::RemoveMcpServer {
+            meta,
+            session_id: SessionId("session".to_owned()),
+            name: "docs".to_owned(),
+        })?;
+        assert_eq!(remove["type"], "remove_mcp_server");
+        assert_eq!(remove["session_id"], "session");
+        assert_eq!(remove["name"], "docs");
         Ok(())
     }
 

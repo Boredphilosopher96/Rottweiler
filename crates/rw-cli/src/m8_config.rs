@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
+    fmt, fs,
     io::Read as _,
     path::{Path, PathBuf},
 };
@@ -22,6 +22,8 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_SERVERS: usize = 128;
 const MAX_PLUGINS: usize = 128;
 const MAX_ARG_BYTES: usize = 16 * 1024;
+const MAX_ENVIRONMENT_ENTRIES: usize = 256;
+const MAX_ENVIRONMENT_VALUE_BYTES: usize = 16 * 1024;
 const OAUTH_RESERVED_QUERY_PARAMETERS: [&str; 9] = [
     "response_type",
     "client_id",
@@ -128,12 +130,13 @@ impl ContentAttestation {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) enum DiscoveredMcpTransport {
     Stdio {
         argv: Vec<String>,
         cwd: Option<PathBuf>,
         inherit_env: Vec<String>,
+        environment: Vec<(String, String)>,
         read_roots: Vec<PathBuf>,
         write_roots: Vec<PathBuf>,
         allowed_domains: Vec<String>,
@@ -151,6 +154,56 @@ pub(crate) enum DiscoveredMcpTransport {
     },
 }
 
+impl fmt::Debug for DiscoveredMcpTransport {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Stdio {
+                argv,
+                cwd,
+                inherit_env,
+                environment,
+                read_roots,
+                write_roots,
+                allowed_domains,
+            } => formatter
+                .debug_struct("Stdio")
+                .field("argv", argv)
+                .field("cwd", cwd)
+                .field("inherit_env", inherit_env)
+                .field(
+                    "environment_keys",
+                    &environment.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+                )
+                .field("read_roots", read_roots)
+                .field("write_roots", write_roots)
+                .field("allowed_domains", allowed_domains)
+                .finish(),
+            Self::Http {
+                endpoint,
+                oauth_credential,
+                oauth_resource,
+                oauth_audience,
+                oauth_authorization_endpoint,
+                oauth_token_endpoint,
+                oauth_client_id,
+                oauth_scopes,
+                oauth_proxy,
+            } => formatter
+                .debug_struct("Http")
+                .field("endpoint", endpoint)
+                .field("oauth_credential", oauth_credential)
+                .field("oauth_resource", oauth_resource)
+                .field("oauth_audience", oauth_audience)
+                .field("oauth_authorization_endpoint", oauth_authorization_endpoint)
+                .field("oauth_token_endpoint", oauth_token_endpoint)
+                .field("oauth_client_id", oauth_client_id)
+                .field("oauth_scopes", oauth_scopes)
+                .field("oauth_proxy", oauth_proxy)
+                .finish(),
+        }
+    }
+}
+
 impl DiscoveredMcpServer {
     pub(crate) fn approval_fingerprint(&self) -> Result<String> {
         let transport = match &self.transport {
@@ -158,11 +211,13 @@ impl DiscoveredMcpServer {
                 argv,
                 cwd,
                 inherit_env,
+                environment,
                 read_roots,
                 write_roots,
                 allowed_domains,
             } => serde_json::json!({
                 "kind":"stdio", "argv":argv, "cwd":cwd, "inherit_env":inherit_env,
+                "environment":environment,
                 "read_roots":read_roots, "write_roots":write_roots,
                 "allowed_domains":allowed_domains,
                 "credentials": self.credentials.iter().map(|binding| (&binding.environment, &binding.credential_reference)).collect::<Vec<_>>(),
@@ -205,11 +260,12 @@ impl DiscoveredMcpServer {
                 argv,
                 cwd,
                 inherit_env,
+                environment,
                 read_roots,
                 write_roots,
                 allowed_domains,
             } => {
-                let mut environment = Vec::new();
+                let mut environment = environment.clone();
                 for name in inherit_env {
                     if let Ok(value) = std::env::var(name) {
                         environment.push((name.clone(), value));
@@ -405,6 +461,8 @@ struct McpEntry {
     #[serde(default)]
     inherit_env: Vec<String>,
     #[serde(default)]
+    environment: BTreeMap<String, String>,
+    #[serde(default)]
     credentials: BTreeMap<String, String>,
     #[serde(default)]
     read_roots: Vec<PathBuf>,
@@ -513,6 +571,47 @@ pub(crate) fn discover_executable_configs(
     Ok(catalog)
 }
 
+pub(crate) fn discover_tui_stdio_server(
+    path: &Path,
+    base: &Path,
+    name: &str,
+    executable: &Path,
+    args: Vec<String>,
+    environment: Vec<(String, String)>,
+) -> Result<DiscoveredMcpServer> {
+    let mut command_values = Vec::with_capacity(args.len() + 1);
+    command_values.push(executable.to_string_lossy().into_owned());
+    command_values.extend(args);
+    let environment = environment.into_iter().collect::<BTreeMap<_, _>>();
+    parse_mcp_server(
+        path,
+        &ExecutableConfigOrigin::User(path.to_owned()),
+        base,
+        name.to_owned(),
+        McpEntry {
+            enabled: false,
+            defer_tools: true,
+            argv: Some(command_values),
+            endpoint: None,
+            cwd: None,
+            inherit_env: Vec::new(),
+            environment,
+            credentials: BTreeMap::new(),
+            read_roots: Vec::new(),
+            write_roots: Vec::new(),
+            allowed_domains: Vec::new(),
+            oauth_credential: None,
+            oauth_resource: None,
+            oauth_audience: None,
+            oauth_authorization_endpoint: None,
+            oauth_token_endpoint: None,
+            oauth_client_id: None,
+            oauth_scopes: Vec::new(),
+            oauth_proxy: None,
+        },
+    )
+}
+
 fn load_mcp_layer(
     path: &Path,
     origin: &ExecutableConfigOrigin,
@@ -563,7 +662,18 @@ fn parse_mcp_server(
 ) -> Result<DiscoveredMcpServer> {
     let id = ServerId::new(name.clone()).map_err(|error| miette!("{}: {error}", path.display()))?;
     validate_env_names(&entry.inherit_env, false)?;
+    validate_literal_environment(&entry.environment)?;
     let credentials = parse_credential_bindings(std::mem::take(&mut entry.credentials))?;
+    if entry.environment.keys().any(|name| {
+        entry.inherit_env.contains(name)
+            || credentials
+                .iter()
+                .any(|binding| binding.environment == *name)
+    }) {
+        return Err(miette!(
+            "MCP environment names must not overlap inherited or credential-backed names"
+        ));
+    }
     let argv = entry
         .argv
         .take()
@@ -701,6 +811,7 @@ fn parse_stdio_transport(
         argv,
         cwd,
         inherit_env: entry.inherit_env,
+        environment: entry.environment.into_iter().collect(),
         read_roots,
         write_roots,
         allowed_domains,
@@ -728,6 +839,7 @@ fn parse_http_transport(
 ) -> Result<DiscoveredMcpTransport> {
     if entry.cwd.is_some()
         || !entry.inherit_env.is_empty()
+        || !entry.environment.is_empty()
         || !credentials.is_empty()
         || !entry.read_roots.is_empty()
         || !entry.write_roots.is_empty()
@@ -1203,6 +1315,18 @@ fn validate_env_names(names: &[String], credential: bool) -> Result<()> {
     }
     Ok(())
 }
+fn validate_literal_environment(environment: &BTreeMap<String, String>) -> Result<()> {
+    if environment.len() > MAX_ENVIRONMENT_ENTRIES {
+        return Err(miette!("MCP environment exceeds 256 entries"));
+    }
+    for (name, value) in environment {
+        validate_env_name(name, true)?;
+        if value.len() > MAX_ENVIRONMENT_VALUE_BYTES || value.as_bytes().contains(&0) {
+            return Err(miette!("MCP environment value is invalid or oversized"));
+        }
+    }
+    Ok(())
+}
 fn validate_env_name(name: &str, credential: bool) -> Result<()> {
     if name.is_empty()
         || name.len() > 128
@@ -1539,6 +1663,95 @@ oauth_client_id = 'public-native-client'
         )
         .expect("private config");
         assert!(discover_executable_configs(&user, &project, true).is_err());
+    }
+
+    #[test]
+    fn stdio_literal_environment_round_trips_redacted_and_approval_bound() {
+        let (_temp, user, project) = roots();
+        let config = user.join(".rottweiler/mcp.toml");
+        let secret = "literal-secret-canary";
+        fs::write(
+            &config,
+            format!(
+                "[servers.docs]\nargv=['/usr/bin/true','--stdio']\n[servers.docs.environment]\nDOCS_TOKEN='{secret}'\n"
+            ),
+        )
+        .expect("config");
+        let catalog = discover_executable_configs(&user, &project, false).expect("catalog");
+        let server = &catalog.mcp_servers[0];
+        let debug = format!("{:?}", server.transport);
+        assert!(debug.contains("DOCS_TOKEN"));
+        assert!(!debug.contains(secret));
+        let fingerprint = server.approval_fingerprint().expect("fingerprint");
+        let runtime = server.runtime_config(|_| unreachable!()).expect("runtime");
+        let McpTransportConfig::Stdio {
+            executable,
+            args,
+            environment,
+            working_directory,
+            sandbox,
+        } = runtime.transport
+        else {
+            panic!("expected stdio");
+        };
+        assert_eq!(executable, fs::canonicalize("/usr/bin/true").expect("true"));
+        assert_eq!(args, ["--stdio"]);
+        assert_eq!(environment, [("DOCS_TOKEN".to_owned(), secret.to_owned())]);
+        assert_eq!(working_directory, None);
+        assert_eq!(
+            sandbox,
+            rw_core::runtime_support::mcp::McpStdioSandboxPolicy::default()
+        );
+
+        fs::write(
+            &config,
+            "[servers.docs]\nargv=['/usr/bin/true','--stdio']\n[servers.docs.environment]\nDOCS_TOKEN='changed'\n",
+        )
+        .expect("changed config");
+        let changed = discover_executable_configs(&user, &project, false).expect("changed");
+        assert_ne!(
+            fingerprint,
+            changed.mcp_servers[0]
+                .approval_fingerprint()
+                .expect("changed fingerprint")
+        );
+    }
+
+    #[test]
+    fn tui_persisted_stdio_server_round_trips_through_executable_loader() {
+        let (_temp, user, project) = roots();
+        let loader = rw_store::config::ConfigLoader::new(
+            user.join(".rottweiler/config.toml"),
+            project.join(".rottweiler/config.toml"),
+        );
+        let executable = fs::canonicalize("/usr/bin/true").expect("true");
+        loader
+            .persist_tui_mcp_stdio_server(
+                "docs",
+                &executable,
+                &["--stdio".to_owned()],
+                &[("DOCS_TOKEN".to_owned(), "secret-canary".to_owned())],
+            )
+            .expect("persist stdio");
+
+        let catalog = discover_executable_configs(&user, &project, false).expect("catalog");
+        assert_eq!(catalog.mcp_servers.len(), 1);
+        let runtime = catalog.mcp_servers[0]
+            .runtime_config(|_| unreachable!())
+            .expect("runtime");
+        assert!(!runtime.enabled);
+        assert!(runtime.defer_tools);
+        assert_eq!(runtime.id, ServerId::new("docs").expect("id"));
+        assert_eq!(
+            runtime.transport,
+            McpTransportConfig::Stdio {
+                executable,
+                args: vec!["--stdio".to_owned()],
+                working_directory: None,
+                environment: vec![("DOCS_TOKEN".to_owned(), "secret-canary".to_owned())],
+                sandbox: rw_core::runtime_support::mcp::McpStdioSandboxPolicy::default(),
+            }
+        );
     }
 
     #[test]

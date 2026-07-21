@@ -5975,6 +5975,11 @@ describe("Rottweiler OpenTUI shell", () => {
       session_id: "session-local",
       servers: [],
     })
+    expect(app.picker.select.options.map((option) => option.value)).toEqual([
+      "mcp.add.http",
+      "mcp.add.stdio",
+      "mcp.empty",
+    ])
     app.picker.select.selectCurrent()
     await setup.mockInput.typeText("docs.remote")
     setup.mockInput.pressEnter()
@@ -6005,11 +6010,22 @@ describe("Rottweiler OpenTUI shell", () => {
         prompt_count: 0,
       }],
     })
+    const serverIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "mcp.server.docs.remote",
+    )
+    expect(app.picker.select.options[serverIndex]?.description).toContain("Approval needed")
+    expect(app.picker.select.options[serverIndex]?.description).not.toContain("approval_required")
+    app.picker.select.setSelectedIndex(serverIndex)
+    app.picker.select.selectCurrent()
+    expect(app.picker.title).toContain("MCP actions · docs.remote")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual([
+      "Enable",
+      "Review fingerprint",
+      "Remove",
+    ])
     const reviewIndex = app.picker.select.options.findIndex(
       (option) => option.value === "mcp.review.docs.remote",
     )
-    expect(app.picker.select.options[reviewIndex]?.description).toContain("Approval needed")
-    expect(app.picker.select.options[reviewIndex]?.description).not.toContain("approval_required")
     app.picker.select.setSelectedIndex(reviewIndex)
     app.picker.select.selectCurrent()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
@@ -6103,7 +6119,7 @@ describe("Rottweiler OpenTUI shell", () => {
     const connectIndex = app.picker.select.options.findIndex(
       (option) => option.value === "mcp.toggle.docs.remote",
     )
-    expect(app.picker.select.options[connectIndex]?.name).toBe("Connect · docs.remote")
+    expect(app.picker.select.options[connectIndex]?.name).toBe("Enable")
     app.picker.select.setSelectedIndex(connectIndex)
     app.picker.select.selectCurrent()
     expect(emitted.at(-1)).toEqual(expect.objectContaining({
@@ -6111,7 +6127,111 @@ describe("Rottweiler OpenTUI shell", () => {
       name: "docs.remote",
       enabled: true,
     }))
+    const removeIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "mcp.remove.docs.remote",
+    )
+    app.picker.select.setSelectedIndex(removeIndex)
+    app.picker.select.selectCurrent()
+    expect((app.picker.title ?? "").trim()).toBe("Remove docs.remote? This deletes its configuration")
+    expect(app.picker.select.options.map((option) => option.name)).toEqual(["Remove", "Cancel"])
+    app.picker.select.setSelectedIndex(0)
+    app.picker.select.selectCurrent()
+    expect(emitted.at(-1)).toEqual(expect.objectContaining({
+      type: "remove_mcp_server",
+      name: "docs.remote",
+    }))
     expect(emitted.some((command) => command.type === "send_message")).toBe(false)
+  })
+
+  test("builds a redacted stdio MCP command through the full prompt chain", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openMcpPicker()
+    const list = emitted.at(-1)
+    if (list?.type !== "list_mcp_servers") throw new Error("missing MCP server list")
+    app.handleEvent({
+      type: "mcp_servers_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "tui",
+        request_id: list.meta.request_id,
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-local",
+      servers: [],
+    })
+    const stdioIndex = app.picker.select.options.findIndex(
+      (option) => option.value === "mcp.add.stdio",
+    )
+    app.picker.select.setSelectedIndex(stdioIndex)
+    app.picker.select.selectCurrent()
+    expect((app.picker.title ?? "").trim()).toBe("Server name, e.g. docs")
+    await setup.mockInput.typeText("docs")
+    setup.mockInput.pressEnter()
+    expect((app.picker.title ?? "").trim()).toBe("Executable path, e.g. /usr/local/bin/docs-mcp")
+    await setup.mockInput.typeText("/usr/local/bin/docs-mcp")
+    setup.mockInput.pressEnter()
+    expect((app.picker.title ?? "").trim()).toBe(
+      "Arguments separated by spaces · quoting is not supported · leave empty for none",
+    )
+    await setup.mockInput.typeText("--stdio   docs")
+    setup.mockInput.pressEnter()
+    expect((app.picker.title ?? "").trim()).toBe(
+      "Environment variable as KEY=VALUE · leave empty to finish",
+    )
+    await setup.mockInput.typeText("missing-separator")
+    setup.mockInput.pressEnter()
+    expect(
+      emitted.some((command) => command.type === "add_mcp_stdio_server"),
+    ).toBeFalse()
+    expect((app.picker.title ?? "").trim()).toBe(
+      "Environment variable as KEY=VALUE · leave empty to finish",
+    )
+    const secret = "secret-canary=value"
+    await setup.mockInput.typeText(`DOCS_TOKEN=${secret}`)
+    setup.mockInput.pressEnter()
+    expect((app.picker.title ?? "").trim()).toBe(
+      "Environment variable as KEY=VALUE · leave empty to finish",
+    )
+    setup.mockInput.pressEnter()
+
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "add_mcp_stdio_server",
+      name: "docs",
+      executable: "/usr/local/bin/docs-mcp",
+      args: ["--stdio", "docs"],
+      environment: [{ key: "DOCS_TOKEN", value: secret }],
+    }))
+    const visiblePickerCopy = app.picker.select.options
+      .flatMap((option) => [option.name, option.description])
+      .join("\n")
+    expect(visiblePickerCopy).not.toContain(secret)
+    expect(app.statusLine.plainText).not.toContain(secret)
+  })
+
+  test("keeps MCP management inert in replay sessions", async () => {
+    const setup = await createTestRenderer({ width: 100, height: 24, useThread: false })
+    renderer = setup.renderer
+    const emitted: ClientCommand[] = []
+    const app = createRottweilerApp(renderer, {
+      replaySessionId: "historical-session",
+      onCommand(command) {
+        emitted.push(command)
+        return { type: "accepted" }
+      },
+    })
+    renderer.root.add(app)
+    app.openMcpPicker()
+    expect(emitted).toEqual([])
+    expect(app.picker.visible).toBeFalse()
   })
 
   test("manages typed permission rows without transcript JSON or manual ids", async () => {

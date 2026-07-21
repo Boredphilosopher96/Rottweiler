@@ -41,6 +41,11 @@ const ENV_SANDBOX_SAFE_LIST: &str = "RW_SANDBOX_SAFE_LIST";
 const ENV_TELEMETRY_ENABLED: &str = "RW_TELEMETRY_ENABLED";
 const ENV_UPDATE_CHANNEL: &str = "RW_UPDATE_CHANNEL";
 const MAX_TUI_AUX_CONFIG_BYTES: usize = 64 * 1024;
+const MAX_MCP_ARG_BYTES: usize = 16 * 1024;
+const MAX_MCP_ARGV_ENTRIES: usize = 256;
+const MAX_MCP_ENVIRONMENT_ENTRIES: usize = 256;
+const MAX_MCP_ENVIRONMENT_NAME_BYTES: usize = 128;
+const MAX_MCP_ENVIRONMENT_VALUE_BYTES: usize = 16 * 1024;
 static TUI_SETTING_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static TUI_SETTING_PROCESS_LOCKS: OnceLock<(Mutex<BTreeSet<PathBuf>>, Condvar)> = OnceLock::new();
 
@@ -1064,6 +1069,153 @@ impl ConfigLoader {
         server_table.insert("enabled".to_owned(), toml::Value::Boolean(false));
         server_table.insert("defer_tools".to_owned(), toml::Value::Boolean(true));
         servers.insert(server.to_owned(), toml::Value::Table(server_table));
+        let bytes =
+            toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
+                key: format!("mcp.servers.{server}"),
+                reason: error.to_string(),
+            })?;
+        persist_tui_config_atomic(parent, &path, bytes.as_bytes(), "mcp.servers")
+    }
+
+    /// Adds a user-scoped stdio MCP server in disabled, deferred mode.
+    /// Environment values are written only to the private user MCP file and
+    /// are never included in validation errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid or oversized argv/environment data, an
+    /// existing server, or an unsafe, malformed, oversized, or unwritable user
+    /// MCP file.
+    pub fn persist_tui_mcp_stdio_server(
+        &self,
+        server: &str,
+        executable: &Path,
+        args: &[String],
+        environment: &[(String, String)],
+    ) -> Result<(), ConfigError> {
+        let key = format!("mcp.servers.{server}");
+        if !valid_mcp_server_name(server) || !valid_mcp_executable_and_args(executable, args) {
+            return Err(ConfigError::InvalidUserSetting {
+                key,
+                reason: "MCP server name or argv is invalid".to_owned(),
+            });
+        }
+        if !valid_mcp_environment(environment) {
+            return Err(ConfigError::InvalidUserSetting {
+                key,
+                reason: "MCP environment keys or values are invalid or oversized".to_owned(),
+            });
+        }
+        let parent = self
+            .user_path
+            .parent()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "user configuration has no parent directory".to_owned(),
+            })?;
+        prepare_tui_config_parent(parent, &self.user_path)?;
+        let _settings_lock = acquire_tui_settings_lock(parent, "mcp.servers")?;
+        let path = self.user_path.with_file_name("mcp.toml");
+        validate_tui_config_file(&path, "mcp.servers")?;
+        let mut document =
+            read_bounded_tui_config_document(&path, "mcp.servers", MAX_TUI_AUX_CONFIG_BYTES)?;
+        if document
+            .get("servers")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|servers| servers.contains_key(server))
+        {
+            return Err(ConfigError::InvalidUserSetting {
+                key,
+                reason: "MCP server already exists".to_owned(),
+            });
+        }
+        let servers = document
+            .as_table_mut()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "MCP configuration root is not a table".to_owned(),
+            })?
+            .entry("servers".to_owned())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+            .as_table_mut()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "MCP servers value is not a table".to_owned(),
+            })?;
+        let mut command_values = Vec::with_capacity(args.len() + 1);
+        command_values.push(toml::Value::String(
+            executable.to_string_lossy().into_owned(),
+        ));
+        command_values.extend(args.iter().cloned().map(toml::Value::String));
+        let environment = environment
+            .iter()
+            .map(|(name, value)| (name.clone(), toml::Value::String(value.clone())))
+            .collect::<toml::map::Map<_, _>>();
+        let mut server_table = toml::map::Map::new();
+        server_table.insert("argv".to_owned(), toml::Value::Array(command_values));
+        server_table.insert("environment".to_owned(), toml::Value::Table(environment));
+        server_table.insert("enabled".to_owned(), toml::Value::Boolean(false));
+        server_table.insert("defer_tools".to_owned(), toml::Value::Boolean(true));
+        server_table.insert("read_roots".to_owned(), toml::Value::Array(Vec::new()));
+        server_table.insert("write_roots".to_owned(), toml::Value::Array(Vec::new()));
+        server_table.insert("allowed_domains".to_owned(), toml::Value::Array(Vec::new()));
+        servers.insert(server.to_owned(), toml::Value::Table(server_table));
+        let bytes =
+            toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
+                key: format!("mcp.servers.{server}"),
+                reason: error.to_string(),
+            })?;
+        if bytes.len() > MAX_TUI_AUX_CONFIG_BYTES {
+            return Err(ConfigError::InvalidUserSetting {
+                key: format!("mcp.servers.{server}"),
+                reason: "MCP configuration exceeds its size limit".to_owned(),
+            });
+        }
+        persist_tui_config_atomic(parent, &path, bytes.as_bytes(), "mcp.servers")
+    }
+
+    /// Removes one user-scoped MCP server and its matching capability override.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown server or unsafe, malformed, or
+    /// unwritable user configuration.
+    pub fn remove_tui_mcp_server(&self, server: &str) -> Result<(), ConfigError> {
+        if !valid_mcp_server_name(server) {
+            return Err(ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "MCP server name is invalid".to_owned(),
+            });
+        }
+        let parent = self
+            .user_path
+            .parent()
+            .ok_or_else(|| ConfigError::InvalidUserSetting {
+                key: "mcp.servers".to_owned(),
+                reason: "user configuration has no parent directory".to_owned(),
+            })?;
+        prepare_tui_config_parent(parent, &self.user_path)?;
+        let _settings_lock = acquire_tui_settings_lock(parent, "mcp.servers")?;
+        let path = self.user_path.with_file_name("mcp.toml");
+        validate_tui_config_file(&path, "mcp.servers")?;
+        let mut document =
+            read_bounded_tui_config_document(&path, "mcp.servers", MAX_TUI_AUX_CONFIG_BYTES)?;
+        let removed = document
+            .get_mut("servers")
+            .and_then(toml::Value::as_table_mut)
+            .and_then(|servers| servers.remove(server));
+        if removed.is_none() {
+            return Err(ConfigError::InvalidUserSetting {
+                key: format!("mcp.servers.{server}"),
+                reason: "MCP server is not present in the user configuration".to_owned(),
+            });
+        }
+        if let Some(overrides) = document
+            .get_mut("capability_overrides")
+            .and_then(toml::Value::as_table_mut)
+        {
+            overrides.remove(server);
+        }
         let bytes =
             toml::to_string_pretty(&document).map_err(|error| ConfigError::InvalidUserSetting {
                 key: format!("mcp.servers.{server}"),
@@ -2583,6 +2735,37 @@ fn valid_mcp_server_name(server: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
+fn valid_mcp_executable_and_args(executable: &Path, args: &[String]) -> bool {
+    let executable = executable.to_string_lossy();
+    Path::new(executable.as_ref()).is_absolute()
+        && !executable.is_empty()
+        && executable.len() <= MAX_MCP_ARG_BYTES
+        && !executable.as_bytes().contains(&0)
+        && args.len() < MAX_MCP_ARGV_ENTRIES
+        && args.iter().all(|argument| {
+            !argument.is_empty()
+                && argument.len() <= MAX_MCP_ARG_BYTES
+                && !argument.as_bytes().contains(&0)
+        })
+}
+
+fn valid_mcp_environment(environment: &[(String, String)]) -> bool {
+    if environment.len() > MAX_MCP_ENVIRONMENT_ENTRIES {
+        return false;
+    }
+    let mut names = BTreeSet::new();
+    environment.iter().all(|(name, value)| {
+        !name.is_empty()
+            && name.len() <= MAX_MCP_ENVIRONMENT_NAME_BYTES
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+            && value.len() <= MAX_MCP_ENVIRONMENT_VALUE_BYTES
+            && !value.as_bytes().contains(&0)
+            && names.insert(name)
+    })
+}
+
 fn read_project_model_preferences(
     user_path: &Path,
 ) -> Result<BTreeMap<String, String>, ConfigError> {
@@ -3243,6 +3426,7 @@ mod tests {
     use std::fs;
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt as _;
+    use std::path::Path;
 
     use rw_types::config::{Config, PermissionDecision, UpdateChannel};
     use tempfile::tempdir;
@@ -3670,6 +3854,107 @@ kind = "openai_codex"
         assert!(loader.persist_tui_keybinding_preset("standard").is_err());
         fs::write(&mcp, vec![b'x'; super::MAX_TUI_AUX_CONFIG_BYTES + 1]).expect("oversized MCP");
         assert!(loader.persist_tui_mcp_enabled("docs", true).is_err());
+    }
+
+    #[test]
+    fn tui_stdio_mcp_persistence_has_loader_compatible_shape_and_redacts_errors() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        let loader = ConfigLoader::new(user.clone(), project);
+        let secret = "stdio-secret-canary";
+        loader
+            .persist_tui_mcp_stdio_server(
+                "docs",
+                Path::new("/usr/local/bin/docs-mcp"),
+                &["--stdio".to_owned(), "docs".to_owned()],
+                &[("DOCS_TOKEN".to_owned(), secret.to_owned())],
+            )
+            .expect("persist stdio server");
+
+        let path = user.with_file_name("mcp.toml");
+        let document = fs::read_to_string(&path).expect("MCP config");
+        let parsed = toml::from_str::<toml::Value>(&document).expect("loader-compatible TOML");
+        let server = parsed
+            .get("servers")
+            .and_then(|servers| servers.get("docs"))
+            .expect("docs server");
+        assert_eq!(
+            server.get("argv").and_then(toml::Value::as_array),
+            Some(&vec![
+                toml::Value::String("/usr/local/bin/docs-mcp".to_owned()),
+                toml::Value::String("--stdio".to_owned()),
+                toml::Value::String("docs".to_owned()),
+            ])
+        );
+        assert_eq!(
+            server
+                .get("environment")
+                .and_then(|environment| environment.get("DOCS_TOKEN"))
+                .and_then(toml::Value::as_str),
+            Some(secret)
+        );
+        assert_eq!(
+            server.get("enabled").and_then(toml::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            server.get("defer_tools").and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            loader.tui_mcp_servers().expect("MCP list"),
+            [("docs".to_owned(), false)]
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                fs::metadata(&path).expect("metadata").permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let oversized_secret = format!(
+            "{secret}{}",
+            "x".repeat(super::MAX_MCP_ENVIRONMENT_VALUE_BYTES)
+        );
+        let error = loader
+            .persist_tui_mcp_stdio_server(
+                "other",
+                Path::new("/usr/local/bin/docs-mcp"),
+                &[],
+                &[("OTHER_TOKEN".to_owned(), oversized_secret.clone())],
+            )
+            .expect_err("oversized environment must fail");
+        let message = error.to_string();
+        assert!(!message.contains(secret));
+        assert!(!message.contains(&oversized_secret));
+    }
+
+    #[test]
+    fn tui_mcp_remove_deletes_only_the_server_and_matching_override() {
+        let root = tempdir().expect("root");
+        let user = root.path().join("user/config.toml");
+        let project = root.path().join("repo/.rottweiler/config.toml");
+        fs::create_dir_all(user.parent().expect("user parent")).expect("user dir");
+        fs::create_dir_all(project.parent().expect("project parent")).expect("project dir");
+        let mcp = user.with_file_name("mcp.toml");
+        fs::write(
+            &mcp,
+            "[servers.docs]\nargv=['/usr/bin/docs']\n[servers.search]\nendpoint='https://example.com/mcp'\n[capability_overrides.docs]\ndefault=['reads_fs']\n[capability_overrides.search]\ndefault=['network']\n",
+        )
+        .expect("MCP config");
+        let loader = ConfigLoader::new(user, project);
+        loader.remove_tui_mcp_server("docs").expect("remove docs");
+        let document = fs::read_to_string(&mcp).expect("MCP config");
+        assert!(!document.contains("servers.docs"));
+        assert!(!document.contains("capability_overrides.docs"));
+        assert!(document.contains("servers.search"));
+        assert!(document.contains("capability_overrides.search"));
+        assert!(loader.remove_tui_mcp_server("missing").is_err());
     }
 
     #[cfg(unix)]

@@ -27,10 +27,10 @@ use rw_core::runtime_support::{
 };
 use rw_core::runtime_support::{SandboxedProtocolLauncher, Tool, UpstreamProxy};
 use rw_core::{
-    HostError, HostMcpService, LoopbackMcpAuthority, McpApprovalReview, McpPolicyProxy,
-    McpServerDescriptor, McpServerState, ProductionMcpHttpClient, ProductionMcpHttpConnector,
-    SessionCommandAction, SessionCommandContext, SessionCommandOutput, ToonMcpEncoder,
-    VaultMcpTokenProvider,
+    HostError, HostMcpService, LoopbackMcpAuthority, McpApprovalReview, McpEnvironmentEntry,
+    McpPolicyProxy, McpServerDescriptor, McpServerState, ProductionMcpHttpClient,
+    ProductionMcpHttpConnector, SessionCommandAction, SessionCommandContext, SessionCommandOutput,
+    ToonMcpEncoder, VaultMcpTokenProvider,
 };
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
@@ -42,6 +42,32 @@ const MAX_CONTROL_OUTPUT: usize = 32 * 1024;
 const APPROVAL_VERSION: u16 = 1;
 
 type McpCredentialResolver = Arc<dyn Fn(&str) -> Result<String> + Send + Sync + 'static>;
+
+fn configured_stdio_environment(
+    configs: &[DiscoveredMcpServer],
+) -> std::collections::BTreeSet<String> {
+    configs
+        .iter()
+        .flat_map(|config| match &config.transport {
+            crate::m8_config::DiscoveredMcpTransport::Stdio {
+                inherit_env,
+                environment,
+                ..
+            } => inherit_env
+                .iter()
+                .cloned()
+                .chain(environment.iter().map(|(name, _)| name.clone()))
+                .chain(
+                    config
+                        .credentials
+                        .iter()
+                        .map(|binding| binding.environment.clone()),
+                )
+                .collect::<Vec<_>>(),
+            crate::m8_config::DiscoveredMcpTransport::Http { .. } => Vec::new(),
+        })
+        .collect()
+}
 
 /// Resolves stdio credential bindings only when an explicit connection is
 /// requested. Registered MCP metadata must never make an idle TUI open the OS
@@ -149,6 +175,7 @@ impl McpApprovalStore {
                 argv,
                 cwd,
                 inherit_env,
+                environment,
                 read_roots,
                 write_roots,
                 allowed_domains,
@@ -158,6 +185,7 @@ impl McpApprovalStore {
                 "argv":argv,
                 "cwd":cwd,
                 "inherited_environment_names":inherit_env,
+                "environment_names":environment.iter().map(|(name, _)| name).collect::<Vec<_>>(),
                 "read_roots":read_roots,
                 "write_roots":write_roots,
                 "allowed_domains":allowed_domains,
@@ -270,6 +298,33 @@ impl McpApprovalStore {
         Ok(())
     }
 
+    pub(crate) fn remove_user_server(&self, server: &ServerId) -> Result<()> {
+        let mut configs = self
+            .configs
+            .write()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        let mut expected = self
+            .expected
+            .write()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        let mut approved = self
+            .approved
+            .lock()
+            .map_err(|_| miette!("MCP approval lock was poisoned"))?;
+        if !configs.contains_key(server) || !expected.contains_key(server) {
+            return Err(miette!("unknown MCP server {server}"));
+        }
+        if approved.contains_key(&server.0) {
+            let mut updated = approved.clone();
+            updated.remove(&server.0);
+            persist_approval_file(&self.path, &updated)?;
+            *approved = updated;
+        }
+        configs.remove(server);
+        expected.remove(server);
+        Ok(())
+    }
+
     fn is_approved(&self, server: &ServerId) -> Result<bool> {
         let expected = self
             .expected
@@ -330,6 +385,43 @@ pub(crate) struct DispatchingMcpConnector {
     pub(crate) http: Arc<dyn McpConnector>,
 }
 
+struct LazySandboxedStdioConnector {
+    workspace_roots: Vec<PathBuf>,
+    scratch: PathBuf,
+    helper: PathBuf,
+    environment: Arc<RwLock<std::collections::BTreeSet<String>>>,
+    approvals: Arc<McpApprovalStore>,
+}
+
+#[async_trait]
+impl McpConnector for LazySandboxedStdioConnector {
+    async fn connect(
+        &self,
+        config: &McpServerConfig,
+    ) -> std::result::Result<Arc<dyn McpClient>, McpError> {
+        let environment = self
+            .environment
+            .read()
+            .map_err(|_| McpError::Policy("MCP environment authority is unavailable".to_owned()))?
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let launcher = SandboxedProtocolLauncher::new(
+            &self.workspace_roots,
+            &self.scratch,
+            &self.helper,
+            environment,
+        )
+        .map_err(|error| McpError::Policy(error.to_string()))?;
+        rw_core::runtime_support::mcp::SandboxedStdioConnector::new(
+            launcher,
+            self.approvals.clone(),
+        )
+        .connect(config)
+        .await
+    }
+}
+
 #[async_trait]
 impl McpConnector for DispatchingMcpConnector {
     async fn connect(
@@ -347,6 +439,7 @@ pub(crate) struct McpSessionRuntime {
     pub(crate) manager: Arc<McpManager>,
     pub(crate) spool: Arc<dyn OverflowSpool>,
     pub(crate) approvals: Arc<McpApprovalStore>,
+    pub(crate) stdio_environment: Arc<RwLock<std::collections::BTreeSet<String>>>,
     _scratch: PrivateMcpScratch,
 }
 
@@ -357,6 +450,7 @@ pub(crate) struct LiveMcpAdmin {
     approvals: Arc<McpApprovalStore>,
     config_loader: ConfigLoader,
     user_mcp_path: PathBuf,
+    stdio_environment: Arc<RwLock<std::collections::BTreeSet<String>>>,
     operation: tokio::sync::Mutex<()>,
 }
 
@@ -366,12 +460,27 @@ impl LiveMcpAdmin {
         approvals: Arc<McpApprovalStore>,
         config_loader: ConfigLoader,
     ) -> Self {
+        Self::new_with_stdio_environment(
+            manager,
+            approvals,
+            config_loader,
+            Arc::new(RwLock::new(std::collections::BTreeSet::new())),
+        )
+    }
+
+    pub(crate) fn new_with_stdio_environment(
+        manager: Arc<McpManager>,
+        approvals: Arc<McpApprovalStore>,
+        config_loader: ConfigLoader,
+        stdio_environment: Arc<RwLock<std::collections::BTreeSet<String>>>,
+    ) -> Self {
         let user_mcp_path = config_loader.credentials_path().with_file_name("mcp.toml");
         Self {
             manager,
             approvals,
             config_loader,
             user_mcp_path,
+            stdio_environment,
             operation: tokio::sync::Mutex::new(()),
         }
     }
@@ -455,6 +564,80 @@ impl LiveMcpAdmin {
             capability_override_origin: None,
         })
     }
+
+    fn discovered_stdio(
+        &self,
+        name: &str,
+        executable: &str,
+        args: &[String],
+        environment: &[McpEnvironmentEntry],
+    ) -> std::result::Result<DiscoveredMcpServer, HostError> {
+        let base = self
+            .user_mcp_path
+            .parent()
+            .and_then(Path::parent)
+            .or_else(|| self.user_mcp_path.parent())
+            .ok_or_else(|| HostError::Query("user MCP configuration has no base".to_owned()))?;
+        let environment = environment
+            .iter()
+            .map(|entry| (entry.key.clone(), entry.value.clone()))
+            .collect::<Vec<_>>();
+        if environment
+            .iter()
+            .map(|(name, _)| name)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != environment.len()
+        {
+            return Err(HostError::Protocol(
+                "MCP environment contains duplicate keys".to_owned(),
+            ));
+        }
+        crate::m8_config::discover_tui_stdio_server(
+            &self.user_mcp_path,
+            base,
+            name,
+            Path::new(executable),
+            args.to_vec(),
+            environment,
+        )
+        .map_err(|error| HostError::Protocol(error.to_string()))
+    }
+
+    async fn set_enabled_locked(
+        &self,
+        name: &str,
+        enabled: bool,
+    ) -> std::result::Result<(), HostError> {
+        let id = ServerId::new(name.to_owned())
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
+        if enabled
+            && !self
+                .approvals
+                .is_approved(&id)
+                .map_err(|error| HostError::Query(error.to_string()))?
+        {
+            return Err(HostError::Protocol(
+                "MCP server must be reviewed and approved before enabling".to_owned(),
+            ));
+        }
+        if let Err(error) = self.manager.set_enabled(&id, enabled).await {
+            if enabled {
+                let _ = self.manager.set_enabled(&id, false).await;
+            }
+            return Err(HostError::Query(error.to_string()));
+        }
+        if let Err(error) = self.config_loader.persist_tui_mcp_enabled(name, enabled) {
+            let rollback = self.manager.set_enabled(&id, !enabled).await;
+            if rollback.is_err() {
+                return Err(HostError::Persistence(format!(
+                    "MCP enablement persistence failed and live rollback was incomplete: {error}"
+                )));
+            }
+            return Err(HostError::Persistence(error.to_string()));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -495,6 +678,93 @@ impl HostMcpService for LiveMcpAdmin {
             }
             return Err(HostError::Persistence(error.to_string()));
         }
+        self.inventory().await
+    }
+
+    async fn add_stdio(
+        &self,
+        name: &str,
+        executable: &str,
+        args: &[String],
+        environment: &[McpEnvironmentEntry],
+    ) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
+        let _guard = self.operation.lock().await;
+        let discovered = self.discovered_stdio(name, executable, args, environment)?;
+        let runtime = discovered
+            .runtime_config(|_| unreachable!("wizard stdio server has no credential binding"))
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        let id = runtime.id.clone();
+        self.manager
+            .register(runtime)
+            .await
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        if let Err(error) = self.approvals.register_user_server(discovered.clone()) {
+            let _ = self.manager.unregister_disabled(&id).await;
+            return Err(HostError::Query(error.to_string()));
+        }
+        let crate::m8_config::DiscoveredMcpTransport::Stdio {
+            argv, environment, ..
+        } = &discovered.transport
+        else {
+            unreachable!("stdio discovery returned another transport")
+        };
+        if let Err(error) = self.config_loader.persist_tui_mcp_stdio_server(
+            name,
+            Path::new(&argv[0]),
+            &argv[1..],
+            environment,
+        ) {
+            let manager_rollback = self.manager.unregister_disabled(&id).await;
+            let approval_rollback = self.approvals.unregister_user_server(&id);
+            if manager_rollback.is_err() || approval_rollback.is_err() {
+                return Err(HostError::Persistence(format!(
+                    "MCP persistence failed and live rollback was incomplete: {error}"
+                )));
+            }
+            return Err(HostError::Persistence(error.to_string()));
+        }
+        self.stdio_environment
+            .write()
+            .map_err(|_| HostError::Query("MCP environment authority is unavailable".to_owned()))?
+            .extend(environment.iter().map(|(name, _)| name.clone()));
+        self.inventory().await
+    }
+
+    async fn remove(&self, name: &str) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
+        let _guard = self.operation.lock().await;
+        let id = ServerId::new(name.to_owned())
+            .map_err(|error| HostError::Protocol(error.to_string()))?;
+        let status = self
+            .manager
+            .statuses()
+            .await
+            .into_iter()
+            .find(|status| status.id == id)
+            .ok_or_else(|| HostError::Query(format!("unknown MCP server {id}")))?;
+        if !self
+            .config_loader
+            .tui_mcp_servers()
+            .map_err(|error| HostError::Persistence(error.to_string()))?
+            .iter()
+            .any(|(server, _)| server == name)
+        {
+            return Err(HostError::Persistence(format!(
+                "MCP server {id} is not present in the user configuration"
+            )));
+        }
+        if status.enabled {
+            self.set_enabled_locked(name, false).await?;
+        }
+        self.manager
+            .unregister_disabled(&id)
+            .await
+            .map_err(|error| HostError::Query(error.to_string()))?;
+        self.config_loader
+            .remove_tui_mcp_server(name)
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
+        self.approvals
+            .remove_user_server(&id)
+            .map_err(|error| HostError::Persistence(error.to_string()))?;
         self.inventory().await
     }
 
@@ -571,33 +841,7 @@ impl HostMcpService for LiveMcpAdmin {
         enabled: bool,
     ) -> std::result::Result<Vec<McpServerDescriptor>, HostError> {
         let _guard = self.operation.lock().await;
-        let id = ServerId::new(name.to_owned())
-            .map_err(|error| HostError::Protocol(error.to_string()))?;
-        if enabled
-            && !self
-                .approvals
-                .is_approved(&id)
-                .map_err(|error| HostError::Query(error.to_string()))?
-        {
-            return Err(HostError::Protocol(
-                "MCP server must be reviewed and approved before enabling".to_owned(),
-            ));
-        }
-        if let Err(error) = self.manager.set_enabled(&id, enabled).await {
-            if enabled {
-                let _ = self.manager.set_enabled(&id, false).await;
-            }
-            return Err(HostError::Query(error.to_string()));
-        }
-        if let Err(error) = self.config_loader.persist_tui_mcp_enabled(name, enabled) {
-            let rollback = self.manager.set_enabled(&id, !enabled).await;
-            if rollback.is_err() {
-                return Err(HostError::Persistence(format!(
-                    "MCP enablement persistence failed and live rollback was incomplete: {error}"
-                )));
-            }
-            return Err(HostError::Persistence(error.to_string()));
-        }
+        self.set_enabled_locked(name, enabled).await?;
         self.inventory().await
     }
 }
@@ -637,6 +881,7 @@ impl McpSessionRuntime {
             manager,
             spool,
             approvals,
+            stdio_environment: Arc::new(RwLock::new(configured_stdio_environment(configs))),
             _scratch: scratch,
         })
     }
@@ -652,6 +897,7 @@ impl McpSessionRuntime {
         resolve_credential: impl Fn(&str) -> Result<String> + Send + Sync + 'static,
         approvals: Arc<McpApprovalStore>,
         scratch: PrivateMcpScratch,
+        stdio_environment: Arc<RwLock<std::collections::BTreeSet<String>>>,
     ) -> Result<Self> {
         let spool = Arc::new(
             FilesystemSpool::new(private_session_root.to_path_buf())
@@ -698,6 +944,7 @@ impl McpSessionRuntime {
             manager,
             spool,
             approvals,
+            stdio_environment,
             _scratch: scratch,
         })
     }
@@ -785,50 +1032,33 @@ impl McpSessionRuntime {
             authorization,
             approvals.clone(),
         ));
-        let connector: Arc<dyn McpConnector> = if configs.iter().any(|config| {
+        let stdio_environment = Arc::new(RwLock::new(configured_stdio_environment(configs)));
+        if configs.iter().any(|config| {
             matches!(
                 &config.transport,
                 crate::m8_config::DiscoveredMcpTransport::Stdio { .. }
             )
         }) {
-            let environment = configs
-                .iter()
-                .flat_map(|config| match &config.transport {
-                    crate::m8_config::DiscoveredMcpTransport::Stdio { inherit_env, .. } => {
-                        inherit_env
-                            .iter()
-                            .cloned()
-                            .chain(
-                                config
-                                    .credentials
-                                    .iter()
-                                    .map(|binding| binding.environment.clone()),
-                            )
-                            .collect::<Vec<_>>()
-                    }
-                    crate::m8_config::DiscoveredMcpTransport::Http { .. } => Vec::new(),
-                })
-                .collect::<Vec<_>>();
-            let launcher = SandboxedProtocolLauncher::new(
+            SandboxedProtocolLauncher::new(
                 workspace_roots,
                 scratch.path(),
                 helper,
-                environment,
+                stdio_environment
+                    .read()
+                    .map_err(|_| miette!("MCP environment authority is unavailable"))?
+                    .iter()
+                    .cloned(),
             )
             .into_diagnostic()?;
-            let stdio: Arc<dyn McpConnector> =
-                Arc::new(rw_core::runtime_support::mcp::SandboxedStdioConnector::new(
-                    launcher,
-                    approvals.clone(),
-                ));
-            Arc::new(DispatchingMcpConnector { stdio, http })
-        } else {
-            // Empty and HTTP-only sessions never launch a local child. Avoid
-            // validating an irrelevant helper path (which may legitimately be
-            // reached through package-manager symlink provenance) while stdio
-            // configurations continue through the fail-closed launcher above.
-            http
-        };
+        }
+        let stdio: Arc<dyn McpConnector> = Arc::new(LazySandboxedStdioConnector {
+            workspace_roots: workspace_roots.to_vec(),
+            scratch: scratch.path().to_owned(),
+            helper: helper.to_owned(),
+            environment: stdio_environment.clone(),
+            approvals: approvals.clone(),
+        });
+        let connector: Arc<dyn McpConnector> = Arc::new(DispatchingMcpConnector { stdio, http });
         Self::start_deferred(
             configs,
             connector,
@@ -841,6 +1071,7 @@ impl McpSessionRuntime {
             },
             approvals,
             scratch,
+            stdio_environment,
         )
         .await
     }
@@ -2017,6 +2248,7 @@ mod tests {
                 argv: vec!["/bin/false".to_owned()],
                 cwd: None,
                 inherit_env: Vec::new(),
+                environment: Vec::new(),
                 read_roots: Vec::new(),
                 write_roots: Vec::new(),
                 allowed_domains: Vec::new(),
@@ -2046,6 +2278,9 @@ mod tests {
             },
             approvals,
             PrivateMcpScratch::create().expect("scratch"),
+            Arc::new(RwLock::new(configured_stdio_environment(
+                std::slice::from_ref(&config),
+            ))),
         )
         .await
         .expect("metadata-only startup");
@@ -2330,6 +2565,125 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn live_admin_stdio_validation_and_enabled_removal_are_fail_closed() {
+        let root = tempfile::tempdir().expect("root");
+        let project = tempfile::tempdir().expect("project");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let manager = Arc::new(McpManager::new(
+            Arc::new(CatalogConnector),
+            Arc::new(MemorySpool),
+            Arc::new(ToonMcpEncoder),
+            McpLimits::default(),
+        ));
+        let approvals = Arc::new(McpApprovalStore::open(root.path(), &[]).expect("approvals"));
+        let loader = ConfigLoader::new(
+            root.path().join("config.toml"),
+            project.path().join(".rottweiler/config.toml"),
+        );
+        let admin = LiveMcpAdmin::new(manager.clone(), approvals, loader.clone());
+        let executable = std::fs::canonicalize("/usr/bin/true")
+            .expect("true")
+            .to_string_lossy()
+            .into_owned();
+        let secret = "stdio-secret-canary";
+        let environment = [McpEnvironmentEntry {
+            key: "DOCS_TOKEN".to_owned(),
+            value: secret.to_owned(),
+        }];
+
+        assert!(admin.add_stdio("", &executable, &[], &[]).await.is_err());
+        assert!(
+            admin
+                .add_stdio("relative", "bin/docs", &[], &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            admin
+                .add_stdio(
+                    "too-many-args",
+                    &executable,
+                    &vec!["x".to_owned(); 256],
+                    &[]
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            admin
+                .add_stdio("empty-arg", &executable, &[String::new()], &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            admin
+                .add_stdio(
+                    "too-many-env",
+                    &executable,
+                    &[],
+                    &(0..257)
+                        .map(|index| McpEnvironmentEntry {
+                            key: format!("KEY_{index}"),
+                            value: "x".to_owned(),
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .await
+                .is_err()
+        );
+        let oversized = format!("{secret}{}", "x".repeat(16 * 1024));
+        let error = admin
+            .add_stdio(
+                "oversized-env",
+                &executable,
+                &[],
+                &[McpEnvironmentEntry {
+                    key: "TOKEN".to_owned(),
+                    value: oversized,
+                }],
+            )
+            .await
+            .expect_err("oversized environment");
+        assert!(!error.to_string().contains(secret));
+
+        let inventory = admin
+            .add_stdio("docs", &executable, &["--stdio".to_owned()], &environment)
+            .await
+            .expect("register and persist stdio");
+        assert_eq!(inventory.len(), 1);
+        assert!(!inventory[0].enabled);
+        assert!(!inventory[0].approved);
+        assert!(matches!(inventory[0].state, McpServerState::Disabled));
+        let review = admin.review("docs").await.expect("stdio review");
+        assert_eq!(review.transport, "stdio");
+        assert_eq!(review.endpoint, None);
+        assert!(!format!("{review:?}").contains(secret));
+        admin
+            .approve("docs", &review.fingerprint)
+            .await
+            .expect("approve stdio");
+        let enabled = admin.set_enabled("docs", true).await.expect("enable stdio");
+        assert!(enabled[0].enabled);
+
+        let removed = admin.remove("docs").await.expect("disable then remove");
+        assert!(removed.is_empty());
+        assert!(manager.statuses().await.is_empty());
+        assert!(
+            loader
+                .tui_mcp_servers()
+                .expect("persisted removal")
+                .is_empty()
+        );
+        assert!(admin.review("docs").await.is_err());
+        assert!(admin.remove("missing").await.is_err());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn live_admin_rolls_back_registration_when_atomic_persistence_is_rejected() {
@@ -2447,6 +2801,7 @@ mod tests {
                 ],
                 cwd: None,
                 inherit_env: vec![],
+                environment: vec![],
                 read_roots: vec![],
                 write_roots: vec![],
                 allowed_domains: vec![],
@@ -2606,6 +2961,7 @@ mod tests {
                     argv: vec![executable.clone()],
                     cwd: None,
                     inherit_env: vec![],
+                    environment: vec![],
                     read_roots: vec![],
                     write_roots: vec![],
                     allowed_domains: vec![],
@@ -2674,6 +3030,7 @@ mod tests {
                 argv: vec![executable],
                 cwd: None,
                 inherit_env: vec![],
+                environment: vec![],
                 read_roots: vec![],
                 write_roots: vec![],
                 allowed_domains: vec![],
@@ -2813,6 +3170,7 @@ mod tests {
                 argv: vec![executable],
                 cwd: None,
                 inherit_env: vec![],
+                environment: vec![],
                 read_roots: vec![],
                 write_roots: vec![],
                 allowed_domains: vec![],

@@ -42,6 +42,7 @@ export interface TranscriptRenderableOptions {
   readonly treeSitterClient?: TreeSitterClient
   readonly onInteraction?: () => void
   readonly onOpenSubagent?: (subagentId: string) => void
+  readonly onOpenToolOutput?: (toolCallId: string) => void
 }
 
 const MAX_VISIBLE_SUBAGENTS = 8
@@ -214,11 +215,13 @@ function colorWithOpacity(color: string, opacity: number): string {
 export class ToolBlockRenderable extends BoxRenderable {
   readonly header: TextRenderable
   readonly body: TextRenderable
+  readonly truncationMarker: TextRenderable
   command: CodeRenderable | TextRenderable | null = null
   diff: DiffRenderable | TextRenderable | null = null
   commandPrompt: TextRenderable | null = null
   #commandContainer: BoxRenderable | null = null
   #diffContainer: BoxRenderable | null = null
+  readonly #bodyContainer: BoxRenderable
   #commandSignature = ""
   #diffSignature = ""
   #collapsed: boolean
@@ -273,6 +276,23 @@ export class ToolBlockRenderable extends BoxRenderable {
       visible: !this.#collapsed,
       selectable: true,
     })
+    this.truncationMarker = new TextRenderable(ctx, {
+      content: "",
+      fg: theme.muted,
+      height: 0,
+      flexShrink: 0,
+      wrapMode: "none",
+      visible: false,
+      selectable: true,
+    })
+    this.#bodyContainer = new BoxRenderable(ctx, {
+      id: `tool-body-${tool.toolCallId}`,
+      width: "100%",
+      height: 0,
+      flexDirection: "column",
+      flexShrink: 0,
+      visible: !this.#collapsed,
+    })
     this.onKeyDown = (key) => {
       if (key.name === "return" || key.name === "space") {
         key.preventDefault()
@@ -286,8 +306,16 @@ export class ToolBlockRenderable extends BoxRenderable {
       const selection = this.ctx.getSelection()
       if (selection === null || selection.getSelectedText().trim() === "") this.toggle()
     }
+    this.truncationMarker.onMouseUp = () => {
+      const selection = this.ctx.getSelection()
+      if (selection === null || selection.getSelectedText().trim() === "") {
+        this.#rendering?.onOpenToolOutput?.(this.#tool.toolCallId)
+      }
+    }
     this.add(this.header)
-    this.add(this.body)
+    this.#bodyContainer.add(this.body)
+    this.#bodyContainer.add(this.truncationMarker)
+    this.add(this.#bodyContainer)
     this.update(tool)
   }
 
@@ -297,7 +325,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#tool = tool
     if (tool.status === "awaiting_approval" && previousStatus !== "awaiting_approval") {
       this.#collapsed = false
-      this.body.visible = true
+      this.#bodyContainer.visible = true
     }
     if (
       !this.#userSetExpansion &&
@@ -310,7 +338,7 @@ export class ToolBlockRenderable extends BoxRenderable {
       // exists. Expand on the completion transition instead of relying only
       // on constructor state, while preserving an explicit user collapse.
       this.#collapsed = false
-      this.body.visible = true
+      this.#bodyContainer.visible = true
     }
     this.#syncCommand(tool)
     this.#syncDiff(tool)
@@ -340,15 +368,36 @@ export class ToolBlockRenderable extends BoxRenderable {
     if (this.#collapsed) {
       this.body.content = ""
       this.body.height = 0
+      this.body.visible = false
+      this.truncationMarker.content = ""
+      this.truncationMarker.height = 0
+      this.truncationMarker.visible = false
+      this.#bodyContainer.height = 0
+      this.#bodyContainer.visible = false
       this.height = 1
       return
     }
-    const body = toolBodyContent(tool)
-    this.body.content = tool.status === "running"
-      ? boundedTailLines(body, 8)
-      : boundedLines(body, 8)
-    const bodyRows = Math.min(8, Math.max(1, this.body.plainText.split("\n").length))
-    this.body.height = bodyRows
+    const body = toolOutputContent(tool)
+    const preview = boundedToolBody(body, 8, tool.status === "running")
+    this.body.visible = true
+    this.body.content = preview.content
+    const bodyContentRows = Math.max(1, preview.content.split("\n").length)
+    this.body.height = bodyContentRows
+    this.truncationMarker.content = preview.hiddenLines === 0
+      ? ""
+      : `… ${preview.hiddenLines} more lines · click to view all`
+    this.truncationMarker.height = preview.hiddenLines === 0 ? 0 : 1
+    this.truncationMarker.visible = preview.hiddenLines > 0
+    this.#bodyContainer.visible = true
+    if (preview.markerFirst) {
+      this.#bodyContainer.remove(this.truncationMarker)
+      this.#bodyContainer.insertBefore(this.truncationMarker, this.body)
+    } else {
+      this.#bodyContainer.remove(this.truncationMarker)
+      this.#bodyContainer.add(this.truncationMarker)
+    }
+    const bodyRows = bodyContentRows + (preview.hiddenLines === 0 ? 0 : 1)
+    this.#bodyContainer.height = bodyRows
     this.height = bodyRows + 1 + (this.#commandContainer?.height ?? 0) + (this.#diffContainer?.height ?? 0)
   }
 
@@ -408,7 +457,7 @@ export class ToolBlockRenderable extends BoxRenderable {
     container.add(this.commandPrompt)
     container.add(this.command)
     this.#commandContainer = container
-    this.insertBefore(container, this.#diffContainer ?? this.body)
+    this.insertBefore(container, this.#diffContainer ?? this.#bodyContainer)
   }
 
   #syncDiff(tool: ToolProjection): void {
@@ -492,19 +541,20 @@ export class ToolBlockRenderable extends BoxRenderable {
       }))
     }
     this.#diffContainer = container
-    this.insertBefore(container, this.body)
+    this.insertBefore(container, this.#bodyContainer)
   }
 
   toggle(): void {
     this.#userSetExpansion = true
     this.#collapsed = !this.#collapsed
-    this.body.visible = !this.#collapsed
+    this.#bodyContainer.visible = !this.#collapsed
     this.update(this.#tool)
     this.#onExpansionChange?.(!this.#collapsed)
   }
 }
 
-function toolBodyContent(tool: ToolProjection): string {
+/** Complete tool-card body content before compact transcript preview bounding. */
+export function toolOutputContent(tool: ToolProjection): string {
   const live = tool.chunks.map((chunk) => chunk.chunk).join("")
   const presentation = presentTool(tool)
   const output = tool.status === "finished"
@@ -545,19 +595,22 @@ function bashPrompt(command: string): string {
   return prompts.join("\n")
 }
 
-function boundedLines(value: string, maximum: number): string {
+function boundedToolBody(
+  value: string,
+  maximum: number,
+  retainTail: boolean,
+): { readonly content: string; readonly hiddenLines: number; readonly markerFirst: boolean } {
   const lines = value.split("\n")
-  if (lines.length <= maximum) return value
-  if (maximum <= 1) return `… ${lines.length} lines`
-  return [...lines.slice(0, maximum - 1), `… ${lines.length - maximum + 1} more lines`].join("\n")
-}
-
-function boundedTailLines(value: string, maximum: number): string {
-  const lines = value.split("\n")
-  if (lines.length <= maximum) return value
-  if (maximum <= 1) return `… ${lines.length} lines`
-  const retained = lines.slice(-(maximum - 1))
-  return [`… ${lines.length - retained.length} earlier lines`, ...retained].join("\n")
+  if (lines.length <= maximum) {
+    return { content: value, hiddenLines: 0, markerFirst: false }
+  }
+  const retainedRows = Math.max(0, maximum - 1)
+  const retained = retainTail ? lines.slice(-retainedRows) : lines.slice(0, retainedRows)
+  return {
+    content: retained.join("\n"),
+    hiddenLines: lines.length - retained.length,
+    markerFirst: retainTail,
+  }
 }
 
 function readToolDiff(tool: ToolProjection): { path: string; unifiedDiff: string } | null {
@@ -586,7 +639,7 @@ function compactToolPresentation(tool: ToolProjection): { subject: string; summa
     : { subject, summary }
 }
 
-function toolDisplayName(name: string): string {
+export function toolDisplayName(name: string): string {
   return ({
     read: "Read file",
     write: "Write file",
@@ -769,6 +822,7 @@ class TurnCardRenderable extends BoxRenderable {
     onReasoningExpansionChange: (expanded: boolean) => void,
     onInteraction: (() => void) | undefined,
     onOpenSubagent: ((subagentId: string) => void) | undefined,
+    onOpenToolOutput: ((toolCallId: string) => void) | undefined,
     treeSitterClient?: TreeSitterClient,
   ) {
     const shell = entry.presentation === "shell_result" ? entry.shell : undefined
@@ -940,6 +994,7 @@ class TurnCardRenderable extends BoxRenderable {
         {
           syntaxStyle,
           ...(treeSitterClient === undefined ? {} : { treeSitterClient }),
+          ...(onOpenToolOutput === undefined ? {} : { onOpenToolOutput }),
         },
       ))
     }
@@ -976,6 +1031,7 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #treeSitterClient: TreeSitterClient | undefined
   readonly #onInteraction: (() => void) | undefined
   readonly #onOpenSubagent: ((subagentId: string) => void) | undefined
+  readonly #onOpenToolOutput: ((toolCallId: string) => void) | undefined
   readonly #toolExpansion = new Map<string, boolean>()
   readonly #tailToolCards = new Map<string, ToolBlockRenderable>()
   readonly #reasoningExpansion = new Map<string, boolean>()
@@ -1008,6 +1064,7 @@ export class TranscriptRenderable extends BoxRenderable {
     this.#treeSitterClient = options.treeSitterClient
     this.#onInteraction = options.onInteraction
     this.#onOpenSubagent = options.onOpenSubagent
+    this.#onOpenToolOutput = options.onOpenToolOutput
     this.scroller = new ScrollBoxRenderable(ctx, {
       id: "transcript-scroll",
       width: "100%",
@@ -1284,6 +1341,7 @@ export class TranscriptRenderable extends BoxRenderable {
         (expanded) => this.#rememberReasoningExpansion(key, expanded),
         this.#onInteraction,
         this.#onOpenSubagent,
+        this.#onOpenToolOutput,
         this.#treeSitterClient,
       )
       this.scroller.insertBefore(card, reference)
@@ -1401,6 +1459,9 @@ export class TranscriptRenderable extends BoxRenderable {
             ...(this.#treeSitterClient === undefined
               ? {}
               : { treeSitterClient: this.#treeSitterClient }),
+            ...(this.#onOpenToolOutput === undefined
+              ? {}
+              : { onOpenToolOutput: this.#onOpenToolOutput }),
           },
         )
         this.#tailToolCards.set(tool.toolCallId, card)

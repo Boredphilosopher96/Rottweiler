@@ -8,7 +8,7 @@ import {
 } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
-import { ContextPanelRenderable, FuzzyPickerRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, formatElapsed, fuzzyScore } from "../src/components"
+import { ContextPanelRenderable, FuzzyPickerRenderable, ImageAttachmentRenderable, ReasoningBlockRenderable, SubagentPanelRenderable, SubagentTrayRenderable, ToolBlockRenderable, formatElapsed, fuzzyScore, toolOutputContent } from "../src/components"
 import { stringCellWidth } from "../src/render"
 import {
   PROTOCOL_VERSION,
@@ -396,7 +396,9 @@ describe("M4 retained components", () => {
     renderer.root.add(card)
     await setup.renderOnce()
 
-    expect(card.body.plainText).toContain("earlier lines")
+    expect(card.truncationMarker.plainText).toMatch(
+      /^… \d+ more lines · click to view all$/,
+    )
     expect(card.body.plainText).toContain("progress-12")
     expect(card.body.plainText).not.toContain("progress-1\n")
 
@@ -412,6 +414,146 @@ describe("M4 retained components", () => {
     renderer.clearSelection()
     await setup.mockMouse.click(card.header.x + 1, card.header.y)
     expect(card.body.visible).toBeFalse()
+  })
+
+  test("opens complete tool output, refreshes streaming content, and restores focus on close", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
+    renderer = setup.renderer
+    const tool = {
+      toolCallId: "full-output",
+      turnId: "1",
+      name: "read",
+      args: { path: "logs/full-output.log" },
+      status: "running" as const,
+      capabilities: ["read_filesystem" as const],
+      rationale: null,
+      diff: null,
+      chunks: Array.from({ length: 12 }, (_, index) => ({
+        stream: "stdout" as const,
+        chunk: `line-${index + 1}\n`,
+      })),
+      output: null,
+      isError: null,
+      callIndex: 0,
+    }
+    const initial: RottweilerState = {
+      ...createInitialState(),
+      tools: { [tool.toolCallId]: tool },
+      streamingTail: {
+        turnId: tool.turnId,
+        text: "",
+        thinking: "",
+        citations: [],
+        toolCallIds: [tool.toolCallId],
+        finished: null,
+      },
+    }
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    const card = app.transcript.streamingCard
+      .getChildren()
+      .flatMap((child) => child.getChildren())
+      .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)!
+    card.toggle()
+    await setup.renderOnce()
+
+    expect(card.body.plainText.split("\n")).toHaveLength(7)
+    expect(card.truncationMarker.plainText).toMatch(
+      /^… \d+ more lines · click to view all$/,
+    )
+    await setup.mockMouse.click(
+      card.truncationMarker.x + 2,
+      card.truncationMarker.y,
+    )
+    await setup.renderOnce()
+
+    expect(app.outputViewer.visible).toBeTrue()
+    expect(app.outputViewer.header.plainText).toBe("Read file · logs/full-output.log")
+    expect(app.outputViewer.body.plainText).toBe(toolOutputContent(tool))
+    expect(app.outputViewer.body.plainText).toContain("line-1")
+    expect(app.outputViewer.body.plainText).toContain("line-12")
+    expect(renderer.currentFocusedRenderable).toBe(app.outputViewer.scroller)
+    expect(app.composer.visible).toBeFalse()
+
+    const streamingTool = {
+      ...tool,
+      chunks: [...tool.chunks, { stream: "stdout" as const, chunk: "line-13\n" }],
+    }
+    const streaming: RottweilerState = {
+      ...initial,
+      tools: { [streamingTool.toolCallId]: streamingTool },
+    }
+    app.setState(streaming)
+    await setup.renderOnce()
+    expect(app.outputViewer.body.plainText).toBe(toolOutputContent(streamingTool))
+    expect(app.outputViewer.body.plainText).toContain("line-13")
+
+    setup.mockInput.pressEscape()
+    await Bun.sleep(30)
+    await setup.renderOnce()
+    expect(app.outputViewer.visible).toBeFalse()
+    expect(app.composer.visible).toBeTrue()
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
+
+    await setup.mockMouse.click(
+      card.truncationMarker.x + 2,
+      card.truncationMarker.y,
+    )
+    await setup.renderOnce()
+    expect(app.outputViewer.visible).toBeTrue()
+    app.setState({
+      ...streaming,
+      tools: {},
+      streamingTail: { ...streaming.streamingTail!, toolCallIds: [] },
+    })
+    await setup.renderOnce()
+    expect(app.outputViewer.visible).toBeFalse()
+    expect(renderer.currentFocusedRenderable).toBe(app.composer.editor)
+  })
+
+  test("does not open full tool output when the marker click completes a selection", async () => {
+    const setup = await createTestRenderer({ width: 90, height: 20, useThread: false })
+    renderer = setup.renderer
+    const opened: string[] = []
+    const card = new ToolBlockRenderable(renderer, kennelTheme, {
+      toolCallId: "selected-marker",
+      turnId: "1",
+      name: "read",
+      args: { path: "selection.log" },
+      status: "running",
+      capabilities: ["read_filesystem"],
+      rationale: null,
+      diff: null,
+      chunks: Array.from({ length: 12 }, (_, index) => ({
+        stream: "stdout" as const,
+        chunk: `selection-${index + 1}\n`,
+      })),
+      output: null,
+      isError: null,
+      callIndex: 0,
+    }, true, undefined, {
+      syntaxStyle: SyntaxStyle.create(),
+      onOpenToolOutput: (toolCallId) => opened.push(toolCallId),
+    })
+    renderer.root.add(card)
+    await setup.renderOnce()
+
+    await setup.mockMouse.drag(
+      card.truncationMarker.x + 1,
+      card.truncationMarker.y,
+      card.truncationMarker.x + 8,
+      card.truncationMarker.y,
+    )
+    expect(renderer.getSelection()?.getSelectedText().trim()).not.toBe("")
+    expect(opened).toEqual([])
+
+    renderer.clearSelection()
+    await setup.mockMouse.click(
+      card.truncationMarker.x + 2,
+      card.truncationMarker.y,
+    )
+    expect(opened).toEqual(["selected-marker"])
   })
 
   test("retains stable transcript rows and preserves the streaming markdown instance", async () => {

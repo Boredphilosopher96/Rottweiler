@@ -865,6 +865,72 @@
         "name": {
           "type": "string"
         },
+        "executable": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpEnvironmentEntry"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "add_mcp_stdio_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name",
+        "executable",
+        "args",
+        "environment"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "remove_mcp_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
         "type": {
           "type": "string",
           "const": "review_mcp_server"
@@ -1738,6 +1804,22 @@
       "enum": [
         "accept",
         "revert"
+      ]
+    },
+    "McpEnvironmentEntry": {
+      "description": "One explicit environment entry for a stdio MCP server.\n\nThe value is carried on the authenticated command wire but never exposed by\ndebug formatting.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "value"
       ]
     },
     "PermissionAction": {

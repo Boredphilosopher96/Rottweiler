@@ -6072,6 +6072,8 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::ListMcpServers { meta, .. }
         | ClientCommand::ListRuntimeServices { meta, .. }
         | ClientCommand::AddMcpHttpServer { meta, .. }
+        | ClientCommand::AddMcpStdioServer { meta, .. }
+        | ClientCommand::RemoveMcpServer { meta, .. }
         | ClientCommand::ReviewMcpServer { meta, .. }
         | ClientCommand::ApproveMcpServer { meta, .. }
         | ClientCommand::SetMcpServerEnabled { meta, .. }
@@ -6139,6 +6141,8 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::ListMcpServers { session_id, .. }
         | ClientCommand::ListRuntimeServices { session_id, .. }
         | ClientCommand::AddMcpHttpServer { session_id, .. }
+        | ClientCommand::AddMcpStdioServer { session_id, .. }
+        | ClientCommand::RemoveMcpServer { session_id, .. }
         | ClientCommand::ReviewMcpServer { session_id, .. }
         | ClientCommand::ApproveMcpServer { session_id, .. }
         | ClientCommand::SetMcpServerEnabled { session_id, .. }
@@ -8548,6 +8552,8 @@ async fn handle_actor_command(
                 | ClientCommand::ListMcpServers { .. }
                 | ClientCommand::ListRuntimeServices { .. }
                 | ClientCommand::AddMcpHttpServer { .. }
+                | ClientCommand::AddMcpStdioServer { .. }
+                | ClientCommand::RemoveMcpServer { .. }
                 | ClientCommand::ReviewMcpServer { .. }
                 | ClientCommand::ApproveMcpServer { .. }
                 | ClientCommand::SetMcpServerEnabled { .. } => {

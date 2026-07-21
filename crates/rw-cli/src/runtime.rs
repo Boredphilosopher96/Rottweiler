@@ -2551,13 +2551,14 @@ pub(crate) async fn compose_hosted_actor(
         Some(runtime)
     };
     let mcp_admin: Option<Arc<dyn rw_core::HostMcpService>> = mcp_runtime.as_ref().map(|runtime| {
-        Arc::new(crate::m8_runtime::LiveMcpAdmin::new(
+        Arc::new(crate::m8_runtime::LiveMcpAdmin::new_with_stdio_environment(
             Arc::clone(&runtime.manager),
             Arc::clone(&runtime.approvals),
             ConfigLoader::new(
                 options.credentials_path.with_file_name("config.toml"),
                 workspace.join(".rottweiler/config.toml"),
             ),
+            Arc::clone(&runtime.stdio_environment),
         )) as Arc<dyn rw_core::HostMcpService>
     });
     let plugin_redactor = Arc::new(crate::m8_runtime::SharedPluginRedactor::new(

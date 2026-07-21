@@ -13,10 +13,10 @@ use rw_types::{
     ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta, CommandOutcome, CommandSource,
     CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState,
     ContextSnapshot, Cost, CostSnapshot, DiffArtifact, EngineError, EngineErrorCategory,
-    EngineEvent, EventMeta, ImageRef, McpApprovalReview, McpServerDescriptor, McpServerState,
-    ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities,
-    ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor, ModelSwitchQuestion,
-    PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
+    EngineEvent, EventMeta, ImageRef, McpApprovalReview, McpEnvironmentEntry, McpServerDescriptor,
+    McpServerState, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
+    ModelCapabilities, ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor,
+    ModelSwitchQuestion, PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
     PermissionModeDescriptor, PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact,
     PlanDecision, PlanStep, PromptDump, PromptTool, ProviderAuthAttemptId, ProviderAuthChallenge,
     ProviderAuthKind, ProviderDescriptor, ProviderNextAction, Question, QuestionId, QuestionOption,
@@ -1731,6 +1731,7 @@ fn generate_typescript() -> String {
     declaration!(McpServerState);
     declaration!(McpServerDescriptor);
     declaration!(McpApprovalReview);
+    declaration!(McpEnvironmentEntry);
     declaration!(RuntimeServiceKind);
     declaration!(RuntimeServiceDescriptor);
     declaration!(WorkspaceFileMatch);

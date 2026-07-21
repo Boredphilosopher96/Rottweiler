@@ -20,9 +20,9 @@ pub use rw_types::config::{
 };
 pub use rw_types::{
     AccountingAttribution, Attachment, AttachmentData, CommandDescriptor, CommandSource,
-    ContextItemId, ContextSnapshot, CostSnapshot, McpApprovalReview, McpServerDescriptor,
-    McpServerState, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
-    ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, PermissionAction,
+    ContextItemId, ContextSnapshot, CostSnapshot, McpApprovalReview, McpEnvironmentEntry,
+    McpServerDescriptor, McpServerState, ModeId, ModelAlias, ModelAliasDescriptor,
+    ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot, ModelDescriptor, PermissionAction,
     PermissionApprovalDescriptor, PermissionApprovalScope, PermissionRuleDescriptor,
     PermissionStateDescriptor, PlanDecision, PromptDump, ProviderAuthChallenge, ProviderAuthKind,
     ProviderDescriptor, ProviderNextAction, ReviewFileDecision, ReviewFileStatus,
