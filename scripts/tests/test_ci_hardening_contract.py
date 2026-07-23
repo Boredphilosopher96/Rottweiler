@@ -29,8 +29,14 @@ class CiHardeningContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assert_checkout_credentials_are_not_persisted(workflow)
         smoke = workflow.split("  performance-smoke:", 1)[1].split(
-            "  performance-runner-contract:", 1
+            "  m4-ssh-loopback:", 1
         )[0]
+        self.assertNotIn("workflow_dispatch", workflow)
+        self.assertNotIn("performance-runner-contract", workflow)
+        self.assertNotIn("linux-performance-build", workflow)
+        self.assertNotIn("macos-performance-build", workflow)
+        self.assertNotIn("performance-linux", workflow)
+        self.assertNotIn("performance-macos", workflow)
         self.assertIn("needs: [test, security-tests]", smoke)
         self.assertNotIn("\n    if:", smoke)
         self.assertIn("timeout-minutes: 45", smoke)
@@ -89,14 +95,21 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("secrets.ROTTWEILER_EVAL_API_KEY", run_step)
 
     def test_protected_performance_consumers_fail_closed_before_queueing(self) -> None:
-        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        performance = (ROOT / ".github/workflows/performance.yml").read_text(
+            encoding="utf-8"
+        )
         nightly = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
         release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assert_checkout_credentials_are_not_persisted(performance)
+        self.assertIn("on:\n  workflow_dispatch:", performance)
+        self.assertNotIn("pull_request:", performance)
+        self.assertNotIn("\n  push:", performance)
+        self.assertNotIn("github.event_name", performance)
 
         cases = (
             (
-                ci,
-                "performance-runner-contract",
+                performance,
+                "runner-contract",
                 ("performance-linux", "performance-macos"),
             ),
             (
@@ -167,7 +180,7 @@ class CiHardeningContractTests(unittest.TestCase):
     def test_rerun_artifacts_preserve_producers_and_version_evidence(self) -> None:
         workflows = {
             name: (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
-            for name in ("ci", "nightly", "release")
+            for name in ("performance", "nightly", "release")
         }
 
         for workflow_name, workflow in workflows.items():
@@ -194,9 +207,9 @@ class CiHardeningContractTests(unittest.TestCase):
                 self.assertIn("overwrite: true", build)
 
         expected_evidence_names = {
-            "ci": (
-                "pr-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
-                "pr-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
+            "performance": (
+                "manual-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
+                "manual-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
             ),
             "nightly": (
                 "nightly-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",

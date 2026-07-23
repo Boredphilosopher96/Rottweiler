@@ -172,14 +172,14 @@ Property tests worth calling out:
 | Memory, 8-hour stress session (engine + TUI combined) | < 500MB RSS | soak test, nightly |
 | Release size | engine binary < 25MB; TUI bundle < 100MB on macOS / < 110MB on Linux | CI check |
 
-The required full, nightly, and release headless gates enforce the stated
-20ms turn-overhead budget at p99 over 500 fresh processes. The per-PR smoke
-runs on a shared hosted runner, so it is deliberately a screening gate rather
-than release evidence: it enforces the same absolute startup and turn limits
-at the median over 100 fresh processes, which detects sustained regressions
-without treating host-wide scheduler stalls as product latency. Every measured
-sample is reported; neither tier retries, trims, nor substitutes a relative
-baseline.
+The required manually dispatched protected-performance, nightly, and release
+headless gates enforce the stated 20ms turn-overhead budget at p99 over 500
+fresh processes. The per-PR smoke runs on a shared hosted runner, so it is
+deliberately a screening gate rather than release evidence: it enforces the
+same absolute startup and turn limits at the median over 100 fresh processes,
+which detects sustained regressions without treating host-wide scheduler stalls
+as product latency. Every measured sample is reported; neither tier retries,
+trims, nor substitutes a relative baseline.
 
 Full p99 consumers run on repository-protected self-hosted runners labeled
 `Linux`, `X64`, and `performance` or `macOS`, `ARM64`, and `performance`. Each
@@ -287,6 +287,7 @@ one-time fixture or a single development run.
 ## 6. CI pipeline summary
 
 Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · protocol codegen check (schema → generated types are committed and in sync) · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · dependency-direction and guarded-network-boundary checks · docs build.
+Manual protected performance: independently built and checksummed Linux/macOS binaries · 500-sample full p99 gates on calibrated protected runners · M4/M8/TUI performance and release-size evidence.
 Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · non-optional terminal-bench subset with retained regression evidence · macOS + Linux release matrix · real WSL2 acceptance on a labeled self-hosted runner.
 Release: signing and publication depend on the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, 14-day dogfood ledger, paid two-family `--record` plus offline replay canary, pinned 20-task Terminal-Bench baseline, macOS/Linux eight-hour soak, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
 
