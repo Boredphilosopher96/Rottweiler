@@ -146,13 +146,13 @@ if sample_count < minimum_samples or sample_count > 5000:
 
 # A fat-LTO link leaves hosted Apple runners hot while macOS may still inspect
 # the newly installed executable. Give Apple hosts one fixed cooling/inspection
-# interval, then use five fixed fresh-process warmups. Measured results are
-# never retried or trimmed: every measured sample contributes to the absolute
-# startup and turn budgets below. Even smoke mode retains the 100-sample floor
-# required for a meaningful empirical p99.
-time.sleep(0 if smoke else (60 if sys.platform == "darwin" else 1))
-warmup_count = 1 if smoke else 5
-for index in range(-warmup_count, 0):
+# interval, then use five fixed fresh-process warmups. Smoke mode reduces only
+# the measured sample count; it keeps identical host conditioning so its p99
+# enforces the same absolute contract instead of measuring cold-runner noise.
+# Measured results are never retried or trimmed, and even smoke mode retains
+# the 100-sample floor required for a meaningful empirical p99.
+time.sleep(60 if sys.platform == "darwin" else 1)
+for index in range(-5, 0):
     one(index)
 samples = [one(index) for index in range(sample_count)]
 starts = sorted(sample[0] for sample in samples)
