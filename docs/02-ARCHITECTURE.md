@@ -13,6 +13,10 @@ Headless engine + thin clients. The engine owns all agent logic and speaks an ev
       │   ClientCommand ↓  ↑ EngineEvent
       │   (TUI: HTTP+SSE over localhost/unix socket; print/SDK: in-proc channel)
 ┌─────┴────────────────┴──────────────┴──────┐
+│                rw-runtime                   │
+│ session factory · storage/provider/tool     │
+│ composition · reusable headless host        │
+├─────────────────────────────────────────────┤
 │                 rw-core                     │
 │  Session loop · mode state machine ·        │
 │  turn scheduler · subagent orchestrator ·   │
@@ -50,8 +54,9 @@ rottweiler/
 │   ├── rw-mcp/                # MCP client/server (rmcp), deferred loading
 │   ├── rw-ext/                # extension host: RPC plugins, hooks, commands/skills/agents loaders
 │   ├── rw-core/               # the engine: session loop, modes, orchestration, permissions
+│   ├── rw-runtime/            # reusable session/host composition for headless frontends
 │   ├── rw-wasm-host/          # private capability-bounded WASM runtime helper
-│   └── rw-cli/                # `rw` binary: arg parsing, print mode, serve mode, spawns the TUI
+│   └── rw-cli/                # `rw` binary: args, presentation, transports, supervision
 ├── packages/
 │   └── tui/                   # OpenTUI frontend (TypeScript, Bun; compiled with `bun build --compile`)
 ├── protocol/                  # GENERATED (ADR-013): JSON Schema + TS types emitted from rw-types
@@ -60,7 +65,15 @@ rottweiler/
 └── tests/                     # cross-crate integration + replay fixtures + protocol contract tests
 ```
 
-Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-types` depends on almost nothing. Enforced by `cargo deny` / a CI check on the dependency graph.
+Dependency rule: arrows point downward only. No Rust crate depends on anything in `packages/`. `rw-types` depends on almost nothing. `rw-core` is independent of `rw-runtime` and all executable frontends. `rw-runtime` owns concrete storage/provider/tool/MCP/extension assembly and injects it into the core engine. `rw-cli` consumes that owned composition API; its direct lower-level dependencies are explicit, narrow administrative and transport commands, not a re-export facade. The metadata and source-layout rules are enforced in CI by `scripts/check-dependency-direction.py`.
+
+The stable boundary is semantic rather than binary-private: `rw-core` owns
+protocol state, actor behavior, permission enforcement, and provider-neutral
+engine traits; `rw-runtime` owns the reusable `RuntimeSessionFactory` and
+`HeadlessRuntimeBuilder`; `rw-cli` owns Clap parsing, terminal/JSON rendering,
+socket transport, process launch, and supervision. Runtime implementation
+modules never re-export lower crates wholesale, so every dependency remains
+visible in the crate that actually uses it.
 
 ### Process model
 
@@ -106,7 +119,7 @@ enum ToolOutput { Text(String), Structured(Value /* TOON-encoded on serializatio
 
 Everything provider-specific (cache_control markers, reasoning-effort params, Gemini quirks) lives in adapter-private extension maps, never in the IR.
 
-IR shape constraint (ADR-013): all protocol-crossing enums use **struct variants with named fields** and typed payloads (no tuple variants, no bare `Value` where a typed shape is known) — the sketches above are illustrative; the M0 codegen spike on the real `Block`/`ToolOutput` types gates the final shapes.
+IR shape constraint (ADR-013): all protocol-crossing enums use **struct variants with named fields** and typed payloads (no tuple variants, no bare `Value` where a typed shape is known). The sketches above are illustrative; the protocol codegen contract validates the real `Block` and `ToolOutput` shapes and rejects drift.
 
 ### Engine protocol (`rw-types`)
 
@@ -142,13 +155,16 @@ exports, and reconnect gaps must not retain them. Status strings crossing the
 protocol are category-only and size-bounded.
 
 Engine events share one delivery channel, but have two explicit scopes.
-`CommandAcknowledged` is a connection-scoped control event with a request id,
-no session sequence, and an optional session id; it provides the immediate
-acknowledgement path without inventing an HTTP-response or UI-only third
-channel. It is persisted to the engine control log. Every other event is
-session-scoped, carries a per-session monotonic sequence id, is persisted in
-that session's event log, participates in reconnect/resync, and is available to
-hooks/extensions. One schema, three consumers: UI, storage, extensions.
+Events carrying `CommandAckMeta` are connection-scoped control/query replies:
+they have a request id, no session sequence, and may identify a session. This
+includes the immediate `CommandAcknowledged` reply and bounded projections such
+as mode, model, settings, review, and workspace results. They are never written
+to a session log or replayed after reconnect. Events carrying `EventMeta` are
+session-scoped, carry a per-session monotonic sequence id, are persisted in that
+session's event log, participate in reconnect/resync, and are available to
+hooks/extensions. The checked-in durable-envelope schema mechanically excludes
+every generated `CommandAckMeta` variant. One event schema, three consumers:
+UI, storage, extensions.
 Versioning uses serde-compatible evolution rules; 64-bit counters and sequence
 ids cross JSON as decimal strings so JavaScript clients never lose precision.
 
@@ -201,7 +217,13 @@ historical event replay never invokes a tool at all.
 
 ### Mode state machine (`rw-core`)
 
-`Discuss ⇄ Plan ⇄ Execute`. Modes are data, not code: each mode = {system-prompt fragment, tool filter, permission policy overlay}. Defined in the same format extension-provided modes use (dogfooding). Plan→Execute transition requires an approval event carrying the plan artifact.
+The reserved built-ins are `discuss`, `plan`, and `execute`; the same registry
+also accepts custom mode ids. Modes are data, not code: each definition contains
+a system-prompt fragment, optional tool filter, and one of the three permission
+policy overlays. Embedded built-ins pass through the same parser and registry as
+extension-provided modes (dogfooding). Any plan-overlay → Execute transition
+requires an approval event carrying the plan artifact. Durable custom-mode
+events pin a semantic fingerprint so replay cannot silently change their policy.
 
 ### Subagent orchestrator (`rw-core`)
 
@@ -257,7 +279,7 @@ historical model, workspace-root generation, and root digest, so completed
 operation recovery remains constant-cost and never rescans a child log or root
 journal that may have grown substantially after the fork.
 
-**M0 path and merge contract.** `ROTTWEILER_HOME/config.toml` is the explicit
+**Configuration path and merge contract.** `ROTTWEILER_HOME/config.toml` is the explicit
 user-path override; otherwise an explicitly set
 `$XDG_CONFIG_HOME/rottweiler/config.toml` is used, falling back to the
 documented `~/.rottweiler/config.toml`. Environment keys use the `RW_` prefix,
@@ -267,7 +289,7 @@ concatenate. Provenance is recorded per rendered leaf. Project-level
 security-sensitive sections are rejected before merging, so they never become
 effective even transiently.
 
-**M1 provider/network contract.** `[providers.<name>]` holds an adapter kind,
+**Provider and network contract.** `[providers.<name>]` holds an adapter kind,
 optional endpoint, API-key environment/credential references, and an optional
 provider-specific proxy. `[models].aliases` remains the provider-blind ordered
 `provider/model` routing table; `[models].thinking` maps aliases to

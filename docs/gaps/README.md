@@ -1,15 +1,34 @@
-# Gap Analysis — Rottweiler implementation review
+# Archived implementation review — July 2026
 
-Review date: 2026-07-12 (restored + extended later the same day; the original 01–08 files were deleted from disk — this folder was untracked — after an implementing agent consumed them; they are restored here with status updated).
-Method: read the built crates (`crates/*`, `packages/tui`), built the workspace and the OpenTUI bundle, and exercised the `rw` binary end-to-end (print mode, line REPL, TUI launch, sessions, export, replay, doctor, stats, permissions, trust) against the user's live `openai_codex` config.
+This directory preserves the gap analysis performed on 2026-07-12. It is a
+historical engineering record, not current product documentation or an active
+issue tracker.
+
+The review read the built crates (`crates/*`, `packages/tui`), built the
+workspace and OpenTUI bundle, and exercised `rw` end-to-end (print mode, line
+REPL, TUI launch, sessions, export, replay, doctor, stats, permissions, and
+trust) against the reviewer's then-current `openai_codex` configuration.
 
 Each finding is tagged **[verified]** (reproduced at runtime), **[code]** (confirmed by reading the source), or **[design]** (the code does what it intends, but the intent is wrong or a spec requirement is unmet). Severity: **P0** breaks a headline capability; **P1** a real bug users will hit; **P2** rough edge.
 
-> **Resolution note (2026-07-12):** every non-parked finding in 01–09 is implemented and re-verified against the functional suite. GAP-08-05 (`auto` via `../model-router`) remains intentionally parked by maintainer direction; it is not silently treated as complete.
+> **Archive notice:** these files preserve the evidence and remediation record
+> from the July 12 review. Their “current state” sections describe the product
+> at the time each finding was opened and must not be used as current
+> documentation. Start with the repository `README.md` and
+> `docs/01-FEATURES.md`; use the architecture, extensibility, security, and
+> verification documents for their respective contracts.
 
-## The one-paragraph verdict
+## Recorded outcome
 
-The reviewed product now ships as one supervised application and the headless and interactive paths share the same durable engine. Startup, approvals, commands, meters, live provider/model catalogs, in-app auth, safe settings, themes, permissions, MCP management, and structured text/image attachments have functional acceptance coverage. Provider sign-in is independent from model selection: credentials remain outside replayable protocol state, catalog refresh is separately retryable, and activation never depends on unrelated aliases. Only the maintainer-parked model-router `auto` integration remains open.
+At the close of this review, the product ran as one supervised application and
+the headless and interactive paths shared the same durable engine. Startup,
+approvals, commands, meters, live provider/model catalogs, in-app auth, safe
+settings, themes, permissions, MCP management, and structured text/image
+attachments had functional acceptance coverage. Provider sign-in was
+independent from model selection: credentials remained outside replayable
+protocol state, catalog refresh was separately retryable, and activation did
+not depend on unrelated aliases. The model-router `auto` integration remained
+explicitly parked by the maintainer.
 
 ## Severity index
 
@@ -25,18 +44,6 @@ The reviewed product now ships as one supervised application and the headless an
 | [08](08-models-providers-commands.md) | Model/provider/command pickers | Dynamic catalog and typed switching resolved; auto-router remains explicitly parked | Closed / parked |
 | [09](09-tui-interaction-and-in-app-settings.md) | TUI interaction + in-app settings | Interactive and typed settings/auth surfaces resolved | Closed |
 
-## The model/provider/command menus specifically
-
-Rottweiler's model selection is **alias-centric** — `/models` can only show the five role aliases because `list_models` is built from `config.models.aliases`. opencode is **catalog-centric**: every `provider/model` across configured providers, fuzzy-searchable, grouped by provider. Two maintainer corrections are binding: (1) the catalog must be **dynamic** — queried live from providers at runtime, never from the static `models.toml` snapshot; (2) the desired **`auto` model** should reuse `../model-router` (which already implements cheapest-capable auto-routing *and* a live daily-refreshed catalog) — but auto is **parked** until the catalog and the TUI basics in [09](09-tui-interaction-and-in-app-settings.md) work.
-
 ## Cross-cutting theme
 
 The original cross-cutting failure was missing production-composition acceptance. The suite now launches the real supervisor/TUI boundary, verifies authenticated readiness and approval round trips, exercises process recovery/replay, and tests typed provider, permission, and MCP workflows alongside unit and replay coverage.
-
-## Maintainer-set priority order
-
-1. Dynamic model catalog (08) — live discovery, not files.
-2. Tool calls + `/` commands + surfaced projection errors (09).
-3. Bottom-bar meters (09/02 — subscription capabilities + quota rendering).
-4. Provider inventory + in-app auth; then in-app settings surface (09).
-5. Auto-routing via model-router (08) — parked until the above work.

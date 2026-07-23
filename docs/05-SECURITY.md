@@ -9,13 +9,13 @@
 
 Out of scope: a malicious *user*, kernel-level escapes, defending secrets from the user's own machine.
 
-## Layer 0 — Folder trust
+## Layer 0 — Project extension inventory trust
 
-Opening a repo executes config: project commands can carry `` !`cmd` `` interpolation, plugins are executables, MCP servers are processes, hooks intercept tools. Therefore **project-level config is inert until the folder is trusted**:
+Opening a repo can expose executable configuration: project commands may carry `` !`cmd` `` interpolation, plugins are executables, MCP servers are processes, and hooks intercept tools. Therefore **project-level executable configuration is inert until its exact extension inventory is trusted**:
 
-- First open of a workspace → trust prompt showing exactly what the project wants to load (commands with shell interpolation, plugins, MCP servers, hooks, toolchain formatters).
+- First open of a workspace with a non-empty project extension inventory → trust prompt showing every artifact under `.agents/` and `.rottweiler/`, including commands, skills, plugins, MCP servers, hooks, toolchain formatters, themes, and supporting resources. A workspace with no project extension artifacts does not prompt; if artifacts appear later, the next discovery pass prompts for that exact inventory.
 - Untrusted: engine runs with user-level config only; project AGENTS.md is loaded as *content* (it's prose for the model, still injection-dampened) but nothing project-local executes.
-- Trust decisions persist per absolute path + config-hash: if `.agents/`/`.rottweiler/` contents change what executes (new plugin, changed hook), re-prompt with a diff of what changed.
+- Trust decisions persist per absolute path plus inventory hash: if any `.agents/` or `.rottweiler/` artifact changes, re-prompt with an exact diff before project extensions become active again.
 - `/trust` shows and edits trust state; `--dangerously-trust` exists for CI images only.
 - Applies to both discovery locations (`.agents/` and `.rottweiler/`) equally.
 - **Security-sensitive config keys are user-level only**: `[permissions]` rules, sandbox safe-list additions, `[network]`/proxy settings, provider endpoint/proxy/credential references, telemetry opt-in, and update-channel settings in *project-level* config are **ignored with a loud warning**, trusted or not. A repo must never be able to allow-list `bash(*)`, bless commands onto the safe-list, route prompts or credentials through an attacker's endpoint/proxy, or opt the user into telemetry — those aren't "things that execute," so a trust prompt can't meaningfully convey them; refusing them outright is the only honest gate. (Project-scope remembered approvals are the one exception: they're written by the *user's own* approval actions, stored in a distinct file that is itself hash-tracked.)
@@ -49,6 +49,7 @@ action = "deny"
 
 - The normal interactive policy prompts only for filesystem-writing tools and shell commands outside the hardened read-only safe-list. Reads, session todo updates, web fetch/search, and non-writing network/exec tools do not prompt. Explicit deny rules, MCP/plugin fingerprint approval, sandbox grants, and network policy remain independent gates. MCP tools that declare filesystem writes prompt like built-ins; under-declared plugin/MCP capabilities never expand their process sandbox.
 - Modes overlay policies: Discuss denies all mutating capabilities; Plan allows read-only; Execute uses the configured policy.
+- The names `discuss`, `plan`, and `execute` are reserved and cannot be shadowed by declarative files. Active custom modes persist a path-free semantic fingerprint; mutation-capable resume and rewind reject missing or changed custom definitions instead of silently applying a different permission floor.
 - Non-interactive runs pick a policy via `--permission-mode {strict|auto-safe|yolo}`. A local interactive session using normal configured policy may switch its session-local override with `/permissions mode {default|strict|auto-safe|yolo}`. A launch-fixed headless or remote-strict policy cannot be weakened from a client command. `yolo` refuses to run as root against `/` in either path (footgun rails).
 - Approvals can be remembered at three scopes: once / session / project (written to project config).
 

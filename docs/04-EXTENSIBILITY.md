@@ -4,7 +4,7 @@ Goal: pi-grade extensibility — nothing in the harness is magic. The test: **ev
 
 ## Tier 1 — Declarative (no code)
 
-Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.rottweiler/` (project) → `~/.agents/` (user) → `~/.rottweiler/` (user). The open `.agents` location is primary so your config stays portable across harnesses; project-level anything is inert until the folder is trusted (05-SECURITY Layer 0).
+Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.rottweiler/` (project) → `~/.agents/` (user) → `~/.rottweiler/` (user). The open `.agents` location is primary so your config stays portable across harnesses; project-level artifacts are inert until their project extension inventory is trusted (05-SECURITY Layer 0).
 
 | Kind | Location | Format |
 |---|---|---|
@@ -16,6 +16,33 @@ Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.
 | Shell hooks | `hooks.toml` | one-liner hooks without writing a plugin: `[[hook]] event = "post_tool" matcher = "edit(*.rs)" run = "cargo fmt --check {file}"` — the command's exit code/stdout map onto the hook response (nonzero on a `pre_*` hook = deny with stderr as message). Registered on the same internal dispatcher; trust-gated at project level; this is what Claude Code settings-hooks import onto |
 | Toolchain | `toolchain.toml` (or `[toolchain]` in config) | per-language/glob `formatter`, `linters`, `test` commands; registers built-in `post_tool` hooks — after edit/write, formatter runs on the touched file and linter diagnostics append to the tool result. Sugar over the public hook API (dogfooding rule) |
 | Themes/keybindings | `themes/*.toml`, `keybindings.toml` | TUI only |
+
+Mode files use one bounded schema. The file stem must match `id`; `permission`
+selects the built-in permission floor (`discuss`, `plan`, or `execute`), while an
+optional non-empty `allowed-tools` list further narrows the session registry.
+An empty list leaves the registry unchanged. Project modes remain inert until
+the extension inventory containing them is trusted. The security-sensitive
+built-in ids `discuss`, `plan`, and `execute` are reserved: a discovered file
+using one of those ids fails registry composition instead of changing the named
+built-in's permission contract. Custom ids can select any of the three permission
+floors.
+When a custom mode becomes active, its canonical semantic fingerprint (id,
+description, permission floor, prompt, and sorted tool allowlist) is persisted
+without its source path. Resume and rewind compare that fingerprint against the
+trusted registry and fail closed if the definition was removed or changed.
+Legacy fingerprint-free events are accepted only for the three built-in ids.
+
+Interactive clients discover modes through the bounded, connection-scoped
+`ListModes`/`ModesListed` protocol catalog. `/mode` with no argument lists the
+active mode and every available id; `/mode <id>` selects any registered mode.
+
+```toml
+id = "audit"
+description = "Inspect the workspace without changing it"
+permission = "discuss"
+prompt = "Audit claims against repository evidence and do not mutate files."
+allowed-tools = ["read", "grep", "glob"]
+```
 
 ## Tier 2 — RPC plugins (any language)
 
@@ -44,7 +71,7 @@ Capabilities are permission-gated: the user approves a plugin's capability set o
 
 Hooks are request/response (can modify/block); events are fire-and-forget. Hook timeout default 5s, configurable; on timeout the engine proceeds per hook's declared `fail-open`/`fail-closed` bit.
 
-**Build ordering (two halves, one API):** the engine-internal **hook dispatcher** — the registration points, ordering, and fail-open/closed semantics — exists from M2, because built-ins consume it (`[toolchain]` formatters/linters in M6, permission supplements in M5). What M8 adds is the **RPC bridge** exposing that same dispatcher to out-of-process plugins. Built-ins register through the identical interface the bridge forwards to (dogfooding rule); M8 must not introduce a second hook mechanism.
+**One dispatcher, two adapters:** the engine-internal **hook dispatcher** owns registration, ordering, and fail-open/closed semantics. Built-ins such as `[toolchain]` formatters/linters and permission supplements consume it directly; the RPC bridge exposes that same dispatcher to out-of-process plugins. Both paths use the identical interface (dogfooding rule), and the conformance suite rejects a second hook mechanism.
 
 | Hook | Can do |
 |---|---|
@@ -68,7 +95,7 @@ Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust seco
 
 ### Executable configuration and approval
 
-Executable configuration follows the normal `.agents`-before-`.rottweiler` discovery rule and is ignored at project scope until the folder is trusted. Commands are literal argv arrays: shell parsing and `PATH` lookup are never implicit, and the executable must resolve to an absolute executable file.
+Executable configuration follows the normal `.agents`-before-`.rottweiler` discovery rule and is ignored at project scope until its project extension inventory is trusted. Commands are literal argv arrays: shell parsing and `PATH` lookup are never implicit, and the executable must resolve to an absolute executable file.
 
 ```toml
 # .agents/mcp.toml
@@ -117,7 +144,7 @@ allowed_domains = []
 
 `rw plugin status|approve|revoke` manages the separately fingerprinted plugin approval ledger. Production approval pins and displays the executable plus every explicit interpreter entrypoint and adjacent dependency descriptor by canonical path, length, and BLAKE3 identity; identities are revalidated immediately before launch, and eval/module/package-runner forms are rejected because their executed content cannot be attested narrowly. A separately pinned `code_root` (the manifest's parent directory) is the only plugin-owned directory readable without `reads-fs`; it must be a strict descendant of an approved workspace root, never the workspace root itself. Omit `cwd` to default it to that code root. The TypeScript production path is the scaffold's `bun run build`, which emits a standalone `dist/plugin`; `bun run start` remains the development path. `rw plugin scaffold --lang ts` emits the canonical protocol-1 TypeScript template and manifest. `rw plugin dev <path> --allow-dev-exec` is an explicit local-development escape hatch: it runs under the restrictive plugin sandbox, watches source files without a build loop, and never grants or mutates production approval.
 
-Protocol 1 is frozen by the M8 conformance suite: the Rust host runs the canonical generated scaffold plus independent tool/hook, event/push, and provider fixtures, and kills an undeclared-capability fixture. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Wire details and limits live in `packages/plugin-sdk/PROTOCOL.md` and its checked-in JSON schema.
+Protocol 1 is frozen by the plugin conformance suite: the Rust host runs the canonical generated scaffold plus independent tool/hook, event/push, and provider fixtures, and kills an undeclared-capability fixture. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Wire details and limits live in `packages/plugin-sdk/PROTOCOL.md` and its checked-in JSON schema.
 
 The protocol documentation site is generated deterministically by
 `packages/plugin-docs` from that frozen Markdown, schema, and canonical wire

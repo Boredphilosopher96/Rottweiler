@@ -1,5 +1,9 @@
 # 03 — Permissions & modes
 
+> **Historical snapshot (2026-07-12).** “Current state” below means the state
+> when this review was opened, not the current product. See the numbered specs
+> in `docs/` for the binding contract.
+
 ## GAP-03-01 — `auto-safe` denies *all* file writes → no automation mode that can actually code — **P1 [verified + code]**
 
 **Resolved (2026-07-12).** `auto-safe` admits only `write`, `edit`, and `multi_edit` calls whose single real path stays within a canonical active root, including `@root/N`; exec, network, missing/ambiguous paths, outside paths, and symlink escapes still deny, and explicit deny rules remain absolute (`340188f`).

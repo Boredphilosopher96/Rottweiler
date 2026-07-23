@@ -1,5 +1,9 @@
 # 06 — Built-in tools
 
+> **Historical snapshot (2026-07-12).** “Current state” below means the state
+> when this review was opened, not the current product. See the numbered specs
+> in `docs/` for the binding contract.
+
 Mostly healthy — the tools do what the spec says. Findings are minor.
 
 ## Positive confirmations — **[code/verified]**

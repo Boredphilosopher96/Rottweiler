@@ -12,14 +12,15 @@ bun run test:perf  # isolated latency and frame-compute gates
 bun run typecheck
 ```
 
-The M0 renderer test uses OpenTUI's public `@opentui/core/testing` surface and
-captures the native renderer's in-memory character and styled-cell buffers.
-This is the foundation for M4 golden-screen and latency tests.
+The renderer acceptance suite uses OpenTUI's public `@opentui/core/testing`
+surface and captures the native renderer's in-memory character and styled-cell
+buffers. Golden-screen and latency tests exercise that same production render
+path.
 
 ## Keybindings
 
 The standard preset preserves the shipped shortcuts (`ctrl+p` commands,
-`ctrl+m` models, `ctrl+o` modes, `ctrl+s` sessions, `ctrl+r` review,
+`alt+m` models, `ctrl+o` modes, `ctrl+s` sessions, `ctrl+r` review,
 `ctrl+g` child-agent tree, `shift+tab` agent mode, `ctrl+e` external editor).
 The child tree supports keyboard or mouse drill-in, live transcript inspection,
 Escape back to the parent, and follow-up/interrupt/close actions from `ctrl+p`.
@@ -44,9 +45,10 @@ always shows the active Vim mode and normal-mode target.
 The launcher resolves the first available file in this order: trusted project
 `.agents/keybindings.toml`, trusted project `.rottweiler/keybindings.toml`, user
 `~/.agents/keybindings.toml`, then user `~/.rottweiler/keybindings.toml`.
-Project bytes must match the exact folder-trust inventory; remote and historical
-replay sessions use user configuration only. The launcher forwards the bounded
-TUI-only TOML as `ROTTWEILER_TUI_KEYBINDINGS`. Parsing is bounded to 64 KiB.
+Project bytes must match the exact trusted project extension inventory; remote
+and historical replay sessions use user configuration only. The launcher
+forwards the bounded TUI-only TOML as `ROTTWEILER_TUI_KEYBINDINGS`. Parsing is
+bounded to 64 KiB.
 Unknown contexts/actions, malformed strokes,
 duplicate bindings, and bindings shadowed by a global shortcut fail with an
 actionable configuration error instead of being resolved by order.

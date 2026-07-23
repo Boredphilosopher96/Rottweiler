@@ -1,5 +1,9 @@
 # 08 — Model / provider / command selection (the opencode-parity gap)
 
+> **Historical snapshot (2026-07-12).** “Current state” below means the state
+> when this review was opened, not the current product. See the numbered specs
+> in `docs/` for the binding contract.
+
 The maintainer's ask: models, the `/` command menu, and provider selection should work **like opencode**. Today they don't — and the reason isn't only that the TUI struggled to connect (01). Even with a live TUI, the *data* behind these pickers is the wrong shape. opencode is **catalog-centric** (pick a concrete `provider/model`); Rottweiler is **alias-centric** (pick a role). That is the root divergence.
 
 ## GAP-08-01 — `list_models` returns 5 role aliases, not a model catalog — **P0 [code]**

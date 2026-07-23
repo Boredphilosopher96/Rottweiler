@@ -1,5 +1,9 @@
 # 07 — MCP, hooks, plugins, protocol
 
+> **Historical snapshot (2026-07-12).** “Current state” below means the state
+> when this review was opened, not the current product. See the numbered specs
+> in `docs/` for the binding contract.
+
 Structurally present and matching the design; most need live conformance runs that the TUI outage partly blocked. Lower-confidence findings, tagged accordingly.
 
 ## Positive confirmations — **[code]**
