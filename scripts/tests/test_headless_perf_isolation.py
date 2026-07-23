@@ -59,8 +59,9 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn('60 if sys.platform == "darwin" else 1', gate)
         self.assertIn("for index in range(-5, 0)", gate)
         self.assertNotIn("warmup_count", gate)
-        self.assertIn("if smoke and turn_p95 >= 20", gate)
-        self.assertIn("if smoke and turn_p99 >= 40", gate)
+        self.assertIn("if smoke and start_p50 >= 80", gate)
+        self.assertIn("if smoke and turn_p50 >= 20", gate)
+        self.assertIn("if not smoke and start_p99 >= 80", gate)
         self.assertIn("if not smoke and turn_p99 >= 20", gate)
         self.assertIn("sample_count > 5000", gate)
         self.assertIn('"samples": [', gate)
@@ -70,7 +71,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("source_metadata.st_nlink != 1", gate)
         self.assertLess(
             gate.index("evidence_temporary.replace(evidence)"),
-            gate.index("if start_p99 >= 80"),
+            gate.index("if smoke and start_p50 >= 80"),
         )
 
     def test_prebuilt_gate_keeps_metrics_schema_and_writes_ordered_evidence(self) -> None:

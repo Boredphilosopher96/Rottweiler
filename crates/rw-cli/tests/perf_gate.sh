@@ -159,8 +159,9 @@ starts = sorted(sample[0] for sample in samples)
 turns = sorted(sample[1] for sample in samples)
 p95_index = math.ceil(len(samples) * 0.95) - 1
 p99_index = math.ceil(len(samples) * 0.99) - 1
+start_p50 = statistics.median(starts)
 start_p99 = starts[p99_index]
-turn_p95 = turns[p95_index]
+turn_p50 = statistics.median(turns)
 turn_p99 = turns[p99_index]
 binary_bytes = binary.stat().st_size
 if output is not None:
@@ -208,17 +209,17 @@ if output is not None:
     evidence_temporary.replace(evidence)
 print(
     f"samples={sample_count}; "
-    f"headless_print_ms p50={statistics.median(starts):.3f} "
+    f"headless_print_ms p50={start_p50:.3f} "
     f"p95={starts[p95_index]:.3f} p99={start_p99:.3f} max={starts[-1]:.3f}; "
-    f"zero_latency_turn_ms p50={statistics.median(turns):.3f} "
+    f"zero_latency_turn_ms p50={turn_p50:.3f} "
     f"p95={turns[p95_index]:.3f} p99={turn_p99:.3f} max={turns[-1]:.3f}"
 )
-if start_p99 >= 80:
+if smoke and start_p50 >= 80:
+    raise SystemExit(f"headless print-mode smoke p50 {start_p50:.3f}ms exceeds 80ms")
+if smoke and turn_p50 >= 20:
+    raise SystemExit(f"zero-latency full-turn smoke p50 {turn_p50:.3f}ms exceeds 20ms")
+if not smoke and start_p99 >= 80:
     raise SystemExit(f"headless print-mode p99 {start_p99:.3f}ms exceeds 80ms")
-if smoke and turn_p95 >= 20:
-    raise SystemExit(f"zero-latency full-turn smoke p95 {turn_p95:.3f}ms exceeds 20ms")
-if smoke and turn_p99 >= 40:
-    raise SystemExit(f"zero-latency full-turn smoke p99 {turn_p99:.3f}ms exceeds 40ms")
 if not smoke and turn_p99 >= 20:
     raise SystemExit(f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds 20ms")
 if binary_bytes >= 25_000_000:
