@@ -4,7 +4,7 @@ How we know the harness works, stays fast, and doesn't regress. Everything here 
 
 ## 1. Deterministic replay (the foundation)
 
-The record/replay middleware (M1) is the spine of all agent-level testing:
+The record/replay middleware is the spine of all agent-level testing:
 
 - `rw --record fixtures/<name>` captures every provider request/response (redacted) into a fixture.
 - The replay provider serves fixtures back; **CI runs with network disabled** (a socket-deny guard in the test harness makes accidental live calls fail loudly).
@@ -13,7 +13,7 @@ The record/replay middleware (M1) is the spine of all agent-level testing:
 
 Fixture library grows with every bug: a fixed bug without a replay fixture reproducing it is not fixed.
 
-### M1 deterministic provider evidence
+### Deterministic provider evidence
 
 CI uses wire-faithful loopback origins for Anthropic Messages, OpenAI Chat, and
 OpenAI Responses. The production HTTP adapters stream tool calls and usage,
@@ -93,9 +93,9 @@ stored token. The ignored release canary in
 pinned client identity, an existing device-flow credential, and an
 explicit `RW_LIVE_GITHUB_COPILOT_MODEL`; ordinary CI only compiles this path.
 
-These deterministic fixtures do **not** substitute for M1's credentialed live
+These deterministic fixtures do **not** substitute for the credentialed live
 smoke. A minimal tool-call recording from both remote API families remains a
-release/milestone gate whenever credentials are available; CI must continue to
+credentialed release gate; CI must continue to
 replay the reviewed, redacted recordings with external networking disabled.
 The single authoritative opt-in harness is
 `crates/rw-core/tests/live_smoke_credentials.rs`. It loads user-scoped provider
@@ -129,22 +129,22 @@ security-sensitive and intentionally ignored.
 | Unit | IR conversions per adapter, TOON round-trip (proptest), permission rule matching, config precedence, redactor, budgeter math | `cargo test`, `proptest` |
 | Integration | full turns under replay: tool loops, interrupts, compaction, failover, resume-after-kill | replay harness in `tests/` |
 | Protocol contract | fixture ClientCommands/EngineEvents round-tripped through the generated Rust *and* TS types; SSE reconnect/resync scenarios against a mock engine | `protocol/` fixtures, run by both `cargo test` and `bun test` |
-| TUI | golden screens (render to an inspectable in-memory buffer, snapshot cells), input latency harness, component tests. Whether OpenTUI provides this surface natively or we build a thin harness is decided by the M0 go/no-go spike; the budget for building it is reserved in M4 | `bun test` in `packages/tui` + `vhs` for visual review artifacts |
-
-Attachment acceptance includes cursor-anchored `@` paths with spaces, clipboard and local-path images, removal, rejected-preview/send preservation, async-submit reconciliation, safe workspace traversal rejection, and a real authenticated command POST carrying the maximum legal two-image envelope.
-| E2E | print-mode runs on real repos under replay; the M6/M7/M8 acceptance fixtures | `tests/e2e/` |
+| TUI | golden screens rendered through OpenTUI's in-memory native test renderer, input latency harness, component tests | `bun test` in `packages/tui` + `vhs` for visual review artifacts |
+| E2E | print-mode runs on real repos under replay; production-composition acceptance fixtures | `tests/e2e/` |
 | Security | the acceptance list in 05-SECURITY (sandbox EPERM assertions, canary-string leak fuzzing, injection corpus) | dedicated `security-tests` job |
 | Fuzz | config parser, TOON decoder, plugin RPC framing, event-log reader | `cargo fuzz`, nightly job |
 
-### M0 OpenTUI test-surface decision: GO
+Attachment acceptance includes cursor-anchored `@` paths with spaces, clipboard and local-path images, removal, rejected-preview/send preservation, async-submit reconciliation, safe workspace traversal rejection, and a real authenticated command POST carrying the maximum legal two-image envelope.
+
+### OpenTUI test surface
 
 OpenTUI 0.4.3 exposes a public `@opentui/core/testing` entry point. Its
 `createTestRenderer` uses the native renderer with in-memory output and provides
 deterministic render flushing, mock keyboard/mouse input, resize control,
-character-frame capture, and styled cell/span capture. The M0 proof in
+character-frame capture, and styled cell/span capture. The contract test in
 `packages/tui/test/app.test.ts` renders the real application component and
-inspects both character and styled-cell buffers. M4 golden-screen and latency
-harnesses will build on this surface; no custom terminal renderer is required.
+inspects both character and styled-cell buffers. Golden-screen and latency
+harnesses use this surface; no custom terminal renderer is required.
 
 Property tests worth calling out:
 - **Plan mode cannot mutate**: fuzz arbitrary tool-call sequences in plan mode → assert zero filesystem diff **outside `.git/` metadata** (read-only-blessed commands like `git status` legitimately refresh the index; workspace content must be untouched).
@@ -218,15 +218,12 @@ the current default-branch source locally. Dedicated
 runners are required because hosted Actions jobs cannot sustain one continuous
 eight-hour process.
 
-**Milestone activation.** A performance budget becomes an executable CI gate in
-the milestone that introduces the measured path (print mode in M2, serve/TUI
-startup and socket latency in M4, deferred MCP startup in M8). Earlier
-milestones must not substitute empty-stub benchmarks that pass without
-measuring the named behavior. Once activated, a budget remains in every later
-milestone's global gate.
+**Gate validity.** A performance budget is executable only when its harness
+measures the named production path. Empty or stub benchmarks cannot satisfy a
+budget, and an activated budget remains part of the global gate.
 
-The M8 prompt-ready gate is `crates/rw-cli/tests/m8_release_gate.sh`. It runs the
-release `rw` binary with an exact persisted folder-trust inventory and MCP
+The production-composition prompt-ready gate is `crates/rw-cli/tests/m8_release_gate.sh`. It runs the
+release `rw` binary with an exact persisted project extension inventory trust record and MCP
 approval ledger, discovers three project-configured stdio servers, starts each
 through the production sandbox launcher, loads their real catalogs, composes
 the provider, tools, commands, and session actor, and observes a marker emitted
@@ -250,7 +247,7 @@ A corpus of structured payloads (search results, dir listings, MCP responses, di
 ## 5. Capability evals (the "best performing harness" claim)
 
 - **terminal-bench subset** (20 tasks) run nightly against a pinned model: track solve rate, tokens, wall time, cost. The harness's job is to not be the bottleneck — compare against a baseline harness (pi or Claude Code) on the same model monthly; regressions in solve-rate-per-dollar are investigated as bugs.
-- **Self-hosting**: from M2 onward, Rottweiler development uses Rottweiler. v1.0 gate: two consecutive weeks of dogfooding with zero P0s (data loss, hang, corruption).
+- **Self-hosting**: Rottweiler development uses Rottweiler. The v1.0 gate requires two consecutive weeks of dogfooding with zero P0s (data loss, hang, corruption).
 - **Compatibility matrix**: ported artifacts (a Claude Code command set, a pi extension rewritten on the plugin SDK, an AGENTS.md-standard repo) exercised in CI as conformance fixtures.
 
 The executable capability lane lives in `evals/`: Harbor 0.18.0 runs the
@@ -308,7 +305,7 @@ override, then assert the complete supervisor process tree exits on default
 close. Homebrew tests also require `rw upgrade` to direct users to
 `brew upgrade rottweiler` rather than mutating the Cellar.
 
-## 7. Definition of Done (any task, any milestone)
+## 7. Definition of Done (any change)
 
 1. Code + tests land together; new behavior has a replay fixture or property test.
 2. Global gates green; budgets green.

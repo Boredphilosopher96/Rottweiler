@@ -1,5 +1,9 @@
 # 02 — Context engine & compaction
 
+> **Historical snapshot (2026-07-12).** “Current state” below means the state
+> when this review was opened, not the current product. See the numbered specs
+> in `docs/` for the binding contract.
+
 Compaction was specified as a 1:1 opencode port (ADR-010) and is a headline reason the project exists. The *algorithm* is ported faithfully; the *wiring* breaks for subscription auth — which is the maintainer's own config (`~/.rottweiler/config.toml`: `kind = "openai_codex"`).
 
 ## GAP-02-01 — Subscription models report no context window → meters read 0 and auto-compaction never fires — **P0 [verified]**

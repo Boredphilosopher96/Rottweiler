@@ -1,5 +1,9 @@
 # 05 — Sandbox
 
+> **Historical snapshot (2026-07-12).** “Current state” below means the state
+> when this review was opened, not the current product. See the numbered specs
+> in `docs/` for the binding contract.
+
 ## GAP-05-01 — macOS Seatbelt profile is `(allow default)` — a deny-list, not the allow-list the threat model assumes — **P1 [code]**
 
 **Resolved within the recorded ADR (2026-07-12).** `05-SECURITY` deliberately specifies broad reads on macOS for compiler/toolchain compatibility, so the implementation does not silently replace that decision. It now adds hard read denials for Rottweiler, SSH, cloud, package-manager, GitHub/OpenCode/Codex, key, and token locations while retaining canonical workspace/scratch write restrictions; syscall acceptance remains green (`a897be5`).

@@ -1,5 +1,9 @@
 # 01 — TUI ↔ engine startup
 
+> **Historical snapshot (2026-07-12).** “Current state” below means the state
+> when this review was opened, not the current product. See the numbered specs
+> in `docs/` for the binding contract.
+
 > **STATUS (2026-07-12, post-review):** commits `42935b9` (fail fast when engine startup exits), `400b8dd` (reject competing workspace engines promptly), and `ee12918` (preserve watchdog barrier on direct resume) landed after this file was written and target these findings. **Re-verify each item below against HEAD before working it.** The maintainer has since reached a live TUI session, so the hard startup blocker appears at least partially fixed; the in-session failures that remain are in [09](09-tui-interaction-and-in-app-settings.md).
 
 The OpenTUI frontend is the reason TypeScript/Bun are in the stack at all (ADR-001). At review time it did not reach a usable state.

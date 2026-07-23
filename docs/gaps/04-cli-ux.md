@@ -1,5 +1,9 @@
 # 04 — CLI & UX surface
 
+> **Historical snapshot (2026-07-12).** “Current state” below means the state
+> when this review was opened, not the current product. See the numbered specs
+> in `docs/` for the binding contract.
+
 Each of these is a paper-cut a real user hits in the first session.
 
 ## GAP-04-01 — Session titling never runs; every session is "New session" — **P1 [verified]**

@@ -1,5 +1,9 @@
 # 09 — TUI interaction failures & the files-vs-app design gap
 
+> **Historical snapshot (2026-07-12).** “Current state” below means the state
+> when this review was opened, not the current product. See the numbered specs
+> in `docs/` for the binding contract.
+
 Maintainer-reported symptoms from a live TUI session (2026-07-12): tool calls don't work, `/` commands don't work, the bottom bar (context %, pricing, cache) is dead, and `/providers` shows a single entry. Plus a design directive: **simple configuration must be doable from the app, opencode-style — not by editing files.** Auto-routing (GAP-08-05) is explicitly parked until the catalog and these basics work.
 
 ## GAP-09-01 — Tool calls don't work in the interactive TUI — **P0 [user-reported; code-traced suspects]**
