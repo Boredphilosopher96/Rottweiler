@@ -54,6 +54,7 @@ import { dirname, join } from "node:path"
 
 const MAX_ASSET_BYTES = 8 * 1024 * 1024
 const MAX_RUNTIME_BYTES = 32 * 1024 * 1024
+const COMPRESSED_ASSET_HEADER_BYTES = 8
 
 const embeddedAssets = [
   ["parser.worker.js", parserWorker],
@@ -199,6 +200,32 @@ export async function materializeTreeSitterRuntime(): Promise<MaterializedTreeSi
   try {
     for (const [relative, embeddedPath] of embeddedAssets) {
       let bytes = new Uint8Array(await Bun.file(embeddedPath).arrayBuffer())
+      if (bytes[0] === 0x52 && bytes[1] === 0x57 && bytes[2] === 0x54 && bytes[3] === 0x5a) {
+        if (bytes.byteLength <= COMPRESSED_ASSET_HEADER_BYTES) {
+          throw new Error(`embedded Tree-sitter asset has a truncated header: ${relative}`)
+        }
+        const expectedBytes = new DataView(
+          bytes.buffer,
+          bytes.byteOffset + 4,
+          4,
+        ).getUint32(0, true)
+        if (expectedBytes === 0 || expectedBytes > MAX_ASSET_BYTES) {
+          throw new Error(`embedded Tree-sitter asset declares an invalid size: ${relative}`)
+        }
+        const compressed = bytes.subarray(COMPRESSED_ASSET_HEADER_BYTES)
+        if (
+          compressed[0] !== 0x28 ||
+          compressed[1] !== 0xb5 ||
+          compressed[2] !== 0x2f ||
+          compressed[3] !== 0xfd
+        ) {
+          throw new Error(`embedded Tree-sitter asset is not a Zstandard frame: ${relative}`)
+        }
+        bytes = new Uint8Array(Bun.zstdDecompressSync(compressed))
+        if (bytes.byteLength !== expectedBytes) {
+          throw new Error(`embedded Tree-sitter asset size does not match its header: ${relative}`)
+        }
+      }
       if (relative === "parser.worker.js") {
         const source = new TextDecoder().decode(bytes)
         const external = 'from "web-tree-sitter"'

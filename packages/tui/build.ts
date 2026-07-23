@@ -1,9 +1,21 @@
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs"
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+} from "node:fs"
 import { spawnSync } from "node:child_process"
 import { tmpdir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 
 import type { BunPlugin } from "bun"
+
+const MAX_EMBEDDED_TREE_SITTER_ASSET_BYTES = 8 * 1024 * 1024
+const COMPRESSED_TREE_SITTER_ASSET_HEADER_BYTES = 8
 
 function cleanupOrphanedBunBuilds(): void {
   for (const entry of readdirSync(import.meta.dir)) {
@@ -66,7 +78,7 @@ const selectedNativeLibrary =
       ? "libopentui.dylib"
       : "libopentui.so"
 const selectedNativePath = join(selectedNativeDirectory, selectedNativeLibrary)
-function stripLinuxArtifact(path: string, label: string): void {
+function stripLinuxNativeLibrary(path: string): void {
   if (process.platform !== "linux") return
   const stripExecutable = process.env.ROTTWEILER_STRIP_BIN ?? "/usr/bin/strip"
   if (!isAbsolute(stripExecutable)) {
@@ -76,12 +88,12 @@ function stripLinuxArtifact(path: string, label: string): void {
     encoding: "utf8",
   })
   if (stripped.error !== undefined) {
-    throw new Error(`failed to strip Linux ${label}: ${stripped.error.message}`)
+    throw new Error(`failed to strip Linux OpenTUI native library: ${stripped.error.message}`)
   }
   if (stripped.status !== 0) {
     const detail = stripped.stderr.trim()
     throw new Error(
-      `failed to strip Linux ${label} (exit ${stripped.status})${detail === "" ? "" : `: ${detail}`}`,
+      `failed to strip Linux OpenTUI native library (exit ${stripped.status})${detail === "" ? "" : `: ${detail}`}`,
     )
   }
 }
@@ -102,6 +114,46 @@ function signDarwinArtifact(path: string, label: string): void {
       `failed to sign macOS ${label} (exit ${signed.status})${detail === "" ? "" : `: ${detail}`}`,
     )
   }
+}
+
+function enforceTuiBundleSize(executable: string, nativeLibrary: string): void {
+  const limit =
+    process.platform === "darwin"
+      ? 100_000_000
+      : process.platform === "linux"
+        ? 110_000_000
+        : undefined
+  if (limit === undefined) return
+  const bundleBytes = statSync(executable).size + statSync(nativeLibrary).size
+  if (bundleBytes >= limit) {
+    throw new Error(`release TUI bundle is ${bundleBytes} bytes; budget is <${limit}`)
+  }
+  console.log(`Release TUI bundle bytes: ${bundleBytes} (budget <${limit})`)
+}
+
+const compressedTreeSitterAssets: BunPlugin = {
+  name: "rottweiler-compressed-tree-sitter-assets",
+  setup(build) {
+    const compress = async ({ path }: { path: string }) => {
+      const source = new Uint8Array(await Bun.file(path).arrayBuffer())
+      if (
+        source.byteLength === 0 ||
+        source.byteLength > MAX_EMBEDDED_TREE_SITTER_ASSET_BYTES
+      ) {
+        throw new Error(`Tree-sitter asset has invalid size before compression: ${path}`)
+      }
+      const compressed = Bun.zstdCompressSync(source, { level: 19 })
+      const contents = new Uint8Array(
+        COMPRESSED_TREE_SITTER_ASSET_HEADER_BYTES + compressed.byteLength,
+      )
+      contents.set([0x52, 0x57, 0x54, 0x5a])
+      new DataView(contents.buffer).setUint32(4, source.byteLength, true)
+      contents.set(compressed, COMPRESSED_TREE_SITTER_ASSET_HEADER_BYTES)
+      return { contents, loader: "file" as const }
+    }
+    build.onLoad({ filter: /\.(?:wasm|scm)$/ }, compress)
+    build.onLoad({ filter: /(?:parser\.worker|tree-sitter)\.js$/ }, compress)
+  },
 }
 const nativePrelude: BunPlugin = {
   name: "rottweiler-opentui-native",
@@ -149,11 +201,14 @@ try {
       outfile: join(import.meta.dir, outputExecutable),
       autoloadDotenv: false,
       autoloadBunfig: false,
+      ...(process.platform === "linux"
+        ? { target: "bun-linux-x64-baseline" as const }
+        : {}),
     },
     format: "esm",
     minify: true,
     bytecode: true,
-    plugins: [nativePrelude],
+    plugins: [compressedTreeSitterAssets, nativePrelude],
   })
 } finally {
   process.off("SIGINT", interruptBuild)
@@ -168,12 +223,17 @@ if (!result.success) {
   process.exit(1)
 }
 
+if (process.platform === "linux") {
+  console.log(`Linux Bun compiled output bytes: ${statSync(outputExecutable).size}`)
+}
+
 mkdirSync(outputDirectory, { recursive: true })
 const outputNativePath = join(outputDirectory, selectedNativeLibrary)
 copyFileSync(selectedNativePath, outputNativePath)
-stripLinuxArtifact(outputNativePath, "OpenTUI native library")
+stripLinuxNativeLibrary(outputNativePath)
 signDarwinArtifact(outputExecutable, "OpenTUI executable")
 signDarwinArtifact(outputNativePath, "OpenTUI native library")
+enforceTuiBundleSize(outputExecutable, outputNativePath)
 
 // Prove the compiled release executable contains its parser runtime. Only the
 // native renderer remains adjacent, preserving the signed six-entry archive.
