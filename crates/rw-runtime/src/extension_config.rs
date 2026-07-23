@@ -8,9 +8,10 @@ use std::{
 };
 
 use miette::{IntoDiagnostic, Result, miette};
-use rw_core::runtime_support::mcp::{McpServerConfig, McpTransportConfig, ServerId};
-use rw_core::runtime_support::plugin::PluginManifest;
-use rw_core::runtime_support::{CapabilityManifest, ToolCapability};
+use rw_ext::PluginManifest;
+use rw_mcp::{McpServerConfig, McpTransportConfig, ServerId};
+use rw_tools::CapabilityManifest;
+use rw_types::ToolCapability;
 use serde::Deserialize;
 use serde::Serialize;
 use url::Url;
@@ -37,13 +38,14 @@ const OAUTH_RESERVED_QUERY_PARAMETERS: [&str; 9] = [
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum ExecutableConfigOrigin {
+pub enum ExecutableConfigOrigin {
     User(PathBuf),
     TrustedProject(PathBuf),
 }
 
 impl ExecutableConfigOrigin {
-    pub(crate) fn path(&self) -> &Path {
+    #[must_use]
+    pub fn path(&self) -> &Path {
         match self {
             Self::User(path) | Self::TrustedProject(path) => path,
         }
@@ -51,29 +53,29 @@ impl ExecutableConfigOrigin {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CredentialBinding {
-    pub(crate) environment: String,
-    pub(crate) credential_reference: String,
+pub struct CredentialBinding {
+    pub environment: String,
+    pub credential_reference: String,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DiscoveredMcpServer {
-    pub(crate) name: String,
-    pub(crate) enabled: bool,
-    pub(crate) defer_tools: bool,
-    pub(crate) transport: DiscoveredMcpTransport,
-    pub(crate) credentials: Vec<CredentialBinding>,
-    pub(crate) attested_files: Vec<ContentAttestation>,
-    pub(crate) origin: ExecutableConfigOrigin,
-    pub(crate) tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides,
-    pub(crate) capability_override_origin: Option<PathBuf>,
+pub struct DiscoveredMcpServer {
+    pub name: String,
+    pub enabled: bool,
+    pub defer_tools: bool,
+    pub transport: DiscoveredMcpTransport,
+    pub credentials: Vec<CredentialBinding>,
+    pub attested_files: Vec<ContentAttestation>,
+    pub origin: ExecutableConfigOrigin,
+    pub tool_capabilities: rw_mcp::McpToolCapabilityOverrides,
+    pub capability_override_origin: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-pub(crate) struct ContentAttestation {
-    pub(crate) path: PathBuf,
-    pub(crate) length: u64,
-    pub(crate) content_blake3: String,
+pub struct ContentAttestation {
+    pub path: PathBuf,
+    pub length: u64,
+    pub content_blake3: String,
     #[cfg(unix)]
     device: u64,
     #[cfg(unix)]
@@ -131,7 +133,7 @@ impl ContentAttestation {
 }
 
 #[derive(Clone)]
-pub(crate) enum DiscoveredMcpTransport {
+pub enum DiscoveredMcpTransport {
     Stdio {
         argv: Vec<String>,
         cwd: Option<PathBuf>,
@@ -282,7 +284,7 @@ impl DiscoveredMcpServer {
                     args: argv[1..].to_vec(),
                     working_directory: cwd.clone(),
                     environment,
-                    sandbox: rw_core::runtime_support::mcp::McpStdioSandboxPolicy {
+                    sandbox: rw_mcp::McpStdioSandboxPolicy {
                         read_roots: read_roots.clone(),
                         write_roots: write_roots.clone(),
                         allowed_domains: allowed_domains.clone(),
@@ -344,33 +346,36 @@ impl DiscoveredMcpServer {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DiscoveredPlugin {
-    pub(crate) name: String,
-    pub(crate) enabled: bool,
-    pub(crate) argv: Vec<String>,
-    pub(crate) cwd: PathBuf,
-    pub(crate) inherit_env: Vec<String>,
-    pub(crate) manifest_path: PathBuf,
-    pub(crate) allowed_domains: Vec<String>,
-    pub(crate) origin: ExecutableConfigOrigin,
+pub struct DiscoveredPlugin {
+    pub name: String,
+    pub enabled: bool,
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub inherit_env: Vec<String>,
+    pub manifest_path: PathBuf,
+    pub allowed_domains: Vec<String>,
+    pub origin: ExecutableConfigOrigin,
 }
 
 impl DiscoveredPlugin {
-    pub(crate) fn process_config(
-        &self,
-    ) -> Result<rw_core::runtime_support::plugin::PluginProcessConfig> {
-        rw_core::runtime_support::plugin::PluginProcessConfig::new(PathBuf::from(&self.argv[0]))
+    /// # Errors
+    /// Returns an error when the discovered process authority is invalid.
+    pub fn process_config(&self) -> Result<rw_ext::PluginProcessConfig> {
+        rw_ext::PluginProcessConfig::new(PathBuf::from(&self.argv[0]))
             .and_then(|config| config.with_argv(self.argv[1..].iter().cloned()))
             .and_then(|config| config.with_cwd(&self.cwd))
             .and_then(|config| {
-                config.with_code_root(self.manifest_path.parent().ok_or(
-                    rw_core::runtime_support::plugin::PluginProcessConfigError::InvalidAttestedFile,
-                )?)
+                config.with_code_root(
+                    self.manifest_path
+                        .parent()
+                        .ok_or(rw_ext::PluginProcessConfigError::InvalidAttestedFile)?,
+                )
             })
             .and_then(|config| {
-                config.with_attested_files(self.attested_files().map_err(|_| {
-                    rw_core::runtime_support::plugin::PluginProcessConfigError::InvalidAttestedFile
-                })?)
+                config.with_attested_files(
+                    self.attested_files()
+                        .map_err(|_| rw_ext::PluginProcessConfigError::InvalidAttestedFile)?,
+                )
             })
             .and_then(|config| config.with_environment_allowlist(self.inherit_env.iter().cloned()))
             .and_then(|config| config.with_allowed_domains(self.allowed_domains.iter().cloned()))
@@ -388,7 +393,9 @@ impl DiscoveredPlugin {
             .collect())
     }
 
-    pub(crate) fn load_manifest(&self) -> Result<PluginManifest> {
+    /// # Errors
+    /// Returns an error when the manifest is unreadable, invalid, or names another plugin.
+    pub fn load_manifest(&self) -> Result<PluginManifest> {
         let bytes = read_private_config(&self.manifest_path)?;
         let manifest =
             PluginManifest::from_slice(&bytes).map_err(|error| miette!(error.to_string()))?;
@@ -404,10 +411,10 @@ impl DiscoveredPlugin {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ExecutableConfigCatalog {
-    pub(crate) mcp_servers: Vec<DiscoveredMcpServer>,
-    pub(crate) plugins: Vec<DiscoveredPlugin>,
-    pub(crate) warnings: Vec<String>,
+pub struct ExecutableConfigCatalog {
+    pub mcp_servers: Vec<DiscoveredMcpServer>,
+    pub plugins: Vec<DiscoveredPlugin>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -507,7 +514,11 @@ const fn yes() -> bool {
     true
 }
 
-pub(crate) fn discover_executable_configs(
+/// Discovers user and trusted-project MCP and plugin configuration.
+///
+/// # Errors
+/// Returns an error when a layer is unsafe, malformed, or exceeds its bounds.
+pub fn discover_executable_configs(
     user_home: &Path,
     project_root: &Path,
     project_trusted: bool,
@@ -705,14 +716,14 @@ fn parse_mcp_server(
         credentials,
         attested_files,
         origin: origin.clone(),
-        tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+        tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
         capability_override_origin: None,
     })
 }
 
 fn parse_capability_override(
     entry: McpCapabilityOverrideEntry,
-) -> Result<rw_core::runtime_support::mcp::McpToolCapabilityOverrides> {
+) -> Result<rw_mcp::McpToolCapabilityOverrides> {
     if entry.tools.len() > 128 {
         return Err(miette!("MCP tool capability override exceeds 128 tools"));
     }
@@ -725,7 +736,7 @@ fn parse_capability_override(
             Ok((name, capability_manifest(capabilities)?))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
-    Ok(rw_core::runtime_support::mcp::McpToolCapabilityOverrides {
+    Ok(rw_mcp::McpToolCapabilityOverrides {
         server_default,
         tools,
     })
@@ -764,7 +775,7 @@ fn validate_mcp_tool_name(name: &str) -> Result<()> {
 }
 
 pub(crate) fn capability_override_json(
-    overrides: &rw_core::runtime_support::mcp::McpToolCapabilityOverrides,
+    overrides: &rw_mcp::McpToolCapabilityOverrides,
 ) -> serde_json::Value {
     let encode = |manifest: &CapabilityManifest| manifest.capabilities().to_vec();
     serde_json::json!({
@@ -1384,7 +1395,7 @@ fn validate_domains(domains: Vec<String>, subject: &str) -> Result<Vec<String>> 
     let mut normalized = domains
         .into_iter()
         .map(|domain| {
-            let domain = rw_core::runtime_support::normalize_egress_domain(&domain)
+            let domain = rw_tools::normalize_egress_domain(&domain)
                 .ok_or_else(|| miette!("invalid {subject} allowed domain"))?;
             let local_suffix = domain.rsplit_once('.').is_some_and(|(_, suffix)| {
                 suffix.eq_ignore_ascii_case("localhost") || suffix.eq_ignore_ascii_case("local")
@@ -1698,10 +1709,7 @@ oauth_client_id = 'public-native-client'
         assert_eq!(args, ["--stdio"]);
         assert_eq!(environment, [("DOCS_TOKEN".to_owned(), secret.to_owned())]);
         assert_eq!(working_directory, None);
-        assert_eq!(
-            sandbox,
-            rw_core::runtime_support::mcp::McpStdioSandboxPolicy::default()
-        );
+        assert_eq!(sandbox, rw_mcp::McpStdioSandboxPolicy::default());
 
         fs::write(
             &config,
@@ -1749,7 +1757,7 @@ oauth_client_id = 'public-native-client'
                 args: vec!["--stdio".to_owned()],
                 working_directory: None,
                 environment: vec![("DOCS_TOKEN".to_owned(), "secret-canary".to_owned())],
-                sandbox: rw_core::runtime_support::mcp::McpStdioSandboxPolicy::default(),
+                sandbox: rw_mcp::McpStdioSandboxPolicy::default(),
             }
         );
     }

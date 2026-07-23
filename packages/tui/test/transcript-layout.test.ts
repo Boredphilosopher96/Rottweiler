@@ -3,12 +3,38 @@ import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-import { RGBA, TextAttributes, TreeSitterClient, getBaseAttributes } from "@opentui/core"
+import {
+  type BaseRenderable,
+  CodeRenderable,
+  RGBA,
+  TextAttributes,
+  TreeSitterClient,
+  getBaseAttributes,
+} from "@opentui/core"
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing"
 
 import { createRottweilerApp } from "../src/app"
 import { createInitialState } from "../src/state"
 import { nordTheme } from "../src/theme"
+
+async function settleMarkdownHighlights(
+  roots: Iterable<BaseRenderable>,
+  renderer: TestRendererSetup,
+): Promise<void> {
+  await renderer.flush()
+  for (;;) {
+    const pending = new Set<CodeRenderable>()
+    const visit = (node: BaseRenderable): void => {
+      if (node instanceof CodeRenderable && node.isHighlighting) pending.add(node)
+      for (const child of node.getChildren()) visit(child)
+    }
+    for (const root of roots) visit(root)
+    if (pending.size === 0) break
+    await Promise.all([...pending].map((renderable) => renderable.highlightingDone))
+    await renderer.flush()
+  }
+  await renderer.waitForVisualIdle()
+}
 
 describe("retained transcript layout", () => {
   let renderer: TestRendererSetup | undefined
@@ -70,10 +96,10 @@ describe("retained transcript layout", () => {
       initialState: { ...createInitialState(), transcript },
     })
     renderer.renderer.root.add(app)
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      await Bun.sleep(10)
-      await renderer.renderOnce()
-    }
+    await settleMarkdownHighlights(
+      [...app.transcript.mountedCards.values()].map((card) => card.markdown),
+      renderer,
+    )
 
     let frame = renderer.captureCharFrame()
     expect(frame).toContain("CARD_23")

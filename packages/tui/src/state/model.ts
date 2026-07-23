@@ -310,6 +310,7 @@ export interface CommandAcknowledgement {
     | "subagent_replay_completed"
     | "sessions_search_ready"
     | "command_descriptors_listed"
+    | "modes_listed"
     | "models_listed"
     | "settings_listed"
     | "mcp_servers_listed"
@@ -410,6 +411,30 @@ export interface CommandChoice {
   readonly usage: string
   readonly source?: CommandSource
 }
+
+export interface ModeChoice {
+  readonly id: string
+  readonly description: string
+  readonly current: boolean
+}
+
+export const BUILTIN_MODE_CHOICES: readonly ModeChoice[] = [
+  {
+    id: "execute",
+    description: "Execute work subject to the configured permission policy",
+    current: true,
+  },
+  {
+    id: "discuss",
+    description: "Explore and explain without changing the workspace",
+    current: false,
+  },
+  {
+    id: "plan",
+    description: "Develop a structured plan without changing the workspace",
+    current: false,
+  },
+]
 
 export interface ModelChoice {
   readonly alias: string
@@ -544,6 +569,8 @@ export interface RottweilerState {
   readonly lastFork: SessionForkProjection | null
   readonly commands: readonly CommandChoice[]
   readonly commandsTruncated: boolean
+  readonly modes: readonly ModeChoice[]
+  readonly modesTruncated: boolean
   readonly models: readonly ModelChoice[]
   readonly modelAliases: readonly ModelAliasChoice[]
   readonly providers: readonly ProviderChoice[]
@@ -616,6 +643,8 @@ export function createInitialState(): RottweilerState {
     lastFork: null,
     commands: [],
     commandsTruncated: false,
+    modes: BUILTIN_MODE_CHOICES,
+    modesTruncated: false,
     models: [],
     modelAliases: [],
     providers: [],

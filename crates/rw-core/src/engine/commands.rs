@@ -2,14 +2,31 @@
 use super::*;
 
 /// Engine-owned slash-command context. Public handlers use this exact type.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SessionCommandContext {
     pub(super) running: bool,
     pub(super) queued_messages: usize,
     pub(super) mode: SessionMode,
+    pub(super) mode_id: ModeId,
+    pub(super) modes: Arc<ModeRegistry>,
     pub(super) permission_summary: String,
     pub(super) plan_summary: String,
     pub(super) command_summary: String,
+}
+
+impl Default for SessionCommandContext {
+    fn default() -> Self {
+        Self {
+            running: false,
+            queued_messages: 0,
+            mode: SessionMode::Execute,
+            mode_id: ModeId("execute".to_owned()),
+            modes: Arc::new(ModeRegistry::builtins().unwrap_or_default()),
+            permission_summary: String::new(),
+            plan_summary: String::new(),
+            command_summary: String::new(),
+        }
+    }
 }
 
 impl SessionCommandContext {
@@ -26,6 +43,11 @@ impl SessionCommandContext {
     #[must_use]
     pub const fn mode(&self) -> SessionMode {
         self.mode
+    }
+
+    #[must_use]
+    pub fn mode_id(&self) -> &ModeId {
+        &self.mode_id
     }
 }
 
@@ -77,7 +99,7 @@ pub enum SessionCommandAction {
         instructions: Option<String>,
     },
     SwitchMode {
-        mode: SessionMode,
+        mode: ModeId,
     },
     SetPermissionMode {
         mode: Option<crate::HeadlessPermissionMode>,
@@ -151,6 +173,7 @@ pub struct WorkspaceRuntimeGeneration {
     pub tools: Arc<ToolRegistry>,
     pub hooks: Arc<HookDispatcher>,
     pub commands: Arc<CommandRegistry<SessionCommandContext, SessionCommandOutput>>,
+    pub modes: Arc<ModeRegistry>,
     pub permissions: Arc<PermissionGate>,
     pub checkpoints: Arc<dyn MutationCheckpointCoordinator>,
     pub folder_trust: Arc<dyn FolderTrustController>,
@@ -488,7 +511,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for StatusComma
                 "Agent: {}\nQueued messages: {}\nMode: {}",
                 if context.running { "working" } else { "idle" },
                 context.queued_messages,
-                format!("{:?}", context.mode).to_ascii_lowercase()
+                context.mode_id.0
             ),
             action: SessionCommandAction::None,
         })
@@ -538,8 +561,24 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ModeCommand
     ) -> Result<SessionCommandOutput, CommandExecutionError> {
         let value = invocation.arguments().trim();
         if value.is_empty() {
+            let available = context
+                .modes
+                .iter()
+                .map(|mode| {
+                    let marker = if mode.id() == &context.mode_id {
+                        "*"
+                    } else {
+                        "-"
+                    };
+                    format!("{marker} {} — {}", mode.id().0, mode.description())
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             return Ok(SessionCommandOutput {
-                message: format!("active mode: {:?}", context.mode).to_ascii_lowercase(),
+                message: format!(
+                    "Active mode: {}\nAvailable modes:\n{available}",
+                    context.mode_id.0
+                ),
                 action: SessionCommandAction::None,
             });
         }
@@ -549,20 +588,23 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for ModeCommand
                 "mode switching requires an idle session",
             ));
         }
-        let mode = match value {
-            "discuss" => SessionMode::Discuss,
-            "plan" => SessionMode::Plan,
-            "execute" => SessionMode::Execute,
-            _ => {
-                return Err(CommandExecutionError::new(
-                    "invalid_mode",
-                    "usage: /mode [discuss|plan|execute]",
-                ));
-            }
-        };
+        if context.modes.get(value).is_none() {
+            let available = context
+                .modes
+                .iter()
+                .map(|mode| mode.id().0.as_str())
+                .collect::<Vec<_>>()
+                .join("|");
+            return Err(CommandExecutionError::new(
+                "invalid_mode",
+                format!("usage: /mode [{available}]"),
+            ));
+        }
         Ok(SessionCommandOutput {
             message: format!("mode changed to {value}"),
-            action: SessionCommandAction::SwitchMode { mode },
+            action: SessionCommandAction::SwitchMode {
+                mode: ModeId(value.to_owned()),
+            },
         })
     }
 }
@@ -964,7 +1006,7 @@ pub fn builtin_command_registry()
     registry
         .register(
             CommandDescriptor::new("mode", "Show or switch the interaction mode")
-                .with_argument_hint("[discuss|plan|execute]"),
+                .with_argument_hint("[id]"),
             ModeCommand,
         )
         .map_err(|error| AgentLoopError::Extension(error.to_string()))?;

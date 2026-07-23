@@ -528,7 +528,7 @@ describe("M4 retained components", () => {
 
       now = 13_000
       reasoning?.update(initial.streamingTail.thinking, false, 86)
-      expect(reasoning?.header.plainText).toBe("⌄ Thought for 12s · Inspecting the workspace")
+      expect(reasoning?.header.plainText).toBe("⌄ Thought for 12s")
     } finally {
       Date.now = originalNow
     }
@@ -1181,7 +1181,7 @@ describe("M4 retained components", () => {
     const expanded = [...app.transcript.mountedCards.values()][0]?.reasoning
     expect([...app.transcript.mountedCards.values()][0]).toBe(card)
     expect(expanded).toBe(reasoning)
-    expect(expanded?.header.plainText).toBe("⌄ Thought · Inspecting workspace")
+    expect(expanded?.header.plainText).toBe("⌄ Thought")
     expect(expanded?.body.visible).toBeTrue()
     expect(expanded?.body.content).toContain("Read `Cargo.toml` next.")
     await setup.mockMouse.click(app.composer.editor.x + 2, app.composer.editor.y)
@@ -1209,7 +1209,7 @@ describe("M4 retained components", () => {
     const live = app.transcript.streamingCard
       .getChildren()
       .find((child): child is ReasoningBlockRenderable => child instanceof ReasoningBlockRenderable)
-    expect(live?.header.plainText).toBe("◌ Thinking… · Inspecting project")
+    expect(live?.header.plainText).toBe("◌ Thinking…")
     expect(live?.body.visible).toBeTrue()
     expect(setup.captureCharFrame()).toContain("Reading manifests now.")
 
@@ -1229,7 +1229,7 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
 
     const committed = [...app.transcript.mountedCards.values()][0]?.reasoning
-    expect(committed?.header.plainText).toBe("⌄ Thought · Inspecting project")
+    expect(committed?.header.plainText).toBe("⌄ Thought")
     expect(committed?.body.visible).toBeTrue()
   })
 
@@ -1266,8 +1266,8 @@ describe("M4 retained components", () => {
     renderer.root.add(app)
     await setup.renderOnce()
     expect(setup.captureCharFrame()).toContain("Running tools")
-    expect(setup.captureCharFrame()).toContain("◌ Thinking… · checking the workspace")
-    expect(setup.captureCharFrame()).toContain("checking the workspace")
+    expect(setup.captureCharFrame()).toContain("◌ Thinking…")
+    expect(setup.captureCharFrame().match(/checking the workspace/g)).toHaveLength(1)
     expect(setup.captureCharFrame()).toContain("Find files")
     expect(setup.captureCharFrame()).toContain("**/*.rs")
     expect(setup.captureCharFrame()).not.toContain("Working…")

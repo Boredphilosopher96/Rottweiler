@@ -215,6 +215,14 @@ pub struct CommandDescriptor {
     pub source: CommandSource,
 }
 
+/// One bounded, credential-free interaction mode exposed to clients.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
+pub struct ModeDescriptor {
+    pub id: ModeId,
+    pub description: String,
+    pub current: bool,
+}
+
 /// One engine-mediated user setting exposed to interactive clients.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize, TS)]
 pub struct UserSettingDescriptor {
@@ -1090,6 +1098,10 @@ pub enum ClientCommand {
         meta: CommandMeta,
         session_id: SessionId,
     },
+    ListModes {
+        meta: CommandMeta,
+        session_id: SessionId,
+    },
     ListModels {
         meta: CommandMeta,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1302,6 +1314,7 @@ impl ClientCommand {
             | Self::ListSessions { meta, .. }
             | Self::SearchSessions { meta, .. }
             | Self::ListCommands { meta, .. }
+            | Self::ListModes { meta, .. }
             | Self::ListModels { meta, .. }
             | Self::ListSettings { meta, .. }
             | Self::SetSetting { meta, .. }
@@ -1369,6 +1382,7 @@ impl ClientCommand {
             | Self::ListSessions { meta, .. }
             | Self::SearchSessions { meta, .. }
             | Self::ListCommands { meta, .. }
+            | Self::ListModes { meta, .. }
             | Self::ListModels { meta, .. }
             | Self::ListSettings { meta, .. }
             | Self::SetSetting { meta, .. }
@@ -1793,6 +1807,12 @@ pub enum EngineEvent {
         commands: Vec<CommandDescriptor>,
         truncated: bool,
     },
+    ModesListed {
+        meta: CommandAckMeta,
+        session_id: SessionId,
+        modes: Vec<ModeDescriptor>,
+        truncated: bool,
+    },
     ModelsListed {
         meta: CommandAckMeta,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2201,6 +2221,11 @@ pub enum EngineEvent {
     ModeChanged {
         meta: EventMeta,
         mode: ModeId,
+        /// BLAKE3 hash of canonical mode semantics. Legacy built-in events may
+        /// omit it; custom modes require it when resuming mutation-capable sessions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        definition_fingerprint: Option<String>,
     },
     PermissionModeChanged {
         meta: EventMeta,
@@ -2306,6 +2331,7 @@ impl EngineEvent {
             | Self::SubagentReplayCompleted { .. }
             | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
+            | Self::ModesListed { .. }
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
             | Self::McpServersListed { .. }
@@ -2395,6 +2421,7 @@ impl EngineEvent {
             | Self::SubagentReplayCompleted { .. }
             | Self::SessionsSearchReady { .. }
             | Self::CommandDescriptorsListed { .. }
+            | Self::ModesListed { .. }
             | Self::ModelsListed { .. }
             | Self::SettingsListed { .. }
             | Self::McpServersListed { .. }

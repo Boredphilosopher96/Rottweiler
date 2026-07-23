@@ -8,22 +8,28 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, Result, miette};
-use rw_core::{EngineEvent, TranscriptFormat, runtime_support::FixtureRedactor};
+use rw_core::{EngineEvent, TranscriptFormat};
+use rw_providers::FixtureRedactor;
 use rw_store::session::{EventEnvelope, SessionEventLog, SessionIndex, SessionSummary};
 use serde_json::Value;
 
-pub(crate) const MAX_HISTORY_BYTES: u64 = 64 * 1024 * 1024;
-pub(crate) const MAX_HISTORY_EVENTS: usize = 250_000;
+pub const MAX_HISTORY_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_HISTORY_EVENTS: usize = 250_000;
 const MAX_RENDERED_BYTES: usize = 96 * 1024 * 1024;
 
-pub(crate) fn load_events(
-    storage_root: &Path,
-    session: &str,
-) -> Result<Vec<EventEnvelope<EngineEvent>>> {
+/// Loads one bounded, identity-validated durable session history.
+///
+/// # Errors
+/// Returns an error when storage cannot be read or an event identity is invalid.
+pub fn load_events(storage_root: &Path, session: &str) -> Result<Vec<EventEnvelope<EngineEvent>>> {
     load_events_with_size(storage_root, session, MAX_HISTORY_BYTES).map(|(events, _)| events)
 }
 
-pub(crate) fn load_events_with_size(
+/// Loads bounded durable events and reports the charged storage bytes.
+///
+/// # Errors
+/// Returns an error when storage cannot be read or an event identity is invalid.
+pub fn load_events_with_size(
     storage_root: &Path,
     session: &str,
     max_bytes: u64,
@@ -50,7 +56,10 @@ pub(crate) fn load_events_with_size(
 }
 
 /// Emits exactly the persisted provider-neutral event payloads consumed by clients.
-pub(crate) fn replay_jsonl(events: &[EventEnvelope<EngineEvent>]) -> Result<Vec<u8>> {
+///
+/// # Errors
+/// Returns an error when an event cannot be serialized or the render cap is exceeded.
+pub fn replay_jsonl(events: &[EventEnvelope<EngineEvent>]) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     for envelope in events {
         serde_json::to_writer(&mut output, &envelope.event).into_diagnostic()?;
@@ -60,7 +69,11 @@ pub(crate) fn replay_jsonl(events: &[EventEnvelope<EngineEvent>]) -> Result<Vec<
     Ok(output)
 }
 
-pub(crate) fn export_transcript(
+/// Renders a redacted transcript in the selected stable export format.
+///
+/// # Errors
+/// Returns an error when serialization, rendering, or size validation fails.
+pub fn export_transcript(
     session: &str,
     events: &[EventEnvelope<EngineEvent>],
     format: TranscriptFormat,
@@ -93,7 +106,10 @@ pub(crate) fn export_transcript(
 
 /// Writes an export beside an already-existing directory entry without following
 /// a destination symlink. Forced replacement is limited to regular, single-link files.
-pub(crate) fn write_transcript_export(
+///
+/// # Errors
+/// Returns an error when the destination is unsafe or the durable write fails.
+pub fn write_transcript_export(
     storage_root: &Path,
     output: &Path,
     bytes: &[u8],
@@ -247,7 +263,11 @@ fn write_transcript_export_portable(
     file.sync_all().into_diagnostic()
 }
 
-pub(crate) fn search_sessions(
+/// Searches the durable session index with a bounded result count.
+///
+/// # Errors
+/// Returns an error when the session index cannot be opened or queried.
+pub fn search_sessions(
     storage_root: &Path,
     query: &str,
     limit: usize,
@@ -262,7 +282,11 @@ pub(crate) fn search_sessions(
         .map_err(|error| miette!("session search failed: {error}"))
 }
 
-pub(crate) fn list_sessions(storage_root: &Path, limit: usize) -> Result<Vec<SessionSummary>> {
+/// Lists recent durable sessions with a bounded result count.
+///
+/// # Errors
+/// Returns an error when the session index cannot be opened or queried.
+pub fn list_sessions(storage_root: &Path, limit: usize) -> Result<Vec<SessionSummary>> {
     if !(1..=1_000).contains(&limit) {
         return Err(miette!("session list limit must be between 1 and 1000"));
     }

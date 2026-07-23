@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use rw_core::runtime_support::{ApprovalDecision, PermissionDecision, SessionMode, ToolCapability};
 use rw_core::{PermissionApprover, PermissionGate, PermissionOutcome, PermissionRequest};
+use rw_types::{ApprovalDecision, SessionMode, ToolCapability, config::PermissionDecision};
 
 struct NeverPrompt;
 

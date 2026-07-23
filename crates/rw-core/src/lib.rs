@@ -53,6 +53,7 @@ pub use engine::{
     SessionSubscription, SessionUsage, StartupNotification, SystemEventClock,
     TOOL_CANCELLATION_GRACE, WorkspaceRootController, WorkspaceRuntimeGeneration,
     builtin_command_registry, builtin_hook_dispatcher, project_session_events,
+    project_session_events_with_modes,
 };
 pub use host::{
     BoundClient, CompletedForkOperation, CreateSessionRequest, EngineHost, EngineHostConfig,
@@ -115,108 +116,6 @@ pub use update::{
     UpdateVerificationError, UpdateVerificationPolicy, VerifiedUpdate, restore_trusted_root_chain,
     verify_update_metadata, verify_update_metadata_chain,
 };
-
-/// Stable construction and protocol surface for executable frontends.
-///
-/// Frontends own presentation and input handling while this facade exposes the
-/// provider-neutral replay protocol, first-party tool boundaries, and shared IR
-/// needed to assemble a headless runtime. Provider and tool implementations
-/// remain in their lower architectural layers.
-pub mod runtime_support {
-    /// Extension and plugin composition surface for executable frontends.
-    pub mod plugin {
-        pub use rw_ext::{
-            ApprovalRequirement, ApprovalStore, ApprovalStoreError, CapabilityEnforcer,
-            CapabilityViolation, DenyPushHandler, ExecutableIdentity, HookDispatchStatus,
-            HookDispatcher, HookEvent, HookHandler, HookRegistration, LaunchedPluginProcess,
-            METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_TOOL_CALL,
-            METHOD_UI_NOTIFY, PluginBoundaryRedactor, PluginCapabilities, PluginEventRouter,
-            PluginHost, PluginLauncher, PluginManifest, PluginProcessConfig,
-            PluginProcessConfigError, PluginProcessError, PluginRpcClient, PluginRpcError,
-            PluginSandboxMode, PluginSandboxProfile, PluginStdin, PluginStdout,
-            PluginToolCapability, PluginToolEffect, PushHandler, RpcCommandAdapter, RpcHookHandler,
-            RpcProviderAdapter, RpcToolAdapter, SupervisedPluginProcess, approve_plugin_launch,
-            plugin_launch_approval_requirement,
-        };
-    }
-
-    /// MCP composition surface for executable frontends.
-    pub mod mcp {
-        pub use rw_mcp::{
-            BridgeError, EngineMcpBridge, EngineTool, FilesystemSpool, McpClient,
-            McpConnectionApprovalPolicy, McpConnector, McpError, McpLimits, McpManager,
-            McpServerAuthority, McpServerConfig, McpStdioSandboxPolicy, McpToolCapabilityOverrides,
-            McpTransportConfig, OverflowReference, OverflowSpool, RottweilerMcpServerFactory,
-            SandboxedStdioConnector, ServerId, ServerState, ServerStatus, SessionSummary,
-            serve_stdio,
-        };
-    }
-
-    pub use rw_ext::{
-        ActiveWasmExtensionLoadReport, AgentDefinition, AgentPermissionMode, AgentPromptSource,
-        AgentRegistry, AgentRegistryError, ArtifactLocation, ArtifactOrigin, ArtifactScope,
-        CLAUDE_FRONTMATTER_MIGRATION, CommandDescriptor, CommandExecutionError, CommandHandler,
-        CommandInvocation, CommandRegistry, CommandRegistryError, CommandSource, CommandTemplate,
-        DiscoveredAgent, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill,
-        DiscoveredWorkflow, ExtensionCatalog, ExtensionDiscoveryConfig, ExtensionDiscoveryError,
-        ExtensionRegistryCatalog, HookDirective, HookDispatchStatus, HookDispatcher, HookEffect,
-        HookError, HookEvent, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
-        InstalledWasmExtension, InstalledWasmExtensionStatus, LoadedAgent, PluginManifest,
-        RegistryError, RegistryRelease, TemplatePart, WasmActivationCatalog,
-        WasmExtensionActivation, WasmHookHostError, WasmHookLimits, WasmProcessHook,
-        WorkflowCondition, WorkflowOnFail, WorkflowRunError, WorkflowRunReport, WorkflowRunner,
-        WorkflowStep, WorkflowStepArtifact, WorkflowStepExecutionError, WorkflowStepExecutor,
-        WorkflowStepReport, WorkflowStepRequest, WorkflowStepTarget,
-        activate_installed_wasm_extension, compose_agent_registry, deactivate_wasm_extension,
-        inspect_installed_wasm_extension, install_verified_component,
-        list_installed_wasm_extensions, load_active_wasm_extensions,
-        load_active_wasm_extensions_report, load_installed_wasm_extension, read_activation_catalog,
-    };
-    pub use rw_providers::{
-        BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FinishReason,
-        FixtureRedactor, GuardedHttpFetchError, GuardedHttpFetchRequest, GuardedHttpFetchResponse,
-        GuardedHttpMethod, GuardedHttpRequest, GuardedHttpStreamResponse,
-        NativeWebSearchCapability, NativeWebSearchRequest, PricingTable, Provider, ProviderError,
-        ProviderErrorKind, ProviderEvent, ProviderReachabilityRequest, ProviderRequest,
-        ProxyAuthentication, ProxyEnvironment, ProxySettings, ProxySource, Recorder,
-        ReplayProvider, Secret as ProviderSecret, ThinkingLevel, ToolChoice, ToolDefinition,
-        WireMode, default_models_path, deny_outbound_network_for_process, guarded_http_fetch,
-        guarded_http_request, provider_reachability_probe,
-    };
-    pub use rw_tools::{
-        ApplyWorktreeDiffTool, AskUserInput, AskUserTool, BackgroundKillTool, BackgroundOutputTool,
-        BackgroundProcessLimits, BackgroundProcessManager, BackgroundStatusTool, BashSandboxMode,
-        BashTool, CancellationToken, CapabilityManifest, CodeIntelligence,
-        CodeIntelligenceProvider, CommandExecutor, CommandFixtureRedactor,
-        CommandOutcome as ToolCommandOutcome, CommandRequest, CommandSafetyClassifier,
-        ConfiguredSearchApi, DefinitionTool, Diagnostic, DiagnosticSeverity, DiagnosticsTool,
-        EditTool, EgressDecision, EgressPin, EgressPolicy, ExecutionLease, FetchRequest,
-        FetchResponse, GlobTool, GrepTool, IntelligenceBackend, IntelligenceResult, Language,
-        Location, LsTool, LspConfig, LspServerConfig, MultiEditTool, MutationScope,
-        NetworkPolicy as SandboxNetworkPolicy, NoopOutputSink, Position, QuestionAsker, Range,
-        ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult, RenameTool,
-        ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
-        SandboxedProtocolLauncher, SubagentEventSink, SubagentLifecycleEvent,
-        SubagentLifecycleMode, SubagentProgressEvent, SupervisedEgressProxy, SymbolIndex,
-        SymbolsTool, TodoTool, TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError,
-        ToolLimits, ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult, UpstreamProxy,
-        WebFetchTool, WebFetcher, WebSearchRequest, WebSearchResponse, WebSearchResult,
-        WebSearchSource, WebSearchTool, WebSearcher, WorkspaceBinding, WorkspaceSymbolIndex,
-        WorkspaceUriMapper, WorktreeIsolation, WorktreeLeaseRecord, WorktreeLimits, WriteTool,
-        discover_sandboxed_lsp_servers, maybe_run_sandbox_helper, normalize_egress_domain,
-        probe_policy_egress, probe_sandbox, shell_launch_plan,
-    };
-    pub use rw_types::{
-        Answer, ApprovalBinding, ApprovalDecision, Block, ClientCommand, ClientId, CommandOutcome,
-        Cost, DiffArtifactRef, EngineError, EngineErrorCategory, EngineEvent, EventMeta,
-        QuestionId, Role, SequenceId, SessionId, SessionMode, SubagentId, SubagentIsolation,
-        SubagentResult, SubagentStatus, ToolCallId, ToolCapability, ToolOutput, ToolOutputPart,
-        ToolOutputStream, Turn, TurnId, TurnMeta, TurnStatus, UnrestorablePath, Usage,
-        config::{
-            PermissionDecision, PermissionRule, ToolchainConfig, ToolchainRule, WebSearchConfig,
-        },
-    };
-}
 
 /// Identifies this workspace component in diagnostics.
 pub const COMPONENT: &str = "core";

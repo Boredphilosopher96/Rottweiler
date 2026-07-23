@@ -11,7 +11,7 @@ use rw_core::{AccountingAttribution, Cost, EngineEvent};
 use rw_store::session::{AccountingLedger, TurnAccountingEntry, UtcDayKey, UtcTimestamp};
 use serde::Serialize;
 
-use crate::history;
+use rw_runtime::session_history;
 
 const MAX_STATS_SESSIONS: usize = 10_000;
 const MAX_STATS_HISTORY_BYTES: u64 = 512 * 1024 * 1024;
@@ -241,7 +241,8 @@ fn load_session_facts(
             inherited_accounting_boundary(storage_root, &id, remaining)?;
         add_history_scan_totals(&mut total_bytes, &mut total_events, metadata_bytes, 0)?;
         let remaining = MAX_STATS_HISTORY_BYTES.saturating_sub(total_bytes);
-        let (events, event_bytes) = history::load_events_with_size(storage_root, &id, remaining)?;
+        let (events, event_bytes) =
+            session_history::load_events_with_size(storage_root, &id, remaining)?;
         add_history_scan_totals(
             &mut total_bytes,
             &mut total_events,
@@ -339,10 +340,11 @@ fn inherited_accounting_boundary(
         .join(session_id)
         .join("metadata.json");
     match fs::symlink_metadata(path) {
-        Ok(_) => {
-            crate::runtime::load_session_metadata_any_bounded(storage_root, session_id, max_bytes)
-                .map(|(metadata, bytes)| (metadata.inherited_accounting_through, bytes))
-        }
+        Ok(_) => rw_runtime::session::load_inherited_accounting_boundary_bounded(
+            storage_root,
+            session_id,
+            max_bytes,
+        ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((None, 0)),
         Err(_) => Err(miette!("session metadata could not be inspected")),
     }
@@ -684,13 +686,11 @@ fn safe_terminal_text(value: &str) -> String {
 mod tests {
     use tempfile::tempdir;
 
-    use rw_core::{
-        Cost, EngineEvent, EventMeta, SequenceId, SessionId, TurnId, TurnStatus, Usage,
-        runtime_support::{SubagentId, ToolCallId},
-    };
+    use rw_core::{Cost, EngineEvent, EventMeta, SequenceId, SessionId, TurnId, TurnStatus, Usage};
     use rw_store::session::{
         AccountingLedger, EventEnvelope, SessionEventLog, TurnAccountingEntry, UtcTimestamp,
     };
+    use rw_types::{SubagentId, ToolCallId};
 
     use super::{
         CostTotals, MAX_STATS_HISTORY_BYTES, MAX_STATS_HISTORY_EVENTS, StatsQuery, UsageTotals,

@@ -13,13 +13,13 @@ use std::{
 use rw_tools::validate_mcp_virtual_tool;
 use thiserror::Error;
 
-use crate::{CommandDescriptor, DiscoveredWorkflow};
+use crate::{CommandDescriptor, DiscoveredWorkflow, ModeDefinition};
 
 mod shell_hook;
 
 pub use shell_hook::DiscoveredShellHook;
 
-const MAX_MARKDOWN_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_MARKDOWN_BYTES: u64 = 1024 * 1024;
 const MAX_RESOURCE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Code-distributed migration table for Claude-style command frontmatter.
@@ -89,6 +89,7 @@ pub enum ArtifactKind {
     Hook,
     Agent,
     Workflow,
+    Mode,
 }
 
 /// An untrusted project artifact visible to the folder-trust inventory.
@@ -528,6 +529,7 @@ pub struct ExtensionCatalog {
     skills: BTreeMap<String, DiscoveredSkill>,
     agents: BTreeMap<String, DiscoveredAgent>,
     workflows: BTreeMap<String, DiscoveredWorkflow>,
+    modes: BTreeMap<String, ModeDefinition>,
     shell_hooks: Vec<DiscoveredShellHook>,
     inert_project_artifacts: Vec<InertProjectArtifact>,
 }
@@ -632,6 +634,17 @@ impl ExtensionCatalog {
         self.workflows.values()
     }
 
+    #[must_use]
+    pub fn mode(&self, id: &str) -> Option<&ModeDefinition> {
+        self.modes.get(id)
+    }
+
+    /// Active declarative modes in stable id order.
+    #[must_use]
+    pub fn modes(&self) -> impl ExactSizeIterator<Item = &ModeDefinition> {
+        self.modes.values()
+    }
+
     /// Active declarative hooks in dispatcher order `(priority, id)`.
     #[must_use]
     pub fn shell_hooks(&self) -> &[DiscoveredShellHook] {
@@ -671,6 +684,11 @@ impl ExtensionCatalog {
             self.workflows
                 .entry(workflow.name().to_owned())
                 .or_insert(workflow);
+        }
+        for path in regular_children_with_extension(&root.join("modes"), "toml")? {
+            let origin = ArtifactOrigin::new(scope, location, path.clone());
+            let mode = crate::mode::parse_mode_file(root, &path, origin)?;
+            self.modes.entry(mode.id().0.clone()).or_insert(mode);
         }
         let hooks_path = root.join("hooks.toml");
         if hooks_path.exists() {
@@ -728,6 +746,15 @@ impl ExtensionCatalog {
                 path,
                 contains_shell_interpolation: false,
                 executes_command: true,
+            });
+        }
+        for path in regular_children_with_extension(&root.join("modes"), "toml")? {
+            self.inert_project_artifacts.push(InertProjectArtifact {
+                kind: ArtifactKind::Mode,
+                name: file_stem(&path)?,
+                path,
+                contains_shell_interpolation: false,
+                executes_command: false,
             });
         }
         let hooks_path = root.join("hooks.toml");
@@ -794,6 +821,8 @@ pub enum ExtensionDiscoveryError {
     InvalidAgent { path: PathBuf, message: String },
     #[error("invalid workflow `{path}`: {message}")]
     InvalidWorkflow { path: PathBuf, message: String },
+    #[error("invalid mode definition `{path}`: {message}")]
+    InvalidMode { path: PathBuf, message: String },
 }
 
 #[derive(Debug)]
@@ -2257,5 +2286,63 @@ mod tests {
             ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home)),
             Err(ExtensionDiscoveryError::InvalidHook { index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn modes_follow_discovery_precedence_and_untrusted_project_modes_are_inert() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let project_mode = project.join(".agents/modes/audit.toml");
+        let user_mode = home.join(".agents/modes/audit.toml");
+        let mode = |description: &str| {
+            format!(
+                "id = \"audit\"\ndescription = \"{description}\"\npermission = \"discuss\"\nprompt = \"Audit carefully\"\nallowed-tools = [\"read\"]\n"
+            )
+        };
+        write(&project_mode, &mode("project"));
+        write(&user_mode, &mode("user"));
+
+        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
+            .expect("untrusted discovery");
+        assert_eq!(
+            untrusted
+                .mode("audit")
+                .expect("user fallback")
+                .description(),
+            "user"
+        );
+        assert!(untrusted.inert_project_artifacts().iter().any(|artifact| {
+            artifact.kind() == ArtifactKind::Mode && artifact.name() == "audit"
+        }));
+
+        let trusted = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
+        )
+        .expect("trusted discovery");
+        assert_eq!(
+            trusted.mode("audit").expect("project mode").description(),
+            "project"
+        );
+        let registry = crate::compose_mode_registry(&trusted).expect("composed registry");
+        assert_eq!(registry.iter().len(), 4);
+        assert!(registry.get("execute").is_some());
+    }
+
+    #[test]
+    fn discovered_modes_cannot_shadow_security_sensitive_builtin_ids() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        write(
+            &home.join(".agents/modes/plan.toml"),
+            "id = \"plan\"\ndescription = \"Unsafe plan\"\npermission = \"execute\"\nprompt = \"Mutate freely\"\n",
+        );
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
+            .expect("mode discovery");
+        assert_eq!(
+            crate::compose_mode_registry(&catalog),
+            Err(crate::ModeRegistryError::Duplicate("plan".to_owned()))
+        );
     }
 }

@@ -200,7 +200,8 @@ export class ReasoningBlockRenderable extends BoxRenderable {
       : this.#elapsedMs === null
         ? "Thought"
         : `Thought for ${formatElapsed(this.#elapsedMs)}`
-    this.header.content = `${indicator} ${state} · ${reasoningTitle(this.#content)}`
+    const title = this.#expanded ? "" : ` · ${reasoningTitle(this.#content)}`
+    this.header.content = `${indicator} ${state}${title}`
     this.body.visible = this.#expanded
     this.body.content = this.#expanded ? this.#content : ""
   }
@@ -1305,6 +1306,9 @@ function shellHeader(active: boolean, status: number | null): string {
 
 export class TranscriptRenderable extends BoxRenderable {
   readonly scroller: ScrollBoxRenderable
+  readonly emptyState: BoxRenderable
+  readonly emptyStateTitle: TextRenderable
+  readonly emptyStateHint: TextRenderable
   readonly streamingCard: BoxRenderable
   readonly streamingMarkdown: MarkdownRenderable
   readonly compactionCard: BoxRenderable
@@ -1369,6 +1373,36 @@ export class TranscriptRenderable extends BoxRenderable {
       verticalScrollbarOptions: { showArrows: false, trackOptions: { backgroundColor: theme.panel } },
     })
     this.scroller.onMouseUp = () => this.#onInteraction?.()
+    this.emptyState = new BoxRenderable(ctx, {
+      id: "transcript-empty-state",
+      width: "100%",
+      minHeight: 6,
+      flexGrow: 1,
+      flexDirection: "column",
+      justifyContent: "center",
+      paddingX: 2,
+      visible: false,
+    })
+    this.emptyStateTitle = new TextRenderable(ctx, {
+      id: "transcript-empty-state-title",
+      content: "Rottweiler",
+      fg: theme.accentStrong,
+      height: 1,
+      flexShrink: 0,
+      selectable: true,
+    })
+    this.emptyStateHint = new TextRenderable(ctx, {
+      id: "transcript-empty-state-hint",
+      content: "Ready for a task. Type / for commands or @ to add workspace files.",
+      fg: theme.muted,
+      height: 2,
+      flexShrink: 0,
+      wrapMode: "word",
+      selectable: true,
+    })
+    this.emptyState.add(this.emptyStateTitle)
+    this.emptyState.add(this.emptyStateHint)
+    this.scroller.add(this.emptyState)
     this.streamingCard = new BoxRenderable(ctx, {
       id: "streaming-tail",
       width: "100%",
@@ -1572,6 +1606,11 @@ export class TranscriptRenderable extends BoxRenderable {
     if (transcriptChanged || cardProjectionChanged) {
       this.#presentableTranscript = presentableTranscript(state)
     }
+    this.emptyState.visible =
+      !state.replay.active &&
+      this.#presentableTranscript.length === 0 &&
+      state.streamingTail === null &&
+      !state.compaction.active
     this.#updateTail(state)
     this.#updateCompaction(state)
     if (transcriptChanged || cardProjectionChanged || turnProjectionChanged) {

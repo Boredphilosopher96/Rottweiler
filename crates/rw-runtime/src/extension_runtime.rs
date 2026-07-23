@@ -10,33 +10,34 @@ use std::{
 
 use async_trait::async_trait;
 use miette::{IntoDiagnostic, Result, miette};
-use rw_core::runtime_support::mcp::{
-    FilesystemSpool, McpClient, McpConnectionApprovalPolicy, McpConnector, McpError, McpLimits,
-    McpManager, McpServerConfig, McpTransportConfig, OverflowSpool, ServerId, ServerState,
-};
-use rw_core::runtime_support::plugin::{
-    ApprovalRequirement, ApprovalStore, ApprovalStoreError, CapabilityEnforcer, HookHandler,
-    HookRegistration, METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY,
-    PluginBoundaryRedactor, PluginEventRouter, PluginHost, PluginManifest, PluginRpcClient,
-    PluginRpcError, PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter,
-    RpcToolAdapter, plugin_launch_approval_requirement,
-};
-use rw_core::runtime_support::{
-    Block, CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation,
-    CommandRegistry, CommandRegistryError, CommandSource, Role, Turn, TurnMeta,
-};
-use rw_core::runtime_support::{SandboxedProtocolLauncher, Tool, UpstreamProxy};
 use rw_core::{
     HostError, HostMcpService, LoopbackMcpAuthority, McpApprovalReview, McpEnvironmentEntry,
     McpPolicyProxy, McpServerDescriptor, McpServerState, ProductionMcpHttpClient,
     ProductionMcpHttpConnector, SessionCommandAction, SessionCommandContext, SessionCommandOutput,
     ToonMcpEncoder, VaultMcpTokenProvider,
 };
+use rw_ext::{
+    ApprovalRequirement, ApprovalStore, ApprovalStoreError, CapabilityEnforcer, HookHandler,
+    HookRegistration, METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY,
+    PluginBoundaryRedactor, PluginEventRouter, PluginHost, PluginManifest, PluginRpcClient,
+    PluginRpcError, PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter,
+    RpcToolAdapter, plugin_launch_approval_requirement,
+};
+use rw_ext::{
+    CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
+    CommandRegistryError, CommandSource,
+};
+use rw_mcp::{
+    FilesystemSpool, McpClient, McpConnectionApprovalPolicy, McpConnector, McpError, McpLimits,
+    McpManager, McpServerConfig, McpTransportConfig, OverflowSpool, ServerId, ServerState,
+};
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
+use rw_tools::{SandboxedProtocolLauncher, Tool, UpstreamProxy};
+use rw_types::{Block, Role, Turn, TurnMeta};
 use serde::{Deserialize, Serialize};
 
-use crate::m8_config::DiscoveredMcpServer;
+use crate::extension_config::DiscoveredMcpServer;
 
 const MAX_CONTROL_OUTPUT: usize = 32 * 1024;
 const APPROVAL_VERSION: u16 = 1;
@@ -49,7 +50,7 @@ fn configured_stdio_environment(
     configs
         .iter()
         .flat_map(|config| match &config.transport {
-            crate::m8_config::DiscoveredMcpTransport::Stdio {
+            crate::extension_config::DiscoveredMcpTransport::Stdio {
                 inherit_env,
                 environment,
                 ..
@@ -64,7 +65,7 @@ fn configured_stdio_environment(
                         .map(|binding| binding.environment.clone()),
                 )
                 .collect::<Vec<_>>(),
-            crate::m8_config::DiscoveredMcpTransport::Http { .. } => Vec::new(),
+            crate::extension_config::DiscoveredMcpTransport::Http { .. } => Vec::new(),
         })
         .collect()
 }
@@ -74,7 +75,7 @@ fn configured_stdio_environment(
 /// credential vault merely because a server exists in configuration.
 struct DeferredCredentialMcpConnector {
     inner: Arc<dyn McpConnector>,
-    bindings: BTreeMap<ServerId, Vec<crate::m8_config::CredentialBinding>>,
+    bindings: BTreeMap<ServerId, Vec<crate::extension_config::CredentialBinding>>,
     resolve: McpCredentialResolver,
 }
 
@@ -163,15 +164,15 @@ impl McpApprovalStore {
             .get(&server.0)
             .cloned();
         let origin = match &config.origin {
-            crate::m8_config::ExecutableConfigOrigin::User(path) => {
+            crate::extension_config::ExecutableConfigOrigin::User(path) => {
                 serde_json::json!({"kind":"user","path":path})
             }
-            crate::m8_config::ExecutableConfigOrigin::TrustedProject(path) => {
+            crate::extension_config::ExecutableConfigOrigin::TrustedProject(path) => {
                 serde_json::json!({"kind":"trusted_project","path":path})
             }
         };
         let transport = match &config.transport {
-            crate::m8_config::DiscoveredMcpTransport::Stdio {
+            crate::extension_config::DiscoveredMcpTransport::Stdio {
                 argv,
                 cwd,
                 inherit_env,
@@ -196,7 +197,7 @@ impl McpApprovalStore {
                     "content_blake3":identity.content_blake3,
                 })).collect::<Vec<_>>(),
             }),
-            crate::m8_config::DiscoveredMcpTransport::Http {
+            crate::extension_config::DiscoveredMcpTransport::Http {
                 endpoint,
                 oauth_credential,
                 oauth_resource,
@@ -224,7 +225,7 @@ impl McpApprovalStore {
             origin,
             transport,
             defer_tools: config.defer_tools,
-            tool_capabilities: crate::m8_config::capability_override_json(
+            tool_capabilities: crate::extension_config::capability_override_json(
                 &config.tool_capabilities,
             ),
             capability_override_origin: config.capability_override_origin.clone(),
@@ -413,12 +414,9 @@ impl McpConnector for LazySandboxedStdioConnector {
             environment,
         )
         .map_err(|error| McpError::Policy(error.to_string()))?;
-        rw_core::runtime_support::mcp::SandboxedStdioConnector::new(
-            launcher,
-            self.approvals.clone(),
-        )
-        .connect(config)
-        .await
+        rw_mcp::SandboxedStdioConnector::new(launcher, self.approvals.clone())
+            .connect(config)
+            .await
     }
 }
 
@@ -455,6 +453,7 @@ pub(crate) struct LiveMcpAdmin {
 }
 
 impl LiveMcpAdmin {
+    #[cfg(test)]
     pub(crate) fn new(
         manager: Arc<McpManager>,
         approvals: Arc<McpApprovalStore>,
@@ -493,20 +492,14 @@ impl LiveMcpAdmin {
                 .is_approved(&status.id)
                 .map_err(|error| HostError::Query(error.to_string()))?;
             let state = match status.state {
-                rw_core::runtime_support::mcp::ServerState::Disabled => McpServerState::Disabled,
-                rw_core::runtime_support::mcp::ServerState::Connecting => {
-                    McpServerState::Connecting
-                }
-                rw_core::runtime_support::mcp::ServerState::Ready => McpServerState::Ready,
-                rw_core::runtime_support::mcp::ServerState::ApprovalRequired => {
-                    McpServerState::ApprovalRequired
-                }
-                rw_core::runtime_support::mcp::ServerState::Failed { message } => {
-                    McpServerState::Failed {
-                        message: message.chars().take(512).collect(),
-                    }
-                }
-                rw_core::runtime_support::mcp::ServerState::Stopping => McpServerState::Stopping,
+                rw_mcp::ServerState::Disabled => McpServerState::Disabled,
+                rw_mcp::ServerState::Connecting => McpServerState::Connecting,
+                rw_mcp::ServerState::Ready => McpServerState::Ready,
+                rw_mcp::ServerState::ApprovalRequired => McpServerState::ApprovalRequired,
+                rw_mcp::ServerState::Failed { message } => McpServerState::Failed {
+                    message: message.chars().take(512).collect(),
+                },
+                rw_mcp::ServerState::Stopping => McpServerState::Stopping,
             };
             servers.push(McpServerDescriptor {
                 name: status.id.0,
@@ -546,7 +539,7 @@ impl LiveMcpAdmin {
             name: name.to_owned(),
             enabled: false,
             defer_tools: true,
-            transport: crate::m8_config::DiscoveredMcpTransport::Http {
+            transport: crate::extension_config::DiscoveredMcpTransport::Http {
                 endpoint: endpoint.to_owned(),
                 oauth_credential: None,
                 oauth_resource: None,
@@ -559,8 +552,10 @@ impl LiveMcpAdmin {
             },
             credentials: Vec::new(),
             attested_files: Vec::new(),
-            origin: crate::m8_config::ExecutableConfigOrigin::User(self.user_mcp_path.clone()),
-            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            origin: crate::extension_config::ExecutableConfigOrigin::User(
+                self.user_mcp_path.clone(),
+            ),
+            tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
             capability_override_origin: None,
         })
     }
@@ -593,7 +588,7 @@ impl LiveMcpAdmin {
                 "MCP environment contains duplicate keys".to_owned(),
             ));
         }
-        crate::m8_config::discover_tui_stdio_server(
+        crate::extension_config::discover_tui_stdio_server(
             &self.user_mcp_path,
             base,
             name,
@@ -702,7 +697,7 @@ impl HostMcpService for LiveMcpAdmin {
             let _ = self.manager.unregister_disabled(&id).await;
             return Err(HostError::Query(error.to_string()));
         }
-        let crate::m8_config::DiscoveredMcpTransport::Stdio {
+        let crate::extension_config::DiscoveredMcpTransport::Stdio {
             argv, environment, ..
         } = &discovered.transport
         else {
@@ -847,6 +842,7 @@ impl HostMcpService for LiveMcpAdmin {
 }
 
 impl McpSessionRuntime {
+    #[cfg(test)]
     pub(crate) async fn start(
         configs: &[DiscoveredMcpServer],
         connector: Arc<dyn McpConnector>,
@@ -1004,8 +1000,10 @@ impl McpSessionRuntime {
         let authorization = Arc::new(VaultMcpTokenProvider::new(credentials.clone(), bindings));
         let mut http_client = ProductionMcpHttpClient::new();
         for endpoint in configs.iter().filter_map(|config| match &config.transport {
-            crate::m8_config::DiscoveredMcpTransport::Http { endpoint, .. } => Some(endpoint),
-            crate::m8_config::DiscoveredMcpTransport::Stdio { .. } => None,
+            crate::extension_config::DiscoveredMcpTransport::Http { endpoint, .. } => {
+                Some(endpoint)
+            }
+            crate::extension_config::DiscoveredMcpTransport::Stdio { .. } => None,
         }) {
             let endpoint = url::Url::parse(endpoint).into_diagnostic()?;
             let loopback = endpoint.host_str().is_some_and(|host| {
@@ -1036,7 +1034,7 @@ impl McpSessionRuntime {
         if configs.iter().any(|config| {
             matches!(
                 &config.transport,
-                crate::m8_config::DiscoveredMcpTransport::Stdio { .. }
+                crate::extension_config::DiscoveredMcpTransport::Stdio { .. }
             )
         }) {
             SandboxedProtocolLauncher::new(
@@ -1121,7 +1119,7 @@ pub(crate) struct PluginSessionRuntime {
         CommandDescriptor,
         Arc<dyn CommandHandler<SessionCommandContext, SessionCommandOutput>>,
     )>,
-    pub(crate) providers: Vec<(String, Arc<dyn rw_core::runtime_support::Provider>)>,
+    pub(crate) providers: Vec<(String, Arc<dyn rw_providers::Provider>)>,
     pub(crate) event_routers: Vec<(std::collections::BTreeSet<String>, Arc<PluginEventRouter>)>,
     pub(crate) pending: Vec<String>,
     _scratch: PrivateMcpScratch,
@@ -1129,7 +1127,7 @@ pub(crate) struct PluginSessionRuntime {
 
 impl PluginSessionRuntime {
     pub(crate) async fn start(
-        configs: &[crate::m8_config::DiscoveredPlugin],
+        configs: &[crate::extension_config::DiscoveredPlugin],
         private_root: &Path,
         workspace_roots: &[PathBuf],
         helper: &Path,
@@ -1137,7 +1135,7 @@ impl PluginSessionRuntime {
     ) -> Result<Self> {
         let store = PrivatePluginApprovalStore::open(private_root)?;
         let scratch = PrivateMcpScratch::create()?;
-        let launcher = crate::plugin_launcher::SandboxedPluginLauncher::new(scratch.path(), helper)
+        let launcher = crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), helper)
             .map_err(|error| miette!(error.to_string()))?;
         let mut runtime = Self {
             hosts: Vec::new(),
@@ -1160,17 +1158,17 @@ impl PluginSessionRuntime {
 
     async fn start_plugin(
         &mut self,
-        config: &crate::m8_config::DiscoveredPlugin,
+        config: &crate::extension_config::DiscoveredPlugin,
         workspace_roots: &[PathBuf],
-        launcher: &crate::plugin_launcher::SandboxedPluginLauncher,
+        launcher: &crate::plugin_process::SandboxedPluginLauncher,
         store: &PrivatePluginApprovalStore,
         redactor: Arc<dyn PluginBoundaryRedactor>,
     ) -> Result<()> {
         let manifest = config.load_manifest()?;
         let process = config.process_config()?;
         let scope = match config.origin {
-            crate::m8_config::ExecutableConfigOrigin::User(_) => "user",
-            crate::m8_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
+            crate::extension_config::ExecutableConfigOrigin::User(_) => "user",
+            crate::extension_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
         };
         let origin = format!("{scope}:{}", config.origin.path().display());
         match plugin_launch_approval_requirement(store, &manifest, &process, &origin)
@@ -1206,7 +1204,7 @@ impl PluginSessionRuntime {
 
     fn register_plugin(
         &mut self,
-        config: &crate::m8_config::DiscoveredPlugin,
+        config: &crate::extension_config::DiscoveredPlugin,
         manifest: &PluginManifest,
         host: PluginHost,
         push_handler: Arc<SessionPluginPushHandler>,
@@ -1265,20 +1263,20 @@ impl PluginSessionRuntime {
 
     fn register_providers(
         &mut self,
-        config: &crate::m8_config::DiscoveredPlugin,
+        config: &crate::extension_config::DiscoveredPlugin,
         manifest: &PluginManifest,
         client: &Arc<dyn PluginRpcClient>,
         enforcer: &Arc<CapabilityEnforcer>,
     ) {
         for declaration in &manifest.capabilities.providers {
-            let capabilities = rw_core::runtime_support::Capabilities {
+            let capabilities = rw_providers::Capabilities {
                 tool_calling: true,
                 vision: false,
                 thinking: false,
-                cache_breakpoints: rw_core::runtime_support::CacheBreakpointSupport::None,
+                cache_breakpoints: rw_providers::CacheBreakpointSupport::None,
                 max_context_tokens: None,
                 max_output_tokens: None,
-                wire_mode: rw_core::runtime_support::WireMode::NormalizedReplay,
+                wire_mode: rw_providers::WireMode::NormalizedReplay,
             };
             self.providers.push((
                 declaration.alias_prefix.clone(),
@@ -1455,14 +1453,12 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for PluginSessi
     }
 }
 
-pub(crate) struct SharedPluginRedactor(
-    std::sync::RwLock<rw_core::runtime_support::FixtureRedactor>,
-);
+pub(crate) struct SharedPluginRedactor(std::sync::RwLock<rw_providers::FixtureRedactor>);
 impl SharedPluginRedactor {
-    pub(crate) fn new(redactor: rw_core::runtime_support::FixtureRedactor) -> Self {
+    pub(crate) fn new(redactor: rw_providers::FixtureRedactor) -> Self {
         Self(std::sync::RwLock::new(redactor))
     }
-    pub(crate) fn bind(&self, redactor: rw_core::runtime_support::FixtureRedactor) {
+    pub(crate) fn bind(&self, redactor: rw_providers::FixtureRedactor) {
         *self
             .0
             .write()
@@ -1481,10 +1477,7 @@ impl PluginBoundaryRedactor for SharedPluginRedactor {
         value
     }
 }
-fn redact_plugin_value(
-    redactor: &rw_core::runtime_support::FixtureRedactor,
-    value: &mut serde_json::Value,
-) {
+fn redact_plugin_value(redactor: &rw_providers::FixtureRedactor, value: &mut serde_json::Value) {
     match value {
         serde_json::Value::String(text) => *text = redactor.redact_text(text),
         serde_json::Value::Array(values) => {
@@ -1813,14 +1806,14 @@ fn invalid_mcp_command() -> CommandExecutionError {
         "usage: /mcp [status | enable <server> | disable <server> | approve <server> [displayed-fingerprint]]",
     )
 }
-fn mcp_command_error(error: &rw_core::runtime_support::mcp::McpError) -> CommandExecutionError {
+fn mcp_command_error(error: &rw_mcp::McpError) -> CommandExecutionError {
     CommandExecutionError::new(
         "mcp_failed",
         error.to_string().chars().take(512).collect::<String>(),
     )
 }
 
-fn render_mcp_statuses(statuses: &[rw_core::runtime_support::mcp::ServerStatus]) -> String {
+fn render_mcp_statuses(statuses: &[rw_mcp::ServerStatus]) -> String {
     if statuses.is_empty() {
         return "MCP servers: none configured".to_owned();
     }
@@ -1971,13 +1964,17 @@ fn persist_approval_file(path: &Path, values: &BTreeMap<String, String>) -> Resu
 
 /// User-private durable plugin approvals. Values are launch-identity fingerprints,
 /// never executable paths, manifests, environment values, or credentials.
-pub(crate) struct PrivatePluginApprovalStore {
+pub struct PrivatePluginApprovalStore {
     path: PathBuf,
     values: Mutex<BTreeMap<String, String>>,
 }
 
 impl PrivatePluginApprovalStore {
-    pub(crate) fn open(private_root: &Path) -> Result<Self> {
+    /// Opens the private durable plugin-approval ledger.
+    ///
+    /// # Errors
+    /// Returns an error when the root or ledger is unsafe, malformed, or unreadable.
+    pub fn open(private_root: &Path) -> Result<Self> {
         validate_private_root(private_root)?;
         let path = private_root.join("plugin-approvals-v1.json");
         let values = match fs::symlink_metadata(&path) {
@@ -2085,7 +2082,11 @@ impl ApprovalStore for PrivatePluginApprovalStore {
 }
 
 impl PrivatePluginApprovalStore {
-    pub(crate) fn revoke(&self, plugin_name: &str) -> Result<bool> {
+    /// Revokes an approved plugin launch identity.
+    ///
+    /// # Errors
+    /// Returns an error when the ledger cannot be locked or durably updated.
+    pub fn revoke(&self, plugin_name: &str) -> Result<bool> {
         let mut values = self
             .values
             .lock()
@@ -2132,8 +2133,10 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
-    use crate::m8_config::{DiscoveredMcpServer, DiscoveredMcpTransport, ExecutableConfigOrigin};
-    use rw_core::runtime_support::mcp::{McpClient, McpError, McpServerConfig, ServerState};
+    use crate::extension_config::{
+        DiscoveredMcpServer, DiscoveredMcpTransport, ExecutableConfigOrigin,
+    };
+    use rw_mcp::{McpClient, McpError, McpServerConfig, ServerState};
     use serde_json::{Value, json};
     use std::time::Duration;
 
@@ -2214,7 +2217,7 @@ mod tests {
             credentials: Vec::new(),
             attested_files: Vec::new(),
             origin: ExecutableConfigOrigin::User(credentials.with_file_name("mcp.toml")),
-            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
             capability_override_origin: None,
         };
         let http_runtime = McpSessionRuntime::start_production(
@@ -2253,13 +2256,13 @@ mod tests {
                 write_roots: Vec::new(),
                 allowed_domains: Vec::new(),
             },
-            credentials: vec![crate::m8_config::CredentialBinding {
+            credentials: vec![crate::extension_config::CredentialBinding {
                 environment: "PRIVATE_TOKEN".to_owned(),
                 credential_reference: "private-token".to_owned(),
             }],
             attested_files: Vec::new(),
             origin: ExecutableConfigOrigin::User(root.path().join("mcp.toml")),
-            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
             capability_override_origin: None,
         };
         let approvals = Arc::new(
@@ -2352,17 +2355,16 @@ mod tests {
         manager
             .register(McpServerConfig {
                 id: ServerId::new("fixture").expect("id"),
-                transport: rw_core::runtime_support::mcp::McpTransportConfig::Stdio {
+                transport: rw_mcp::McpTransportConfig::Stdio {
                     executable: "/bin/false".into(),
                     args: vec![],
                     working_directory: None,
                     environment: vec![],
-                    sandbox: rw_core::runtime_support::mcp::McpStdioSandboxPolicy::default(),
+                    sandbox: rw_mcp::McpStdioSandboxPolicy::default(),
                 },
                 enabled: false,
                 defer_tools: true,
-                tool_capabilities:
-                    rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+                tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
             })
             .await
             .expect("register");
@@ -2405,20 +2407,16 @@ mod tests {
             _: &ServerId,
             _: &str,
             _: &[u8],
-        ) -> std::result::Result<rw_core::runtime_support::mcp::OverflowReference, McpError>
-        {
+        ) -> std::result::Result<rw_mcp::OverflowReference, McpError> {
             unreachable!()
         }
         async fn read(
             &self,
-            _: &rw_core::runtime_support::mcp::OverflowReference,
+            _: &rw_mcp::OverflowReference,
         ) -> std::result::Result<Vec<u8>, McpError> {
             unreachable!()
         }
-        async fn remove(
-            &self,
-            _: &rw_core::runtime_support::mcp::OverflowReference,
-        ) -> std::result::Result<(), McpError> {
+        async fn remove(&self, _: &rw_mcp::OverflowReference) -> std::result::Result<(), McpError> {
             unreachable!()
         }
     }
@@ -2809,7 +2807,7 @@ mod tests {
             credentials: vec![],
             attested_files: vec![],
             origin: ExecutableConfigOrigin::User(root.join("mcp.toml")),
-            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
             capability_override_origin: None,
         }
     }
@@ -2969,8 +2967,7 @@ mod tests {
                 credentials: vec![],
                 attested_files: vec![],
                 origin: ExecutableConfigOrigin::User(root.path().join("mcp.toml")),
-                tool_capabilities:
-                    rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+                tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
                 capability_override_origin: None,
             })
             .collect::<Vec<_>>();
@@ -3038,7 +3035,7 @@ mod tests {
             credentials: vec![],
             attested_files: vec![],
             origin: ExecutableConfigOrigin::User(root.path().join("mcp.toml")),
-            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
             capability_override_origin: None,
         };
         let approvals = Arc::new(
@@ -3178,7 +3175,7 @@ mod tests {
             credentials: vec![],
             attested_files: vec![],
             origin: ExecutableConfigOrigin::User(user_root.path().join("mcp.toml")),
-            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
             capability_override_origin: None,
         };
         let server = ServerId::new("fixture").expect("server");

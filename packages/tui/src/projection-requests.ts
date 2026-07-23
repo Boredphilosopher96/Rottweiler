@@ -9,6 +9,7 @@ import { isRecord, type WireEngineEvent } from "./transport"
 
 export type ProjectionKind =
   | "commands"
+  | "modes"
   | "models"
   | "sessions"
   | "files"
@@ -42,6 +43,7 @@ export type ProjectionCommand =
   | { readonly type: "search_sessions"; readonly query: string; readonly limit: number }
   | { readonly type: "rename_session"; readonly sessionId: string; readonly title: string }
   | { readonly type: "list_models"; readonly refresh: boolean }
+  | { readonly type: "list_modes" }
   | { readonly type: "list_settings" }
   | { readonly type: "set_setting"; readonly key: string; readonly value: string }
   | { readonly type: "list_mcp_servers" }
@@ -92,6 +94,7 @@ export class ProjectionRequestBroker {
   readonly #options: ProjectionRequestBrokerOptions
   readonly #requests: Record<ProjectionRequestKind, string | null> = {
     commands: null,
+    modes: null,
     models: null,
     sessions: null,
     files: null,
@@ -163,6 +166,7 @@ export class ProjectionRequestBroker {
       "workspace_status",
       "review",
       "commands",
+      "modes",
       "models",
       "sessions",
       "settings",
@@ -241,6 +245,8 @@ export class ProjectionRequestBroker {
       }
       case "command_descriptors_listed":
         return this.accepts("commands", requestId)
+      case "modes_listed":
+        return this.accepts("modes", requestId)
       case "models_listed":
         return this.accepts("models", requestId)
       case "settings_listed":
@@ -258,6 +264,9 @@ export class ProjectionRequestBroker {
       case "command_descriptors_listed":
         this.clear("commands")
         return "commands"
+      case "modes_listed":
+        this.clear("modes")
+        return "modes"
       case "models_listed":
         this.clear("models")
         return "models"
@@ -351,6 +360,9 @@ export class ProjectionRequestBroker {
       case "list_commands":
         this.#requests.commands = requestId
         break
+      case "list_modes":
+        this.#requests.modes = requestId
+        break
       case "list_models":
         this.#requests.models = requestId
         break
@@ -394,7 +406,7 @@ export class ProjectionRequestBroker {
       return
     }
     if (!this.matches(kind, requestId)) return
-    if (kind === "commands" || kind === "models" || kind === "permissions" || kind === "mcp" || kind === "runtime_services") {
+    if (kind === "commands" || kind === "modes" || kind === "models" || kind === "permissions" || kind === "mcp" || kind === "runtime_services") {
       this.clear(kind)
     } else if (kind === "settings") {
       this.clear("settings_pending")
@@ -406,6 +418,7 @@ export class ProjectionRequestBroker {
 export function projectionKind(type: ClientCommand["type"]): ProjectionKind | null {
   switch (type) {
     case "list_commands": return "commands"
+    case "list_modes": return "modes"
     case "list_models": return "models"
     case "list_sessions":
     case "search_sessions": return "sessions"
@@ -433,6 +446,7 @@ function dispatchCommand(
     case "list_models": return { ...command, meta, session_id: sessionId }
     case "list_sessions": return { type: command.type, meta }
     case "list_commands":
+    case "list_modes":
     case "list_settings":
     case "list_mcp_servers":
     case "list_runtime_services":

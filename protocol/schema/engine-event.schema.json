@@ -469,6 +469,37 @@
           "$ref": "#/$defs/CommandAckMeta"
         },
         "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "modes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ModeDescriptor"
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "modes_listed"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "modes",
+        "truncated"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandAckMeta"
+        },
+        "session_id": {
           "anyOf": [
             {
               "$ref": "#/$defs/SessionId"
@@ -2071,6 +2102,13 @@
         "mode": {
           "$ref": "#/$defs/ModeId"
         },
+        "definition_fingerprint": {
+          "description": "BLAKE3 hash of canonical mode semantics. Legacy built-in events may\nomit it; custom modes require it when resuming mutation-capable sessions.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "type": {
           "type": "string",
           "const": "mode_changed"
@@ -3627,6 +3665,30 @@
         "mcp"
       ]
     },
+    "ModeDescriptor": {
+      "description": "One bounded, credential-free interaction mode exposed to clients.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/ModeId"
+        },
+        "description": {
+          "type": "string"
+        },
+        "current": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "description",
+        "current"
+      ]
+    },
+    "ModeId": {
+      "description": "Open identifier of a built-in or extension-provided mode.",
+      "type": "string"
+    },
     "ModelDescriptor": {
       "description": "One concrete provider/model discovered from a live authenticated catalog.",
       "type": "object",
@@ -4822,10 +4884,6 @@
         "deleted",
         "type_changed"
       ]
-    },
-    "ModeId": {
-      "description": "Open identifier of a built-in or extension-provided mode.",
-      "type": "string"
     },
     "PlanArtifact": {
       "description": "Durable plan submitted before entering execute mode.",

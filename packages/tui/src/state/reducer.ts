@@ -41,6 +41,7 @@ const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "subagent_replay_completed",
   "sessions_search_ready",
   "command_descriptors_listed",
+  "modes_listed",
   "models_listed",
   "settings_listed",
   "mcp_servers_listed",
@@ -123,6 +124,7 @@ const ACK_EVENT_TYPES = new Set<EngineEvent["type"]>([
   "subagent_replay_completed",
   "sessions_search_ready",
   "command_descriptors_listed",
+  "modes_listed",
   "models_listed",
   "settings_listed",
   "mcp_servers_listed",
@@ -412,6 +414,20 @@ function applyKnownEvent(
         commandsTruncated: event.truncated,
         commandAcks: responseAck(state, event.meta.request_id, event.type, null),
       }
+    case "modes_listed": {
+      const currentModes = event.modes.filter((mode) => mode.current)
+      return {
+        ...state,
+        ...(currentModes.length === 1 ? { mode: currentModes[0]!.id } : {}),
+        modes: event.modes.map((mode) => ({
+          id: mode.id,
+          description: mode.description,
+          current: mode.current,
+        })),
+        modesTruncated: event.truncated,
+        commandAcks: responseAck(state, event.meta.request_id, event.type, event.session_id),
+      }
+    }
     case "models_listed":
       const currentModels = event.models.filter(
         (model) => model.current === true && model.available !== false,
@@ -2030,6 +2046,7 @@ function responseAck(
     | "subagent_replay_completed"
     | "sessions_search_ready"
     | "command_descriptors_listed"
+    | "modes_listed"
     | "models_listed"
     | "settings_listed"
     | "mcp_servers_listed"

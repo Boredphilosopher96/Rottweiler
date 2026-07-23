@@ -8,13 +8,13 @@ use std::{
 };
 
 use async_trait::async_trait;
-use rw_core::runtime_support::plugin::{
+use rw_ext::{
     CapabilityViolation, LaunchedPluginProcess, PluginLauncher, PluginProcessConfig,
     PluginProcessError, PluginSandboxProfile, PluginToolEffect, SupervisedPluginProcess,
 };
-use rw_core::runtime_support::{
-    EgressPolicy, SandboxNetworkPolicy as NetworkPolicy, SandboxPolicy, SandboxSupport,
-    SupervisedEgressProxy, probe_sandbox, shell_launch_plan,
+use rw_tools::{
+    EgressPolicy, NetworkPolicy, SandboxPolicy, SandboxSupport, SupervisedEgressProxy,
+    probe_sandbox, shell_launch_plan,
 };
 use tokio::{
     io::{AsyncReadExt as _, BufReader},
@@ -26,13 +26,17 @@ const MAX_PLUGIN_STDERR_BYTES: u64 = 256 * 1024;
 /// A launcher that refuses ambient networking and executes only through the
 /// native Rottweiler sandbox helper. The approved manifest remains the sole
 /// source of capability truth.
-pub(crate) struct SandboxedPluginLauncher {
+pub struct SandboxedPluginLauncher {
     scratch: PathBuf,
     helper: PathBuf,
 }
 
 impl SandboxedPluginLauncher {
-    pub(crate) fn new(scratch: &Path, helper: &Path) -> Result<Self, PluginProcessError> {
+    /// Creates a launcher from canonical scratch and sandbox-helper paths.
+    ///
+    /// # Errors
+    /// Returns an error when either path is unsafe or sandbox enforcement is unavailable.
+    pub fn new(scratch: &Path, helper: &Path) -> Result<Self, PluginProcessError> {
         let scratch = std::fs::canonicalize(scratch).map_err(|error| process_error(&error))?;
         let helper = std::fs::canonicalize(helper).map_err(|error| process_error(&error))?;
         if !scratch.is_dir() || !helper.is_file() {
@@ -364,7 +368,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
-    use rw_core::runtime_support::plugin::{
+    use rw_ext::{
         ApprovalStore, ApprovalStoreError, DenyPushHandler, LaunchedPluginProcess,
         METHOD_TOOL_CALL, PluginCapabilities, PluginHost, PluginLauncher, PluginManifest,
         PluginToolCapability, SupervisedPluginProcess, approve_plugin_launch,
@@ -383,7 +387,7 @@ mod tests {
         let executable = std::fs::canonicalize("/usr/bin/true").expect("true");
         let config = PluginProcessConfig::new(executable).expect("config");
         let profile = PluginSandboxProfile {
-            mode: rw_core::runtime_support::plugin::PluginSandboxMode::Approved,
+            mode: rw_ext::PluginSandboxMode::Approved,
             capabilities: PluginCapabilities::default(),
             approved_roots: vec![],
             allowed_domains: vec![],
@@ -396,7 +400,7 @@ mod tests {
             .block_on(child.process.wait())
             .expect("wait for fixture");
         let profile = PluginSandboxProfile {
-            mode: rw_core::runtime_support::plugin::PluginSandboxMode::Approved,
+            mode: rw_ext::PluginSandboxMode::Approved,
             capabilities: PluginCapabilities {
                 tools: vec![PluginToolCapability {
                     name: "x".to_owned(),
@@ -419,7 +423,7 @@ mod tests {
             .with_allowed_domains(["api.example.com"])
             .expect("domain config");
         let profile = PluginSandboxProfile {
-            mode: rw_core::runtime_support::plugin::PluginSandboxMode::Approved,
+            mode: rw_ext::PluginSandboxMode::Approved,
             capabilities: PluginCapabilities {
                 tools: vec![PluginToolCapability {
                     name: "x".to_owned(),
@@ -559,8 +563,8 @@ mod tests {
             &[sdk.to_path_buf()],
             manifest,
             Arc::new(DenyPushHandler),
-            Arc::new(crate::m8_runtime::SharedPluginRedactor::new(
-                rw_core::runtime_support::FixtureRedactor::default(),
+            Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
+                rw_providers::FixtureRedactor::default(),
             )),
         )
         .await
@@ -661,8 +665,8 @@ mod tests {
             &[workspace.path().to_path_buf()],
             manifest,
             Arc::new(DenyPushHandler),
-            Arc::new(crate::m8_runtime::SharedPluginRedactor::new(
-                rw_core::runtime_support::FixtureRedactor::default(),
+            Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
+                rw_providers::FixtureRedactor::default(),
             )),
         )
         .await
@@ -729,8 +733,8 @@ mod tests {
             &[workspace.path().to_path_buf()],
             manifest,
             Arc::new(DenyPushHandler),
-            Arc::new(crate::m8_runtime::SharedPluginRedactor::new(
-                rw_core::runtime_support::FixtureRedactor::default(),
+            Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
+                rw_providers::FixtureRedactor::default(),
             )),
         )
         .await

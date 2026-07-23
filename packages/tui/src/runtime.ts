@@ -648,6 +648,7 @@ export class TuiEngineRuntime {
   async #requestInitialProjections(sessionId: string, signal: AbortSignal): Promise<void> {
     const commands: ClientCommand[] = [
       { type: "list_models", refresh: false, meta: this.#meta(), session_id: sessionId },
+      { type: "list_modes", meta: this.#meta(), session_id: sessionId },
       { type: "list_sessions", meta: this.#meta() },
       { type: "get_context", meta: this.#meta(), session_id: sessionId },
       { type: "get_cost", meta: this.#meta(), session_id: sessionId },

@@ -73,8 +73,16 @@ import {
   type PresentationFrameScheduler,
 } from "./presentation"
 import { PickerController, type PickerKind } from "./picker-controller"
-import { presentError, sanitizeErrorFragment, truncateToCells } from "./render"
+import { presentError, sanitizeErrorFragment } from "./render"
 import { setWorkspaceRoots } from "./render/tool-presentation"
+import {
+  commandSourceLabel,
+  isLocalSlashCommand,
+  isU64,
+  mergeSlashCommandChoices,
+  parseSessionAction,
+  type CommandChoice,
+} from "./session-commands"
 import {
   createInitialState,
   enterReplayMode,
@@ -108,6 +116,25 @@ import {
   isWireEngineEvent,
   type WireEngineEvent,
 } from "./transport"
+import {
+  boundedUiText,
+  contextPanelHasContent,
+  mcpStateLabel,
+  mcpTransportLabel,
+  modePickerPresentation,
+  modelAliasDescription,
+  modelAvailabilityLabel,
+  permissionActionLabel,
+  permissionPatternLabel,
+  permissionRuleActionLabel,
+  providerConnectionStatus,
+  providerDisplayName,
+  providerName,
+  providerStatusDetail,
+  queuedMessageLabel,
+  nextModeId,
+  timelineTurnLabel,
+} from "./ui-presentation"
 
 export interface RottweilerAppOptions {
   readonly initialEvent?: EngineEvent
@@ -196,7 +223,6 @@ interface PendingRewindIntent {
   requestId: string | null
 }
 
-type CommandChoice = RottweilerState["commands"][number]
 type SubagentDescriptor = Extract<EngineEvent, { type: "subagents_listed" }>["subagents"][number]
 type SubagentAction =
   | { readonly kind: "inspect"; readonly subagent: SubagentDescriptor }
@@ -204,8 +230,6 @@ type SubagentAction =
   | { readonly kind: "running"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "interrupt"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "close"; readonly subagent: SubagentDescriptor }
-type ProviderProjection = RottweilerState["providers"][number]
-type ProviderIdentity = Pick<ProviderProjection, "name" | "authKind">
 type ModelPickerChoice =
   | { readonly kind: "alias"; readonly alias: RottweilerState["modelAliases"][number] }
   | { readonly kind: "model"; readonly model: RottweilerState["models"][number] }
@@ -232,29 +256,6 @@ interface PendingExport {
   readonly requestId: string | null
 }
 type PermissionModePickerAction = Extract<PermissionPickerAction, { readonly kind: "mode" }>
-
-const LOCAL_SLASH_COMMANDS: readonly CommandChoice[] = [
-  { name: "help", description: "List available commands", usage: "/help" },
-  { name: "status", description: "Show actor running and queue state", usage: "/status" },
-  { name: "mode", description: "Show or switch the interaction mode", usage: "/mode [discuss|plan|execute]" },
-  { name: "models", description: "Switch the active model", usage: "/models" },
-  { name: "providers", description: "Choose a configured provider and model", usage: "/providers" },
-  { name: "agents", description: "Inspect and manage child agents", usage: "/agents" },
-  { name: "theme", description: "Preview and change the interface theme", usage: "/theme" },
-  { name: "settings", description: "Change safe user settings", usage: "/settings" },
-  { name: "permissions", description: "Show or edit session permission rules", usage: "/permissions [list|mode|approvals|add|remove|clear-session|revoke-session|revoke-project]" },
-  { name: "plan", description: "Show the pending or approved plan", usage: "/plan" },
-  { name: "rewind", description: "Restore a completed turn checkpoint", usage: "/rewind <turn>" },
-  { name: "fork", description: "Fork this session at a completed turn", usage: "/fork [turn]" },
-  { name: "review", description: "Review the cumulative session diff", usage: "/review" },
-  { name: "interrupt", description: "Interrupt the active turn", usage: "/interrupt" },
-  { name: "context", description: "Inspect, pin, or evict context items", usage: "/context [pin|evict <item-id>]" },
-  { name: "cost", description: "Show usage, cost, and budget accounting", usage: "/cost" },
-  { name: "compact", description: "Compact conversation context", usage: "/compact [instructions]" },
-  { name: "trust", description: "Inspect or change folder trust", usage: "/trust [status|grant|revoke]" },
-  { name: "add-dir", description: "Append a live workspace root", usage: "/add-dir <path>" },
-  { name: "exit", description: "Close Rottweiler", usage: "/exit" },
-]
 
 interface PaletteAction {
   readonly id: string
@@ -904,7 +905,9 @@ export class RottweilerApp extends BoxRenderable {
         )
       },
     })
-    this.statusLine = new StatusLineRenderable(this.ctx, theme)
+    this.statusLine = new StatusLineRenderable(this.ctx, theme, {
+      modelPickerKeycap: this.#bindingHint("open_model_picker", ["global"]),
+    })
     this.add(this.banner)
     this.add(this.main)
     this.add(this.reviewPanel)
@@ -1307,6 +1310,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     if (event.type === "command_finished" && event.name === "add-dir" && !next.replay.active) {
       this.#requestCommands()
+      this.#requestModes()
     }
     if (event.type === "subagent_spawned" || event.type === "subagent_finished") {
       this.#requestSubagents()
@@ -1511,6 +1515,7 @@ export class RottweilerApp extends BoxRenderable {
     this.contextPanel.visible =
       !viewingSubagent &&
       !state.replay.active &&
+      contextPanelHasContent(state) &&
       (this.width === 0 ? this.ctx.width >= 100 : this.width >= 100)
     this.interactionPanel.update(viewingSubagent ? childPassiveInteractionState(presented) : state)
     this.reviewPanel.update(state, !viewingSubagent && this.#reviewOpen)
@@ -2013,6 +2018,7 @@ export class RottweilerApp extends BoxRenderable {
 
   openModePicker(): void {
     this.#pickerController.begin("modes")
+    this.#requestModes()
     this.#pickerController.refresh()
   }
 
@@ -2134,6 +2140,7 @@ export class RottweilerApp extends BoxRenderable {
     this.contextPanel.visible =
       this.#activeSubagentId === null &&
       !this.#state.replay.active &&
+      contextPanelHasContent(this.#state) &&
       width >= 100 &&
       height >= 12
     this.composer.resizeForTerminal(height)
@@ -2251,9 +2258,7 @@ export class RottweilerApp extends BoxRenderable {
     }
     switch (action) {
       case "cycle_agent_mode": {
-        const current = this.#state.mode ?? "execute"
-        const mode: ModeId =
-          current === "execute" ? "discuss" : current === "discuss" ? "plan" : "execute"
+        const mode: ModeId = nextModeId(this.#state.mode, this.#state.modes)
         this.#projectionRequests.emit({
           type: "switch_mode",
           meta: this.#projectionRequests.meta(),
@@ -2565,7 +2570,7 @@ export class RottweilerApp extends BoxRenderable {
                 description: `${commandError} · select to retry`,
                 value: null,
               }]),
-          ...this.#slashCommandChoices().map((command) => ({
+          ...mergeSlashCommandChoices(this.#state.commands).map((command) => ({
             id: command.name,
             label: `/${command.name}`,
             description: `${commandSourceLabel(command.source)} · ${command.description}`,
@@ -3728,40 +3733,32 @@ export class RottweilerApp extends BoxRenderable {
         })
         break
       }
-      case "modes":
+      case "modes": {
+        const presentation = modePickerPresentation(
+          this.#state,
+          this.#projectionErrors.modes,
+          this.#projectionRequests.current("modes") !== null,
+        )
         this.#pickerController.show(
-          "Modes",
-          [
-            {
-              id: "execute",
-              label: "Execute",
-              description: "Use tools and make changes",
-              value: "execute",
-            },
-            {
-              id: "plan",
-              label: "Plan",
-              description: "Reason without mutations",
-              value: "plan",
-            },
-            {
-              id: "discuss",
-              label: "Discuss",
-              description: "Explore before acting",
-              value: "discuss",
-            },
-          ],
+          presentation.title,
+          presentation.items,
           (item) => {
+            if (item.value.kind === "retry") {
+              this.#requestModes()
+              this.#pickerController.refresh()
+              return
+            }
             this.#projectionRequests.emit({
               type: "switch_mode",
               meta: this.#projectionRequests.meta(),
               session_id: this.#sessionId,
-              mode: item.value as ModeId,
+              mode: item.value.id,
             })
             this.closePicker()
           },
         )
         break
+      }
       case "agents": {
         if (this.#subagentListError !== null) {
           this.#pickerController.show(
@@ -4136,9 +4133,8 @@ export class RottweilerApp extends BoxRenderable {
       { id: "help.show", title: "Command help", section: "Help & system", description: "List every available slash command", run: submit("/help") },
       { id: "app.exit", title: "Exit Rottweiler", section: "Help & system", description: "Close the TUI and its supervised engine", run: open(() => this.#options.onExit?.()) },
     ]
-    const localNames = new Set(LOCAL_SLASH_COMMANDS.map((command) => command.name))
     for (const command of this.#state.commands) {
-      if (localNames.has(command.name)) continue
+      if (isLocalSlashCommand(command.name)) continue
       const requiresArgument = /<[^>]+>/.test(command.usage)
       actions.push({
         id: `slash.${command.name}`,
@@ -4149,12 +4145,6 @@ export class RottweilerApp extends BoxRenderable {
       })
     }
     return actions
-  }
-
-  #slashCommandChoices(): readonly CommandChoice[] {
-    const choices = new Map(LOCAL_SLASH_COMMANDS.map((command) => [command.name, command]))
-    for (const command of this.#state.commands) choices.set(command.name, command)
-    return [...choices.values()]
   }
 
   #composerInputChanged(value: string): void {
@@ -4633,6 +4623,11 @@ export class RottweilerApp extends BoxRenderable {
     this.#modelsRequested = true
     this.#clearProjectionError("models")
     this.#projectionRequests.command({ type: "list_models", refresh })
+  }
+
+  #requestModes(): void {
+    this.#clearProjectionError("modes")
+    this.#projectionRequests.command({ type: "list_modes" })
   }
 
   #openChangedFileDiff(path: string): void {
@@ -5442,26 +5437,6 @@ function wireEventBytes(event: WireEngineEvent): number {
   }
 }
 
-function boundedUiText(value: string, maximum: number): string {
-  const safe = value
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-  return truncateToCells(safe, maximum)
-}
-
-function queuedMessageLabel(content: string): string {
-  const firstLine = content.split(/\r?\n/, 1)[0] ?? ""
-  const label = boundedUiText(firstLine, 64)
-  return label.length === 0 ? "(empty message)" : label
-}
-
-function timelineTurnLabel(content: string): string {
-  const firstLine = content.split(/\r?\n/, 1)[0] ?? ""
-  const label = boundedUiText(firstLine, 64)
-  return label.length === 0 ? "(attachment-only message)" : label
-}
-
 function timelineUserMessage(turn: RottweilerState["transcript"][number]["turn"]): {
   readonly content: string
   readonly hadAttachments: boolean
@@ -5525,80 +5500,6 @@ function childPassiveInteractionState(state: RottweilerState): RottweilerState {
   }
 }
 
-type SessionAction =
-  | { readonly type: "exit" }
-  | { readonly type: "review" }
-  | { readonly type: "fork"; readonly atTurn: string | null }
-  | { readonly type: "rewindTimeline" }
-  | { readonly type: "models" }
-  | { readonly type: "providers" }
-  | { readonly type: "agents" }
-  | { readonly type: "theme" }
-  | { readonly type: "settings" }
-  | { readonly type: "permissions" }
-  | { readonly type: "mcp" }
-  | { readonly type: "invalid"; readonly message: string }
-
-function parseSessionAction(content: string): SessionAction | null {
-  const tokens = content.trim().split(/\s+/)
-  const command = tokens[0]
-  if (command === "/exit") {
-    return tokens.length === 1
-      ? { type: "exit" }
-      : { type: "invalid", message: `usage: ${command}` }
-  }
-  if (command === "/review") {
-    return tokens.length === 1
-      ? { type: "review" }
-      : { type: "invalid", message: "usage: /review" }
-  }
-  if (command === "/rewind" && tokens.length === 1) {
-    return { type: "rewindTimeline" }
-  }
-  if (command === "/models") {
-    return tokens.length === 1
-      ? { type: "models" }
-      : { type: "invalid", message: "usage: /models" }
-  }
-  if (command === "/providers") {
-    return tokens.length === 1
-      ? { type: "providers" }
-      : { type: "invalid", message: "usage: /providers" }
-  }
-  if (command === "/agents") {
-    return tokens.length === 1
-      ? { type: "agents" }
-      : { type: "invalid", message: "usage: /agents" }
-  }
-  if (command === "/theme") {
-    return tokens.length === 1
-      ? { type: "theme" }
-      : { type: "invalid", message: "usage: /theme" }
-  }
-  if (command === "/settings") {
-    return tokens.length === 1
-      ? { type: "settings" }
-      : { type: "invalid", message: "usage: /settings" }
-  }
-  if (command === "/permissions") {
-    return tokens.length === 1 ? { type: "permissions" } : null
-  }
-  if (command === "/mcp") {
-    return tokens.length === 1 ? { type: "mcp" } : null
-  }
-  if (command !== "/fork") return null
-  if (tokens.length === 1) return { type: "fork", atTurn: null }
-  if (tokens.length !== 2 || !isU64(tokens[1] ?? "")) {
-    return { type: "invalid", message: "usage: /fork [turn] where turn is a decimal u64" }
-  }
-  return { type: "fork", atTurn: tokens[1] ?? null }
-}
-
-function isU64(value: string): boolean {
-  return ( /^(0|[1-9][0-9]*)$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n
-  )
-}
-
 function safeErrorMessage(error: unknown): string {
   return error instanceof Error && error.message.length > 0
     ? error.message
@@ -5608,147 +5509,6 @@ function safeErrorMessage(error: unknown): string {
 function expandLeadingHome(path: string): string {
   if (path === "~") return homedir()
   return path.startsWith("~/") ? `${homedir()}${path.slice(1)}` : path
-}
-
-function commandSourceLabel(source: CommandChoice["source"]): string {
-  switch (source) {
-    case "project": return "Project"
-    case "user": return "User"
-    case "plugin": return "Plugin"
-    case "skill": return "Skills"
-    case "workflow": return "Workflows"
-    case "mcp": return "MCP"
-    case "builtin":
-    case undefined:
-      return "Built-in"
-  }
-}
-
-function providerDisplayName(provider: ProviderIdentity): string {
-  return providerName(provider.name)
-}
-
-function providerName(name: string): string {
-  if (name === "openai_codex") return "OpenAI · ChatGPT"
-  if (name === "openai") return "OpenAI API"
-  if (name === "github_copilot") return "GitHub Copilot"
-  if (name === "anthropic") return "Anthropic API"
-  return name.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase())
-}
-
-function mcpTransportLabel(transport: string): string {
-  switch (transport) {
-    case "http":
-    case "streamable_http": return "Remote HTTPS"
-    case "stdio": return "Local command"
-    default: return "Connection"
-  }
-}
-
-function mcpStateLabel(state: string): string {
-  switch (state) {
-    case "disabled": return "Disabled"
-    case "connecting": return "Connecting"
-    case "ready": return "Connected"
-    case "approval_required": return "Approval needed"
-    case "failed": return "Connection failed"
-    case "stopping": return "Stopping"
-    default: return "Unavailable"
-  }
-}
-
-function providerConnectionStatus(provider: ProviderProjection): string {
-  if (provider.authenticated && provider.reachable) return "Connected"
-  if (provider.authenticated) return "Signed in · models unavailable"
-  if (!provider.configured) return "Not set up"
-  switch (provider.authKind) {
-    case "oauth": return provider.name === "openai_codex" ? "Sign in with ChatGPT" : "Sign in required"
-    case "device_flow": return "Sign in with GitHub"
-    case "api_key": return "API key required"
-    case "none": return "Unavailable"
-  }
-}
-
-function providerStatusDetail(provider: ProviderProjection): string {
-  if (provider.authenticated && provider.reachable) return ""
-  if (provider.authenticated && !provider.reachable) {
-    const status = provider.status?.toLowerCase() ?? ""
-    if (status.includes("auth")) return "GitHub rejected this sign-in · sign in again"
-    if (status.includes("rate limit")) return "Model catalog is rate limited · retry shortly"
-    if (status.includes("timed out") || status.includes("network") || status.includes("server")) {
-      return "Couldn't reach the model catalog · retry"
-    }
-    if (status.includes("invalid") || status.includes("unsupported")) {
-      return "The provider returned an unusable model catalog"
-    }
-    return "Couldn't load available models · retry"
-  }
-  const status = provider.status?.toLowerCase() ?? ""
-  if (status.includes("setup required") || status.includes("not configured")) {
-    return "Complete setup to continue"
-  }
-  if (status.includes("credential") || status.includes("auth")) {
-    return "Sign in again to continue"
-  }
-  if (status.includes("model") || status.includes("discovery")) {
-    return "Couldn't load available models"
-  }
-  return ""
-}
-
-function modelAvailabilityLabel(model: RottweilerState["models"][number]): string {
-  if (model.available !== false) return "available"
-  const status = model.status?.toLowerCase() ?? ""
-  if (status.includes("credential") || status.includes("auth")) return "sign in again"
-  if (status.includes("discovery") || status.includes("catalog")) {
-    return "couldn't verify availability"
-  }
-  return "unavailable"
-}
-
-function modelAliasDescription(
-  alias: RottweilerState["modelAliases"][number],
-  models: readonly RottweilerState["models"][number][],
-): string {
-  const candidates = alias.candidates.map((candidate) => boundedUiText(candidate, 64))
-  const candidateModels = alias.candidates.map((candidate) =>
-    models.find((model) => (model.id ?? model.alias) === candidate),
-  )
-  const availability =
-    candidateModels.length > 0 && candidateModels.every((model) => model !== undefined)
-      ? candidateModels.every((model) => model?.available === false)
-        ? "no available route"
-        : "available"
-      : ""
-  return boundedUiText(
-    ["failover", candidates.join(" → "), availability].filter(Boolean).join(" · "),
-    160,
-  )
-}
-
-function permissionActionLabel(action: "allow" | "ask" | "deny"): string {
-  switch (action) {
-    case "allow": return "Allowed automatically"
-    case "ask": return "Ask first"
-    case "deny": return "Not allowed"
-  }
-}
-
-function permissionRuleActionLabel(action: "allow" | "ask" | "deny"): string {
-  switch (action) {
-    case "allow": return "Always allow matching tools"
-    case "ask": return "Ask before matching tools run"
-    case "deny": return "Never allow matching tools"
-  }
-}
-
-function permissionPatternLabel(pattern: string): string {
-  const callPattern = /^([^()]+)\((.*)\)$/.exec(pattern)
-  if (callPattern === null) return pattern.replaceAll("_", " ")
-  const tool = callPattern[1] ?? pattern
-  const argumentPattern = callPattern[2] ?? ""
-  if (argumentPattern.length === 0 || argumentPattern === "*") return `${tool} · any arguments`
-  return `${tool} · arguments matching ${argumentPattern}`
 }
 
 function approvalBinding(diff: unknown): ApprovalBinding | null {

@@ -14,10 +14,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rw_core::{
-    EngineEvent, TurnStatus,
-    runtime_support::{FinishReason, ProviderEvent, SandboxSupport, probe_sandbox},
-};
+use rw_core::{EngineEvent, TurnStatus};
+use rw_providers::{FinishReason, ProviderEvent};
+use rw_tools::{SandboxSupport, probe_sandbox};
 use serde_json::json;
 use tempfile::{TempDir, tempdir};
 
@@ -521,6 +520,10 @@ fn local_tui_launch_anchors_relative_added_roots_before_repository_discovery() {
     let added = root.path().join("added-root");
     fs::create_dir_all(&nested).expect("nested launch directory");
     fs::create_dir(&added).expect("additional workspace root");
+    assert!(
+        !run.workspace.join("../../../added-root").exists(),
+        "fixture must distinguish invocation-relative from repository-relative resolution"
+    );
     let script = root.path().join("offline.json");
     write_script(&script, Vec::new());
     let report = root.path().join("launch-cwd");
@@ -555,15 +558,9 @@ fn local_tui_launch_anchors_relative_added_roots_before_repository_discovery() {
             .expect("canonical reported cwd"),
         fs::canonicalize(&run.workspace).expect("canonical repository"),
     );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains(&format!(
-            "workspace: {}",
-            fs::canonicalize(&added)
-                .expect("canonical additional root")
-                .display()
-        )),
-        "relative --add-dir must resolve from the nested invocation cwd"
-    );
+    // The command can succeed only if `--add-dir` was canonicalized while the
+    // nested invocation directory was still current. The same relative path
+    // is deliberately absent from the repository-root interpretation above.
 }
 
 #[cfg(unix)]

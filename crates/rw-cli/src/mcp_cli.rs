@@ -3,12 +3,12 @@
 use std::{fs, io::Write as _};
 
 use miette::{IntoDiagnostic as _, Result, miette};
-use rw_core::runtime_support::mcp::ServerId;
 use rw_core::{McpOAuthLoginConfig, begin_mcp_oauth_login};
+use rw_mcp::ServerId;
 use rw_store::credentials::CredentialReference;
 use url::Url;
 
-use crate::m8_config::{DiscoveredMcpServer, DiscoveredMcpTransport};
+use rw_runtime::executable_config::{DiscoveredMcpServer, DiscoveredMcpTransport};
 
 pub(crate) async fn login(server_name: &str, dangerously_trust: bool) -> Result<()> {
     let workspace =
@@ -21,8 +21,8 @@ pub(crate) async fn login(server_name: &str, dangerously_trust: bool) -> Result<
         loader
     };
     let effective = loader.load().into_diagnostic()?;
-    let (user_home, _) = crate::runtime::extension_user_roots(&credentials_path);
-    let catalog = crate::m8_config::discover_executable_configs(
+    let (user_home, _) = rw_runtime::session::extension_user_roots(&credentials_path);
+    let catalog = rw_runtime::executable_config::discover_executable_configs(
         &user_home,
         &workspace,
         effective.project_trusted(),
@@ -104,7 +104,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::m8_config::ExecutableConfigOrigin;
+    use rw_runtime::executable_config::ExecutableConfigOrigin;
 
     #[test]
     fn login_requires_a_complete_http_oauth_profile() {
@@ -126,7 +126,7 @@ mod tests {
             credentials: Vec::new(),
             attested_files: Vec::new(),
             origin: ExecutableConfigOrigin::User(PathBuf::from("mcp.toml")),
-            tool_capabilities: rw_core::runtime_support::mcp::McpToolCapabilityOverrides::default(),
+            tool_capabilities: rw_mcp::McpToolCapabilityOverrides::default(),
             capability_override_origin: None,
         };
         assert!(login_configuration(&server, PathBuf::from("credentials.toml")).is_err());

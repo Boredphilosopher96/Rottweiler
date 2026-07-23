@@ -2,23 +2,26 @@ use std::sync::{Arc, Mutex};
 use std::{collections::BTreeSet, path::PathBuf};
 
 use async_trait::async_trait;
-use rw_core::runtime_support::{
-    AgentRegistry, CapabilityManifest, ExtensionCatalog, SubagentEventSink, SubagentLifecycleEvent,
-    SubagentLifecycleMode, SubagentProgressEvent, Tool, ToolCapability, ToolContext,
-    ToolDescriptor, ToolError, ToolRegistry, ToolResult, WorkflowRunReport, WorkflowRunner,
-    WorkflowStepArtifact, WorkflowStepExecutionError, WorkflowStepExecutor, WorkflowStepRequest,
-    WorkflowStepTarget, WorkspaceBinding,
-};
-use rw_core::runtime_support::{
-    CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
-    CommandRegistryError, CommandSource, SubagentResult,
-};
 use rw_core::{
     CommandToolCall, CommandToolOutputKind, OrchestrationError, SessionCommandAction,
     SessionCommandContext, SessionCommandOutput, SubagentHandle, SubagentObserver,
     SubagentOrchestrator, SubagentRequest, diff_artifact_reference,
-    runtime_support::{CancellationToken, SessionId},
 };
+use rw_ext::{
+    AgentRegistry, ExtensionCatalog, WorkflowRunReport, WorkflowRunner, WorkflowStepArtifact,
+    WorkflowStepExecutionError, WorkflowStepExecutor, WorkflowStepRequest, WorkflowStepTarget,
+};
+use rw_ext::{
+    CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
+    CommandRegistryError, CommandSource,
+};
+use rw_tools::CancellationToken;
+use rw_tools::{
+    CapabilityManifest, SubagentEventSink, SubagentLifecycleEvent, SubagentLifecycleMode,
+    SubagentProgressEvent, Tool, ToolContext, ToolDescriptor, ToolError, ToolRegistry, ToolResult,
+    WorkspaceBinding,
+};
+use rw_types::{SessionId, SubagentResult, ToolCapability};
 use serde_json::{Value, json};
 
 const MAX_FRAMED_WORKFLOW_TASK_BYTES: usize = 64 * 1024;
@@ -532,7 +535,7 @@ impl WorkflowStepExecutor for OrchestratedWorkflowExecutor {
                     "workflow child cleanup failed after durable result: {error}"
                 ))
             })?;
-        if result.status == rw_core::runtime_support::SubagentStatus::Completed {
+        if result.status == rw_types::SubagentStatus::Completed {
             Ok(WorkflowStepArtifact {
                 subagent_id: result.subagent_id,
                 child_session_id: result.session_id,
@@ -589,15 +592,6 @@ mod tests {
         OrchestratedWorkflowExecutor, OrderedWorkflowObserver, WorkflowLifecycleGuard,
         WorkflowLifecycleOrder, WorkflowObserver, compact_workflow_report, frame_step_input,
     };
-    use rw_core::runtime_support::{
-        Block, BoxEventStream, CancellationToken, CommandDescriptor, CommandExecutionError,
-        CommandHandler, CommandInvocation, CommandRegistry, Cost, ExtensionCatalog,
-        ExtensionDiscoveryConfig, FinishReason, PermissionDecision, ProviderEvent, ProviderRequest,
-        SessionId, SubagentEventSink, SubagentLifecycleEvent, SubagentProgressEvent,
-        SubagentResult, SubagentStatus, ToolError, ToolRegistry, Usage, WorkflowRunReport,
-        WorkflowRunner, WorkflowStepReport, WorkflowStepRequest, WorkflowStepTarget,
-        WorktreeIsolation, WorktreeLimits, compose_agent_registry,
-    };
     use rw_core::{
         ActorSubagentSessionFactory, AgentLoopError, ModelDriver, NoopFolderTrustController,
         NoopMutationCheckpointCoordinator, NoopSecretRedactor, NoopSessionEventSink,
@@ -607,6 +601,20 @@ mod tests {
         SubagentOrchestrator, SubagentProgressObserver, SubagentRecoveryRecord, SubagentSession,
         SubagentSessionFactory, SubagentTurnResult, SystemEventClock,
         WorktreeSubagentSessionFactory,
+    };
+    use rw_ext::{
+        CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation,
+        CommandRegistry, ExtensionCatalog, ExtensionDiscoveryConfig, WorkflowRunReport,
+        WorkflowRunner, WorkflowStepReport, WorkflowStepRequest, WorkflowStepTarget,
+        compose_agent_registry,
+    };
+    use rw_providers::{BoxEventStream, FinishReason, ProviderEvent, ProviderRequest};
+    use rw_tools::{
+        CancellationToken, SubagentEventSink, SubagentLifecycleEvent, SubagentProgressEvent,
+        ToolError, ToolRegistry, WorktreeIsolation, WorktreeLimits,
+    };
+    use rw_types::{
+        Block, Cost, SessionId, SubagentResult, SubagentStatus, Usage, config::PermissionDecision,
     };
     use serde_json::Value;
     use tempfile::TempDir;
@@ -655,11 +663,9 @@ mod tests {
         }
     }
 
-    fn workflow_artifact(
-        text: impl Into<String>,
-    ) -> rw_core::runtime_support::WorkflowStepArtifact {
-        rw_core::runtime_support::WorkflowStepArtifact {
-            subagent_id: rw_core::runtime_support::SubagentId("dependency".to_owned()),
+    fn workflow_artifact(text: impl Into<String>) -> rw_ext::WorkflowStepArtifact {
+        rw_ext::WorkflowStepArtifact {
+            subagent_id: rw_types::SubagentId("dependency".to_owned()),
             child_session_id: SessionId("dependency-session".to_owned()),
             final_text: text.into(),
             touched_files: Vec::new(),
@@ -717,7 +723,7 @@ mod tests {
         let steps = (0..64)
             .map(|index| {
                 let mut output = workflow_artifact("x".repeat(256 * 1024));
-                output.diff_artifact = Some(rw_core::runtime_support::DiffArtifactRef {
+                output.diff_artifact = Some(rw_types::DiffArtifactRef {
                     artifact_id: format!("{index:064x}"),
                     base_commit: "base".to_owned(),
                     touched_files: Vec::new(),
@@ -797,7 +803,7 @@ mod tests {
         async fn remove(
             &self,
             _parent_session_id: &SessionId,
-            subagent_id: &rw_core::runtime_support::SubagentId,
+            subagent_id: &rw_types::SubagentId,
         ) -> Result<(), OrchestrationError> {
             self.active.lock().expect("metadata").remove(&subagent_id.0);
             Ok(())
@@ -941,7 +947,7 @@ mod tests {
             events: sink.clone(),
         };
         let result = SubagentResult {
-            subagent_id: rw_core::runtime_support::SubagentId("agent-1".to_owned()),
+            subagent_id: rw_types::SubagentId("agent-1".to_owned()),
             session_id: SessionId("child-1".to_owned()),
             status: SubagentStatus::Completed,
             final_text: "done".to_owned(),
@@ -989,7 +995,7 @@ mod tests {
             position: 1,
         };
         let handle = SubagentHandle {
-            subagent_id: rw_core::runtime_support::SubagentId("later".to_owned()),
+            subagent_id: rw_types::SubagentId("later".to_owned()),
             session_id: SessionId("later-session".to_owned()),
         };
         let result = SubagentResult {
@@ -1187,6 +1193,9 @@ needs = ["impl", "tests"]
                     permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
                     hooks: Arc::new(rw_core::builtin_hook_dispatcher()?),
                     commands: Arc::clone(&child_commands),
+                    modes: Arc::new(rw_ext::ModeRegistry::builtins().map_err(|error| {
+                        AgentLoopError::InvalidConfiguration(error.to_string())
+                    })?),
                     event_sink: Arc::new(NoopSessionEventSink::new(None)),
                     event_clock: Arc::new(SystemEventClock),
                     secret_redactor: Arc::new(NoopSecretRedactor),
@@ -1197,7 +1206,7 @@ needs = ["impl", "tests"]
                     max_turns: 4,
                     identical_tool_failure_limit: 5,
                     max_output_tokens: 1024,
-                    thinking: rw_core::runtime_support::ThinkingLevel::Off,
+                    thinking: rw_providers::ThinkingLevel::Off,
                     event_capacity: 64,
                 })
             }));
@@ -1289,6 +1298,10 @@ needs = ["impl", "tests"]
                 permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
                 hooks: Arc::new(rw_core::builtin_hook_dispatcher()?),
                 commands: Arc::clone(&child_commands),
+                modes: Arc::new(
+                    rw_ext::ModeRegistry::builtins()
+                        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
+                ),
                 event_sink: Arc::new(NoopSessionEventSink::new(None)),
                 event_clock: Arc::new(SystemEventClock),
                 secret_redactor: Arc::new(NoopSecretRedactor),
@@ -1299,7 +1312,7 @@ needs = ["impl", "tests"]
                 max_turns: 4,
                 identical_tool_failure_limit: 5,
                 max_output_tokens: 1024,
-                thinking: rw_core::runtime_support::ThinkingLevel::Off,
+                thinking: rw_providers::ThinkingLevel::Off,
                 event_capacity: 64,
             })
         }));

@@ -1716,19 +1716,19 @@ mod tests {
         assert!(hooks.contains("check-policy"));
 
         let user = tempdir().expect("user home");
-        let catalog = rw_core::runtime_support::ExtensionCatalog::discover(
-            &rw_core::runtime_support::ExtensionDiscoveryConfig::new(
-                &apply.target_root,
-                user.path(),
-            )
-            .with_project_trusted(true),
+        let catalog = rw_ext::ExtensionCatalog::discover(
+            &rw_ext::ExtensionDiscoveryConfig::new(&apply.target_root, user.path())
+                .with_project_trusted(true),
         )
         .expect("imported extensions must be consumable");
         assert!(catalog.command("test").is_some());
         assert_eq!(catalog.shell_hooks().len(), 1);
-        let executable =
-            crate::m8_config::discover_executable_configs(user.path(), &apply.target_root, true)
-                .expect("imported MCP must be consumable");
+        let executable = rw_runtime::executable_config::discover_executable_configs(
+            user.path(),
+            &apply.target_root,
+            true,
+        )
+        .expect("imported MCP must be consumable");
         assert_eq!(executable.mcp_servers.len(), 1);
         assert!(
             rw_core::load_root_project_instructions(&apply.target_root)
@@ -1834,8 +1834,8 @@ mod tests {
         })
         .expect("import");
         let user = tempdir().expect("user");
-        let catalog = rw_core::runtime_support::ExtensionCatalog::discover(
-            &rw_core::runtime_support::ExtensionDiscoveryConfig::new(target.path(), user.path())
+        let catalog = rw_ext::ExtensionCatalog::discover(
+            &rw_ext::ExtensionDiscoveryConfig::new(target.path(), user.path())
                 .with_project_trusted(true),
         )
         .expect("discover imported commands");

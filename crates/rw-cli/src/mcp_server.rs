@@ -11,26 +11,20 @@ use std::{
 
 use async_trait::async_trait;
 use miette::{Result, miette};
-use rw_core::runtime_support::mcp::{
-    BridgeError, EngineMcpBridge, EngineTool, McpServerAuthority, RottweilerMcpServerFactory,
-    SessionSummary, serve_stdio,
-};
-use rw_core::runtime_support::{
-    ApprovalDecision, GlobTool, GrepTool, LsTool, ReadTool, Tool, ToolContext, ToolLimits,
-    ToolRegistry,
-};
 use rw_core::{
     BoundClient, ClientCommand, ClientId, CommandMeta, CommandOutcome, EngineEvent, EngineHost,
     EngineHostConfig, HeadlessPermissionMode, PROTOCOL_VERSION, PermissionApprover, PermissionGate,
     PermissionOutcome, PermissionRequest, RequestId,
 };
+use rw_mcp::{
+    BridgeError, EngineMcpBridge, EngineTool, McpServerAuthority, RottweilerMcpServerFactory,
+    SessionSummary, serve_stdio,
+};
+use rw_tools::{GlobTool, GrepTool, LsTool, ReadTool, Tool, ToolContext, ToolLimits, ToolRegistry};
+use rw_types::ApprovalDecision;
 use serde_json::{Value, json};
 
-use crate::{
-    PermissionMode,
-    host_runtime::{CliHostOptions, CliSessionFactory},
-    runtime::HostedProviderMode,
-};
+use rw_runtime::{RuntimeHostOptions, RuntimeSessionFactory, session::HostedProviderMode};
 
 const HOST_RESULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_EXPOSED_TOOLS: usize = 32;
@@ -41,7 +35,7 @@ pub(crate) struct StdioServerOptions {
     pub(crate) storage_root: PathBuf,
     pub(crate) credentials_path: PathBuf,
     pub(crate) config: rw_core::Config,
-    pub(crate) permission_mode: Option<PermissionMode>,
+    pub(crate) permission_mode: Option<rw_runtime::PermissionMode>,
     pub(crate) max_turns: usize,
     pub(crate) provider_mode: HostedProviderMode,
     pub(crate) dangerously_trust: bool,
@@ -263,7 +257,7 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
         .first()
         .ok_or_else(|| miette!("MCP server requires an authorized workspace"))?
         .clone();
-    let host_options = CliHostOptions {
+    let host_options = RuntimeHostOptions {
         storage_root: options.storage_root,
         credentials_path: options.credentials_path,
         config: options.config,
@@ -275,10 +269,12 @@ pub(crate) async fn run_stdio(options: StdioServerOptions) -> Result<()> {
         wait_for_execution_lease: false,
     };
     let factory = Arc::new(
-        CliSessionFactory::new(host_options)
+        RuntimeSessionFactory::new(host_options)
             .map_err(|_| miette!("MCP engine host could not initialize"))?,
     );
-    let host = EngineHost::new(EngineHostConfig::default(), factory.clone(), factory)
+    let host = rw_runtime::HeadlessRuntimeBuilder::new(factory)
+        .with_config(EngineHostConfig::default())
+        .build()
         .map_err(|_| miette!("MCP engine host could not initialize"))?;
     let registry = read_only_tools()?;
     let allowed_tools = registry

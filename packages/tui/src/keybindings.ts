@@ -172,7 +172,9 @@ const STANDARD_DEFAULTS = {
     open_review: ["ctrl+r"],
     cycle_agent_mode: ["shift+tab"],
     open_command_picker: ["ctrl+p"],
-    open_model_picker: ["ctrl+m"],
+    // Ctrl+M is carriage return in legacy terminal input and collides with
+    // submit. Alt+M remains distinguishable without enhanced-key protocols.
+    open_model_picker: ["alt+m"],
     open_mode_picker: ["ctrl+o"],
     open_session_picker: ["ctrl+s"],
     open_subagent_picker: ["ctrl+g"],
@@ -202,7 +204,7 @@ const VIM_DEFAULTS = {
     open_review: ["ctrl+r"],
     cycle_agent_mode: ["shift+tab"],
     open_command_picker: ["ctrl+p"],
-    open_model_picker: ["ctrl+m"],
+    open_model_picker: ["alt+m"],
     open_mode_picker: ["ctrl+o"],
     open_session_picker: ["ctrl+s"],
     open_subagent_picker: ["ctrl+g"],
@@ -404,12 +406,18 @@ export function parseKeybindingToml(source: string): KeybindingConfiguration {
 
 export function keyStrokeFromEvent(event: KeyEvent): string {
   const name = canonicalKeyName(event.name)
+  // OpenTUI exposes a physical Alt key as `meta` for legacy ESC-prefixed
+  // input and as both `meta` and `option` for Kitty keyboard events. Collapse
+  // those transport shapes to the user-facing `alt` modifier while preserving
+  // enhanced Command/Meta events that do not carry `option`.
+  const legacyAlt = event.source === "raw" && event.meta && !event.option && !event.super
+  const alt = event.option || legacyAlt
   const modifiers = [
     ...(event.ctrl ? ["ctrl"] : []),
-    ...(event.meta ? ["meta"] : []),
+    ...(event.meta && !alt ? ["meta"] : []),
     ...(event.super ? ["super"] : []),
     ...(event.hyper ? ["hyper"] : []),
-    ...(event.option ? ["alt"] : []),
+    ...(alt ? ["alt"] : []),
     ...(event.shift ? ["shift"] : []),
   ]
   return [...modifiers, name].join("+")

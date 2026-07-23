@@ -1230,11 +1230,22 @@ fn prepare_turn_start(
         .then(|| state.provider.clone())
         .flatten();
     let mut turn_config =
-        config.with_model_route_and_mode(model_alias.clone(), provider, state.mode);
+        config.with_model_route_and_mode(model_alias.clone(), provider, &state.mode_id);
     turn_config.thinking = state.thinking;
+    let mode = config.modes.get(&state.mode_id.0).ok_or_else(|| {
+        AgentLoopError::InvalidConfiguration(format!("unknown active mode {:?}", state.mode_id.0))
+    })?;
+    if !mode.allowed_tools().is_empty() {
+        turn_config.tools = Arc::new(
+            turn_config
+                .tools
+                .subset(mode.allowed_tools().iter().map(String::as_str))
+                .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
+        );
+    }
     if let Some(allowed_tools) = allowed_tools {
         turn_config.tools = Arc::new(
-            config
+            turn_config
                 .tools
                 .subset(allowed_tools.iter().map(String::as_str))
                 .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,

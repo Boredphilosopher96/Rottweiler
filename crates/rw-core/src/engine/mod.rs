@@ -23,7 +23,8 @@ use rw_context::{
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
     HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect, HookEvent,
-    HookFailure, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
+    HookFailure, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration, ModeDefinition,
+    ModePermissionOverlay, ModeRegistry, ModeSource,
 };
 use rw_providers::{
     BoxEventStream, CacheBreakpointSupport, CacheHint, FinishReason, ProviderEvent,
@@ -85,6 +86,7 @@ use projection::recovered_pending_event;
 pub use projection::{
     ContextSurgeryAction, InterruptedToolRepair, RecoveredQuestion, RecoveredUserShell,
     SessionProjectionError, SessionRecoveredState, project_session_events,
+    project_session_events_with_modes,
 };
 use projection::{
     approved_plan_context_item, parse_turn_id, plan_review_context_turn, review_hash_is_valid,
@@ -913,7 +915,8 @@ enum PendingEvent {
         strategy: ModelContextTransfer,
     },
     ModeChanged {
-        mode: SessionMode,
+        mode: ModeId,
+        definition_fingerprint: Option<String>,
     },
     PermissionModeChanged {
         mode: Option<crate::HeadlessPermissionMode>,
@@ -988,6 +991,14 @@ fn parse_session_mode(mode: &str) -> Option<SessionMode> {
         "plan" => Some(SessionMode::Plan),
         "execute" => Some(SessionMode::Execute),
         _ => None,
+    }
+}
+
+fn mode_permission_base(mode: &ModeDefinition) -> SessionMode {
+    match mode.permission() {
+        ModePermissionOverlay::Discuss => SessionMode::Discuss,
+        ModePermissionOverlay::Plan => SessionMode::Plan,
+        ModePermissionOverlay::Execute => SessionMode::Execute,
     }
 }
 
@@ -1541,9 +1552,13 @@ impl PendingEvent {
             Self::ModelContextCleared { strategy } => {
                 EngineEvent::ModelContextCleared { meta, strategy }
             }
-            Self::ModeChanged { mode } => EngineEvent::ModeChanged {
+            Self::ModeChanged {
+                mode,
+                definition_fingerprint,
+            } => EngineEvent::ModeChanged {
                 meta,
-                mode: ModeId(session_mode_name(mode).to_owned()),
+                mode,
+                definition_fingerprint,
             },
             Self::PermissionModeChanged { mode } => EngineEvent::PermissionModeChanged {
                 meta,
@@ -1691,6 +1706,7 @@ pub struct SessionSnapshot {
     pub provider: Option<String>,
     pub thinking: ThinkingLevel,
     pub mode: SessionMode,
+    pub mode_id: ModeId,
     pub permission_mode: Option<crate::HeadlessPermissionMode>,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
@@ -1706,8 +1722,13 @@ async fn apply_mode_change(
     state: &mut ActorState,
     events: &broadcast::Sender<RoutedEvent>,
     sink: &Arc<dyn SessionEventSink>,
-    mode: SessionMode,
+    mode_id: ModeId,
+    modes: &ModeRegistry,
 ) -> Result<(), AgentLoopError> {
+    let definition = modes.get(&mode_id.0).ok_or_else(|| {
+        AgentLoopError::InvalidConfiguration(format!("unknown mode {:?}", mode_id.0))
+    })?;
+    let mode = mode_permission_base(definition);
     let evicted = (mode == SessionMode::Plan)
         .then(|| approved_plan_context_item(&state.conversation))
         .flatten();
@@ -1718,7 +1739,10 @@ async fn apply_mode_change(
             effective_after_agent_turn: state.completed_turns,
         });
     }
-    durable.push(PendingEvent::ModeChanged { mode });
+    durable.push(PendingEvent::ModeChanged {
+        mode: mode_id.clone(),
+        definition_fingerprint: Some(definition.semantic_fingerprint()),
+    });
     emit_batch(state, events, sink, durable).await?;
     if let Some(item_id) = evicted {
         state.context_surgery.push(ContextSurgeryAction {
@@ -1728,6 +1752,7 @@ async fn apply_mode_change(
         });
     }
     state.mode = mode;
+    state.mode_id = mode_id;
     if mode == SessionMode::Plan {
         state.pending_plan = None;
         state.approved_plan = None;
@@ -2219,6 +2244,8 @@ mod tests {
             running: false,
             queued_messages: 2,
             mode: SessionMode::Execute,
+            mode_id: ModeId("execute".to_owned()),
+            modes: Arc::new(ModeRegistry::builtins().expect("built-in modes")),
             permission_summary: "Default permission: ask\nSession rules: none".to_owned(),
             plan_summary: "No plan has been submitted.".to_owned(),
             command_summary: "/status — Show agent status".to_owned(),
@@ -4255,6 +4282,7 @@ mod tests {
                 tools: Arc::clone(&self.tools),
                 hooks: Arc::new(builtin_hook_dispatcher().expect("generation hooks")),
                 commands: Arc::new(commands),
+                modes: Arc::new(ModeRegistry::builtins().expect("generation modes")),
                 permissions: Arc::clone(&self.permissions),
                 checkpoints: Arc::new(NoopMutationCheckpointCoordinator),
                 folder_trust: Arc::new(NoopFolderTrustController),
@@ -4453,6 +4481,7 @@ mod tests {
             permissions: Arc::new(PermissionGate::new(permissions)),
             hooks: Arc::new(hooks),
             commands: Arc::new(builtin_command_registry().expect("built-in commands")),
+            modes: Arc::new(ModeRegistry::builtins().expect("built-in modes")),
             event_sink: Arc::new(NoopSessionEventSink::default()),
             event_clock: Arc::new(FixedClock),
             secret_redactor: Arc::new(NoopSecretRedactor),
@@ -12383,6 +12412,254 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
+    async fn declarative_custom_mode_is_prompted_filtered_enforced_and_replayable() {
+        let root = TempDir::new().expect("workspace");
+        let model = Arc::new(ScriptedModel::new([stop_script("audited", &[])]));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(rw_tools::ReadTool::new(ToolLimits::default())))
+            .expect("read tool");
+        tools
+            .register(Arc::new(WriteTool::new(ToolLimits::default())))
+            .expect("write tool");
+        let custom = rw_ext::parse_mode_toml(
+            "audit.toml",
+            r#"
+id = "audit"
+description = "Read-only audit"
+permission = "discuss"
+prompt = "CUSTOM AUDIT MODE: inspect evidence and do not mutate."
+allowed-tools = ["read"]
+"#,
+            rw_ext::ModeSource::Embedded {
+                name: "test".to_owned(),
+            },
+        )
+        .expect("custom mode");
+        let mut mode_registry = ModeRegistry::builtins().expect("built-in modes");
+        mode_registry
+            .register(custom)
+            .expect("register custom mode");
+        mode_registry
+            .register(
+                rw_ext::parse_mode_toml(
+                    "ship.toml",
+                    r#"
+id = "ship"
+description = "Execute through a custom id"
+permission = "execute"
+prompt = "Execute approved work."
+"#,
+                    rw_ext::ModeSource::Embedded {
+                        name: "test".to_owned(),
+                    },
+                )
+                .expect("custom execute mode"),
+            )
+            .expect("register custom execute mode");
+        let mut actor_config = config(
+            root.path(),
+            model.clone(),
+            Arc::new(tools),
+            PermissionDecision::Allow,
+            HookDispatcher::new(),
+        );
+        actor_config.modes = Arc::new(mode_registry);
+        let sink = Arc::new(RecordingSink::default());
+        actor_config.event_sink = sink.clone();
+        let handle = SessionActor::spawn(actor_config).expect("actor");
+        let mut events = handle.subscribe();
+        handle.ensure_local_driver().await.expect("local driver");
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SwitchMode {
+                    meta: protocol_meta("local", "enter-plan"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    mode: ModeId("plan".to_owned()),
+                })
+                .await
+                .expect("enter plan"),
+            CommandOutcome::Accepted
+        );
+        assert!(matches!(
+            handle
+                .dispatch(ClientCommand::SwitchMode {
+                    meta: protocol_meta("local", "custom-execute-before-approval"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    mode: ModeId("ship".to_owned()),
+                })
+                .await
+                .expect("custom execute rejected"),
+            CommandOutcome::Rejected { error } if error.code == "plan_approval_required"
+        ));
+        assert_eq!(
+            handle
+                .dispatch(ClientCommand::SwitchMode {
+                    meta: protocol_meta("local", "custom-audit"),
+                    session_id: SessionId("fixture-session".to_owned()),
+                    mode: ModeId("audit".to_owned()),
+                })
+                .await
+                .expect("switch custom mode"),
+            CommandOutcome::Accepted
+        );
+        assert_eq!(
+            handle.send_message("inspect").await.expect("turn"),
+            MessageDisposition::Started
+        );
+        collect_turn(&mut events).await;
+
+        let requests = model.requests.lock().expect("requests");
+        let request = requests.first().expect("provider request");
+        let wire = serde_json::to_string(request).expect("request wire");
+        assert!(wire.contains("CUSTOM AUDIT MODE"), "request: {wire}");
+        assert!(wire.contains("\"name\":\"read\""));
+        assert!(!wire.contains("\"name\":\"write\""));
+        drop(requests);
+
+        let durable = sink.events.lock().expect("events");
+        assert!(durable.iter().any(|event| matches!(
+            &event.wire,
+            EngineEvent::ModeChanged { mode, .. } if mode.0 == "audit"
+        )));
+        let projected = project_session_events(
+            &durable
+                .iter()
+                .map(|event| event.wire.clone())
+                .collect::<Vec<_>>(),
+        )
+        .expect("projection");
+        assert_eq!(projected.mode_id, Some(ModeId("audit".to_owned())));
+    }
+
+    #[test]
+    fn custom_mode_projection_preserves_permission_floor_and_rewind_state() {
+        let custom = rw_ext::parse_mode_toml(
+            "audit.toml",
+            r#"
+id = "audit"
+description = "Read-only audit"
+permission = "discuss"
+prompt = "Inspect without mutation."
+"#,
+            rw_ext::ModeSource::Embedded {
+                name: "test".to_owned(),
+            },
+        )
+        .expect("custom mode");
+        let mut modes = ModeRegistry::builtins().expect("built-ins");
+        modes.register(custom).expect("custom mode registry");
+        let kinds = vec![
+            PendingEvent::ModeChanged {
+                mode: ModeId("audit".to_owned()),
+                definition_fingerprint: modes
+                    .get("audit")
+                    .map(ModeDefinition::semantic_fingerprint),
+            },
+            PendingEvent::TurnStarted { turn: 1 },
+            PendingEvent::TurnFinished {
+                turn: 1,
+                status: AgentTurnStatus::Completed,
+                usage: SessionUsage::default(),
+                cost: unavailable_cost(),
+            },
+            PendingEvent::ModeChanged {
+                mode: ModeId("execute".to_owned()),
+                definition_fingerprint: None,
+            },
+            PendingEvent::ConversationRewound {
+                to_turn: 1,
+                operation_id: "rewind-mode".to_owned(),
+                unrestorable_paths: Vec::new(),
+            },
+        ];
+        let events = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(sequence, kind)| wire_event(u64::try_from(sequence).expect("sequence"), kind))
+            .collect::<Vec<_>>();
+        let recovered =
+            project_session_events_with_modes(&events, &modes).expect("registry-aware projection");
+        assert_eq!(recovered.mode_id, Some(ModeId("audit".to_owned())));
+        assert_eq!(recovered.mode, SessionMode::Discuss);
+    }
+
+    #[test]
+    fn custom_plan_projection_is_fail_closed_and_requires_registered_definition() {
+        let custom = rw_ext::parse_mode_toml(
+            "design.toml",
+            r#"
+id = "design"
+description = "Custom planning"
+permission = "plan"
+prompt = "Produce a plan."
+"#,
+            rw_ext::ModeSource::Embedded {
+                name: "test".to_owned(),
+            },
+        )
+        .expect("custom mode");
+        let mut modes = ModeRegistry::builtins().expect("built-ins");
+        modes.register(custom).expect("custom mode registry");
+        let events = vec![wire_event(
+            0,
+            PendingEvent::ModeChanged {
+                mode: ModeId("design".to_owned()),
+                definition_fingerprint: modes
+                    .get("design")
+                    .map(ModeDefinition::semantic_fingerprint),
+            },
+        )];
+        let recovered =
+            project_session_events_with_modes(&events, &modes).expect("custom plan projection");
+        assert_eq!(recovered.mode, SessionMode::Plan);
+        assert!(recovered.plan_gate_active);
+
+        let builtins = ModeRegistry::builtins().expect("built-ins");
+        assert_eq!(
+            project_session_events_with_modes(&events, &builtins),
+            Err(SessionProjectionError::InvalidMode("design".to_owned()))
+        );
+
+        let changed = rw_ext::parse_mode_toml(
+            "design.toml",
+            r#"
+id = "design"
+description = "Custom planning"
+permission = "execute"
+prompt = "The file changed after the mode was selected."
+"#,
+            rw_ext::ModeSource::Embedded {
+                name: "changed".to_owned(),
+            },
+        )
+        .expect("changed custom mode");
+        let mut changed_modes = ModeRegistry::builtins().expect("built-ins");
+        changed_modes.register(changed).expect("changed registry");
+        assert_eq!(
+            project_session_events_with_modes(&events, &changed_modes),
+            Err(SessionProjectionError::ModeDefinitionChanged(
+                "design".to_owned()
+            ))
+        );
+
+        let legacy_custom = vec![wire_event(
+            0,
+            PendingEvent::ModeChanged {
+                mode: ModeId("design".to_owned()),
+                definition_fingerprint: None,
+            },
+        )];
+        assert_eq!(
+            project_session_events_with_modes(&legacy_custom, &modes),
+            Err(SessionProjectionError::ModeDefinitionChanged(
+                "design".to_owned()
+            ))
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn seeded_plan_mode_property_keeps_complete_workspace_byte_identical() {
         for seed in 0_u64..48 {
             for hook_allow in [false, true] {
@@ -12766,7 +13043,8 @@ mod tests {
         let item_id = ContextItemId("conversation:0".to_owned());
         let kinds = vec![
             PendingEvent::ModeChanged {
-                mode: SessionMode::Plan,
+                mode: wire_mode(SessionMode::Plan),
+                definition_fingerprint: None,
             },
             PendingEvent::PlanSubmitted {
                 artifact: artifact.clone(),
@@ -12785,7 +13063,8 @@ mod tests {
                 effective_after_agent_turn: 0,
             },
             PendingEvent::ModeChanged {
-                mode: SessionMode::Execute,
+                mode: wire_mode(SessionMode::Execute),
+                definition_fingerprint: None,
             },
         ];
         let events = kinds
@@ -12811,13 +13090,15 @@ mod tests {
         next_cycle.push(wire_event(
             6,
             PendingEvent::ModeChanged {
-                mode: SessionMode::Plan,
+                mode: wire_mode(SessionMode::Plan),
+                definition_fingerprint: None,
             },
         ));
         next_cycle.push(wire_event(
             7,
             PendingEvent::ModeChanged {
-                mode: SessionMode::Discuss,
+                mode: wire_mode(SessionMode::Discuss),
+                definition_fingerprint: None,
             },
         ));
         let resumed = project_session_events(&next_cycle).expect("resume second plan cycle");

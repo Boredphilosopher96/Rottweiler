@@ -335,25 +335,25 @@ fn append_local_checks(checks: &mut Vec<DoctorCheck>) {
         std::env::var("COLORTERM").ok().as_deref(),
         std::io::stdout().is_terminal(),
     ));
-    let sandbox = rw_core::runtime_support::probe_sandbox();
+    let sandbox = rw_tools::probe_sandbox();
     checks.push(sandbox_check(
-        sandbox.support == rw_core::runtime_support::SandboxSupport::Enforced,
+        sandbox.support == rw_tools::SandboxSupport::Enforced,
         sandbox.backend,
     ));
-    let egress = rw_core::runtime_support::probe_policy_egress();
+    let egress = rw_tools::probe_policy_egress();
     checks.push(check(
         "sandbox_egress",
-        if egress.support == rw_core::runtime_support::SandboxSupport::Enforced {
+        if egress.support == rw_tools::SandboxSupport::Enforced {
             CheckStatus::Pass
         } else {
             CheckStatus::Warning
         },
-        if egress.support == rw_core::runtime_support::SandboxSupport::Enforced {
+        if egress.support == rw_tools::SandboxSupport::Enforced {
             "policy_egress_available"
         } else {
             "policy_egress_unavailable"
         },
-        if egress.support == rw_core::runtime_support::SandboxSupport::Enforced {
+        if egress.support == rw_tools::SandboxSupport::Enforced {
             "sandbox policy-egress enforcement is available"
         } else {
             "sandbox policy-egress enforcement is unavailable; networked commands fail closed"
@@ -501,7 +501,7 @@ fn sandbox_check(available: bool, backend: &str) -> DoctorCheck {
 }
 
 fn provider_plans(config: &Config) -> Vec<ProviderPlan> {
-    let settings = rw_core::runtime_support::ProxySettings {
+    let settings = rw_providers::ProxySettings {
         global: config
             .network
             .proxy
@@ -518,7 +518,7 @@ fn provider_plans(config: &Config) -> Vec<ProviderPlan> {
                     .map(|url| (name.clone(), url))
             })
             .collect(),
-        environment: rw_core::runtime_support::ProxyEnvironment::capture(),
+        environment: rw_providers::ProxyEnvironment::capture(),
     };
     config
         .providers
@@ -528,7 +528,7 @@ fn provider_plans(config: &Config) -> Vec<ProviderPlan> {
             if let Some(endpoint) = plan.endpoint.as_ref() {
                 if let Some(resolution) = settings.resolve(name, endpoint) {
                     plan.proxy = Some(resolution.url);
-                    if resolution.source == rw_core::runtime_support::ProxySource::Environment {
+                    if resolution.source == rw_providers::ProxySource::Environment {
                         plan.proxy_username = None;
                         plan.proxy_password = None;
                     }
@@ -897,23 +897,22 @@ async fn probe_provider(
         (plan.proxy_username.as_deref(), plan.proxy_password.as_ref())
         && let Some(InventoryValue::Present { secret, .. }) = inventory.get(password_key)
     {
-        Some(rw_core::runtime_support::ProxyAuthentication::new(
+        Some(rw_providers::ProxyAuthentication::new(
             username,
-            rw_core::runtime_support::ProviderSecret::new(secret.0.clone()),
+            rw_providers::Secret::new(secret.0.clone()),
         ))
     } else {
         None
     };
-    let Ok(status) = rw_core::runtime_support::provider_reachability_probe(
-        rw_core::runtime_support::ProviderReachabilityRequest {
+    let Ok(status) =
+        rw_providers::provider_reachability_probe(rw_providers::ProviderReachabilityRequest {
             url: endpoint,
             headers,
             proxy: plan.proxy.clone(),
             proxy_authentication,
             timeout: Duration::from_millis(timeout_ms),
-        },
-    )
-    .await
+        })
+        .await
     else {
         return Reachability::Unreachable;
     };

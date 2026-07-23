@@ -7,6 +7,7 @@ members = [
     "crates/rw-intel",
     "crates/rw-mcp",
     "crates/rw-providers",
+    "crates/rw-runtime",
     "crates/rw-sandbox",
     "crates/rw-store",
     "crates/rw-tools",
@@ -97,6 +98,7 @@ rw-ext = { version = "0.1.0", path = "crates/rw-ext" }
 rw-intel = { version = "0.1.0", path = "crates/rw-intel" }
 rw-mcp = { version = "0.1.0", path = "crates/rw-mcp" }
 rw-providers = { version = "0.1.0", path = "crates/rw-providers" }
+rw-runtime = { version = "0.1.0", path = "crates/rw-runtime" }
 rw-sandbox = { version = "0.1.0", path = "crates/rw-sandbox" }
 rw-store = { version = "0.1.0", path = "crates/rw-store" }
 rw-tools = { version = "0.1.0", path = "crates/rw-tools" }
