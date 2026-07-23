@@ -1047,8 +1047,13 @@ export class StatusLineRenderable extends TextRenderable {
   #branch: string | null = null
   #inputMode: "normal" | "insert" | null = null
   #inputTarget: "composer" | "transcript" | "picker" | "interaction" | "review" | null = null
+  readonly #modelPickerKeycap: string | null
 
-  constructor(ctx: RenderContext, theme: RottweilerTheme) {
+  constructor(
+    ctx: RenderContext,
+    theme: RottweilerTheme,
+    options: { readonly modelPickerKeycap?: string | null } = {},
+  ) {
     super(ctx, {
       id: "status-line",
       width: "100%",
@@ -1058,6 +1063,7 @@ export class StatusLineRenderable extends TextRenderable {
       bg: theme.panel,
       truncate: true,
     })
+    this.#modelPickerKeycap = options.modelPickerKeycap ?? null
   }
 
   setBranch(branch: string | null): void {
@@ -1077,12 +1083,19 @@ export class StatusLineRenderable extends TextRenderable {
       (tool) => tool.status === "awaiting_approval",
     )
     const permissionMode = permissionRuntimeMode(state.permissions)
+    const hasSessionActivity =
+      state.replay.active ||
+      state.transcript.length > 0 ||
+      state.streamingTail !== null ||
+      Object.keys(state.tools).length > 0
     const context =
       state.context === null
-        ? "ctx —"
+        ? (hasSessionActivity ? "ctx —" : null)
         : `ctx ${formatTokenCount(state.context.used_tokens)}/${formatTokenCount(state.context.usable_tokens)} (${formatPercent(state.context.used_tokens, state.context.usable_tokens)})`
     const cache =
-      state.cost === null || !hasRecordedUsage(state.cost.session_usage)
+      state.cost === null
+        ? (hasSessionActivity ? "cache —" : null)
+        : !hasRecordedUsage(state.cost.session_usage)
         ? "cache —"
         : `cache ${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
     const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
@@ -1100,16 +1113,22 @@ export class StatusLineRenderable extends TextRenderable {
         : [`◉ ${state.mode ?? "—"}${permissionMode === null ? "" : ` · ${permissionMode}`}`]),
       ...(waitingApproval === undefined ? [] : [`approval · ${toolDisplayName(waitingApproval.name)}`]),
       state.model === null
-        ? "model none · Ctrl+M"
+        ? `model not selected${
+            this.#modelPickerKeycap === null ? "" : ` · ${this.#modelPickerKeycap}`
+          }`
         : `model ${
             state.provider === null || state.model.includes("/")
               ? state.model
               : `${state.provider}/${state.model}`
           }`,
-      context,
-      formatSessionCost(state.cost, state.context?.used_tokens ?? null),
-      cache,
-      `git ${this.#branch ?? "—"}`,
+      ...(context === null ? [] : [context]),
+      ...(state.cost === null && !hasSessionActivity
+        ? []
+        : [formatSessionCost(state.cost, state.context?.used_tokens ?? null)]),
+      ...(cache === null ? [] : [cache]),
+      ...(this.#branch === null && !hasSessionActivity
+        ? []
+        : [`git ${this.#branch ?? "—"}`]),
       ...(pluginStatus === undefined ? [] : [`Extension · ${humanLabel(pluginStatus[1])}`]),
     ].join("  │  ")
   }

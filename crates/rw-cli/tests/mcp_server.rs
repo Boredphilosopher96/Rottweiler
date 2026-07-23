@@ -7,7 +7,7 @@ use rmcp::{
     model::CallToolRequestParams,
     transport::{ConfigureCommandExt as _, TokioChildProcess},
 };
-use rw_core::runtime_support::{FinishReason, ProviderEvent};
+use rw_providers::{FinishReason, ProviderEvent};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

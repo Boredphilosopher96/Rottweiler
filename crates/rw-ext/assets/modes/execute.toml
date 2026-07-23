@@ -1,0 +1,5 @@
+id = "execute"
+description = "Execute work subject to the configured permission policy"
+permission = "execute"
+prompt = "Active mode: Execute. Follow the approved plan artifact when present. Tool calls remain subject to the permission policy."
+allowed-tools = []

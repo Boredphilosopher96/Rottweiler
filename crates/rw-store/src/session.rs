@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tempfile::TempDir;
 use thiserror::Error;
 
-const EVENT_SCHEMA_VERSION: u16 = 1;
+/// Current public JSONL envelope version for durable session events.
+pub const SESSION_EVENT_SCHEMA_VERSION: u16 = 1;
+const EVENT_SCHEMA_VERSION: u16 = SESSION_EVENT_SCHEMA_VERSION;
 const MAX_SEARCH_INDEX_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_SEARCH_INDEX_WAL_BYTES: u64 = 64 * 1024 * 1024;
 static INDEX_TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

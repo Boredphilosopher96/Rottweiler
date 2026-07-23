@@ -1,0 +1,5 @@
+id = "discuss"
+description = "Explore and explain without changing the workspace"
+permission = "discuss"
+prompt = "Active mode: Discuss. Use only read-only tools. Do not request or imply any mutation."
+allowed-tools = []

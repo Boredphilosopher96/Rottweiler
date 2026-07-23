@@ -13,6 +13,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runner-contract:
+    name: Required hardening runner contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail closed when protected hardening runners are unavailable
+        env:
+          SELF_HOSTED_RUNNERS_ENABLED: ${{ vars.ROTTWEILER_SELF_HOSTED_RUNNERS }}
+        run: |
+          if [ "$SELF_HOSTED_RUNNERS_ENABLED" != "true" ]; then
+            echo "ROTTWEILER_SELF_HOSTED_RUNNERS must be true; soak, WSL2, and Terminal-Bench cannot silently skip" >&2
+            exit 1
+          fi
+
   fuzz:
     name: Fuzz ${{ matrix.target }}
     runs-on: ubuntu-latest
@@ -23,6 +36,8 @@ jobs:
         target: [config_parser, toon_decoder, plugin_rpc, event_log]
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
       - name: Install nightly Rust
         run: rustup toolchain install nightly --profile minimal
       - name: Cache pinned cargo-fuzz
@@ -40,8 +55,6 @@ jobs:
   cross-platform-release:
     name: Release budgets (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # Hosted-runner perf budgets are advisory; protected-runner baselines remain the release gate.
-    continue-on-error: true
     timeout-minutes: 60
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
@@ -113,6 +126,7 @@ jobs:
     name: Eight-hour supervised soak (${{ matrix.platform }})
     # Gate until self-hosted runners exist; set ROTTWEILER_SELF_HOSTED_RUNNERS=true to re-enable.
     if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
+    needs: runner-contract
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 510
     strategy:
@@ -127,6 +141,8 @@ jobs:
       ROTTWEILER_CREDENTIAL_BACKEND: file
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
       - run: rustup override set 1.94.1
@@ -169,10 +185,13 @@ jobs:
     name: WSL2 release, sandbox, doctor, and DrvFS acceptance
     # Gate until self-hosted runners exist; set ROTTWEILER_SELF_HOSTED_RUNNERS=true to re-enable.
     if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
+    needs: runner-contract
     runs-on: [self-hosted, Windows, X64, wsl2]
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
       - name: Execute inside the configured WSL2 distribution
         shell: pwsh
         run: |
@@ -186,16 +205,18 @@ jobs:
     name: Terminal-Bench 2.1 pinned subset
     # Gate until self-hosted runners exist; set ROTTWEILER_SELF_HOSTED_RUNNERS=true to re-enable.
     if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
+    needs: runner-contract
     runs-on: [self-hosted, Linux, X64, terminal-bench]
     timeout-minutes: 720
     env:
-      ROTTWEILER_EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
       ROTTWEILER_CREDENTIAL_BACKEND: file
       ROTTWEILER_EVAL_MODEL: ${{ vars.ROTTWEILER_EVAL_MODEL }}
       ROTTWEILER_EVAL_CONCURRENCY: "4"
       ROTTWEILER_EVAL_OUTPUT_DIR: ${{ github.workspace }}/terminal-bench-evidence
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
       - name: Install Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
       - run: rustup override set 1.94.1
@@ -213,6 +234,8 @@ jobs:
           printf 'ROTTWEILER_RELEASE_ARCHIVE=%s\n' "$archive" >> "$GITHUB_ENV"
       - name: Run pinned 20-task subset
         run: scripts/run-terminal-bench.sh
+        env:
+          ROTTWEILER_EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
       - name: Enforce protected solve-rate, token, wall-time, and cost baseline
         env:
           TERMINAL_BENCH_BASELINE_JSON: ${{ vars.ROTTWEILER_TERMINAL_BENCH_BASELINE_JSON }}

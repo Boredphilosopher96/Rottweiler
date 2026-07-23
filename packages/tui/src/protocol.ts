@@ -23,6 +23,7 @@ export type {
   McpApprovalReview,
   McpServerDescriptor,
   McpServerState,
+  ModeDescriptor,
   PromptDump,
   PlanArtifact,
   PlanDecision,

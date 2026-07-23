@@ -9,7 +9,7 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, Result, miette};
-use rw_core::runtime_support::plugin::{
+use rw_ext::{
     LaunchedPluginProcess, PluginCapabilities, PluginLauncher, PluginManifest, PluginProcessConfig,
     PluginSandboxMode, PluginSandboxProfile, PluginToolCapability, PluginToolEffect,
     SupervisedPluginProcess,
@@ -21,7 +21,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::plugin_launcher::SandboxedPluginLauncher;
+use rw_runtime::plugin::SandboxedPluginLauncher;
 
 const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SOURCE_FILES: usize = 4_096;
@@ -158,7 +158,7 @@ async fn supervise(
 }
 
 struct RunningPlugin {
-    stdin: rw_core::runtime_support::plugin::PluginStdin,
+    stdin: rw_ext::PluginStdin,
     process: Arc<dyn SupervisedPluginProcess>,
     trace: JoinHandle<Result<()>>,
 }
@@ -262,10 +262,7 @@ async fn terminate_and_reap(process: &dyn SupervisedPluginProcess) {
     let _ = tokio::time::timeout(SHUTDOWN_DEADLINE, process.reap()).await;
 }
 
-async fn write_frame(
-    writer: &mut rw_core::runtime_support::plugin::PluginStdin,
-    value: &Value,
-) -> Result<()> {
+async fn write_frame(writer: &mut rw_ext::PluginStdin, value: &Value) -> Result<()> {
     let mut bytes = serde_json::to_vec(value).into_diagnostic()?;
     if bytes.len() > MAX_FRAME_BYTES {
         return Err(miette!("plugin dev host frame exceeded the protocol limit"));
@@ -275,9 +272,7 @@ async fn write_frame(
     writer.flush().await.into_diagnostic()
 }
 
-async fn read_frame(
-    reader: &mut rw_core::runtime_support::plugin::PluginStdout,
-) -> Result<Vec<u8>> {
+async fn read_frame(reader: &mut rw_ext::PluginStdout) -> Result<Vec<u8>> {
     let mut frame = Vec::new();
     loop {
         let available = reader.fill_buf().await.into_diagnostic()?;
@@ -520,12 +515,12 @@ mod tests {
     };
 
     use async_trait::async_trait;
-    use rw_core::runtime_support::plugin::{
+    use rw_ext::{
         ApprovalStore, ApprovalStoreError, DenyPushHandler, ExecutableIdentity, HookDispatcher,
         HookEvent, PluginBoundaryRedactor, PluginHost, PluginProcessError, RpcHookHandler,
         RpcToolAdapter, approve_plugin_launch,
     };
-    use rw_core::runtime_support::{Tool as _, ToolContext};
+    use rw_tools::{Tool as _, ToolContext};
     use serde_json::json;
     use tokio::{io::BufReader, process::Child};
 
@@ -600,11 +595,7 @@ mod tests {
 
     #[async_trait]
     impl SupervisedPluginProcess for DirectProcess {
-        fn mark_capability_violation(
-            &self,
-            _violation: &rw_core::runtime_support::plugin::CapabilityViolation,
-        ) {
-        }
+        fn mark_capability_violation(&self, _violation: &rw_ext::CapabilityViolation) {}
 
         fn kill_tree(&self) -> std::result::Result<(), PluginProcessError> {
             if let Some(pid) = self
@@ -791,7 +782,7 @@ mod tests {
                 .dispatch(HookEvent::PreTool, json!({"name":"bash"}))
                 .await
                 .status(),
-            rw_core::runtime_support::plugin::HookDispatchStatus::Blocked { .. }
+            rw_ext::HookDispatchStatus::Blocked { .. }
         ));
         host.shutdown().await.expect("scaffold shutdown");
         assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);

@@ -10,8 +10,8 @@ use std::{
 };
 
 use async_trait::async_trait;
-use rw_core::runtime_support::{SessionId, SubagentId};
 use rw_core::{OrchestrationError, SubagentMetadataStore, SubagentRecoveryRecord};
+use rw_types::{SessionId, SubagentId};
 use serde::{Deserialize, Serialize};
 
 const VERSION: u16 = 1;
@@ -586,21 +586,22 @@ impl FileSync {
 mod tests {
     use std::sync::Arc;
 
-    use rw_core::runtime_support::{CapabilityManifest, SubagentId, SubagentIsolation};
     use rw_core::{
         SubagentHandle, SubagentMetadataStore as _, SubagentPermissionMode, SubagentRecoveryPhase,
         SubagentRecoveryPolicy, SubagentRecoveryRecord,
     };
+    use rw_tools::CapabilityManifest;
+    use rw_types::{SubagentId, SubagentIsolation};
     use tempfile::TempDir;
 
     use super::PrivateSubagentMetadataStore;
 
     fn record() -> SubagentRecoveryRecord {
         SubagentRecoveryRecord {
-            parent_session_id: rw_core::runtime_support::SessionId("parent".to_owned()),
+            parent_session_id: rw_types::SessionId("parent".to_owned()),
             handle: SubagentHandle {
                 subagent_id: SubagentId("child".to_owned()),
-                session_id: rw_core::runtime_support::SessionId("child-session".to_owned()),
+                session_id: rw_types::SessionId("child-session".to_owned()),
             },
             task: "fixture task".to_owned(),
             agent: "fixture agent".to_owned(),
@@ -632,7 +633,7 @@ mod tests {
         )
         .expect("stale temp");
         let loaded = store
-            .load_parent(&rw_core::runtime_support::SessionId("parent".to_owned()))
+            .load_parent(&rw_types::SessionId("parent".to_owned()))
             .expect("load");
         assert_eq!(loaded, vec![record()]);
     }
@@ -648,7 +649,7 @@ mod tests {
         symlink(outside.path(), root.path().join("subagents-v1/parent")).expect("symlink");
         assert!(
             store
-                .load_parent(&rw_core::runtime_support::SessionId("parent".to_owned()))
+                .load_parent(&rw_types::SessionId("parent".to_owned()))
                 .is_err()
         );
     }
@@ -667,7 +668,7 @@ mod tests {
         symlink(outside.path().join("record"), directory.join("child.json")).expect("symlink");
         assert!(
             store
-                .load_parent(&rw_core::runtime_support::SessionId("parent".to_owned()))
+                .load_parent(&rw_types::SessionId("parent".to_owned()))
                 .is_err()
         );
     }
@@ -684,7 +685,7 @@ mod tests {
         std::fs::hard_link(&record_path, root.path().join("leaked-record")).expect("hard link");
         assert!(
             store
-                .load_parent(&rw_core::runtime_support::SessionId("parent".to_owned()))
+                .load_parent(&rw_types::SessionId("parent".to_owned()))
                 .is_err()
         );
         std::fs::remove_file(root.path().join("leaked-record")).expect("remove hard link");
@@ -692,7 +693,7 @@ mod tests {
             .expect("public mode");
         assert!(
             store
-                .load_parent(&rw_core::runtime_support::SessionId("parent".to_owned()))
+                .load_parent(&rw_types::SessionId("parent".to_owned()))
                 .is_err()
         );
     }
@@ -731,7 +732,7 @@ mod tests {
             .expect("replacement mode");
         assert!(
             store
-                .load_parent(&rw_core::runtime_support::SessionId("parent".to_owned()))
+                .load_parent(&rw_types::SessionId("parent".to_owned()))
                 .is_err(),
             "same-owner same-mode replacement must fail identity validation"
         );
@@ -777,7 +778,7 @@ mod tests {
         store.save(record()).await.expect("save");
         assert_eq!(
             store
-                .load_parent(&rw_core::runtime_support::SessionId("parent".to_owned()))
+                .load_parent(&rw_types::SessionId("parent".to_owned()))
                 .expect("load"),
             vec![record()]
         );

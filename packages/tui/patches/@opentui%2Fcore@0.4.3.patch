@@ -1,9 +1,3 @@
-diff --git a/node_modules/@opentui/core/.bun-tag-62ce12d3fab8c607 b/.bun-tag-62ce12d3fab8c607
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
-diff --git a/node_modules/@opentui/core/.bun-tag-859d518edbe983ee b/.bun-tag-859d518edbe983ee
-new file mode 100644
-index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/index-d5xqskty.js b/index-d5xqskty.js
 index b3c986b0ded01ca864ae9547f7b7b85b23934273..26f5a1dd50268646182afa718a46f420c0c1ce01 100644
 --- a/index-d5xqskty.js
@@ -76,3 +70,18 @@ index b3c986b0ded01ca864ae9547f7b7b85b23934273..26f5a1dd50268646182afa718a46f420
  if (isBunfsPath(targetLibPath)) {
    targetLibPath = targetLibPath.replace("../", "");
  }
+diff --git a/index-xt9f071j.js b/index-xt9f071j.js
+index 8a54df7..ebccf43 100644
+--- a/index-xt9f071j.js
++++ b/index-xt9f071j.js
+@@ -3399,9 +3399,9 @@ class CodeRenderable extends TextBufferRenderable {
+         this.requestRender();
+         return;
+       }
+-      console.warn("Code highlighting failed, falling back to plain text:", error);
+       if (this.isDestroyed)
+         return;
++      console.warn("Code highlighting failed, falling back to plain text:", error);
+       this.textBuffer.setText(content);
+       this.setRenderedLineSources(undefined);
+       this._shouldRenderTextBuffer = true;

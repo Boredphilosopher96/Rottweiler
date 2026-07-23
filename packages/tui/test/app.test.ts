@@ -483,12 +483,41 @@ describe("Rottweiler OpenTUI shell", () => {
     const frame = setup.captureCharFrame()
     expect(frame).toContain("Rottweiler")
     expect(frame).toContain("hello")
-    expect(frame).toContain("model none · Ctrl+M")
+    expect(frame).toContain("model not selected · Alt+M")
 
     const cells = setup.captureSpans()
     expect(cells.cols).toBe(72)
     expect(cells.rows).toBe(12)
     expect(cells.lines).toHaveLength(12)
+  })
+
+  test("presents an intentional ready state without an empty context sidebar", async () => {
+    const setup = await createTestRenderer({ width: 112, height: 24, useThread: false })
+    renderer = setup.renderer
+    const app = createRottweilerApp(renderer, {
+      initialState: {
+        ...createInitialState(),
+        connection: { phase: "connected", attempt: 0, error: null, gap: null },
+      },
+    })
+    renderer.root.add(app)
+
+    await setup.renderOnce()
+
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Rottweiler")
+    expect(frame).toContain("Ready for a task. Type / for commands or @ to add workspace files.")
+    expect(frame).toContain("model not selected · Alt+M")
+    expect(frame).not.toContain("No tasks")
+    expect(frame).not.toContain("No changed files")
+    expect(app.contextPanel.visible).toBeFalse()
+
+    app.setState({
+      ...app.state,
+      todos: [{ id: "first-task", content: "Inspect the workspace", status: "pending" }],
+    })
+    await setup.renderOnce()
+    expect(app.contextPanel.visible).toBeTrue()
   })
 
   test("coalesces hundreds of ordered presentation deltas into one frame without losing protocol progress", async () => {
@@ -1423,7 +1452,7 @@ describe("Rottweiler OpenTUI shell", () => {
     }))
   })
 
-  test("shows unknown status until confirmed and clears a friendly recovery banner on success", async () => {
+  test("omits unavailable telemetry and clears a friendly recovery banner on success", async () => {
     const setup = await createTestRenderer({ width: 100, height: 18, useThread: false })
     renderer = setup.renderer
     const app = createRottweilerApp(renderer, {
@@ -1438,8 +1467,10 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(app.banner.plainText).not.toContain("attempt")
     expect(app.banner.plainText).not.toContain("disconnected")
     expect(app.statusLine.plainText).toContain("◉ execute")
-    expect(app.statusLine.plainText).toContain("model none · Ctrl+M")
-    expect(app.statusLine.plainText).toContain("cache —")
+    expect(app.statusLine.plainText).toContain("model not selected · Alt+M")
+    expect(app.statusLine.plainText).not.toContain("ctx")
+    expect(app.statusLine.plainText).not.toContain("cache")
+    expect(app.statusLine.plainText).not.toContain("git")
     app.handleEvent({
       type: "error",
       meta: {
@@ -2528,6 +2559,7 @@ describe("Rottweiler OpenTUI shell", () => {
       const model = app.picker.select.options.find((option) => option.value === "model.list")
       expect(model?.description).toContain("Ctrl+K")
       expect(model?.description).not.toContain("Ctrl+M")
+      expect(app.statusLine.plainText).toContain("model not selected · Ctrl+K")
     })
   })
 
@@ -5031,6 +5063,42 @@ describe("Rottweiler OpenTUI shell", () => {
       unrestorable_paths: [],
     })
     expect(emitted.filter((command) => command.type === "list_commands")).toHaveLength(3)
+    expect(emitted.filter((command) => command.type === "list_modes")).toHaveLength(1)
+
+    app.openModePicker()
+    const firstModesRequest = emitted.findLast((command) => command.type === "list_modes")
+    expect(firstModesRequest?.type).toBe("list_modes")
+    app.handleEvent({
+      type: "modes_listed",
+      meta: { protocol_version: PROTOCOL_VERSION, client_id: "ui", request_id: firstModesRequest!.meta.request_id, emitted_at: "2026-01-01T00:00:02Z" },
+      session_id: "session-local",
+      modes: [
+        { id: "execute", description: "Make changes", current: true },
+        { id: "audit", description: "Inspect controls and evidence", current: false },
+      ],
+      truncated: false,
+    })
+    expect(app.state.mode).toBe("execute")
+    app.closePicker()
+    app.openModePicker()
+    const auditIndex = app.picker.select.options.findIndex((option) => option.value === "mode:audit")
+    expect(auditIndex).toBeGreaterThanOrEqual(0)
+    app.picker.select.setSelectedIndex(auditIndex)
+    app.picker.select.selectCurrent()
+    expect(emitted).toContainEqual(expect.objectContaining({
+      type: "switch_mode",
+      mode: "audit",
+    }))
+    app.handleEvent({
+      type: "mode_changed",
+      meta: { protocol_version: PROTOCOL_VERSION, session_id: "session-local", sequence_id: "2", emitted_at: "2026-01-01T00:00:03Z" },
+      mode: "audit",
+    })
+    expect(app.statusLine.plainText).toContain("audit")
+    app.openModePicker()
+    const currentAudit = app.picker.select.options.find((option) => option.value === "mode:audit")
+    expect(currentAudit?.name).toBe("● Audit")
+    app.closePicker()
 
     app.openModelPicker()
     const firstModelsRequest = emitted.find((command) => command.type === "list_models")

@@ -23,6 +23,7 @@ pub struct SessionActorConfig {
     pub permissions: Arc<PermissionGate>,
     pub hooks: Arc<HookDispatcher>,
     pub commands: Arc<CommandRegistry<SessionCommandContext, SessionCommandOutput>>,
+    pub modes: Arc<ModeRegistry>,
     pub event_sink: Arc<dyn SessionEventSink>,
     pub event_clock: Arc<dyn EventClock>,
     pub secret_redactor: Arc<dyn SecretRedactor>,
@@ -79,6 +80,7 @@ impl SessionActorConfig {
             permissions: Arc::clone(&self.permissions),
             hooks: Arc::clone(&self.hooks),
             commands: Arc::clone(&self.commands),
+            modes: Arc::clone(&self.modes),
             event_sink: Arc::clone(&self.event_sink),
             event_clock: Arc::clone(&self.event_clock),
             secret_redactor: Arc::clone(&self.secret_redactor),
@@ -97,6 +99,7 @@ impl SessionActorConfig {
     pub(super) fn with_workspace_generation(
         &self,
         generation: &WorkspaceRuntimeGeneration,
+        active_mode: &ModeId,
     ) -> Self {
         let mut configured = self.with_model_alias(self.model_alias.clone());
         configured.workspace_root.clone_from(&generation.roots[0]);
@@ -111,6 +114,10 @@ impl SessionActorConfig {
         );
         configured.hooks = Arc::clone(&generation.hooks);
         configured.commands = Arc::clone(&generation.commands);
+        configured.modes = self.modes.get(&active_mode.0).map_or_else(
+            || Arc::clone(&generation.modes),
+            |definition| Arc::new(generation.modes.with_pinned(definition.clone())),
+        );
         configured.permissions = Arc::clone(&generation.permissions);
         configured.checkpoints = Arc::clone(&generation.checkpoints);
         configured.folder_trust = Arc::clone(&generation.folder_trust);
@@ -120,9 +127,15 @@ impl SessionActorConfig {
         configured
     }
 
-    fn with_model_alias_and_mode(&self, model_alias: String, mode: SessionMode) -> Self {
+    fn with_model_alias_and_mode(&self, model_alias: String, mode_id: &ModeId) -> Self {
         let mut configured = self.with_model_alias(model_alias);
-        if mode == SessionMode::Execute {
+        let Some(mode) = configured.modes.get(&mode_id.0) else {
+            return configured;
+        };
+        // Execute is the base policy already present in the canonical system
+        // prompt. Preserve that stable cache prefix for the embedded default;
+        // an extension overriding `execute` still contributes its fragment.
+        if mode.id().0 == "execute" && matches!(mode.source(), ModeSource::Embedded { .. }) {
             return configured;
         }
         if let Some(system) = configured
@@ -131,8 +144,19 @@ impl SessionActorConfig {
             .find(|turn| turn.role == Role::System)
         {
             system.blocks.push(Block::Text {
-                text: mode_system_text(mode).to_owned(),
+                text: mode.prompt().to_owned(),
             });
+        } else {
+            configured.initial_session_context.insert(
+                0,
+                Turn {
+                    role: Role::System,
+                    blocks: vec![Block::Text {
+                        text: mode.prompt().to_owned(),
+                    }],
+                    meta: TurnMeta::default(),
+                },
+            );
         }
         configured
     }
@@ -141,25 +165,11 @@ impl SessionActorConfig {
         &self,
         model_alias: String,
         provider: Option<String>,
-        mode: SessionMode,
+        mode_id: &ModeId,
     ) -> Self {
-        let mut configured = self.with_model_alias_and_mode(model_alias, mode);
+        let mut configured = self.with_model_alias_and_mode(model_alias, mode_id);
         configured.recovered.provider = provider;
         configured
-    }
-}
-
-fn mode_system_text(mode: SessionMode) -> &'static str {
-    match mode {
-        SessionMode::Discuss => {
-            "Active mode: Discuss. Use only read-only tools. Do not request or imply any mutation."
-        }
-        SessionMode::Plan => {
-            "Active mode: Plan. Use only read-only tools. Finish by calling submit_plan with the complete structured plan artifact; do not mutate the workspace."
-        }
-        SessionMode::Execute => {
-            "Active mode: Execute. Follow the approved plan artifact when present. Tool calls remain subject to the permission policy."
-        }
     }
 }
 
@@ -190,6 +200,16 @@ impl SessionActor {
                 "model alias must not be empty".to_owned(),
             ));
         }
+        let recovered_mode = config
+            .recovered
+            .mode_id
+            .as_ref()
+            .map_or("execute", |mode| mode.0.as_str());
+        if config.modes.get(recovered_mode).is_none() {
+            return Err(AgentLoopError::InvalidConfiguration(format!(
+                "recovered mode {recovered_mode:?} is not registered"
+            )));
+        }
         if config.recovered.permission_mode.is_some() {
             config
                 .permissions
@@ -217,6 +237,7 @@ impl SessionActor {
         let command_descriptors = Arc::new(RwLock::new(Arc::from(
             config.commands.descriptors().cloned().collect::<Vec<_>>(),
         )));
+        let mode_registry = Arc::new(RwLock::new(Arc::clone(&config.modes)));
         let handle = SessionHandle {
             commands: command_tx,
             events: event_tx.clone(),
@@ -227,6 +248,7 @@ impl SessionActor {
             local_attached: Arc::new(AtomicBool::new(false)),
             local_last_seen: config.recovered.last_sequence,
             command_descriptors: Arc::clone(&command_descriptors),
+            mode_registry: Arc::clone(&mode_registry),
             model: Arc::clone(&config.model),
         };
         tokio::spawn(run_actor(
@@ -236,6 +258,7 @@ impl SessionActor {
             event_tx,
             active_turn,
             Arc::clone(&command_descriptors),
+            mode_registry,
         ));
         Ok(handle)
     }
@@ -370,6 +393,7 @@ pub struct SessionHandle {
     local_attached: Arc<AtomicBool>,
     local_last_seen: Option<SequenceId>,
     command_descriptors: Arc<RwLock<Arc<[CommandDescriptor]>>>,
+    mode_registry: Arc<RwLock<Arc<ModeRegistry>>>,
     model: Arc<dyn ModelDriver>,
 }
 
@@ -557,6 +581,16 @@ impl SessionHandle {
     #[must_use]
     pub fn command_descriptors(&self) -> Arc<[CommandDescriptor]> {
         self.command_descriptors
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Current mode registry, including trusted declarative modes activated by
+    /// workspace-generation changes.
+    #[must_use]
+    pub fn mode_registry(&self) -> Arc<ModeRegistry> {
+        self.mode_registry
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -1118,15 +1152,17 @@ pub(super) async fn recover_actor_from_journal(
     }
 
     let durable = config.event_sink.read_after(None).await?;
-    let recovered = project_session_events(&durable).map_err(|error| {
-        AgentLoopError::Persistence(format!("could not recover session journal: {error}"))
-    })?;
+    let recovered =
+        project_session_events_with_modes(&durable, &config.modes).map_err(|error| {
+            AgentLoopError::Persistence(format!("could not recover session journal: {error}"))
+        })?;
     let client_roles = std::mem::take(&mut state.client_roles);
     *state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
         &config.model_alias,
         config.thinking,
+        &config.modes,
         &recovered,
     );
     state.client_roles = client_roles;
@@ -1228,12 +1264,14 @@ async fn run_actor(
     events: broadcast::Sender<RoutedEvent>,
     active_turn: Arc<AtomicU64>,
     command_descriptors: Arc<RwLock<Arc<[CommandDescriptor]>>>,
+    mode_registry: Arc<RwLock<Arc<ModeRegistry>>>,
 ) {
     let mut state = ActorState::recover(
         config.session_id.clone(),
         Arc::clone(&config.event_clock),
         &config.model_alias,
         config.thinking,
+        &config.modes,
         &config.recovered,
     );
     let interrupted_turn = config.recovered.interrupted_turn;
@@ -1367,6 +1405,7 @@ async fn run_actor(
                     &events,
                     &active_turn,
                     &command_descriptors,
+                    &mode_registry,
                 ).await;
             }
             signal = signals.recv() => {
@@ -1495,6 +1534,7 @@ pub(super) struct ActorState {
     pub(super) provider: Option<String>,
     pub(super) thinking: ThinkingLevel,
     pub(super) mode: SessionMode,
+    pub(super) mode_id: ModeId,
     pub(super) pending_plan: Option<PlanArtifact>,
     pub(super) approved_plan: Option<PlanArtifact>,
     pub(super) plan_gate_active: bool,
@@ -1539,6 +1579,7 @@ impl ActorState {
         event_clock: Arc<dyn EventClock>,
         default_model_alias: &str,
         default_thinking: ThinkingLevel,
+        modes: &ModeRegistry,
         recovered: &SessionRecoveredState,
     ) -> Self {
         let pending_model_switches = recovered
@@ -1573,6 +1614,13 @@ impl ActorState {
                     .unwrap_or_else(|| u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1))
             })
             .collect();
+        let mode_id = recovered
+            .mode_id
+            .clone()
+            .unwrap_or_else(|| ModeId(session_mode_name(recovered.mode).to_owned()));
+        let mode = modes
+            .get(&mode_id.0)
+            .map_or(recovered.mode, mode_permission_base);
         Self {
             session_id,
             session_title: recovered.title.clone(),
@@ -1608,7 +1656,8 @@ impl ActorState {
                 .unwrap_or_else(|| default_model_alias.to_owned()),
             provider: recovered.provider.clone(),
             thinking: recovered.thinking.unwrap_or(default_thinking),
-            mode: recovered.mode,
+            mode,
+            mode_id,
             pending_plan: recovered.pending_plan.clone(),
             approved_plan: recovered.approved_plan.clone(),
             plan_gate_active: recovered.plan_gate_active,

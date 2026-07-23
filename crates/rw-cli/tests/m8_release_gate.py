@@ -23,12 +23,105 @@ import time
 PROMPT_READY_MARKER = b"rw_perf_prompt_ready=1\n"
 FINGERPRINT = re.compile(rb"/mcp approve ([A-Za-z0-9_.-]+) ([0-9a-f]{64})")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+PROJECT_TRUST_PROMPT = "Trust this exact project extension inventory? [y/N] "
+TRUST_INVENTORY_ROW = re.compile(
+    r"^  (?P<path>\S+) \[(?P<kind>[a-z_]+)\] "
+    r"(?P<bytes>\d+) bytes hash (?P<hash>[0-9a-f]{64})$",
+    re.MULTILINE,
+)
 MCP_STATUS_ROW = re.compile(
     r"^- (?P<id>[A-Za-z0-9_.-]+) · (?P<state>.+?) · "
     r"(?P<tools>\d+) tools · (?P<resources>\d+) resources · "
     r"(?P<prompts>\d+) prompts$",
     re.MULTILINE,
 )
+
+
+def normalized_terminal_text(output: bytes) -> str:
+    return ANSI_ESCAPE.sub("", output.decode("utf-8", errors="replace")).replace(
+        "\r", ""
+    )
+
+
+def validate_project_trust_inventory(
+    output: bytes,
+    workspace: pathlib.Path,
+    inventory_file: pathlib.Path,
+    *,
+    expected_state: str,
+    expected_hash: str | None = None,
+    require_initial_addition: bool = False,
+    require_prompt: bool = False,
+) -> str:
+    text = normalized_terminal_text(output)
+    workspace_line = f"workspace: {workspace.resolve()}"
+    state_line = f"state: {expected_state}"
+    lines = text.splitlines()
+    try:
+        assessment_start = lines.index(workspace_line)
+    except ValueError as error:
+        raise RuntimeError(
+            f"trust assessment did not identify the exact workspace: {text[-2000:]!r}"
+        ) from error
+    if lines[assessment_start + 1 : assessment_start + 3] != [
+        state_line,
+        "project extension inventory:",
+    ]:
+        raise RuntimeError(
+            "trust assessment did not report the expected state and inventory header: "
+            f"{text[-2000:]!r}"
+        )
+    rows = list(TRUST_INVENTORY_ROW.finditer(text))
+    inventory_line = (
+        lines[assessment_start + 3]
+        if len(lines) > assessment_start + 3
+        else ""
+    )
+    if len(rows) != 1 or rows[0].group(0) != inventory_line:
+        raise RuntimeError(
+            "trust assessment did not contain exactly one well-formed inventory row: "
+            f"{text[-2000:]!r}"
+        )
+    row = rows[0].groupdict()
+    expected_path = inventory_file.relative_to(workspace).as_posix()
+    expected_bytes = inventory_file.stat().st_size
+    if (
+        row["path"] != expected_path
+        or row["kind"] != "mcp"
+        or int(row["bytes"]) != expected_bytes
+    ):
+        raise RuntimeError(
+            "trust assessment described the wrong project extension: "
+            f"expected={expected_path!r}/mcp/{expected_bytes} actual={row!r}"
+        )
+    if require_initial_addition:
+        expected_changes = [
+            "changes since last trust:",
+            f"  + {expected_path}",
+        ]
+        if lines[assessment_start + 4 : assessment_start + 6] != expected_changes:
+            raise RuntimeError(
+                "initial trust assessment did not report the exact inventory addition: "
+                f"{text[-2000:]!r}"
+            )
+    elif "changes since last trust:" in lines:
+        raise RuntimeError(
+            f"trust assessment unexpectedly reported inventory changes: {text[-2000:]!r}"
+        )
+    if expected_hash is not None and row["hash"] != expected_hash:
+        raise RuntimeError(
+            "persisted trust inventory hash differs from the approved challenge: "
+            f"expected={expected_hash!r} actual={row['hash']!r}"
+        )
+    if require_prompt:
+        prompt_index = assessment_start + (6 if require_initial_addition else 4)
+        if lines[prompt_index : prompt_index + 1] != [PROJECT_TRUST_PROMPT]:
+            raise RuntimeError(
+                "exact project extension inventory trust challenge was not shown "
+                "immediately after the assessment: "
+                f"{text[-2000:]!r}"
+            )
+    return row["hash"]
 
 
 def isolated_env(home: pathlib.Path, temporary: pathlib.Path) -> dict[str, str]:
@@ -45,6 +138,7 @@ def grant_exact_project_trust(
     rw: pathlib.Path,
     workspace: pathlib.Path,
     env: dict[str, str],
+    inventory_file: pathlib.Path,
 ) -> None:
     pid, descriptor = pty.fork()
     if pid == 0:
@@ -54,6 +148,8 @@ def grant_exact_project_trust(
     try:
         deadline = time.monotonic() + 10
         prompted = False
+        prompted_hash: str | None = None
+        prompt_validation_error: RuntimeError | None = None
         while time.monotonic() < deadline:
             ready, _, _ = select.select([descriptor], [], [], 0.05)
             if not ready:
@@ -65,7 +161,19 @@ def grant_exact_project_trust(
             if not chunk:
                 break
             captured.extend(chunk)
-            if not prompted and b"Trust this exact executable inventory?" in captured:
+            if not prompted and PROJECT_TRUST_PROMPT.encode() in captured:
+                try:
+                    prompted_hash = validate_project_trust_inventory(
+                        bytes(captured),
+                        workspace,
+                        inventory_file,
+                        expected_state="Untrusted",
+                        require_initial_addition=True,
+                        require_prompt=True,
+                    )
+                except RuntimeError as error:
+                    prompt_validation_error = error
+                    break
                 os.write(descriptor, b"y\n")
                 prompted = True
     finally:
@@ -91,11 +199,17 @@ def grant_exact_project_trust(
                 os.killpg(pid, signal.SIGKILL)
             _, status = os.waitpid(pid, 0)
     exit_code = os.waitstatus_to_exitcode(status)
-    if not prompted:
-        raise RuntimeError(f"folder trust prompt was not shown: {captured[-2000:]!r}")
+    if prompt_validation_error is not None:
+        raise prompt_validation_error
+    if not prompted or prompted_hash is None:
+        raise RuntimeError(
+            "exact project extension inventory trust challenge was not shown: "
+            f"{captured[-2000:]!r}"
+        )
     if exit_code != 0:
         raise RuntimeError(
-            f"folder trust grant failed with exit code {exit_code}: {captured[-2000:]!r}"
+            "project extension inventory trust grant failed with exit code "
+            f"{exit_code}: {captured[-2000:]!r}"
         )
     status_run = subprocess.run(
         [str(rw), "trust", "status"],
@@ -106,11 +220,18 @@ def grant_exact_project_trust(
         timeout=10,
         check=False,
     )
-    if status_run.returncode != 0 or b"state: Trusted" not in status_run.stdout:
+    if status_run.returncode != 0:
         raise RuntimeError(
-            "persisted exact folder trust was not rediscovered: "
+            "persisted project extension inventory trust could not be read: "
             f"stdout={status_run.stdout!r} stderr={status_run.stderr!r}"
         )
+    validate_project_trust_inventory(
+        status_run.stdout,
+        workspace,
+        inventory_file,
+        expected_state="Trusted",
+        expected_hash=prompted_hash,
+    )
 
 
 def run_command(
@@ -611,7 +732,7 @@ def main() -> int:
             encoding="utf-8",
         )
         env = isolated_env(home, scratch)
-        grant_exact_project_trust(rw, workspace, env)
+        grant_exact_project_trust(rw, workspace, env, agents / "mcp.toml")
         approve_exact_mcp_configs(
             rw, workspace, env, provider_script, server_names
         )

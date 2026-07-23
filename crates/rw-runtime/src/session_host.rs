@@ -31,7 +31,6 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 #[cfg(unix)]
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use rw_core::runtime_support::PricingTable;
 use rw_core::{
     AttachmentData, CachedModelCatalog, CommandDescriptor, CompletedForkOperation, Config,
     CreateSessionRequest, EngineEvent, ForkOperationKey, ForkOperationState, ForkSessionRequest,
@@ -43,6 +42,7 @@ use rw_core::{
     WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus, begin_provider_login,
     builtin_command_registry, project_session_events,
 };
+use rw_providers::PricingTable;
 use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;
 use rw_store::session::{SessionEventLog, SessionIndex, UtcTimestamp};
@@ -50,7 +50,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     PermissionMode,
-    runtime::{
+    session_runtime::{
         HostedProviderMode, HostedSessionComposition, compose_hosted_actor,
         fork_hosted_session_storage, load_session_metadata_any, load_session_workspace_roots,
         new_session_id, remove_forked_session_storage,
@@ -60,6 +60,7 @@ use crate::{
 const MAX_SEARCH_RESULTS: usize = 1_000;
 const MAX_SEARCH_QUERY_BYTES: usize = 1_024;
 const MAX_SESSION_RESULTS: usize = 10_000;
+#[cfg(test)]
 const MAX_PROVIDER_DISPLAY_NAME_BYTES: usize = 256;
 #[cfg(unix)]
 const MAX_SEARCH_ENTRIES: usize = 50_000;
@@ -188,6 +189,7 @@ struct ExpectedForkState {
     model: ModelAlias,
     workspace_generation: u64,
     roots_digest: String,
+    modes: rw_ext::ModeRegistry,
 }
 
 impl ForkJournalState {
@@ -208,7 +210,7 @@ struct ForkJournalLock {
 }
 
 #[derive(Clone)]
-pub(crate) struct CliHostOptions {
+pub struct RuntimeHostOptions {
     pub storage_root: PathBuf,
     pub credentials_path: PathBuf,
     pub config: Config,
@@ -220,8 +222,12 @@ pub(crate) struct CliHostOptions {
     pub wait_for_execution_lease: bool,
 }
 
-impl CliHostOptions {
-    pub(crate) fn from_environment(
+impl RuntimeHostOptions {
+    /// Loads reusable host composition options from the effective environment.
+    ///
+    /// # Errors
+    /// Returns an error when configuration or private storage cannot be resolved.
+    pub fn from_environment(
         allowed_workspaces: Vec<PathBuf>,
         dangerously_trust: bool,
         permission_mode: Option<PermissionMode>,
@@ -260,8 +266,8 @@ impl CliHostOptions {
 }
 
 #[derive(Clone)]
-pub(crate) struct CliSessionFactory {
-    options: Arc<CliHostOptions>,
+pub struct RuntimeSessionFactory {
+    options: Arc<RuntimeHostOptions>,
     allowed_workspaces: Arc<Vec<PathBuf>>,
     model_catalog: Arc<CachedModelCatalog>,
 }
@@ -286,8 +292,12 @@ impl ModelCatalogSource for PersistingModelCatalogSource {
     }
 }
 
-impl CliSessionFactory {
-    pub(crate) fn new(mut options: CliHostOptions) -> Result<Self, HostError> {
+impl RuntimeSessionFactory {
+    /// Builds a reusable session factory over an authorized workspace set.
+    ///
+    /// # Errors
+    /// Returns an error when options are invalid or durable runtime state is unsafe.
+    pub fn new(mut options: RuntimeHostOptions) -> Result<Self, HostError> {
         if options.max_turns == 0 || options.allowed_workspaces.is_empty() {
             return Err(HostError::Protocol(
                 "host requires a turn limit and at least one authorized workspace".to_owned(),
@@ -304,7 +314,7 @@ impl CliSessionFactory {
         allowed.sort();
         allowed.dedup();
         options.allowed_workspaces.clone_from(&allowed);
-        crate::runtime::initialize_private_storage_root(&options.storage_root)
+        crate::session_runtime::initialize_private_storage_root(&options.storage_root)
             .map_err(|_| HostError::Persistence("host storage could not initialize".to_owned()))?;
         let pricing_path = options.storage_root.join("models.toml");
         let pricing = if pricing_path.is_file() {
@@ -349,8 +359,8 @@ impl CliSessionFactory {
     ) -> Result<String, HostError> {
         let events = crate::history::load_events(&self.options.storage_root, &session.session_id.0)
             .map_err(|error| HostError::Query(error.to_string()))?;
-        let redactor = rw_core::runtime_support::FixtureRedactor::default();
-        crate::runtime::register_credential_environment(&redactor);
+        let redactor = rw_providers::FixtureRedactor::default();
+        crate::session_runtime::register_credential_environment(&redactor);
         let exported =
             crate::history::export_transcript(&session.session_id.0, &events, format, &redactor)
                 .map_err(|error| HostError::Query(error.to_string()))?;
@@ -667,25 +677,41 @@ impl CliSessionFactory {
         let inherited = envelopes.get(..inherited_count).ok_or_else(|| {
             HostError::Persistence("fork boundary exceeds its event log".to_owned())
         })?;
-        let recovered = project_session_events(
-            &inherited
-                .iter()
-                .map(|envelope| envelope.event.clone())
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|_| HostError::Persistence("fork event projection failed".to_owned()))?;
-        let roots = crate::runtime::load_checkpoint_roots_exact(
-            &crate::runtime::checkpoint_root(
+        let inherited_events = inherited
+            .iter()
+            .map(|envelope| envelope.event.clone())
+            .collect::<Vec<_>>();
+        // This generic pass consumes only the non-policy workspace generation
+        // required to locate the historical extension roots. Mutation-capable
+        // state is accepted only after the registry-aware pass below.
+        let workspace_projection = project_session_events(&inherited_events)
+            .map_err(|_| HostError::Persistence("fork event projection failed".to_owned()))?;
+        let roots = crate::session_runtime::load_checkpoint_roots_exact(
+            &crate::session_runtime::checkpoint_root(
                 &self.options.storage_root,
                 workspace,
                 &request.parent.session_id.0,
             ),
-            recovered.workspace_generation,
+            workspace_projection.workspace_generation,
         )
         .map_err(|_| HostError::Persistence("fork root generation is unavailable".to_owned()))?
         .ok_or_else(|| {
             HostError::Persistence("fork root generation is not committed".to_owned())
         })?;
+        let (user_home, user_rottweiler) =
+            crate::session_runtime::extension_user_roots(&self.options.credentials_path);
+        let catalog = crate::session_runtime::discover_runtime_extensions(
+            &roots,
+            &self.options.storage_root.join("trust.json"),
+            &user_home,
+            &user_rottweiler,
+            self.options.dangerously_trust,
+        )
+        .map_err(|_| HostError::Persistence("fork mode registry is unavailable".to_owned()))?;
+        let validated = crate::mode_recovery::compose_and_project(&catalog, &inherited_events)
+            .map_err(|_| HostError::Persistence("fork mode projection failed".to_owned()))?;
+        let recovered = validated.recovered;
+        let modes = validated.modes;
         let roots_digest =
             blake3::hash(&serde_json::to_vec(&roots).map_err(|_| {
                 HostError::Persistence("fork roots could not serialize".to_owned())
@@ -696,6 +722,7 @@ impl CliSessionFactory {
             model: ModelAlias(recovered.model_alias.unwrap_or(metadata.model_alias)),
             workspace_generation: recovered.workspace_generation,
             roots_digest,
+            modes,
         })
     }
 
@@ -758,7 +785,7 @@ impl CliSessionFactory {
             ));
         }
         if let ForkJournalState::Completed { result } = &journal.state {
-            crate::runtime::validate_forked_session_commit(
+            crate::session_runtime::validate_forked_session_commit(
                 &self.options.storage_root,
                 &journal.canonical_workspace,
                 &journal.child_session_id.0,
@@ -930,6 +957,7 @@ impl CliSessionFactory {
         Ok(Some(journal))
     }
 
+    #[cfg(test)]
     fn load_fork_journal(
         &self,
         key: &ForkOperationKey,
@@ -1232,7 +1260,7 @@ impl CliSessionFactory {
                         .join(&journal.child_session_id.0)
                         .join("metadata.json");
                     if metadata.is_file() {
-                        crate::runtime::validate_forked_session_commit(
+                        crate::session_runtime::validate_forked_session_commit(
                             &self.options.storage_root,
                             &journal.canonical_workspace,
                             &journal.child_session_id.0,
@@ -1263,7 +1291,7 @@ impl CliSessionFactory {
                     }
                 }
                 ForkJournalState::StorageCommitted => {
-                    crate::runtime::validate_forked_session_commit(
+                    crate::session_runtime::validate_forked_session_commit(
                         &self.options.storage_root,
                         &journal.canonical_workspace,
                         &journal.child_session_id.0,
@@ -1278,7 +1306,7 @@ impl CliSessionFactory {
                     pending = pending.saturating_add(1);
                 }
                 ForkJournalState::Completed { .. } => {
-                    crate::runtime::validate_forked_session_commit(
+                    crate::session_runtime::validate_forked_session_commit(
                         &self.options.storage_root,
                         &journal.canonical_workspace,
                         &journal.child_session_id.0,
@@ -1581,7 +1609,7 @@ impl CliSessionFactory {
 }
 
 #[async_trait]
-impl SessionFactory for CliSessionFactory {
+impl SessionFactory for RuntimeSessionFactory {
     fn allocate_session_id(&self) -> Result<SessionId, HostError> {
         new_session_id()
             .map(SessionId)
@@ -1721,6 +1749,9 @@ impl SessionFactory for CliSessionFactory {
                 return Err(HostError::RequestConflict);
             }
             if matches!(journal.state, ForkJournalState::Prepared) {
+                // Recompose at commit time so extension changes between
+                // prepare and fork cannot bypass the persisted fingerprint.
+                let expected = factory.expected_fork_state(&request, &workspace_for_fork)?;
                 let operation_id = journal.operation_id.clone();
                 fork_hosted_session_storage(
                     &storage_root,
@@ -1732,6 +1763,7 @@ impl SessionFactory for CliSessionFactory {
                     include_idle_tail,
                     driver_client_id,
                     Some(&operation_id),
+                    &expected.modes,
                 )
                 .map_err(|error| {
                     tracing::error!(reason = %error, "session fork storage failed");
@@ -1867,7 +1899,7 @@ impl SessionFactory for CliSessionFactory {
 }
 
 #[async_trait]
-impl HostQueryService for CliSessionFactory {
+impl HostQueryService for RuntimeSessionFactory {
     async fn command_descriptors(&self) -> Result<Vec<CommandDescriptor>, HostError> {
         let registry = builtin_command_registry().map_err(HostError::from)?;
         Ok(registry
@@ -2335,6 +2367,7 @@ fn workspace_name(workspace: &Path) -> String {
         .to_owned()
 }
 
+#[cfg(test)]
 fn configured_alias_providers(candidates: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     candidates
@@ -3594,16 +3627,16 @@ mod tests {
         assert!(!catalog.models[1].current);
     }
 
-    fn factory(root: &Path, workspace: &Path) -> CliSessionFactory {
+    fn factory(root: &Path, workspace: &Path) -> RuntimeSessionFactory {
         factory_with_allowed_workspaces(root, vec![workspace.to_path_buf()])
     }
 
     fn factory_with_allowed_workspaces(
         root: &Path,
         allowed_workspaces: Vec<PathBuf>,
-    ) -> CliSessionFactory {
+    ) -> RuntimeSessionFactory {
         let storage_root = private_test_directory(&root.join("state"));
-        CliSessionFactory::new(CliHostOptions {
+        RuntimeSessionFactory::new(RuntimeHostOptions {
             credentials_path: storage_root.join("credentials.json"),
             storage_root,
             config: Config::default(),
@@ -3630,17 +3663,6 @@ mod tests {
                 .expect("private test directory permissions");
         }
         fs::canonicalize(path).expect("canonical private test directory")
-    }
-
-    fn descriptor(workspace: &Path) -> SessionDescriptor {
-        SessionDescriptor {
-            session_id: SessionId("session-query".to_owned()),
-            title: "Session query".to_owned(),
-            workspace_name: workspace_name(workspace),
-            model: ModelAlias("fast".to_owned()),
-            driver_client_id: None,
-            shell_active: false,
-        }
     }
 
     #[test]
@@ -4337,13 +4359,13 @@ mod tests {
         use rw_core::{
             ClientCommand, ClientId, ClientRole, CommandMeta, CommandOutcome, ForkOperationKey,
             PROTOCOL_VERSION, PreparedForkOperation, RequestId, TurnId,
-            runtime_support::{FinishReason, ProviderEvent},
         };
+        use rw_providers::{FinishReason, ProviderEvent};
 
         let root = tempdir().expect("root");
         let workspace = private_test_directory(&root.path().join("workspace"));
         let storage_root = private_test_directory(&root.path().join("state"));
-        let factory = CliSessionFactory::new(CliHostOptions {
+        let factory = RuntimeSessionFactory::new(RuntimeHostOptions {
             credentials_path: storage_root.join("credentials.json"),
             storage_root: storage_root.clone(),
             config: Config::default(),
@@ -4570,15 +4592,16 @@ mod tests {
         drop(parent);
         drop(factory);
         tokio::task::yield_now().await;
-        let restarted =
-            Arc::new(CliSessionFactory::new(restart_options.clone()).expect("restart recovery"));
+        let restarted = Arc::new(
+            RuntimeSessionFactory::new(restart_options.clone()).expect("restart recovery"),
+        );
         let promoted = restarted
             .load_fork_journal(&durable_key)
             .expect("load promoted journal")
             .expect("promoted journal exists");
         assert!(matches!(promoted.state, ForkJournalState::StorageCommitted));
         assert_eq!(
-            CliSessionFactory::journal_operation(&promoted)
+            RuntimeSessionFactory::journal_operation(&promoted)
                 .request
                 .child_session_id,
             child_id
@@ -4688,6 +4711,7 @@ mod tests {
                             caused_by: None,
                         },
                         mode: rw_core::ModeId("execute".to_owned()),
+                        definition_fingerprint: None,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -4717,14 +4741,14 @@ mod tests {
             )
             .expect("install completed-child no-read canary");
             fs::set_permissions(
-                crate::runtime::checkpoint_root(&storage_root, &workspace, &child_id.0)
+                crate::session_runtime::checkpoint_root(&storage_root, &workspace, &child_id.0)
                     .join("workspace-roots.json"),
                 fs::Permissions::from_mode(0o000),
             )
             .expect("install completed-child root-journal no-read canary");
         }
         let reloaded =
-            Arc::new(CliSessionFactory::new(restart_options).expect("completed restart"));
+            Arc::new(RuntimeSessionFactory::new(restart_options).expect("completed restart"));
         assert_eq!(
             reloaded
                 .load_fork_operation(&durable_key)
@@ -4854,7 +4878,7 @@ mod tests {
             .join(&child.0);
         fs::create_dir_all(&checkpoint_tree).expect("partial checkpoint tree");
         fs::write(checkpoint_tree.join("partial"), b"partial").expect("partial checkpoint");
-        let restarted = CliSessionFactory::new((*factory.options).clone()).expect("recover");
+        let restarted = RuntimeSessionFactory::new((*factory.options).clone()).expect("recover");
         assert!(!session_tree.exists());
         assert!(!checkpoint_tree.exists());
         assert_eq!(
@@ -4981,7 +5005,7 @@ mod tests {
         let release = root.path().join("lock-release");
         let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .arg("--exact")
-            .arg("host_runtime::tests::fork_journal_cross_process_lock_helper")
+            .arg("session_host::tests::fork_journal_cross_process_lock_helper")
             .arg("--nocapture")
             .env("RW_TEST_FORK_LOCK_ROOT", root.path())
             .env("RW_TEST_FORK_LOCK_WORKSPACE", &workspace)
@@ -4997,7 +5021,7 @@ mod tests {
 
         let (send, receive) = std::sync::mpsc::channel();
         let recovery = std::thread::spawn(move || {
-            let result = CliSessionFactory::new(options);
+            let result = RuntimeSessionFactory::new(options);
             send.send(result.is_ok()).expect("recovery result");
         });
         assert!(
@@ -5029,31 +5053,31 @@ mod tests {
         fs::write(&unpublished, br#"{"version":1"#).expect("unpublished journal temporary");
         fs::set_permissions(&unpublished, fs::Permissions::from_mode(0o600))
             .expect("private unpublished journal");
-        CliSessionFactory::new(options.clone()).expect("orphan temporary is recoverable");
+        RuntimeSessionFactory::new(options.clone()).expect("orphan temporary is recoverable");
         assert!(!unpublished.exists());
 
         fs::write(directory.join("unexpected"), b"x").expect("unexpected entry");
-        assert!(CliSessionFactory::new(options.clone()).is_err());
+        assert!(RuntimeSessionFactory::new(options.clone()).is_err());
         fs::remove_file(directory.join("unexpected")).expect("remove unexpected");
 
         let outside = root.path().join("outside");
         fs::write(&outside, b"{}").expect("outside");
         symlink(&outside, directory.join(format!("{}.json", "a".repeat(64)))).expect("symlink");
-        assert!(CliSessionFactory::new(options.clone()).is_err());
+        assert!(RuntimeSessionFactory::new(options.clone()).is_err());
         fs::remove_file(directory.join(format!("{}.json", "a".repeat(64))))
             .expect("remove symlink");
 
         fs::set_permissions(&outside, fs::Permissions::from_mode(0o600)).expect("private source");
         fs::hard_link(&outside, directory.join(format!("{}.json", "b".repeat(64))))
             .expect("hardlink");
-        assert!(CliSessionFactory::new(options.clone()).is_err());
+        assert!(RuntimeSessionFactory::new(options.clone()).is_err());
         fs::remove_file(directory.join(format!("{}.json", "b".repeat(64))))
             .expect("remove hardlink");
 
         let oversized = directory.join(format!("{}.json", "c".repeat(64)));
         fs::write(&oversized, vec![b'x'; MAX_FORK_JOURNAL_BYTES + 1]).expect("oversized");
         fs::set_permissions(&oversized, fs::Permissions::from_mode(0o600)).expect("private file");
-        assert!(CliSessionFactory::new(options).is_err());
+        assert!(RuntimeSessionFactory::new(options).is_err());
     }
 
     #[test]
@@ -5081,7 +5105,7 @@ mod tests {
         };
 
         let settings =
-            CliSessionFactory::setting_descriptors(&loaded, &session, None, "standard", &[]);
+            RuntimeSessionFactory::setting_descriptors(&loaded, &session, None, "standard", &[]);
 
         assert!(
             settings
@@ -5118,7 +5142,7 @@ mod tests {
         };
 
         let settings =
-            CliSessionFactory::setting_descriptors(&loaded, &session, None, "standard", &[]);
+            RuntimeSessionFactory::setting_descriptors(&loaded, &session, None, "standard", &[]);
         let descriptor = |key: &str| {
             settings
                 .iter()

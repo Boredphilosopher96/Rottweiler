@@ -2,12 +2,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rw_core::ProviderNativeWebSearcher;
-use rw_core::runtime_support::{
-    BoxEventStream, CacheBreakpointSupport, CancellationToken, Capabilities, FinishReason,
-    FixtureRedactor, NativeWebSearchCapability, Provider, ProviderError, ProviderEvent,
-    ProviderRequest, Recorder, ReplayProvider, WebSearchRequest, WebSearchSource, WebSearcher,
-    WireMode, deny_outbound_network_for_process,
+use rw_providers::{
+    BoxEventStream, CacheBreakpointSupport, Capabilities, FinishReason, FixtureRedactor,
+    NativeWebSearchCapability, Provider, ProviderError, ProviderEvent, ProviderRequest, Recorder,
+    ReplayProvider, WireMode, deny_outbound_network_for_process,
 };
+use rw_tools::{CancellationToken, WebSearchRequest, WebSearchSource, WebSearcher};
 
 struct NativeFixtureProvider {
     request: Mutex<Option<ProviderRequest>>,

@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use rw_types::{
     ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta,
     CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, McpApprovalReview,
-    McpEnvironmentEntry, McpServerDescriptor, ModelAlias, ModelCatalogSnapshot,
+    McpEnvironmentEntry, McpServerDescriptor, ModeDescriptor, ModelAlias, ModelCatalogSnapshot,
     ProviderAuthAttemptId, ProviderAuthChallenge, RequestId, RuntimeServiceDescriptor, SequenceId,
     SessionDescriptor, SessionId, ShellId, SubagentDescriptor, SubagentId, SubagentReplayItem,
     TranscriptFormat, TurnId, WorkspaceDiff, WorkspaceFileMatch, WorkspaceFilePreview,
@@ -34,6 +34,8 @@ const SUBAGENT_REPLAY_BATCH_EVENTS: usize = 128;
 const SUBAGENT_REPLAY_BATCH_BYTES: usize = 128 * 1024;
 const MAX_WIRE_COMMANDS: usize = 512;
 const MAX_WIRE_COMMAND_CATALOG_BYTES: usize = 48 * 1024;
+const MAX_WIRE_MODES: usize = 128;
+const MAX_WIRE_MODE_CATALOG_BYTES: usize = 64 * 1024;
 const PROVIDER_AUTH_BEGIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 const PROVIDER_AUTH_COMPLETE_DEADLINE: std::time::Duration = std::time::Duration::from_mins(10);
 const MAX_PROVIDER_AUTH_URL_BYTES: usize = 4_096;
@@ -1803,6 +1805,43 @@ impl EngineHost {
                         meta: ack_meta(&meta, &*self.clock),
                         session_id,
                         commands,
+                        truncated,
+                    }],
+                ))
+            }
+            ClientCommand::ListModes { meta, session_id } => {
+                let session = self.ready_session(&session_id).await?;
+                let snapshot = session.handle().snapshot().await.map_err(HostError::from)?;
+                let registry = session.handle().mode_registry();
+                let active = registry.get(&snapshot.mode_id.0).ok_or_else(|| {
+                    HostError::Persistence(format!(
+                        "active mode {:?} is absent from the live registry",
+                        snapshot.mode_id.0
+                    ))
+                })?;
+                let active = ModeDescriptor {
+                    id: active.id().clone(),
+                    description: active.description().to_owned(),
+                    current: true,
+                };
+                let (modes, truncated) = wire_mode_catalog(
+                    active,
+                    registry
+                        .iter()
+                        .filter(|definition| definition.id() != &snapshot.mode_id)
+                        .map(|definition| ModeDescriptor {
+                            id: definition.id().clone(),
+                            description: definition.description().to_owned(),
+                            current: false,
+                        }),
+                );
+                Ok((
+                    CommandOutcome::Accepted,
+                    Some(session_id.clone()),
+                    vec![EngineEvent::ModesListed {
+                        meta: ack_meta(&meta, &*self.clock),
+                        session_id,
+                        modes,
                         truncated,
                     }],
                 ))
@@ -3625,6 +3664,7 @@ fn command_session_id(command: &ClientCommand) -> Option<SessionId> {
         | ClientCommand::GetWorkspaceStatus { session_id, .. }
         | ClientCommand::GetWorkspaceDiff { session_id, .. }
         | ClientCommand::ListCommands { session_id, .. }
+        | ClientCommand::ListModes { session_id, .. }
         | ClientCommand::ListSettings { session_id, .. }
         | ClientCommand::SetSetting { session_id, .. }
         | ClientCommand::ListMcpServers { session_id, .. }
@@ -3923,6 +3963,41 @@ fn wire_command_catalog(
     (commands, truncated)
 }
 
+fn wire_mode_catalog(
+    active: ModeDescriptor,
+    descriptors: impl IntoIterator<Item = ModeDescriptor>,
+) -> (Vec<ModeDescriptor>, bool) {
+    debug_assert!(active.current);
+    let mut modes = vec![active];
+    let mut truncated = false;
+    let mut serialized_bytes =
+        serde_json::to_vec(&modes).map_or(MAX_WIRE_MODE_CATALOG_BYTES, |encoded| encoded.len());
+    for mode in descriptors {
+        if modes.len() >= MAX_WIRE_MODES {
+            truncated = true;
+            break;
+        }
+        let Ok(encoded) = serde_json::to_vec(&mode) else {
+            truncated = true;
+            break;
+        };
+        let Some(next_size) = serialized_bytes
+            .checked_add(1)
+            .and_then(|size| size.checked_add(encoded.len()))
+        else {
+            truncated = true;
+            break;
+        };
+        if next_size > MAX_WIRE_MODE_CATALOG_BYTES {
+            truncated = true;
+            break;
+        }
+        serialized_bytes = next_size;
+        modes.push(mode);
+    }
+    (modes, truncated)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -3939,7 +4014,9 @@ mod tests {
         CommandDescriptor as ExtensionCommandDescriptor, CommandExecutionError, CommandHandler,
         CommandInvocation,
     };
-    use rw_types::{AttachmentData, CommandMeta, PROTOCOL_VERSION};
+    use rw_providers::{BoxEventStream, ProviderRequest, ThinkingLevel};
+    use rw_tools::ToolRegistry;
+    use rw_types::{AttachmentData, CommandMeta, PROTOCOL_VERSION, config::PermissionDecision};
     use tempfile::TempDir;
 
     use super::*;
@@ -3948,9 +4025,6 @@ mod tests {
         NoopSecretRedactor, NoopSessionEventSink, PermissionGate, SessionActor, SessionActorConfig,
         SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,
         SessionRecoveredState, builtin_command_registry, builtin_hook_dispatcher,
-        runtime_support::{
-            BoxEventStream, PermissionDecision, ProviderRequest, ThinkingLevel, ToolRegistry,
-        },
     };
 
     #[test]
@@ -4192,6 +4266,7 @@ mod tests {
                 permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
                 hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
                 commands: Arc::new(commands),
+                modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
                 event_sink: self
                     .event_sink
                     .clone()
@@ -5571,6 +5646,72 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn list_modes_returns_a_bounded_connection_scoped_live_catalog() {
+        let (host, _factory) = host(2);
+        let bound = BoundClient {
+            client_id: ClientId("mode-driver".to_owned()),
+        };
+        let session_id = SessionId("mode-catalog".to_owned());
+        assert_eq!(
+            host.dispatch(
+                bound.clone(),
+                ClientCommand::ResumeSession {
+                    meta: meta("spoofed", "resume-mode-catalog"),
+                    session_id: session_id.clone(),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let mut events = host
+            .subscribe(bound.clone(), None, None)
+            .await
+            .expect("mode catalog events");
+        assert_eq!(
+            host.dispatch(
+                bound,
+                ClientCommand::ListModes {
+                    meta: meta("spoofed", "list-mode-catalog"),
+                    session_id: session_id.clone(),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        let listed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let EngineEvent::ModesListed {
+                    session_id: listed_session,
+                    modes,
+                    truncated,
+                    ..
+                } = events
+                    .recv()
+                    .await
+                    .expect("mode catalog event")
+                    .expect("mode catalog result")
+                    && listed_session == session_id
+                {
+                    break (modes, truncated);
+                }
+            }
+        })
+        .await
+        .expect("mode catalog deadline");
+        assert!(!listed.1);
+        assert_eq!(listed.0.len(), 3);
+        assert!(
+            listed
+                .0
+                .iter()
+                .any(|mode| mode.id.0 == "execute" && mode.current)
+        );
+        assert!(listed.0.iter().all(|mode| !mode.description.is_empty()));
+    }
+
     #[test]
     fn wire_command_catalog_is_bounded_below_the_sse_line_limit() {
         let descriptors = (0..600).map(|index| {
@@ -5588,6 +5729,31 @@ mod tests {
                 .expect("bounded command catalog JSON")
                 .len()
                 <= MAX_WIRE_COMMAND_CATALOG_BYTES
+        );
+    }
+
+    #[test]
+    fn wire_mode_catalog_is_count_and_byte_bounded() {
+        let active = ModeDescriptor {
+            id: rw_types::ModeId("zzzz-active".to_owned()),
+            description: "active mode beyond every stable-order cutoff".to_owned(),
+            current: true,
+        };
+        let descriptors = (0..200).map(|index| ModeDescriptor {
+            id: rw_types::ModeId(format!("mode-{index}")),
+            description: format!("{}-{index}", "description".repeat(80)),
+            current: false,
+        });
+        let (modes, truncated) = wire_mode_catalog(active.clone(), descriptors);
+        assert!(truncated);
+        assert!(modes.len() <= MAX_WIRE_MODES);
+        assert_eq!(modes.first(), Some(&active));
+        assert_eq!(modes.iter().filter(|mode| mode.current).count(), 1);
+        assert!(
+            serde_json::to_vec(&modes)
+                .expect("bounded mode catalog JSON")
+                .len()
+                <= MAX_WIRE_MODE_CATALOG_BYTES
         );
     }
 

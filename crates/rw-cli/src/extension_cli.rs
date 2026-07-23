@@ -8,7 +8,8 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use miette::{IntoDiagnostic as _, Result, miette};
-use rw_core::{prepare_update_network, runtime_support};
+use rw_core::prepare_update_network;
+use rw_ext as extensions;
 use url::Url;
 
 const MAX_CATALOG_BYTES: usize = 2 * 1024 * 1024;
@@ -40,7 +41,7 @@ pub(crate) async fn install_registry_release(
     name: &str,
     version: Option<&str>,
     publisher_key: &str,
-) -> Result<runtime_support::InstalledWasmExtension> {
+) -> Result<extensions::InstalledWasmExtension> {
     let catalog = fetch_catalog(source).await?;
     let release = match version {
         Some(version) => catalog
@@ -64,7 +65,7 @@ pub(crate) async fn install_registry_release(
         .await
         .map_err(|error| miette!(error.to_string()))?;
     let installed =
-        runtime_support::install_verified_component(store, release, &trusted_key, &component)
+        extensions::install_verified_component(store, release, &trusted_key, &component)
             .map_err(|error| miette!(error.to_string()))?;
     println!(
         "installed {} {} (inactive); run `rw extension enable {} {}` after reviewing its capabilities",
@@ -74,7 +75,7 @@ pub(crate) async fn install_registry_release(
 }
 
 pub(crate) fn status(store: &Path) -> Result<()> {
-    let installed = runtime_support::list_installed_wasm_extensions(store)
+    let installed = extensions::list_installed_wasm_extensions(store)
         .map_err(|error| miette!(error.to_string()))?;
     if installed.is_empty() {
         println!("No WASM extensions installed.");
@@ -112,7 +113,7 @@ pub(crate) fn status(store: &Path) -> Result<()> {
 }
 
 pub(crate) async fn enable(store: &Path, name: &str, version: &str, yes: bool) -> Result<()> {
-    let manifest = runtime_support::inspect_installed_wasm_extension(store, name, version)
+    let manifest = extensions::inspect_installed_wasm_extension(store, name, version)
         .map_err(|error| miette!(error.to_string()))?;
     let summary = serde_json::to_string_pretty(&manifest).into_diagnostic()?;
     println!("Exact extension capabilities to enable:\n{summary}");
@@ -131,20 +132,20 @@ pub(crate) async fn enable(store: &Path, name: &str, version: &str, yes: bool) -
         }
     }
     let (verified_manifest, component) =
-        runtime_support::load_installed_wasm_extension(store, name, version)
+        extensions::load_installed_wasm_extension(store, name, version)
             .map_err(|error| miette!(error.to_string()))?;
-    let helper = crate::runtime::locate_wasm_host_executable()?;
-    runtime_support::WasmProcessHook::new(
+    let helper = rw_runtime::session::locate_wasm_host_executable()?;
+    extensions::WasmProcessHook::new(
         helper,
         verified_manifest,
         component,
-        runtime_support::WasmHookLimits::default(),
+        extensions::WasmHookLimits::default(),
     )
     .map_err(|error| miette!(error.to_string()))?
     .validate()
     .await
     .map_err(|error| miette!(error.to_string()))?;
-    let activation = runtime_support::activate_installed_wasm_extension(store, name, version)
+    let activation = extensions::activate_installed_wasm_extension(store, name, version)
         .map_err(|error| miette!(error.to_string()))?;
     println!(
         "enabled {} {}; restart active sessions to load it",
@@ -154,7 +155,7 @@ pub(crate) async fn enable(store: &Path, name: &str, version: &str, yes: bool) -
 }
 
 pub(crate) fn disable(store: &Path, name: &str) -> Result<()> {
-    if runtime_support::deactivate_wasm_extension(store, name)
+    if extensions::deactivate_wasm_extension(store, name)
         .map_err(|error| miette!(error.to_string()))?
     {
         println!("disabled {name}; restart active sessions to unload it");
@@ -164,7 +165,7 @@ pub(crate) fn disable(store: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_catalog(source: &str) -> Result<runtime_support::ExtensionRegistryCatalog> {
+async fn fetch_catalog(source: &str) -> Result<extensions::ExtensionRegistryCatalog> {
     let source = Url::parse(source).into_diagnostic()?;
     let network = prepare_update_network().map_err(|error| miette!(error.to_string()))?;
     for warning in network.warnings() {
@@ -174,7 +175,7 @@ async fn fetch_catalog(source: &str) -> Result<runtime_support::ExtensionRegistr
         .fetch(&source, MAX_CATALOG_BYTES, Duration::from_secs(30))
         .await
         .map_err(|error| miette!(error.to_string()))?;
-    runtime_support::ExtensionRegistryCatalog::from_slice(&bytes)
+    extensions::ExtensionRegistryCatalog::from_slice(&bytes)
         .map_err(|error| miette!(error.to_string()))
 }
 

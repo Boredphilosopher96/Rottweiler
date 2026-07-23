@@ -29,6 +29,7 @@ fn client_command_meta(command: &ClientCommand) -> &CommandMeta {
         | ClientCommand::ListSessions { meta, .. }
         | ClientCommand::SearchSessions { meta, .. }
         | ClientCommand::ListCommands { meta, .. }
+        | ClientCommand::ListModes { meta, .. }
         | ClientCommand::ListModels { meta, .. }
         | ClientCommand::ListSettings { meta, .. }
         | ClientCommand::SetSetting { meta, .. }
@@ -99,6 +100,7 @@ fn client_command_session(command: &ClientCommand) -> Option<&SessionId> {
         | ClientCommand::GetWorkspaceStatus { session_id, .. }
         | ClientCommand::GetWorkspaceDiff { session_id, .. }
         | ClientCommand::ListCommands { session_id, .. }
+        | ClientCommand::ListModes { session_id, .. }
         | ClientCommand::ListSettings { session_id, .. }
         | ClientCommand::SetSetting { session_id, .. }
         | ClientCommand::ListMcpServers { session_id, .. }
@@ -599,6 +601,7 @@ fn unsupported_in_m2(command: &ClientCommand) -> bool {
             | ClientCommand::Fork { .. }
             | ClientCommand::ListSessions { .. }
             | ClientCommand::ListCommands { .. }
+            | ClientCommand::ListModes { .. }
             | ClientCommand::ListModels { .. }
             | ClientCommand::SearchWorkspaceFiles { .. }
             | ClientCommand::PreviewWorkspaceFile { .. }
@@ -665,7 +668,7 @@ fn start_manual_compaction(
     let config = Arc::new(config.with_model_route_and_mode(
         state.model_alias.clone(),
         state.provider.clone(),
-        state.mode,
+        &state.mode_id,
     ));
     let signals = turn_signals.clone();
     tokio::spawn(async move {
@@ -885,6 +888,7 @@ pub(super) async fn handle_actor_command(
     events: &broadcast::Sender<RoutedEvent>,
     active_turn: &Arc<AtomicU64>,
     command_descriptors: &Arc<RwLock<Arc<[CommandDescriptor]>>>,
+    mode_registry: &Arc<RwLock<Arc<ModeRegistry>>>,
 ) {
     match command {
         ActorCommand::Protocol {
@@ -1116,7 +1120,7 @@ pub(super) async fn handle_actor_command(
                         return;
                     }
                 }
-                ClientCommand::SwitchMode { mode, .. } if parse_session_mode(&mode.0).is_none() => {
+                ClientCommand::SwitchMode { mode, .. } if config.modes.get(&mode.0).is_none() => {
                     let outcome = protocol_rejection(
                         "unknown_mode",
                         format!("mode {:?} is not registered", mode.0),
@@ -1126,7 +1130,9 @@ pub(super) async fn handle_actor_command(
                     return;
                 }
                 ClientCommand::SwitchMode { mode, .. }
-                    if mode.0 == "execute" && state.plan_gate_active =>
+                    if config.modes.get(&mode.0).is_some_and(|definition| {
+                        mode_permission_base(definition) == SessionMode::Execute
+                    }) && state.plan_gate_active =>
                 {
                     let outcome = protocol_rejection(
                         "plan_approval_required",
@@ -1968,10 +1974,9 @@ pub(super) async fn handle_actor_command(
                         .insert(meta.client_id.0.clone(), ClientRole::Driver);
                 }
                 ClientCommand::SwitchMode { mode, .. } => {
-                    let Some(mode) = parse_session_mode(&mode.0) else {
-                        return;
-                    };
-                    let result = apply_mode_change(state, events, &config.event_sink, mode).await;
+                    let result =
+                        apply_mode_change(state, events, &config.event_sink, mode, &config.modes)
+                            .await;
                     if let Some(complete) = completion.take() {
                         let _ = complete.send(result.map(|()| ProtocolCompletion::Unit));
                     }
@@ -2008,7 +2013,11 @@ pub(super) async fn handle_actor_command(
                             effective_after_agent_turn: state.completed_turns,
                         });
                         durable.push(PendingEvent::ModeChanged {
-                            mode: SessionMode::Execute,
+                            mode: ModeId("execute".to_owned()),
+                            definition_fingerprint: config
+                                .modes
+                                .get("execute")
+                                .map(ModeDefinition::semantic_fingerprint),
                         });
                     }
                     let result = emit_batch(state, events, &config.event_sink, durable).await;
@@ -2025,7 +2034,11 @@ pub(super) async fn handle_actor_command(
                                 pinned: true,
                                 effective_after_agent_turn: state.completed_turns,
                             });
-                            state.mode = SessionMode::Execute;
+                            state.mode = config
+                                .modes
+                                .get("execute")
+                                .map_or(SessionMode::Execute, mode_permission_base);
+                            state.mode_id = ModeId("execute".to_owned());
                         }
                     }
                     if let Some(complete) = completion.take() {
@@ -2170,6 +2183,7 @@ pub(super) async fn handle_actor_command(
                         events,
                         active_turn,
                         command_descriptors,
+                        mode_registry,
                     ))
                     .await;
                     match internal_receive.await {
@@ -2411,7 +2425,7 @@ pub(super) async fn handle_actor_command(
                                     requested.0
                                 ))
                             })?;
-                            project_session_events(&events[..=boundary])
+                            project_session_events_with_modes(&events[..=boundary], &config.modes)
                                 .map_err(|error| AgentLoopError::Persistence(error.to_string()))
                         })
                     } else {
@@ -2475,6 +2489,7 @@ pub(super) async fn handle_actor_command(
                 | ClientCommand::ListSessions { .. }
                 | ClientCommand::SearchSessions { .. }
                 | ClientCommand::ListCommands { .. }
+                | ClientCommand::ListModes { .. }
                 | ClientCommand::ListModels { .. }
                 | ClientCommand::ListSettings { .. }
                 | ClientCommand::SetSetting { .. }
@@ -2612,6 +2627,8 @@ pub(super) async fn handle_actor_command(
                     running: state.running.is_some() || state.initialization_running,
                     queued_messages: state.queued.len(),
                     mode: state.mode,
+                    mode_id: state.mode_id.clone(),
+                    modes: Arc::clone(&config.modes),
                     permission_summary: render_permission_snapshot(&config.permissions.snapshot()),
                     plan_summary: state
                         .pending_plan
@@ -2788,7 +2805,24 @@ pub(super) async fn handle_actor_command(
                                 );
                             }
                             SessionCommandAction::SwitchMode { mode } => {
-                                if mode == SessionMode::Execute && state.plan_gate_active {
+                                let base = config
+                                    .modes
+                                    .get(&mode.0)
+                                    .map(mode_permission_base)
+                                    .ok_or_else(|| {
+                                        AgentLoopError::InvalidConfiguration(format!(
+                                            "unknown mode {:?}",
+                                            mode.0
+                                        ))
+                                    });
+                                let base = match base {
+                                    Ok(base) => base,
+                                    Err(error) => {
+                                        let _ = respond.send(Err(error));
+                                        return;
+                                    }
+                                };
+                                if base == SessionMode::Execute && state.plan_gate_active {
                                     let _ = respond.send(Err(
                                         AgentLoopError::InvalidConfiguration(
                                             "plan_approval_required: submit and approve a plan before Execute"
@@ -2797,8 +2831,14 @@ pub(super) async fn handle_actor_command(
                                     ));
                                     return;
                                 }
-                                if let Err(error) =
-                                    apply_mode_change(state, events, &config.event_sink, mode).await
+                                if let Err(error) = apply_mode_change(
+                                    state,
+                                    events,
+                                    &config.event_sink,
+                                    mode,
+                                    &config.modes,
+                                )
+                                .await
                                 {
                                     let _ = respond.send(Err(error));
                                     return;
@@ -2982,8 +3022,9 @@ pub(super) async fn handle_actor_command(
                                 config
                                     .workspace_roots
                                     .finalize_generation(generation.generation);
-                                let next_config =
-                                    Arc::new(config.with_workspace_generation(&generation));
+                                let next_config = Arc::new(
+                                    config.with_workspace_generation(&generation, &state.mode_id),
+                                );
                                 *command_descriptors
                                     .write()
                                     .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(
@@ -2993,6 +3034,10 @@ pub(super) async fn handle_actor_command(
                                         .cloned()
                                         .collect::<Vec<_>>(),
                                 );
+                                *mode_registry
+                                    .write()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    Arc::clone(&next_config.modes);
                                 *config = next_config;
                                 *tool_context = replacement_context;
                                 output.message = format!(
@@ -3298,6 +3343,7 @@ pub(super) async fn handle_actor_command(
                 provider: state.provider.clone(),
                 thinking: state.thinking,
                 mode: state.mode,
+                mode_id: state.mode_id.clone(),
                 permission_mode: config.permissions.snapshot().runtime_mode,
                 pending_plan: state.pending_plan.clone(),
                 approved_plan: state.approved_plan.clone(),
@@ -3361,7 +3407,9 @@ async fn rewind_state(
         .rposition(|event| {
             matches!(event, EngineEvent::TurnFinished { turn_id, .. } if parse_turn_id(turn_id) == Ok(to_turn))
         })
-        .map(|boundary| project_session_events(&historical[..=boundary]))
+        .map(|boundary| {
+            project_session_events_with_modes(&historical[..=boundary], &config.modes)
+        })
         .transpose()
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
     let operation_id = format!(
@@ -3395,6 +3443,9 @@ async fn rewind_state(
         state.pruned_tool_outputs = historical.pruned_tool_outputs;
         state.budgeter = historical.budgeter;
         state.mode = historical.mode;
+        state.mode_id = historical
+            .mode_id
+            .unwrap_or_else(|| ModeId(session_mode_name(historical.mode).to_owned()));
         state.pending_plan = historical.pending_plan;
         state.approved_plan = historical.approved_plan;
         state.plan_gate_active = historical.plan_gate_active;

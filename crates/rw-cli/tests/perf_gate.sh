@@ -136,17 +136,23 @@ def one(index):
         raise SystemExit(f"missing performance marker: {error}") from error
     return elapsed_ms, turn_ms
 
-sample_count = int(os.environ.get("ROTTWEILER_PERF_SAMPLES", "500"))
-if sample_count < 100 or sample_count > 5000:
-    raise SystemExit("ROTTWEILER_PERF_SAMPLES must be between 100 and 5000")
+smoke = os.environ.get("ROTTWEILER_PERF_SMOKE") == "1"
+sample_count = int(os.environ.get("ROTTWEILER_PERF_SAMPLES", "100" if smoke else "500"))
+minimum_samples = 100
+if sample_count < minimum_samples or sample_count > 5000:
+    raise SystemExit(
+        f"ROTTWEILER_PERF_SAMPLES must be between {minimum_samples} and 5000"
+    )
 
 # A fat-LTO link leaves hosted Apple runners hot while macOS may still inspect
 # the newly installed executable. Give Apple hosts one fixed cooling/inspection
 # interval, then use five fixed fresh-process warmups. Measured results are
-# never retried or trimmed: all 500 samples still enforce the absolute startup
-# and turn budgets below.
-time.sleep(60 if sys.platform == "darwin" else 1)
-for index in range(-5, 0):
+# never retried or trimmed: every measured sample contributes to the absolute
+# startup and turn budgets below. Even smoke mode retains the 100-sample floor
+# required for a meaningful empirical p99.
+time.sleep(0 if smoke else (60 if sys.platform == "darwin" else 1))
+warmup_count = 1 if smoke else 5
+for index in range(-warmup_count, 0):
     one(index)
 samples = [one(index) for index in range(sample_count)]
 starts = sorted(sample[0] for sample in samples)

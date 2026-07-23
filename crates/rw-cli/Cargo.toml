@@ -29,7 +29,13 @@ nix.workspace = true
 portable-pty.workspace = true
 rpassword.workspace = true
 rw-core.workspace = true
+rw-ext.workspace = true
+rw-mcp.workspace = true
+rw-providers.workspace = true
+rw-runtime.workspace = true
 rw-store.workspace = true
+rw-tools.workspace = true
+rw-types.workspace = true
 rustix.workspace = true
 rustyline = "=17.0.2"
 serde.workspace = true

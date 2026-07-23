@@ -19,7 +19,7 @@ pub use protocol::{
     CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState,
     ContextSnapshot, Cost, CostSnapshot, DiffArtifact, DiffArtifactRef, EngineError,
     EngineErrorCategory, EngineEvent, EventMeta, McpApprovalReview, McpEnvironmentEntry,
-    McpServerDescriptor, McpServerState, ModeId, ModelAlias, ModelAliasDescriptor,
+    McpServerDescriptor, McpServerState, ModeDescriptor, ModeId, ModelAlias, ModelAliasDescriptor,
     ModelCacheBehavior, ModelCapabilities, ModelCatalogSnapshot, ModelContextTransfer,
     ModelDescriptor, ModelSwitchQuestion, PermissionAction, PermissionApprovalDescriptor,
     PermissionApprovalScope, PermissionModeDescriptor, PermissionRuleDescriptor,

@@ -2,6 +2,11 @@
 /fuzz/target/
 /fuzz/artifacts/
 /dist/
+/perf-results/
+/soak-result.json
+/soak-baseline-result.json
+/terminal-bench-evidence/
+/terminal-bench-baseline.json
 *.profraw
 .DS_Store
 .idea/

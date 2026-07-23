@@ -1,4 +1,4 @@
-//! Folder-trust ledger and executable project inventory.
+//! Folder-trust ledger and project extension inventory.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -15,14 +15,14 @@ const MAX_INVENTORY_FILES: usize = 4_096;
 const MAX_INVENTORY_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_INVENTORY_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Persisted trust state for the current executable project configuration.
+/// Persisted trust state for the current project extension inventory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FolderTrustState {
     /// No decision has been recorded for this canonical workspace.
     Untrusted,
-    /// The workspace was trusted, but executable project content changed.
+    /// The workspace was trusted, but project extension content changed.
     Changed,
-    /// The canonical path and executable-content hash match the ledger.
+    /// The canonical path and project-extension inventory hash match the ledger.
     Trusted,
 }
 
@@ -76,6 +76,13 @@ impl FolderTrustAssessment {
         &self.inventory
     }
 
+    /// Whether this workspace currently contains project extension artifacts
+    /// whose activation requires an explicit trust decision.
+    #[must_use]
+    pub fn requires_confirmation(&self) -> bool {
+        !self.project_execution_enabled() && !self.inventory.is_empty()
+    }
+
     #[must_use]
     pub fn changes(&self) -> &[TrustInventoryChange] {
         &self.changes
@@ -102,7 +109,7 @@ impl FolderTrustAssessment {
     #[must_use]
     pub fn render_prompt_with_workspace(&self, workspace: &str) -> String {
         let mut lines = vec![format!(
-            "workspace: {}\nstate: {:?}\nexecutable project inventory:",
+            "workspace: {}\nstate: {:?}\nproject extension inventory:",
             workspace, self.state
         )];
         if self.inventory.is_empty() {
@@ -138,11 +145,11 @@ pub enum FolderTrustError {
     },
     #[error("unsafe project extension entry {0}")]
     UnsafeEntry(PathBuf),
-    #[error("project executable inventory exceeded its {limit}-file limit")]
+    #[error("project extension inventory exceeded its {limit}-file limit")]
     FileLimit { limit: usize },
-    #[error("project executable file exceeds its {limit}-byte limit: {path}")]
+    #[error("project extension file exceeds its {limit}-byte limit: {path}")]
     FileSize { path: PathBuf, limit: u64 },
-    #[error("project executable inventory exceeds its {limit}-byte total limit")]
+    #[error("project extension inventory exceeds its {limit}-byte total limit")]
     TotalSize { limit: u64 },
     #[error("project extension path is not valid UTF-8: {0}")]
     NonUtf8Path(PathBuf),
@@ -755,6 +762,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_project_extension_inventory_never_requests_a_trust_decision() {
+        let root = TempDir::new().expect("root");
+        let workspace = root.path().join("repo");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let store = FolderTrustStore::new(root.path().join("user/trust.json"));
+
+        let assessment = store.assess(&workspace).expect("assessment");
+
+        assert!(assessment.inventory().is_empty());
+        assert!(!assessment.requires_confirmation());
+    }
+
+    #[test]
+    fn supporting_project_extension_artifacts_are_part_of_the_trust_inventory() {
+        let root = TempDir::new().expect("root");
+        let workspace = root.path().join("repo");
+        fs::create_dir_all(workspace.join(".rottweiler")).expect("extension directory");
+        fs::write(
+            workspace.join(".rottweiler/README.md"),
+            "supporting extension documentation",
+        )
+        .expect("supporting artifact");
+        let store = FolderTrustStore::new(root.path().join("user/trust.json"));
+
+        let assessment = store.assess(&workspace).expect("assessment");
+
+        assert!(assessment.requires_confirmation());
+        assert!(matches!(
+            assessment.inventory(),
+            [TrustInventoryItem { kind, path, .. }]
+                if kind == "project_extension" && path == ".rottweiler/README.md"
+        ));
+    }
+
+    #[test]
     fn malicious_project_is_inert_until_exact_inventory_is_trusted() {
         let canary = Path::new("/tmp/rottweiler-untrusted-folder-pwned");
         let _ = fs::remove_file(canary);
@@ -780,6 +822,7 @@ mod tests {
         let first = store.assess(&workspace).expect("assessment");
         assert_eq!(first.state(), FolderTrustState::Untrusted);
         assert!(!first.project_execution_enabled());
+        assert!(first.requires_confirmation());
         assert!(first.inventory().iter().any(|item| item.kind == "command"));
         assert!(first.inventory().iter().any(|item| item.kind == "plugin"));
         let prompt = first.render_prompt();
@@ -791,10 +834,9 @@ mod tests {
         );
 
         store.grant(&first).expect("grant");
-        assert_eq!(
-            store.assess(&workspace).expect("trusted").state(),
-            FolderTrustState::Trusted
-        );
+        let trusted = store.assess(&workspace).expect("trusted");
+        assert_eq!(trusted.state(), FolderTrustState::Trusted);
+        assert!(!trusted.requires_confirmation());
         assert!(
             !canary.exists(),
             "grant persistence must not execute project content"
@@ -804,10 +846,19 @@ mod tests {
         let changed = store.assess(&workspace).expect("changed");
         assert_eq!(changed.state(), FolderTrustState::Changed);
         assert!(!changed.project_execution_enabled());
+        assert!(changed.requires_confirmation());
         assert!(matches!(
             changed.changes(),
             [TrustInventoryChange::Modified { after, .. }] if after.path == ".agents/commands/x.md"
         ));
+
+        fs::remove_file(agents.join("x.md")).expect("remove command");
+        fs::remove_file(rottweiler.join("plugins.toml")).expect("remove plugin");
+        let removed = store.assess(&workspace).expect("removed inventory");
+        assert_eq!(removed.state(), FolderTrustState::Changed);
+        assert!(removed.inventory().is_empty());
+        assert!(!removed.project_execution_enabled());
+        assert!(!removed.requires_confirmation());
     }
 
     #[test]

@@ -18,7 +18,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             "  performance:", 1
         )[0]
 
-        self.assertIn("needs: [test, security-tests]", build)
+        self.assertIn("needs: [test, security-tests, performance-smoke]", build)
         self.assertIn("$RUNNER_TEMP/rottweiler-macos-performance-build.noindex", build)
         self.assertIn("$RUNNER_TEMP/rottweiler-macos-performance-artifact.noindex", build)
         self.assertIn("shasum -a 256 rw > rw.sha256", build)
@@ -53,8 +53,11 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn('time.sleep(60 if sys.platform == "darwin" else 1)', gate)
-        self.assertIn('os.environ.get("ROTTWEILER_PERF_SAMPLES", "500")', gate)
+        self.assertIn('smoke = os.environ.get("ROTTWEILER_PERF_SMOKE") == "1"', gate)
+        self.assertIn('"100" if smoke else "500"', gate)
+        self.assertIn("minimum_samples = 100", gate)
+        self.assertIn('60 if sys.platform == "darwin" else 1', gate)
+        self.assertIn("warmup_count = 1 if smoke else 5", gate)
         self.assertIn("sample_count > 5000", gate)
         self.assertIn('"samples": [', gate)
         self.assertIn('"runner": {', gate)

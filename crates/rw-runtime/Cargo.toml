@@ -1,0 +1,44 @@
+[package]
+name = "rw-runtime"
+description = "Reusable Rottweiler headless runtime composition"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-stream = "0.3.6"
+async-trait = "0.1.89"
+base64.workspace = true
+blake3.workspace = true
+ed25519-dalek.workspace = true
+futures-util = "0.3.31"
+getrandom.workspace = true
+globset.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+ignore.workspace = true
+miette.workspace = true
+nix.workspace = true
+portable-pty.workspace = true
+rw-core.workspace = true
+rw-ext.workspace = true
+rw-mcp.workspace = true
+rw-providers.workspace = true
+rw-store.workspace = true
+rw-tools.workspace = true
+rw-types.workspace = true
+rustix.workspace = true
+rustyline = "=17.0.2"
+serde.workspace = true
+serde_json.workspace = true
+shell-words.workspace = true
+tempfile = "3.23"
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

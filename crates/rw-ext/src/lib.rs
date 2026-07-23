@@ -6,6 +6,7 @@ mod agent;
 mod command;
 mod discovery;
 mod hook;
+mod mode;
 mod plugin;
 mod plugin_runtime;
 mod registry;
@@ -33,6 +34,10 @@ pub use hook::{
     HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect, HookError,
     HookEvent, HookFailure, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
     HookRegistrationError,
+};
+pub use mode::{
+    ModeDefinition, ModePermissionOverlay, ModeRegistry, ModeRegistryError, ModeSource,
+    compose_mode_registry, parse_mode_toml,
 };
 pub use plugin::*;
 pub use plugin_runtime::*;

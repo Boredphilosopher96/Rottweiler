@@ -14,37 +14,6 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use miette::{IntoDiagnostic, Result, miette};
 use rustyline::{DefaultEditor, error::ReadlineError};
-#[cfg(test)]
-use rw_core::runtime_support::probe_sandbox;
-use rw_core::runtime_support::{
-    ApplyWorktreeDiffTool, ApprovalBinding, ApprovalDecision, AskUserInput, AskUserTool,
-    BackgroundKillTool, BackgroundOutputTool, BackgroundProcessLimits, BackgroundProcessManager,
-    BackgroundStatusTool, BashSandboxMode, BashTool, Block, BoxEventStream, CacheBreakpointSupport,
-    CacheHint, CancellationToken, Capabilities, CapabilityManifest, CodeIntelligence,
-    CodeIntelligenceProvider, CommandDescriptor, CommandExecutionError, CommandExecutor,
-    CommandFixtureRedactor, CommandHandler, CommandInvocation, CommandRegistry, CommandRequest,
-    CommandSafetyClassifier, CommandSource, ConfiguredSearchApi, DefinitionTool, Diagnostic,
-    DiagnosticsTool, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill, EditTool,
-    EgressDecision, EgressPin, EgressPolicy, ExecutionLease, ExtensionCatalog,
-    ExtensionDiscoveryConfig, FetchRequest, FetchResponse, FixtureRedactor, GlobTool, GrepTool,
-    GuardedHttpFetchError, GuardedHttpFetchRequest, HookDirective, HookDispatcher, HookEffect,
-    HookError, HookEvent, HookFailurePolicy, HookHandler, HookInvocation, HookRegistration,
-    IntelligenceBackend, IntelligenceResult, Location, LsTool, LspConfig, MultiEditTool,
-    MutationScope, NativeWebSearchCapability, Position, PricingTable, Provider, ProviderError,
-    ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyEnvironment, ProxySettings,
-    QuestionAsker, ReadTool, Recorder, RecordingCommandExecutor, ReferencesTool, RenameResult,
-    RenameTool, ReplayCommandExecutor, ReplayProvider, Role, SandboxNetworkPolicy, SandboxPolicy,
-    SandboxSupport, SandboxedLspSpawner, SessionId, SubagentProgressEvent, SupervisedEgressProxy,
-    SymbolsTool, TemplatePart, ThinkingLevel, TodoTool, TokioCommandExecutor, Tool, ToolCapability,
-    ToolChoice, ToolCommandOutcome, ToolContext, ToolDefinition, ToolDescriptor, ToolError,
-    ToolLimits, ToolOutput, ToolOutputChunk, ToolOutputPart, ToolOutputSink, ToolRegistry,
-    ToolResult, ToolchainConfig, Turn, TurnMeta, UpstreamProxy, WasmHookLimits, WasmProcessHook,
-    WebFetchTool, WebFetcher, WebSearchConfig, WebSearchRequest, WebSearchResponse, WebSearchTool,
-    WebSearcher, WireMode, WorkspaceSymbolIndex, WorkspaceUriMapper, WorktreeIsolation,
-    WorktreeLeaseRecord, WorktreeLimits, WriteTool, compose_agent_registry, default_models_path,
-    deny_outbound_network_for_process, discover_sandboxed_lsp_servers, guarded_http_fetch,
-    load_active_wasm_extensions_report, probe_policy_egress,
-};
 use rw_core::{
     AccountingAttribution, ActorSubagentSessionFactory, AgentLoopError, BudgetLedgerQuery,
     BudgetLedgerTotals, CachedModelCatalog, ClientId, Config, EngineEvent, EventClock, EventMeta,
@@ -61,6 +30,22 @@ use rw_core::{
     ToolOutputStream, TurnStatus, UnrestorablePath, Usage, WorktreeSubagentSessionFactory,
     base_agent_system_turn, builtin_command_registry, builtin_hook_dispatcher,
     load_instruction_stack, load_nested_instruction_stack, project_session_events,
+    project_session_events_with_modes,
+};
+use rw_ext::{
+    CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
+    CommandSource, DiscoveredCommand, DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog,
+    ExtensionDiscoveryConfig, HookDirective, HookDispatcher, HookEffect, HookError, HookEvent,
+    HookFailurePolicy, HookHandler, HookInvocation, HookRegistration, TemplatePart, WasmHookLimits,
+    WasmProcessHook, compose_agent_registry, compose_mode_registry,
+    load_active_wasm_extensions_report,
+};
+use rw_providers::{
+    BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, FixtureRedactor,
+    GuardedHttpFetchError, GuardedHttpFetchRequest, NativeWebSearchCapability, PricingTable,
+    Provider, ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyEnvironment,
+    ProxySettings, Recorder, ReplayProvider, ThinkingLevel, ToolChoice, ToolDefinition, WireMode,
+    default_models_path, deny_outbound_network_for_process, guarded_http_fetch,
 };
 use rw_store::{
     catalog_cache::{load_model_catalog_cache, store_model_catalog_cache},
@@ -72,6 +57,31 @@ use rw_store::{
         SessionStoreError, SessionSummary, TurnAccountingEntry, UtcTimestamp,
     },
     trust::FolderTrustStore,
+};
+#[cfg(test)]
+use rw_tools::probe_sandbox;
+use rw_tools::{
+    ApplyWorktreeDiffTool, AskUserInput, AskUserTool, BackgroundKillTool, BackgroundOutputTool,
+    BackgroundProcessLimits, BackgroundProcessManager, BackgroundStatusTool, BashSandboxMode,
+    BashTool, CancellationToken, CapabilityManifest, CodeIntelligence, CodeIntelligenceProvider,
+    CommandExecutor, CommandFixtureRedactor, CommandOutcome as ToolCommandOutcome, CommandRequest,
+    CommandSafetyClassifier, ConfiguredSearchApi, DefinitionTool, Diagnostic, DiagnosticsTool,
+    EditTool, EgressDecision, EgressPin, EgressPolicy, ExecutionLease, FetchRequest, FetchResponse,
+    GlobTool, GrepTool, IntelligenceBackend, IntelligenceResult, Location, LsTool, LspConfig,
+    MultiEditTool, MutationScope, NetworkPolicy as SandboxNetworkPolicy, Position, QuestionAsker,
+    ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult, RenameTool,
+    ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
+    SubagentProgressEvent, SupervisedEgressProxy, SymbolsTool, TodoTool, TokioCommandExecutor,
+    Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
+    ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool, WebFetcher, WebSearchRequest,
+    WebSearchResponse, WebSearchTool, WebSearcher, WorkspaceSymbolIndex, WorkspaceUriMapper,
+    WorktreeIsolation, WorktreeLeaseRecord, WorktreeLimits, WriteTool,
+    discover_sandboxed_lsp_servers, probe_policy_egress,
+};
+use rw_types::{
+    ApprovalBinding, ApprovalDecision, Block, Role, SessionId, ToolCapability, ToolOutput,
+    ToolOutputPart, Turn, TurnMeta,
+    config::{ToolchainConfig, WebSearchConfig},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OnceCell, mpsc, oneshot};
@@ -125,7 +135,11 @@ pub(crate) async fn load_effective_pricing_table() -> Result<PricingTable> {
     }
 }
 
-pub(crate) async fn discover_model_catalog(refresh: bool) -> Result<ModelCatalogSnapshot> {
+/// Discovers the effective provider model catalog.
+///
+/// # Errors
+/// Returns an error when configuration or provider discovery fails.
+pub async fn discover_model_catalog(refresh: bool) -> Result<ModelCatalogSnapshot> {
     let loader = ConfigLoader::from_environment().into_diagnostic()?;
     let credentials_path = loader.credentials_path().clone();
     let effective = loader.load().into_diagnostic()?;
@@ -160,7 +174,11 @@ pub(crate) async fn discover_model_catalog(refresh: bool) -> Result<ModelCatalog
     Ok(snapshot)
 }
 
-pub(crate) fn initialize_private_storage_root(path: &Path) -> io::Result<()> {
+/// Creates or validates the current-user private runtime storage root.
+///
+/// # Errors
+/// Returns an error when the path is unsafe or its permissions cannot be secured.
+pub fn initialize_private_storage_root(path: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => return validate_storage_root_type(&metadata),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -336,7 +354,7 @@ fn effective_subagent_events(
 
 fn unmatched_retained_spawn_turn(
     retained: &[(u64, EngineEvent)],
-    target: &rw_core::runtime_support::SubagentId,
+    target: &rw_types::SubagentId,
 ) -> Option<u64> {
     let mut unmatched = None;
     for (turn, event) in retained {
@@ -650,7 +668,7 @@ impl SubagentSessionFactory for RuntimeSubagentSessionFactory {
         &self,
         launch: rw_core::SubagentLaunch,
     ) -> std::result::Result<Arc<dyn rw_core::SubagentSession>, rw_core::OrchestrationError> {
-        if launch.request.isolation == rw_core::runtime_support::SubagentIsolation::Shared {
+        if launch.request.isolation == rw_types::SubagentIsolation::Shared {
             return self.shared.create(launch).await;
         }
         let isolated = self.isolated.as_ref().ok_or_else(|| {
@@ -864,7 +882,7 @@ struct CheckpointRootGeneration {
     committed: bool,
 }
 
-pub(crate) struct RunOptions {
+pub struct RunOptions {
     pub prompt: Option<String>,
     pub output_format: OutputFormat,
     pub permission_mode: Option<PermissionMode>,
@@ -883,7 +901,7 @@ pub(crate) struct RunOptions {
     pub action: RunAction,
 }
 
-pub(crate) enum RunAction {
+pub enum RunAction {
     Agent,
     PromptDump { turn: Option<u64> },
 }
@@ -920,7 +938,7 @@ impl<T> Drop for AbortOnDropTask<T> {
 
 #[derive(Clone)]
 #[allow(dead_code)]
-pub(crate) enum HostedProviderMode {
+pub enum HostedProviderMode {
     Live,
     DeterministicReplay {
         provider_name: String,
@@ -1311,7 +1329,11 @@ fn canonical_workspace_roots(primary: &Path, additional: &[PathBuf]) -> Result<V
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-pub(crate) async fn run(options: RunOptions) -> Result<()> {
+/// Runs a local print, line, or inspection session.
+///
+/// # Errors
+/// Returns an error when session composition, execution, or output rendering fails.
+pub async fn run(options: RunOptions) -> Result<()> {
     if options.max_turns == 0 {
         return Err(miette!("--max-turns must be greater than zero"));
     }
@@ -1364,11 +1386,46 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     // metadata read/write or checkpoint recovery may happen before it.
     let log = SessionEventLog::open(&storage_root, &session_id)
         .map_err(|error| miette!("session log could not open: {error}"))?;
-    // Exact Git-root validation is required before isolated subagents become
-    // available, but it is independent of session recovery and tool
-    // composition. Start it only after configuration/session validation and
-    // writer ownership, then overlap the Git subprocess with that work. The
-    // result is still awaited below before the factory is published.
+    if resuming {
+        // This preliminary projection consumes only the non-policy workspace
+        // generation needed to restore the historical extension roots.
+        let committed = project_session_events(&load_session_events(&log)?)
+            .map_err(|error| miette!("session root projection failed: {error}"))?;
+        if let Some(generation) = preview_persisted_workspace_roots(
+            &checkpoint_root(&storage_root, &workspace, &session_id),
+            &workspace,
+            &workspace_roots,
+            committed.workspace_generation,
+        )? {
+            persisted_workspace_generation = generation.generation;
+            workspace_roots = generation.roots;
+        }
+    }
+    let (extension_user_home, extension_user_rottweiler) =
+        extension_user_roots(&config_loader.credentials_path());
+    let extension_catalog = Arc::new(discover_runtime_extensions(
+        &workspace_roots,
+        &storage_root.join("trust.json"),
+        &extension_user_home,
+        &extension_user_rottweiler,
+        options.dangerously_trust,
+    )?);
+    let validated_modes =
+        crate::mode_recovery::compose_and_project(&extension_catalog, &load_session_events(&log)?)?;
+    let runtime_modes = Arc::new(validated_modes.modes);
+    if resuming
+        && let Some(generation) = restore_persisted_workspace_roots(
+            &checkpoint_root(&storage_root, &workspace, &session_id),
+            &workspace,
+            &workspace_roots,
+            persisted_workspace_generation,
+        )?
+    {
+        persisted_workspace_generation = generation.generation;
+        workspace_roots = generation.roots;
+    }
+    // Exact Git-root validation can create private worktree state, so it starts
+    // only after persisted mode fingerprints have been accepted.
     let worktree_isolation_task = if matches!(&options.action, RunAction::Agent) {
         let repository_root = workspace.clone();
         let private_root = storage_root.join("worktrees");
@@ -1384,19 +1441,6 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     } else {
         None
     };
-    if resuming {
-        let committed = project_session_events(&load_session_events(&log)?)
-            .map_err(|error| miette!("session root projection failed: {error}"))?;
-        if let Some(generation) = restore_persisted_workspace_roots(
-            &checkpoint_root(&storage_root, &workspace, &session_id),
-            &workspace,
-            &workspace_roots,
-            committed.workspace_generation,
-        )? {
-            persisted_workspace_generation = generation.generation;
-            workspace_roots = generation.roots;
-        }
-    }
     let execution_lease_path = workspace_execution_lease_path(&storage_root, &workspace)?;
     // The event writer above already excludes a live process resuming this
     // exact session. If a crashed process's command watchdog is the only
@@ -1465,8 +1509,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     .await
     .map_err(|error| miette!("rewind recovery worker failed: {error}"))??;
     let recovered_events = load_session_events(&log)?;
-    let recovered = project_session_events(&recovered_events)
-        .map_err(|error| miette!("session log projection failed: {error}"))?;
+    let recovered = crate::mode_recovery::project(&recovered_events, &runtime_modes)?;
     let durable_sink = Arc::new(DurableEventSink::new(
         log,
         storage_root.clone(),
@@ -1619,10 +1662,10 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
     // exercising production executable discovery. Other offline/replay runs
     // keep executable project configuration inert.
     let executable_catalog = if inspection || (offline_fixture && !options.perf_markers) {
-        crate::m8_config::ExecutableConfigCatalog::default()
+        crate::extension_config::ExecutableConfigCatalog::default()
     } else {
         let (user_home, _) = extension_user_roots(&config_loader.credentials_path());
-        let catalog = crate::m8_config::discover_executable_configs(
+        let catalog = crate::extension_config::discover_executable_configs(
             &user_home,
             &workspace,
             derived_project_trusted || options.dangerously_trust,
@@ -1636,7 +1679,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         None
     } else {
         let session_root = storage_root.join("sessions").join(&session_id);
-        let runtime = crate::m8_runtime::McpSessionRuntime::start_production(
+        let runtime = crate::extension_runtime::McpSessionRuntime::start_production(
             &executable_catalog.mcp_servers,
             &workspace_roots,
             &session_root,
@@ -1746,13 +1789,13 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         || (options.replay_dir.is_some() && options.record_replay_script.is_none())
         || options.in_memory_replay_script.is_some())
     .then(deny_outbound_network_for_process);
-    let plugin_redactor = Arc::new(crate::m8_runtime::SharedPluginRedactor::new(
+    let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
         fixture_redactor.clone(),
     ));
     let plugin_runtime = if executable_catalog.plugins.is_empty() || inspection {
         None
     } else {
-        let runtime = crate::m8_runtime::PluginSessionRuntime::start(
+        let runtime = crate::extension_runtime::PluginSessionRuntime::start(
             &executable_catalog.plugins,
             &storage_root,
             &workspace_roots,
@@ -1925,15 +1968,6 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         built_tools.read_only_hook_scratch.clone(),
         &workspace_roots,
     ));
-    let (extension_user_home, extension_user_rottweiler) =
-        extension_user_roots(&config_loader.credentials_path());
-    let extension_catalog = Arc::new(discover_runtime_extensions(
-        &workspace_roots,
-        &storage_root.join("trust.json"),
-        &extension_user_home,
-        &extension_user_rottweiler,
-        options.dangerously_trust,
-    )?);
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
@@ -2151,7 +2185,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         &runtime_tools,
     )?;
     if let Some(mcp) = &mcp_runtime {
-        crate::m8_runtime::register_mcp_command(
+        crate::extension_runtime::register_mcp_command(
             &mut runtime_commands,
             Arc::clone(&mcp.manager),
             Some(Arc::clone(&mcp.approvals)),
@@ -2184,6 +2218,7 @@ pub(crate) async fn run(options: RunOptions) -> Result<()> {
         permissions,
         hooks: runtime_hooks,
         commands: runtime_commands,
+        modes: runtime_modes,
         event_sink: actor_event_sink,
         event_clock: Arc::new(SystemEventClock),
         secret_redactor,
@@ -2305,9 +2340,11 @@ pub(crate) async fn compose_hosted_actor(
     let log = SessionEventLog::open(&options.storage_root, &session_id)
         .map_err(|error| miette!("session log could not open: {error}"))?;
     if options.resume {
+        // This preliminary projection consumes only the non-policy workspace
+        // generation needed to restore the historical extension roots.
         let committed = project_session_events(&load_session_events(&log)?)
             .map_err(|error| miette!("session root projection failed: {error}"))?;
-        if let Some(generation) = restore_persisted_workspace_roots(
+        if let Some(generation) = preview_persisted_workspace_roots(
             &checkpoint_root(&options.storage_root, &workspace, &session_id),
             &workspace,
             &workspace_roots,
@@ -2325,6 +2362,29 @@ pub(crate) async fn compose_hosted_actor(
                 "persisted workspace root is outside the current host authorization policy"
             ));
         }
+    }
+    let (extension_user_home, extension_user_rottweiler) =
+        extension_user_roots(&extension_credentials_path);
+    let extension_catalog = Arc::new(discover_runtime_extensions(
+        &workspace_roots,
+        &options.storage_root.join("trust.json"),
+        &extension_user_home,
+        &extension_user_rottweiler,
+        options.dangerously_trust,
+    )?);
+    let validated_modes =
+        crate::mode_recovery::compose_and_project(&extension_catalog, &load_session_events(&log)?)?;
+    let runtime_modes = Arc::new(validated_modes.modes);
+    if options.resume
+        && let Some(generation) = restore_persisted_workspace_roots(
+            &checkpoint_root(&options.storage_root, &workspace, &session_id),
+            &workspace,
+            &workspace_roots,
+            persisted_workspace_generation,
+        )?
+    {
+        persisted_workspace_generation = generation.generation;
+        workspace_roots = generation.roots;
     }
     let execution_lease_path = workspace_execution_lease_path(&options.storage_root, &workspace)?;
     let wait_for_execution_lease = options.wait_for_execution_lease;
@@ -2390,8 +2450,7 @@ pub(crate) async fn compose_hosted_actor(
     .await
     .map_err(|error| miette!("rewind recovery worker failed: {error}"))??;
     let recovered_events = load_session_events(&log)?;
-    let recovered = project_session_events(&recovered_events)
-        .map_err(|error| miette!("session log projection failed: {error}"))?;
+    let recovered = crate::mode_recovery::project(&recovered_events, &runtime_modes)?;
     let descriptor_model = recovered
         .model_alias
         .clone()
@@ -2501,10 +2560,10 @@ pub(crate) async fn compose_hosted_actor(
     });
 
     let executable_catalog = if offline {
-        crate::m8_config::ExecutableConfigCatalog::default()
+        crate::extension_config::ExecutableConfigCatalog::default()
     } else {
         let (user_home, _) = extension_user_roots(&extension_credentials_path);
-        let catalog = crate::m8_config::discover_executable_configs(
+        let catalog = crate::extension_config::discover_executable_configs(
             &user_home,
             &workspace,
             derived_project_trusted || options.dangerously_trust,
@@ -2516,7 +2575,7 @@ pub(crate) async fn compose_hosted_actor(
     };
     let mcp_runtime = {
         let runtime = Arc::new(
-            crate::m8_runtime::McpSessionRuntime::start_production(
+            crate::extension_runtime::McpSessionRuntime::start_production(
                 &executable_catalog.mcp_servers,
                 &workspace_roots,
                 &options.storage_root.join("sessions").join(&session_id),
@@ -2551,24 +2610,26 @@ pub(crate) async fn compose_hosted_actor(
         Some(runtime)
     };
     let mcp_admin: Option<Arc<dyn rw_core::HostMcpService>> = mcp_runtime.as_ref().map(|runtime| {
-        Arc::new(crate::m8_runtime::LiveMcpAdmin::new_with_stdio_environment(
-            Arc::clone(&runtime.manager),
-            Arc::clone(&runtime.approvals),
-            ConfigLoader::new(
-                options.credentials_path.with_file_name("config.toml"),
-                workspace.join(".rottweiler/config.toml"),
+        Arc::new(
+            crate::extension_runtime::LiveMcpAdmin::new_with_stdio_environment(
+                Arc::clone(&runtime.manager),
+                Arc::clone(&runtime.approvals),
+                ConfigLoader::new(
+                    options.credentials_path.with_file_name("config.toml"),
+                    workspace.join(".rottweiler/config.toml"),
+                ),
+                Arc::clone(&runtime.stdio_environment),
             ),
-            Arc::clone(&runtime.stdio_environment),
-        )) as Arc<dyn rw_core::HostMcpService>
+        ) as Arc<dyn rw_core::HostMcpService>
     });
-    let plugin_redactor = Arc::new(crate::m8_runtime::SharedPluginRedactor::new(
+    let plugin_redactor = Arc::new(crate::extension_runtime::SharedPluginRedactor::new(
         fixture_redactor.clone(),
     ));
     let plugin_runtime = if executable_catalog.plugins.is_empty() {
         None
     } else {
         let runtime = Arc::new(
-            crate::m8_runtime::PluginSessionRuntime::start(
+            crate::extension_runtime::PluginSessionRuntime::start(
                 &executable_catalog.plugins,
                 &options.storage_root,
                 &workspace_roots,
@@ -2704,15 +2765,6 @@ pub(crate) async fn compose_hosted_actor(
         built_tools.read_only_hook_scratch.clone(),
         &workspace_roots,
     ));
-    let (extension_user_home, extension_user_rottweiler) =
-        extension_user_roots(&extension_credentials_path);
-    let extension_catalog = Arc::new(discover_runtime_extensions(
-        &workspace_roots,
-        &options.storage_root.join("trust.json"),
-        &extension_user_home,
-        &extension_user_rottweiler,
-        options.dangerously_trust,
-    )?);
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
@@ -2926,7 +2978,7 @@ pub(crate) async fn compose_hosted_actor(
         &runtime_tools,
     )?;
     if let Some(mcp) = &mcp_runtime {
-        crate::m8_runtime::register_mcp_command(
+        crate::extension_runtime::register_mcp_command(
             &mut runtime_commands,
             Arc::clone(&mcp.manager),
             Some(Arc::clone(&mcp.approvals)),
@@ -2959,6 +3011,7 @@ pub(crate) async fn compose_hosted_actor(
         permissions,
         hooks: runtime_hooks,
         commands: runtime_commands,
+        modes: runtime_modes,
         event_sink: actor_event_sink,
         event_clock: Arc::new(SystemEventClock),
         secret_redactor,
@@ -3414,7 +3467,11 @@ fn select_session(storage_root: &Path, workspace: &Path, options: &RunOptions) -
     new_session_id()
 }
 
-pub(crate) fn select_interactive_session(
+/// Selects an explicit, latest, or newly allocated interactive session.
+///
+/// # Errors
+/// Returns an error when durable session metadata cannot be inspected.
+pub fn select_interactive_session(
     storage_root: &Path,
     workspace: &Path,
     resume: Option<&str>,
@@ -3494,7 +3551,7 @@ fn workspace_execution_lease_path(storage_root: &Path, workspace: &Path) -> Resu
 fn acquire_shared_execution_lease(
     path: &Path,
     wait: bool,
-) -> std::result::Result<Arc<ExecutionLease>, rw_core::runtime_support::ToolError> {
+) -> std::result::Result<Arc<ExecutionLease>, rw_tools::ToolError> {
     static LEASES: OnceLock<Mutex<HashMap<PathBuf, std::sync::Weak<ExecutionLease>>>> =
         OnceLock::new();
     let mut leases = LEASES
@@ -3528,6 +3585,7 @@ pub(crate) fn fork_hosted_session_storage(
     include_idle_tail: bool,
     driver_client_id: ClientId,
     fork_operation_id: Option<&str>,
+    mode_registry: &rw_ext::ModeRegistry,
 ) -> Result<()> {
     validate_session_id(parent_session_id)?;
     validate_session_id(child_session_id)?;
@@ -3579,13 +3637,16 @@ pub(crate) fn fork_hosted_session_storage(
     {
         return Err(miette!("fork parent envelope sequence is not contiguous"));
     }
-    let projected = project_session_events(
-        &prefix
-            .iter()
-            .map(|event| event.event.clone())
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| miette!("fork prefix projection failed: {error}"))?;
+    let prefix_events = prefix
+        .iter()
+        .map(|event| event.event.clone())
+        .collect::<Vec<_>>();
+    // This preliminary projection reads only the non-policy workspace
+    // generation needed to locate the historical root set. The registry-aware
+    // projection below validates all mode semantics before any child path is
+    // created or event is written.
+    let workspace_projection = project_session_events(&prefix_events)
+        .map_err(|error| miette!("fork prefix projection failed: {error}"))?;
     let source_checkpoint_root = checkpoint_root(storage_root, workspace, parent_session_id);
     let target_checkpoint_root = checkpoint_root(storage_root, workspace, child_session_id);
     if target_checkpoint_root.exists() {
@@ -3593,11 +3654,13 @@ pub(crate) fn fork_hosted_session_storage(
     }
     let fork_roots = load_checkpoint_root_generation_exact(
         &source_checkpoint_root,
-        projected.workspace_generation,
+        workspace_projection.workspace_generation,
     )?
     .filter(|generation| generation.committed)
     .map(|generation| generation.roots)
     .ok_or_else(|| miette!("fork workspace-root generation is unavailable"))?;
+    let projected = crate::mode_recovery::project(&prefix_events, mode_registry)
+        .map_err(|error| miette!("fork mode projection failed: {error}"))?;
     let mapping = CheckpointRootMapping {
         version: CHECKPOINT_ROOTS_VERSION,
         generations: vec![CheckpointRootGeneration {
@@ -3977,7 +4040,14 @@ fn restore_persisted_workspace_roots(
     let path = root.join("workspace-roots.json");
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && committed_generation == 0 => {
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(miette!(
+                "committed workspace generation is missing its local root journal"
+            ));
+        }
         Err(error) => return Err(miette!("checkpoint root journal could not load: {error}")),
     };
     let mut mapping: CheckpointRootMapping = serde_json::from_slice(&bytes)
@@ -4002,6 +4072,53 @@ fn restore_persisted_workspace_roots(
     }
     let Some(mut generation) = mapping.generations.last().cloned() else {
         return Ok(None);
+    };
+    generation.roots = canonical_workspace_roots(primary, &generation.roots[1..])?;
+    if supplied.len() > 1 && supplied != generation.roots {
+        return Err(miette!(
+            "resume workspace roots differ from the durable stable-index generation"
+        ));
+    }
+    Ok(Some(generation))
+}
+
+/// Resolves the historical root generation without repairing or rewriting its
+/// journal. A matching uncommitted generation is intentionally visible here:
+/// the durable event is the commit record, and repair marks/truncates the local
+/// journal only after mode validation. Resume uses this preview to compose the
+/// exact mode registry before any crash-recovery mutation.
+fn preview_persisted_workspace_roots(
+    root: &Path,
+    primary: &Path,
+    supplied: &[PathBuf],
+    committed_generation: u64,
+) -> Result<Option<CheckpointRootGeneration>> {
+    let path = root.join("workspace-roots.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && committed_generation == 0 => {
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(miette!(
+                "committed workspace generation is missing its local root journal"
+            ));
+        }
+        Err(error) => return Err(miette!("checkpoint root journal could not load: {error}")),
+    };
+    let mapping: CheckpointRootMapping = serde_json::from_slice(&bytes)
+        .map_err(|error| miette!("checkpoint root journal is corrupt: {error}"))?;
+    if mapping.version != CHECKPOINT_ROOTS_VERSION {
+        return Err(miette!("checkpoint root journal version is unsupported"));
+    }
+    let Some(mut generation) = mapping
+        .generations
+        .into_iter()
+        .find(|entry| entry.generation == committed_generation)
+    else {
+        return Err(miette!(
+            "committed workspace generation is absent from the local root journal"
+        ));
     };
     generation.roots = canonical_workspace_roots(primary, &generation.roots[1..])?;
     if supplied.len() > 1 && supplied != generation.roots {
@@ -4175,6 +4292,22 @@ pub(crate) fn load_session_metadata_any_bounded(
         ));
     }
     Ok((metadata, byte_count))
+}
+
+/// Reads only the inherited-accounting boundary needed by aggregate clients.
+///
+/// The private metadata representation remains an implementation detail of the
+/// runtime; callers receive the bounded field and the number of bytes charged.
+///
+/// # Errors
+/// Returns an error when metadata is unsafe, malformed, or exceeds the byte cap.
+pub fn load_inherited_accounting_boundary_bounded(
+    storage_root: &Path,
+    session_id: &str,
+    max_bytes: u64,
+) -> Result<(Option<SequenceId>, u64)> {
+    load_session_metadata_any_bounded(storage_root, session_id, max_bytes)
+        .map(|(metadata, bytes)| (metadata.inherited_accounting_through, bytes))
 }
 
 #[cfg(unix)]
@@ -4397,7 +4530,11 @@ fn sync_file(file: &std::fs::File) -> Result<()> {
     }
 }
 
-pub(crate) fn new_session_id() -> Result<String> {
+/// Allocates a cryptographically random local session identifier.
+///
+/// # Errors
+/// Returns an error when the operating system random source is unavailable.
+pub fn new_session_id() -> Result<String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|error| miette!("session id entropy failed: {error}"))?;
     let mut id = String::with_capacity(40);
@@ -4630,17 +4767,17 @@ trait PluginEventPublisher: Send + Sync {
         &self,
         event: &str,
         payload: serde_json::Value,
-    ) -> std::result::Result<(), rw_core::runtime_support::plugin::PluginRpcError>;
+    ) -> std::result::Result<(), rw_ext::PluginRpcError>;
 }
 
 #[async_trait]
-impl PluginEventPublisher for rw_core::runtime_support::plugin::PluginEventRouter {
+impl PluginEventPublisher for rw_ext::PluginEventRouter {
     async fn publish(
         &self,
         event: &str,
         payload: serde_json::Value,
-    ) -> std::result::Result<(), rw_core::runtime_support::plugin::PluginRpcError> {
-        rw_core::runtime_support::plugin::PluginEventRouter::publish(self, event, payload).await
+    ) -> std::result::Result<(), rw_ext::PluginRpcError> {
+        rw_ext::PluginEventRouter::publish(self, event, payload).await
     }
 }
 
@@ -4744,10 +4881,7 @@ impl Drop for PluginFanoutWorker {
 impl PluginFanoutEventSink {
     fn new(
         inner: Arc<DurableEventSink>,
-        routers: Vec<(
-            BTreeSet<String>,
-            Arc<rw_core::runtime_support::plugin::PluginEventRouter>,
-        )>,
+        routers: Vec<(BTreeSet<String>, Arc<rw_ext::PluginEventRouter>)>,
         redactor: FixtureRedactor,
     ) -> Self {
         let workers = routers
@@ -4970,6 +5104,7 @@ impl WorkspaceRootAuthorization {
 struct PreparedExtensionGeneration {
     hooks: Arc<HookDispatcher>,
     commands: Arc<CommandRegistry<SessionCommandContext, SessionCommandOutput>>,
+    modes: Arc<rw_ext::ModeRegistry>,
     skill_index: Option<Turn>,
 }
 
@@ -5056,6 +5191,8 @@ impl RuntimeWorkspaceRootController {
         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let commands = compose_runtime_commands(&catalog, &roots, storage_root, &built.registry)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        let mode_registry = compose_mode_registry(&catalog)
+            .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let child_checkpoint_root = checkpoint_root(storage_root, workspace_root, &session_id.0);
         let stores = open_checkpoint_stores(&child_checkpoint_root, &roots)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
@@ -5063,7 +5200,7 @@ impl RuntimeWorkspaceRootController {
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let events = load_session_events(&log)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        let recovered = project_session_events(&events)
+        let recovered = project_session_events_with_modes(&events, &mode_registry)
             .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
         let event_sink =
             DurableEventSink::new(log, storage_root.to_path_buf(), session_id.0.clone())
@@ -5132,6 +5269,7 @@ impl RuntimeWorkspaceRootController {
             permissions,
             hooks: Arc::new(hooks),
             commands: Arc::new(commands),
+            modes: Arc::new(mode_registry),
             event_sink: Arc::new(event_sink),
             event_clock: Arc::new(SystemEventClock),
             secret_redactor,
@@ -5339,9 +5477,15 @@ impl RuntimeWorkspaceRootController {
                         "workspace command generation could not prepare".to_owned(),
                     )
                 })?;
+        let modes = compose_mode_registry(&catalog).map_err(|_error| {
+            AgentLoopError::InvalidConfiguration(
+                "workspace mode generation could not prepare".to_owned(),
+            )
+        })?;
         Ok(PreparedExtensionGeneration {
             hooks: Arc::new(hooks),
             commands: Arc::new(commands),
+            modes: Arc::new(modes),
             skill_index,
         })
     }
@@ -5397,6 +5541,7 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
             tools: prepared.built.registry,
             hooks: prepared.extensions.hooks,
             commands: prepared.extensions.commands,
+            modes: prepared.extensions.modes,
             permissions: prepared.permissions,
             checkpoints: Arc::new(DurableCheckpointCoordinator::from_stores(stores)),
             folder_trust: Arc::new(RuntimeFolderTrustController::new(
@@ -8194,7 +8339,7 @@ fn credential_shaped_environment_name(name: &str) -> bool {
         || normalized.ends_with("_CREDENTIALS")
 }
 
-pub(crate) fn register_credential_environment(redactor: &FixtureRedactor) {
+pub fn register_credential_environment(redactor: &FixtureRedactor) {
     for (name, value) in std::env::vars_os() {
         let (Some(name), Some(value)) = (name.to_str(), value.to_str()) else {
             continue;
@@ -8861,7 +9006,7 @@ impl CustomPromptDefinition {
         }
     }
 
-    fn origin(&self) -> &rw_core::runtime_support::ArtifactOrigin {
+    fn origin(&self) -> &rw_ext::ArtifactOrigin {
         match self {
             Self::Command(command) => command.origin(),
             Self::Skill(skill) => skill.origin(),
@@ -8982,7 +9127,7 @@ fn extension_command_error(_error: impl std::fmt::Display) -> CommandExecutionEr
 }
 
 fn expand_custom_template(
-    template: &rw_core::runtime_support::CommandTemplate,
+    template: &rw_ext::CommandTemplate,
     arguments: &str,
     positional: &[String],
     runtime: &mut CustomTemplateRuntime<'_>,
@@ -9195,24 +9340,19 @@ fn normalized_allowed_tools(
     })
 }
 
-fn extension_origin_rank(
-    origin: &rw_core::runtime_support::ArtifactOrigin,
-    roots: &[PathBuf],
-) -> usize {
+fn extension_origin_rank(origin: &rw_ext::ArtifactOrigin, roots: &[PathBuf]) -> usize {
     let location = match origin.location() {
-        rw_core::runtime_support::ArtifactLocation::Agents => 0,
-        rw_core::runtime_support::ArtifactLocation::Rottweiler => 1,
+        rw_ext::ArtifactLocation::Agents => 0,
+        rw_ext::ArtifactLocation::Rottweiler => 1,
     };
     match origin.scope() {
-        rw_core::runtime_support::ArtifactScope::Project => roots
+        rw_ext::ArtifactScope::Project => roots
             .iter()
             .position(|root| origin.path().starts_with(root))
             .unwrap_or(roots.len())
             .saturating_mul(2)
             .saturating_add(location),
-        rw_core::runtime_support::ArtifactScope::User => {
-            roots.len().saturating_mul(2).saturating_add(location)
-        }
+        rw_ext::ArtifactScope::User => roots.len().saturating_mul(2).saturating_add(location),
     }
 }
 
@@ -9266,8 +9406,8 @@ fn compose_runtime_commands(
                 command
                     .descriptor()
                     .with_source(match definition.origin().scope() {
-                        rw_core::runtime_support::ArtifactScope::Project => CommandSource::Project,
-                        rw_core::runtime_support::ArtifactScope::User => CommandSource::User,
+                        rw_ext::ArtifactScope::Project => CommandSource::Project,
+                        rw_ext::ArtifactScope::User => CommandSource::User,
                     })
             }
             CustomPromptDefinition::Skill(skill) => {
@@ -9510,7 +9650,7 @@ fn register_declarative_hooks(
     Ok(())
 }
 
-fn discover_runtime_extensions(
+pub(crate) fn discover_runtime_extensions(
     workspace_roots: &[PathBuf],
     trust_store_path: &Path,
     user_home: &Path,
@@ -9553,7 +9693,7 @@ fn discover_runtime_extensions_derived(
         .map_err(|error| miette!("extension discovery failed: {error}"))
 }
 
-pub(crate) fn extension_user_roots(credentials_path: &Path) -> (PathBuf, PathBuf) {
+pub fn extension_user_roots(credentials_path: &Path) -> (PathBuf, PathBuf) {
     let rottweiler = credentials_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -9741,7 +9881,11 @@ fn sanitized_wasm_notice_text(value: &str, limit: usize) -> String {
         .collect()
 }
 
-pub(crate) fn locate_wasm_host_executable() -> Result<PathBuf> {
+/// Resolves the bundled private WASM host executable.
+///
+/// # Errors
+/// Returns an error when no safe executable candidate can be located.
+pub fn locate_wasm_host_executable() -> Result<PathBuf> {
     if let Some(override_path) = std::env::var_os("ROTTWEILER_WASM_HOST_BIN") {
         return require_private_helper(PathBuf::from(override_path));
     }
@@ -11079,9 +11223,9 @@ struct MultiRootCodeIntelligence {
 }
 
 fn lsp_servers_for_root(
-    servers: &[rw_core::runtime_support::LspServerConfig],
+    servers: &[rw_tools::LspServerConfig],
     trusted: bool,
-) -> Vec<rw_core::runtime_support::LspServerConfig> {
+) -> Vec<rw_tools::LspServerConfig> {
     if trusted {
         servers.to_vec()
     } else {
@@ -12476,13 +12620,16 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
-    use rw_core::runtime_support::{
-        DiagnosticSeverity, FinishReason, PermissionDecision, PluginManifest, Range, Role,
-        ToolCallId, ToolCapability, ToolCommandOutcome, TurnMeta, WebSearchResult, WebSearchSource,
-    };
     use rw_core::{
         Cost, PermissionApprover, PermissionOutcome, PermissionRequest, ProviderConfig, TurnId,
     };
+    use rw_ext::PluginManifest;
+    use rw_providers::FinishReason;
+    use rw_tools::{
+        CommandOutcome as ToolCommandOutcome, DiagnosticSeverity, Range, WebSearchResult,
+        WebSearchSource,
+    };
+    use rw_types::{Role, ToolCallId, ToolCapability, TurnMeta, config::PermissionDecision};
     use tempfile::{TempDir, tempdir};
 
     struct RejectingPermissionApprover(AtomicUsize);
@@ -13172,6 +13319,7 @@ mod tests {
             permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
             hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
             commands: Arc::new(builtin_command_registry().expect("commands")),
+            modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
             event_sink: Arc::new(FailModelChangedSink {
                 inner: rw_core::NoopSessionEventSink::default(),
             }),
@@ -13486,6 +13634,7 @@ mod tests {
             permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
             hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
             commands: Arc::new(builtin_command_registry().expect("commands")),
+            modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
             event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
             event_clock: Arc::new(SystemEventClock),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
@@ -14056,7 +14205,7 @@ mod tests {
             _progress: Arc<dyn rw_core::SubagentProgressObserver>,
         ) -> std::result::Result<rw_core::SubagentTurnResult, rw_core::OrchestrationError> {
             Ok(rw_core::SubagentTurnResult {
-                status: rw_core::runtime_support::SubagentStatus::Completed,
+                status: rw_types::SubagentStatus::Completed,
                 final_text: format!("{}:{prompt}", self.session_id.0),
                 touched_files: Vec::new(),
                 diff_artifact: None,
@@ -14091,7 +14240,7 @@ mod tests {
 
         async fn finished(
             &self,
-            _result: &rw_core::runtime_support::SubagentResult,
+            _result: &rw_types::SubagentResult,
         ) -> std::result::Result<(), rw_core::OrchestrationError> {
             Ok(())
         }
@@ -14118,7 +14267,7 @@ mod tests {
         async fn remove(
             &self,
             _parent_session_id: &SessionId,
-            _subagent_id: &rw_core::runtime_support::SubagentId,
+            _subagent_id: &rw_types::SubagentId,
         ) -> std::result::Result<(), rw_core::OrchestrationError> {
             Err(rw_core::OrchestrationError::Session(
                 "injected metadata removal failure".to_owned(),
@@ -14180,7 +14329,7 @@ mod tests {
                 },
                 EngineEvent::SubagentSpawned {
                     meta: meta(sequence + 1),
-                    subagent_id: rw_core::runtime_support::SubagentId(name.to_owned()),
+                    subagent_id: rw_types::SubagentId(name.to_owned()),
                     child_session_id: SessionId(format!("session-{name}")),
                     task: name.to_owned(),
                 },
@@ -14225,7 +14374,7 @@ mod tests {
     #[test]
     fn tail_repair_closes_original_turn_and_rewind_removes_both_lifecycle_events() {
         let parent = SessionId("parent".to_owned());
-        let child = rw_core::runtime_support::SubagentId("child".to_owned());
+        let child = rw_types::SubagentId("child".to_owned());
         let child_session = SessionId("child-session".to_owned());
         let meta = |sequence| EventMeta {
             protocol_version: SESSION_EVENT_VERSION,
@@ -14398,7 +14547,7 @@ mod tests {
             (1_u64, "first-child", first.clone()),
             (3_u64, "second-child", second.clone()),
         ] {
-            let subagent_id = rw_core::runtime_support::SubagentId(name.to_owned());
+            let subagent_id = rw_types::SubagentId(name.to_owned());
             let child_session_id = SessionId(format!("{name}-session"));
             durable
                 .append(EngineEvent::SubagentSpawned {
@@ -14413,10 +14562,10 @@ mod tests {
                 .append(EngineEvent::SubagentFinished {
                     meta: meta(sequence + 1),
                     subagent_id: subagent_id.clone(),
-                    result: rw_core::runtime_support::SubagentResult {
+                    result: rw_types::SubagentResult {
                         subagent_id,
                         session_id: child_session_id,
-                        status: rw_core::runtime_support::SubagentStatus::Completed,
+                        status: rw_types::SubagentStatus::Completed,
                         final_text: name.to_owned(),
                         touched_files: vec!["shared.txt".to_owned()],
                         diff_artifact: Some(artifact),
@@ -14526,6 +14675,7 @@ mod tests {
             permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
             hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
             commands: Arc::new(builtin_command_registry().expect("commands")),
+            modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
             event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
             event_clock: Arc::new(SystemEventClock),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
@@ -14603,13 +14753,13 @@ mod tests {
             },
             EngineEvent::SubagentSpawned {
                 meta: meta(1),
-                subagent_id: rw_core::runtime_support::SubagentId("first".to_owned()),
+                subagent_id: rw_types::SubagentId("first".to_owned()),
                 child_session_id: SessionId("first-session".to_owned()),
                 task: "first".to_owned(),
             },
             EngineEvent::SubagentSpawned {
                 meta: meta(2),
-                subagent_id: rw_core::runtime_support::SubagentId("second".to_owned()),
+                subagent_id: rw_types::SubagentId("second".to_owned()),
                 child_session_id: SessionId("second-session".to_owned()),
                 task: "second".to_owned(),
             },
@@ -14647,7 +14797,7 @@ mod tests {
         async fn append_spawn(
             storage: &Path,
             parent: &SessionId,
-            child_id: &rw_core::runtime_support::SubagentId,
+            child_id: &rw_types::SubagentId,
             child_session: &SessionId,
         ) -> DurableEventSink {
             let log = SessionEventLog::open(storage, &parent.0).expect("open parent log");
@@ -14679,7 +14829,7 @@ mod tests {
 
         fn record(
             parent: &SessionId,
-            child_id: &rw_core::runtime_support::SubagentId,
+            child_id: &rw_types::SubagentId,
             child_session: &SessionId,
             depth: usize,
             workspace: &Path,
@@ -14694,7 +14844,7 @@ mod tests {
                 agent: "fixture agent".to_owned(),
                 depth,
                 workspace_root: workspace.to_path_buf(),
-                isolation: rw_core::runtime_support::SubagentIsolation::Shared,
+                isolation: rw_types::SubagentIsolation::Shared,
                 worktree: None,
                 capabilities: CapabilityManifest::default(),
                 tool_names: vec!["spawn_agent".to_owned(), "apply_worktree_diff".to_owned()],
@@ -14726,7 +14876,7 @@ mod tests {
         async fn assert_follow_up(
             orchestrator: &SubagentOrchestrator,
             owner: &SessionId,
-            child_id: &rw_core::runtime_support::SubagentId,
+            child_id: &rw_types::SubagentId,
             expected_session: &SessionId,
         ) {
             let observer: Arc<dyn rw_core::SubagentObserver> = Arc::new(RecoveryProbeObserver);
@@ -14742,10 +14892,7 @@ mod tests {
                 .expect("recovered follow-up");
             assert_eq!(&handle.session_id, expected_session);
             let result = orchestrator.wait(&handle).await.expect("follow-up result");
-            assert_eq!(
-                result.status,
-                rw_core::runtime_support::SubagentStatus::Completed
-            );
+            assert_eq!(result.status, rw_types::SubagentStatus::Completed);
             assert!(result.final_text.contains("continue after restart"));
         }
 
@@ -14762,9 +14909,9 @@ mod tests {
         .expect("private storage");
         let workspace = workspace.canonicalize().expect("canonical workspace");
         let parent = SessionId("tree-parent".to_owned());
-        let child_id = rw_core::runtime_support::SubagentId("tree-child".to_owned());
+        let child_id = rw_types::SubagentId("tree-child".to_owned());
         let child_session = SessionId("tree-child-session".to_owned());
-        let grandchild_id = rw_core::runtime_support::SubagentId("tree-grandchild".to_owned());
+        let grandchild_id = rw_types::SubagentId("tree-grandchild".to_owned());
         let grandchild_session = SessionId("tree-grandchild-session".to_owned());
 
         let root_sink = append_spawn(&storage, &parent, &child_id, &child_session).await;
@@ -14910,16 +15057,16 @@ mod tests {
         let mut record = rw_core::SubagentRecoveryRecord {
             parent_session_id: SessionId("parent".to_owned()),
             handle: rw_core::SubagentHandle {
-                subagent_id: rw_core::runtime_support::SubagentId("child".to_owned()),
+                subagent_id: rw_types::SubagentId("child".to_owned()),
                 session_id: SessionId("child-session".to_owned()),
             },
             task: "fixture task".to_owned(),
             agent: "fixture agent".to_owned(),
             depth: 1,
             workspace_root: local.clone(),
-            isolation: rw_core::runtime_support::SubagentIsolation::Shared,
+            isolation: rw_types::SubagentIsolation::Shared,
             worktree: None,
-            capabilities: rw_core::runtime_support::CapabilityManifest::default(),
+            capabilities: rw_tools::CapabilityManifest::default(),
             tool_names: Vec::new(),
             policy: rw_core::SubagentRecoveryPolicy {
                 model_alias: "fast".to_owned(),
@@ -15020,7 +15167,7 @@ mod tests {
         std::fs::write(lease.path().join("rewound.txt"), b"discard\n").expect("changed worktree");
         let lease_path = lease.path().to_path_buf();
         let parent_session_id = SessionId("parent".to_owned());
-        let subagent_id = rw_core::runtime_support::SubagentId("rewound-child".to_owned());
+        let subagent_id = rw_types::SubagentId("rewound-child".to_owned());
         let child_session_id = SessionId("rewound-child-session".to_owned());
         let record = rw_core::SubagentRecoveryRecord {
             parent_session_id: parent_session_id.clone(),
@@ -15032,9 +15179,9 @@ mod tests {
             agent: "fixture agent".to_owned(),
             depth: 1,
             workspace_root: std::fs::canonicalize(&repository).expect("canonical repository"),
-            isolation: rw_core::runtime_support::SubagentIsolation::Worktree,
+            isolation: rw_types::SubagentIsolation::Worktree,
             worktree: Some(lease.durable_record()),
-            capabilities: rw_core::runtime_support::CapabilityManifest::default(),
+            capabilities: rw_tools::CapabilityManifest::default(),
             tool_names: Vec::new(),
             policy: rw_core::SubagentRecoveryPolicy {
                 model_alias: "fast".to_owned(),
@@ -15131,7 +15278,7 @@ mod tests {
         assert!(String::from_utf8_lossy(&git(&["status", "--porcelain=v1"]).stdout).is_empty());
 
         let mut pending = record;
-        pending.handle.subagent_id = rw_core::runtime_support::SubagentId("pending".to_owned());
+        pending.handle.subagent_id = rw_types::SubagentId("pending".to_owned());
         pending.handle.session_id = SessionId("pending-session".to_owned());
         pending.worktree = None;
         pending.phase = rw_core::SubagentRecoveryPhase::Pending;
@@ -15503,7 +15650,7 @@ mod tests {
             .await;
         assert!(matches!(
             first.status(),
-            rw_core::runtime_support::HookDispatchStatus::Blocked { hook_id, .. }
+            rw_ext::HookDispatchStatus::Blocked { hook_id, .. }
                 if hook_id == "builtin.nested_instructions"
         ));
 
@@ -15591,7 +15738,7 @@ mod tests {
             .await;
         assert!(matches!(
             blocked.status(),
-            rw_core::runtime_support::HookDispatchStatus::Blocked { .. }
+            rw_ext::HookDispatchStatus::Blocked { .. }
         ));
         assert!(
             dispatcher
@@ -15899,7 +16046,7 @@ mod tests {
             .await;
         assert!(matches!(
             blocked.status(),
-            rw_core::runtime_support::HookDispatchStatus::Blocked { hook_id, message }
+            rw_ext::HookDispatchStatus::Blocked { hook_id, message }
                 if hook_id == "deny-rust-edit" && message.contains("fixture diagnostic")
         ));
         let calls = executor.calls.lock().expect("calls");
@@ -16648,7 +16795,7 @@ mod tests {
 
         let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
             .arg("--exact")
-            .arg("runtime::tests::configured_websearch_replay_network_denied_helper")
+            .arg("session_runtime::tests::configured_websearch_replay_network_denied_helper")
             .arg("--nocapture")
             .env("ROTTWEILER_WEBSEARCH_REPLAY_FIXTURE", fixtures.path())
             .status()
@@ -17173,8 +17320,8 @@ mod tests {
 
     #[test]
     fn untrusted_root_removes_lsp_server_before_any_spawn_boundary() {
-        let server = rw_core::runtime_support::LspServerConfig {
-            language: rw_core::runtime_support::Language::Rust,
+        let server = rw_tools::LspServerConfig {
+            language: rw_tools::Language::Rust,
             command: PathBuf::from("/trusted/outside/rust-analyzer"),
             args: Vec::new(),
         };
@@ -17642,6 +17789,7 @@ mod tests {
             .join(&parent.0)
             .join("events.jsonl");
         let parent_bytes = std::fs::read(&parent_path).expect("parent bytes");
+        let fork_modes = rw_ext::ModeRegistry::builtins().expect("built-in modes");
         fork_hosted_session_storage(
             &storage,
             &workspace,
@@ -17652,6 +17800,7 @@ mod tests {
             false,
             driver.clone(),
             None,
+            &fork_modes,
         )
         .expect("fork");
         assert_eq!(
@@ -17710,6 +17859,76 @@ mod tests {
                 .files
                 .len(),
             1
+        );
+
+        let invalid_child = SessionId("fork-storage-invalid-mode".to_owned());
+        let parent_roots_path =
+            checkpoint_root(&storage, &workspace, &parent.0).join("workspace-roots.json");
+        let parent_roots_before = std::fs::read(&parent_roots_path).expect("parent roots journal");
+        let mut parent_log = SessionEventLog::open(&storage, &parent.0).expect("parent log");
+        parent_log
+            .append(EngineEvent::ModeChanged {
+                meta: meta(7),
+                mode: rw_core::ModeId("removed-custom-mode".to_owned()),
+                definition_fingerprint: Some("stale-fingerprint".to_owned()),
+            })
+            .expect("custom mode event");
+        drop(parent_log);
+        let error = fork_hosted_session_storage(
+            &storage,
+            &workspace,
+            &parent.0,
+            &invalid_child.0,
+            2,
+            Some(SequenceId(7)),
+            true,
+            driver,
+            None,
+            &fork_modes,
+        )
+        .expect_err("removed custom mode must reject fork");
+        assert!(error.to_string().contains("mode projection"));
+        assert!(!storage.join("sessions").join(&invalid_child.0).exists());
+        assert!(!checkpoint_root(&storage, &workspace, &invalid_child.0).exists());
+        assert_eq!(
+            std::fs::read(parent_roots_path).expect("parent roots remain readable"),
+            parent_roots_before
+        );
+    }
+
+    #[test]
+    fn local_and_hosted_resume_reject_missing_nonzero_root_journal() {
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let missing = root.path().join("missing-checkpoint-root");
+        for result in [
+            preview_persisted_workspace_roots(
+                &missing,
+                &workspace,
+                std::slice::from_ref(&workspace),
+                1,
+            ),
+            restore_persisted_workspace_roots(
+                &missing,
+                &workspace,
+                std::slice::from_ref(&workspace),
+                1,
+            ),
+        ] {
+            let error = result.expect_err("nonzero generation requires its root journal");
+            assert!(error.to_string().contains("missing its local root journal"));
+        }
+        assert!(
+            preview_persisted_workspace_roots(
+                &missing,
+                &workspace,
+                std::slice::from_ref(&workspace),
+                0,
+            )
+            .expect("generation zero permits no journal")
+            .is_none()
         );
     }
 
@@ -17826,7 +18045,7 @@ mod tests {
             max_output_tokens: 512,
             temperature: None,
             thinking: ThinkingLevel::Off,
-            cache_hint: Some(rw_core::runtime_support::CacheHint {
+            cache_hint: Some(rw_providers::CacheHint {
                 stable_prefix_turns: 1,
                 tools_in_prefix: true,
             }),
@@ -17887,6 +18106,7 @@ mod tests {
             permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
             hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
             commands: Arc::new(builtin_command_registry().expect("commands")),
+            modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
             event_sink: Arc::new(rw_core::NoopSessionEventSink::default()),
             event_clock: Arc::new(SystemEventClock),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
@@ -19231,6 +19451,7 @@ mod tests {
             permissions: Arc::new(PermissionGate::new(PermissionDecision::Allow)),
             hooks: Arc::new(builtin_hook_dispatcher().expect("hooks")),
             commands: Arc::new(builtin_command_registry().expect("commands")),
+            modes: Arc::new(rw_ext::ModeRegistry::builtins().expect("built-in modes")),
             event_sink: sink,
             event_clock: Arc::new(SystemEventClock),
             secret_redactor: Arc::new(rw_core::NoopSecretRedactor),
@@ -19329,7 +19550,7 @@ mod tests {
 
             async fn finished(
                 &self,
-                result: &rw_core::runtime_support::SubagentResult,
+                result: &rw_types::SubagentResult,
             ) -> std::result::Result<(), rw_core::OrchestrationError> {
                 self.sink
                     .append(EngineEvent::SubagentFinished {
@@ -19384,6 +19605,10 @@ mod tests {
                 ),
                 commands: Arc::new(
                     builtin_command_registry()
+                        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
+                ),
+                modes: Arc::new(
+                    rw_ext::ModeRegistry::builtins()
                         .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?,
                 ),
                 event_sink: Arc::new(sink),
@@ -19448,7 +19673,7 @@ mod tests {
         let child_workspace = initial_lease.path().to_path_buf();
         let parent = SessionId("recovery-parent".to_owned());
         let handle = rw_core::SubagentHandle {
-            subagent_id: rw_core::runtime_support::SubagentId("recoverable-child".to_owned()),
+            subagent_id: rw_types::SubagentId("recoverable-child".to_owned()),
             session_id: SessionId("recoverable-child-session".to_owned()),
         };
         drop(
@@ -19473,7 +19698,7 @@ mod tests {
             agent: "fixture agent".to_owned(),
             depth: 1,
             workspace_root: canonical_repository.clone(),
-            isolation: rw_core::runtime_support::SubagentIsolation::Worktree,
+            isolation: rw_types::SubagentIsolation::Worktree,
             worktree: Some(lease_record.clone()),
             capabilities,
             tool_names: vec!["write".to_owned()],
@@ -19536,7 +19761,7 @@ mod tests {
         assert!(matches!(
             repaired.last(),
             Some(EngineEvent::SubagentFinished { result, .. })
-                if result.status == rw_core::runtime_support::SubagentStatus::Failed
+                if result.status == rw_types::SubagentStatus::Failed
         ));
         let effective = effective_subagent_events(&repaired).expect("effective repaired lifecycle");
         let recovered_manager = Arc::new(
@@ -19676,10 +19901,7 @@ mod tests {
             .wait(&follow_up)
             .await
             .expect("recovered follow-up result");
-        assert_eq!(
-            result.status,
-            rw_core::runtime_support::SubagentStatus::Completed
-        );
+        assert_eq!(result.status, rw_types::SubagentStatus::Completed);
         let recovered_artifact = result.diff_artifact.expect("recovered durable artifact");
         assert_eq!(
             std::fs::read(child_workspace.join("recovered.txt")).expect("worktree output"),
@@ -19834,7 +20056,7 @@ mod tests {
             &self,
             _event: &str,
             _payload: serde_json::Value,
-        ) -> std::result::Result<(), rw_core::runtime_support::plugin::PluginRpcError> {
+        ) -> std::result::Result<(), rw_ext::PluginRpcError> {
             std::future::pending().await
         }
     }
@@ -19845,8 +20067,8 @@ mod tests {
             &self,
             _event: &str,
             _payload: serde_json::Value,
-        ) -> std::result::Result<(), rw_core::runtime_support::plugin::PluginRpcError> {
-            Err(rw_core::runtime_support::plugin::PluginRpcError {
+        ) -> std::result::Result<(), rw_ext::PluginRpcError> {
+            Err(rw_ext::PluginRpcError {
                 code: "fixture_failure".to_owned(),
                 message: "fixture delivery failed".to_owned(),
             })

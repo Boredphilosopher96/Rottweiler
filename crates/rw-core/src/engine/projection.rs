@@ -26,6 +26,7 @@ pub struct SessionRecoveredState {
     pub provider: Option<String>,
     pub thinking: Option<ThinkingLevel>,
     pub mode: SessionMode,
+    pub mode_id: Option<ModeId>,
     pub permission_mode: Option<crate::HeadlessPermissionMode>,
     pub pending_plan: Option<PlanArtifact>,
     pub approved_plan: Option<PlanArtifact>,
@@ -84,10 +85,12 @@ pub enum SessionProjectionError {
     InvalidTurnId(String),
     #[error("invalid durable user-shell transition: {0}")]
     InvalidShellTransition(String),
-    #[error("unknown built-in mode id `{0}` in durable session")]
-    InvalidMode(String),
     #[error("unknown permission mode id `{0}` in durable session")]
     InvalidPermissionMode(String),
+    #[error("unknown mode id `{0}` in durable session")]
+    InvalidMode(String),
+    #[error("durable mode definition `{0}` is missing its fingerprint or changed")]
+    ModeDefinitionChanged(String),
     #[error("invalid durable workspace-root generation")]
     InvalidWorkspaceGeneration,
 }
@@ -142,6 +145,7 @@ pub(super) fn recovered_pending_event(
         | EngineEvent::SessionReviewReady { .. }
         | EngineEvent::SessionReviewUpdated { .. }
         | EngineEvent::CommandDescriptorsListed { .. }
+        | EngineEvent::ModesListed { .. }
         | EngineEvent::ModelsListed { .. }
         | EngineEvent::SettingsListed { .. }
         | EngineEvent::McpServersListed { .. }
@@ -545,9 +549,13 @@ pub(super) fn recovered_pending_event(
         EngineEvent::ModelContextCleared { strategy, .. } => PendingEvent::ModelContextCleared {
             strategy: *strategy,
         },
-        EngineEvent::ModeChanged { mode, .. } => PendingEvent::ModeChanged {
-            mode: parse_session_mode(&mode.0)
-                .ok_or_else(|| SessionProjectionError::InvalidMode(mode.0.clone()))?,
+        EngineEvent::ModeChanged {
+            mode,
+            definition_fingerprint,
+            ..
+        } => PendingEvent::ModeChanged {
+            mode: mode.clone(),
+            definition_fingerprint: definition_fingerprint.clone(),
         },
         EngineEvent::PermissionModeChanged { mode, .. } => PendingEvent::PermissionModeChanged {
             mode: mode.as_deref().map(parse_permission_mode).transpose()?,
@@ -611,6 +619,48 @@ pub(super) fn recovered_pending_event(
 pub fn project_session_events(
     events: &[EngineEvent],
 ) -> Result<SessionRecoveredState, SessionProjectionError> {
+    project_session_events_resolving_mode(events, |mode, _recorded_fingerprint| {
+        Ok(parse_session_mode(&mode.0).unwrap_or(SessionMode::Execute))
+    })
+}
+
+/// Projects a session log with the exact runtime mode registry. Unlike the
+/// protocol-only projector, this preserves custom permission floors and fails
+/// closed when a durable custom mode is no longer registered.
+///
+/// # Errors
+///
+/// Returns the normal projection errors or [`SessionProjectionError::InvalidMode`]
+/// when a durable mode id is absent from the supplied registry.
+pub fn project_session_events_with_modes(
+    events: &[EngineEvent],
+    modes: &ModeRegistry,
+) -> Result<SessionRecoveredState, SessionProjectionError> {
+    project_session_events_resolving_mode(events, |mode, recorded_fingerprint| {
+        let definition = modes
+            .get(&mode.0)
+            .ok_or_else(|| SessionProjectionError::InvalidMode(mode.0.clone()))?;
+        match recorded_fingerprint {
+            Some(recorded) if recorded == &definition.semantic_fingerprint() => {}
+            None if matches!(mode.0.as_str(), "discuss" | "plan" | "execute") => {}
+            _ => {
+                return Err(SessionProjectionError::ModeDefinitionChanged(
+                    mode.0.clone(),
+                ));
+            }
+        }
+        Ok(mode_permission_base(definition))
+    })
+}
+
+#[allow(clippy::match_same_arms, clippy::too_many_lines)]
+fn project_session_events_resolving_mode(
+    events: &[EngineEvent],
+    mut resolve_mode: impl FnMut(
+        &ModeId,
+        Option<&String>,
+    ) -> Result<SessionMode, SessionProjectionError>,
+) -> Result<SessionRecoveredState, SessionProjectionError> {
     let mut conversation = Vec::new();
     let mut title = None;
     let mut conversation_agent_turns = Vec::new();
@@ -635,10 +685,21 @@ pub fn project_session_events(
     let mut selected_provider = None;
     let mut selected_thinking = None;
     let mut mode = SessionMode::Execute;
+    let mut mode_id = None;
     let mut permission_mode = None;
     let mut pending_plan = None;
     let mut approved_plan = None;
     let mut plan_gate_active = false;
+    let mut turn_mode_states = BTreeMap::<
+        u64,
+        (
+            SessionMode,
+            Option<ModeId>,
+            Option<PlanArtifact>,
+            Option<PlanArtifact>,
+            bool,
+        ),
+    >::new();
     let mut active_shell = None::<RecoveredUserShell>;
     let mut workspace_generation = 0_u64;
     let mut workspace_roots = Vec::new();
@@ -788,6 +849,21 @@ pub fn project_session_events(
                     partial_tool_blocks.clear();
                 }
                 completed_turns = u64::try_from(turn_ends.len()).unwrap_or(u64::MAX);
+                if let Some((
+                    restored_mode,
+                    restored_mode_id,
+                    restored_pending_plan,
+                    restored_approved_plan,
+                    restored_plan_gate,
+                )) = turn_mode_states.get(to_turn).cloned()
+                {
+                    mode = restored_mode;
+                    mode_id = restored_mode_id;
+                    pending_plan = restored_pending_plan;
+                    approved_plan = restored_approved_plan;
+                    plan_gate_active = restored_plan_gate;
+                }
+                turn_mode_states.retain(|turn, _| *turn <= *to_turn);
                 pending_questions
                     .retain(|_, question: &mut RecoveredQuestion| question.agent_turn <= *to_turn);
                 context_surgery.retain(|action: &ContextSurgeryAction| {
@@ -811,6 +887,16 @@ pub fn project_session_events(
                     usage: (*usage).into(),
                     cost: cost.clone(),
                 });
+                turn_mode_states.insert(
+                    *turn,
+                    (
+                        mode,
+                        mode_id.clone(),
+                        pending_plan.clone(),
+                        approved_plan.clone(),
+                        plan_gate_active,
+                    ),
+                );
             }
             PendingEvent::TextDelta { turn, text } if active_turn == Some(*turn) => {
                 append_text(&mut partial_assistant_blocks, text);
@@ -1026,9 +1112,13 @@ pub fn project_session_events(
                 context_surgery.clear();
                 pruned_tool_outputs.clear();
             }
-            PendingEvent::ModeChanged { mode: changed } => {
-                mode = *changed;
-                if *changed == SessionMode::Plan {
+            PendingEvent::ModeChanged {
+                mode: changed,
+                definition_fingerprint,
+            } => {
+                mode_id = Some(changed.clone());
+                mode = resolve_mode(changed, definition_fingerprint.as_ref())?;
+                if mode == SessionMode::Plan {
                     pending_plan = None;
                     approved_plan = None;
                     plan_gate_active = true;
@@ -1180,6 +1270,7 @@ pub fn project_session_events(
         provider: selected_provider,
         thinking: selected_thinking,
         mode,
+        mode_id,
         permission_mode,
         pending_plan,
         approved_plan,

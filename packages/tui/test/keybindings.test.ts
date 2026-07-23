@@ -21,6 +21,7 @@ describe("configurable TUI keybindings", () => {
     const standard = compileKeybindings()
     expect(standard.preset).toBe("standard")
     expect(standard.bindings("global").get("ctrl+p")).toBe("open_command_picker")
+    expect(standard.bindings("global").get("alt+m")).toBe("open_model_picker")
     expect(standard.bindings("global").get("shift+tab")).toBe("cycle_agent_mode")
     expect(standard.bindings("global").get("ctrl+v")).toBe("paste_image")
     expect(standard.bindings("standard").get("ctrl+e")).toBe("open_external_editor")
@@ -144,6 +145,19 @@ describe("standard TUI keyboard safety", () => {
     expect(legacyControlSpace).toMatchObject({ name: "space", ctrl: true, source: "raw" })
     expect(bindings.resolve("standard", controlSpace as unknown as KeyEvent)).toBe("block_toggle")
     expect(bindings.resolve("standard", legacyControlSpace as unknown as KeyEvent)).toBe("block_toggle")
+  })
+
+  test("opens the model picker with physical Alt+M in enhanced and legacy terminals", () => {
+    const enhancedAltM = parseKeypress("\u001b[109;3u", { useKittyKeyboard: true })
+    const legacyAltM = parseKeypress("\u001bm", { useKittyKeyboard: true })
+    const legacyControlM = parseKeypress("\r", { useKittyKeyboard: true })
+    const bindings = compileKeybindings()
+
+    expect(enhancedAltM).toMatchObject({ name: "m", option: true, source: "kitty" })
+    expect(legacyAltM).toMatchObject({ name: "m", meta: true, source: "raw" })
+    expect(bindings.resolve("global", enhancedAltM as unknown as KeyEvent)).toBe("open_model_picker")
+    expect(bindings.resolve("global", legacyAltM as unknown as KeyEvent)).toBe("open_model_picker")
+    expect(bindings.resolve("global", legacyControlM as unknown as KeyEvent)).toBeNull()
   })
 
   test("treats ambiguous legacy macOS Ctrl+A/E bytes as Command-arrow navigation", () => {

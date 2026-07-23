@@ -10,50 +10,38 @@ use std::{
 };
 
 use async_trait::async_trait;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use miette::{IntoDiagnostic, Result, miette};
-use rw_core::runtime_support::maybe_run_sandbox_helper;
 use rw_core::{
     ClientCommand, ClientId, CommandOutcome, CreateSessionRequest, DEFAULT_MODEL_CATALOG_URL,
-    EngineEvent, EngineHost, EngineHostConfig, GitHubCopilotLogin, OAuthLogin, ProviderApiKey,
-    ProviderLogin, ProviderLoginCancellation, SequenceId, SessionId, begin_provider_login,
-    refresh_model_catalog, store_provider_api_key,
+    EngineEvent, EngineHostConfig, GitHubCopilotLogin, OAuthLogin, ProviderApiKey, ProviderLogin,
+    ProviderLoginCancellation, SequenceId, SessionId, begin_provider_login, refresh_model_catalog,
+    store_provider_api_key,
 };
+use rw_runtime::{executable_config, session, session_history};
+use rw_tools::maybe_run_sandbox_helper;
 use tracing_subscriber::EnvFilter;
 
 mod doctor;
 mod extension_cli;
-mod history;
-#[allow(dead_code)]
-mod host_runtime;
 mod import;
-#[allow(dead_code)]
-mod m8_config;
-#[allow(dead_code)]
-mod m8_runtime;
 mod mcp_cli;
 mod mcp_server;
 mod plugin_cli;
 mod plugin_dev;
 #[allow(dead_code)]
-mod plugin_launcher;
-mod project_commands;
-#[allow(dead_code)]
 mod remote;
-mod runtime;
 #[allow(dead_code)]
 mod server;
 #[allow(dead_code)]
 mod shell_broker;
 mod stats;
-mod subagent_metadata;
 #[allow(dead_code)]
 mod supervisor;
 #[allow(dead_code)]
 mod tty;
 mod tui_config;
 mod upgrade;
-mod workflow_runtime;
 
 /// Normalizes rustix's platform-native device identifier without assuming the
 /// signed/unsigned width selected by a particular Unix libc ABI.
@@ -64,6 +52,7 @@ pub(crate) fn rustix_device_id<T: TryInto<u64>>(device: T) -> Option<u64> {
 
 /// Widens rustix's platform-native mode representation for stable bit tests.
 #[cfg(unix)]
+#[cfg(test)]
 pub(crate) fn rustix_mode_bits<T: Into<u32>>(mode: T) -> u32 {
     mode.into()
 }
@@ -76,42 +65,37 @@ struct Cli {
     #[arg(short = 'p', long, value_name = "PROMPT")]
     prompt: Option<String>,
     /// Rendering contract for print mode.
-    #[arg(long, value_enum, default_value_t = OutputFormat::Text, global = true)]
-    output_format: OutputFormat,
+    #[arg(long, value_enum)]
+    output_format: Option<OutputFormat>,
     /// Non-interactive permission policy. Omitted means the loaded config policy.
-    #[arg(long, value_enum, global = true)]
+    #[arg(long, value_enum)]
     permission_mode: Option<PermissionMode>,
     /// Maximum provider iterations permitted in one user turn.
-    #[arg(long, default_value_t = 32, global = true)]
-    max_turns: usize,
+    #[arg(long)]
+    max_turns: Option<usize>,
     /// Run the `OpenTUI` locally against an engine reached over SSH.
-    #[arg(long, value_name = "HOST", global = true)]
+    #[arg(long, value_name = "HOST")]
     remote: Option<String>,
     /// Workspace path on the remote engine host; defaults to the local path.
-    #[arg(long, value_name = "PATH", requires = "remote", global = true)]
+    #[arg(long, value_name = "PATH", requires = "remote")]
     remote_workspace: Option<PathBuf>,
     /// Keep the engine alive after the interactive client exits.
-    #[arg(long, global = true)]
+    #[arg(long)]
     detach: bool,
     /// Use the pre-M4 readline client instead of `OpenTUI`.
-    #[arg(long, global = true)]
+    #[arg(long)]
     line: bool,
     /// Add another canonical workspace root for tools and sandbox writes.
-    #[arg(long = "add-dir", value_name = "PATH", global = true)]
+    #[arg(long = "add-dir", value_name = "PATH")]
     add_dirs: Vec<PathBuf>,
     /// Enable executable project configuration without persisting trust.
-    #[arg(long, global = true)]
+    #[arg(long)]
     dangerously_trust: bool,
     /// Resume an exact durable session id.
-    #[arg(
-        long,
-        value_name = "SESSION",
-        conflicts_with = "continue_latest",
-        global = true
-    )]
+    #[arg(long, value_name = "SESSION", conflicts_with = "continue_latest")]
     resume: Option<String>,
     /// Continue the most recently updated durable session.
-    #[arg(long = "continue", conflicts_with = "resume", global = true)]
+    #[arg(long = "continue", conflicts_with = "resume")]
     continue_latest: bool,
     /// Network-free provider recording directory used by deterministic tests.
     #[arg(long, hide = true, value_name = "DIRECTORY")]
@@ -128,16 +112,16 @@ struct Cli {
     )]
     in_memory_replay_script: Option<PathBuf>,
     /// Delay each scripted provider event for crash/interrupt acceptance tests.
-    #[arg(long, hide = true, default_value_t = 0)]
-    record_script_delay_ms: u64,
+    #[arg(long, hide = true)]
+    record_script_delay_ms: Option<u64>,
     /// Emit deterministic timing markers for the release performance smoke.
     #[arg(long, hide = true)]
     perf_markers: bool,
     /// Provider name stored in the deterministic replay directory.
-    #[arg(long, hide = true, default_value = "cli-replay")]
-    replay_provider: String,
+    #[arg(long, hide = true)]
+    replay_provider: Option<String>,
     /// Override the active provider-neutral model alias.
-    #[arg(long, value_name = "ALIAS", global = true)]
+    #[arg(long, value_name = "ALIAS")]
     model: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -168,6 +152,129 @@ impl PermissionMode {
     }
 }
 
+impl From<PermissionMode> for rw_runtime::PermissionMode {
+    fn from(value: PermissionMode) -> Self {
+        match value {
+            PermissionMode::Strict => Self::Strict,
+            PermissionMode::AutoSafe => Self::AutoSafe,
+            PermissionMode::Yolo => Self::Yolo,
+        }
+    }
+}
+
+impl From<OutputFormat> for rw_runtime::OutputFormat {
+    fn from(value: OutputFormat) -> Self {
+        match value {
+            OutputFormat::Text => Self::Text,
+            OutputFormat::Json => Self::Json,
+            OutputFormat::StreamJson => Self::StreamJson,
+        }
+    }
+}
+
+const DEFAULT_MAX_TURNS: usize = 32;
+
+#[derive(Debug, Default, Args)]
+struct EnginePolicyArgs {
+    /// Non-interactive permission policy. Omitted means the loaded config policy.
+    #[arg(
+        id = "engine_permission_mode",
+        long = "permission-mode",
+        value_name = "PERMISSION_MODE",
+        value_enum,
+        global = true
+    )]
+    permission_mode: Option<PermissionMode>,
+    /// Maximum provider iterations permitted in one user turn.
+    #[arg(
+        id = "engine_max_turns",
+        long = "max-turns",
+        value_name = "MAX_TURNS",
+        global = true
+    )]
+    max_turns: Option<usize>,
+    /// Add another canonical workspace root for tools and sandbox writes.
+    #[arg(
+        id = "engine_add_dirs",
+        long = "add-dir",
+        value_name = "PATH",
+        global = true
+    )]
+    add_dirs: Vec<PathBuf>,
+    /// Enable executable project configuration without persisting trust.
+    #[arg(
+        id = "engine_dangerously_trust",
+        long = "dangerously-trust",
+        global = true
+    )]
+    dangerously_trust: bool,
+}
+
+#[derive(Debug, Default, Args)]
+struct ScriptedProviderArgs {
+    /// Use a deterministic in-memory provider-event script without fixture I/O.
+    #[arg(
+        id = "scripted_in_memory_replay_script",
+        long = "in-memory-replay-script",
+        hide = true,
+        value_name = "SCRIPT",
+        global = true
+    )]
+    in_memory_replay_script: Option<PathBuf>,
+    /// Delay each scripted provider event for crash/interrupt acceptance tests.
+    #[arg(
+        id = "scripted_record_script_delay_ms",
+        long = "record-script-delay-ms",
+        hide = true,
+        global = true
+    )]
+    record_script_delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Args)]
+struct PromptOptions {
+    /// Rendering contract for the assembled prompt.
+    #[arg(
+        id = "prompt_output_format",
+        long = "output-format",
+        value_name = "OUTPUT_FORMAT",
+        value_enum,
+        global = true
+    )]
+    output_format: Option<OutputFormat>,
+    #[command(flatten)]
+    engine: EnginePolicyArgs,
+    /// Resume an exact durable session id.
+    #[arg(
+        id = "prompt_resume",
+        long = "resume",
+        value_name = "SESSION",
+        global = true
+    )]
+    resume: Option<String>,
+    /// Override the active provider-neutral model alias.
+    #[arg(
+        id = "prompt_model",
+        long = "model",
+        value_name = "ALIAS",
+        global = true
+    )]
+    model: Option<String>,
+}
+
+#[derive(Debug, Default, Args)]
+struct MachineOutputArgs {
+    /// Rendering contract for machine-readable output.
+    #[arg(
+        id = "machine_output_format",
+        long = "output-format",
+        value_name = "OUTPUT_FORMAT",
+        value_enum,
+        global = true
+    )]
+    output_format: Option<OutputFormat>,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Internal release-installer durability helper.
@@ -179,6 +286,16 @@ enum Command {
     },
     /// Run the authenticated headless engine server.
     Serve {
+        #[command(flatten)]
+        engine: EnginePolicyArgs,
+        #[command(flatten)]
+        scripted_provider: ScriptedProviderArgs,
+        /// Override the active provider-neutral model alias.
+        #[arg(long, value_name = "ALIAS")]
+        model: Option<String>,
+        /// Keep the engine alive after the interactive client exits.
+        #[arg(long)]
+        detach: bool,
         /// Unix socket path; defaults to `ROTTWEILER_ENGINE_SOCKET`.
         #[arg(long, value_name = "PATH")]
         socket: Option<PathBuf>,
@@ -197,11 +314,20 @@ enum Command {
     },
     /// Inspect an assembled model prompt without calling a provider.
     Prompt {
+        #[command(flatten)]
+        options: PromptOptions,
         #[command(subcommand)]
         command: PromptCommand,
     },
     /// Inspect Rottweiler configuration.
     Config {
+        /// Enable executable project configuration without persisting trust.
+        #[arg(
+            id = "config_dangerously_trust",
+            long = "dangerously-trust",
+            global = true
+        )]
+        dangerously_trust: bool,
         #[command(subcommand)]
         command: ConfigCommand,
     },
@@ -232,11 +358,22 @@ enum Command {
     },
     /// Expose approved Rottweiler tools and connection-owned sessions over MCP.
     McpServer {
+        #[command(flatten)]
+        engine: EnginePolicyArgs,
+        #[command(flatten)]
+        scripted_provider: ScriptedProviderArgs,
         #[command(subcommand)]
         command: McpServerCommand,
     },
     /// Manage configured MCP clients.
     Mcp {
+        /// Enable executable project configuration without persisting trust.
+        #[arg(
+            id = "mcp_dangerously_trust",
+            long = "dangerously-trust",
+            global = true
+        )]
+        dangerously_trust: bool,
         #[command(subcommand)]
         command: McpCommand,
     },
@@ -262,11 +399,15 @@ enum Command {
     },
     /// Search durable session titles and transcripts.
     Sessions {
+        #[command(flatten)]
+        output: MachineOutputArgs,
         #[command(subcommand)]
         command: SessionsCommand,
     },
     /// Report bounded historical tokens, costs, cache savings, and tool use.
     Stats {
+        #[command(flatten)]
+        output: MachineOutputArgs,
         /// Limit the report to this session and its durable subagent descendants.
         #[arg(long, value_name = "SESSION")]
         session: Option<String>,
@@ -282,6 +423,8 @@ enum Command {
     },
     /// Import declarative configuration without reading credentials or executing content.
     Import {
+        #[command(flatten)]
+        output: MachineOutputArgs,
         #[arg(value_enum)]
         source: import::ImportSource,
         /// Source project/config directory.
@@ -299,6 +442,8 @@ enum Command {
     },
     /// Diagnose configuration, credentials, sandbox, terminal, and providers.
     Doctor {
+        #[command(flatten)]
+        output: MachineOutputArgs,
         /// Opt in to bounded provider reachability and credential-validation probes.
         #[arg(long)]
         network: bool,
@@ -470,9 +615,9 @@ enum ExtensionRegistryCommand {
 
 #[derive(Clone, Copy, Debug, Subcommand)]
 enum TrustCommand {
-    /// Show the exact executable inventory and its trust state.
+    /// Show the exact project extension inventory and its trust state.
     Status,
-    /// Trust the exact currently displayed executable inventory.
+    /// Trust the exact currently displayed project extension inventory.
     Grant,
     /// Revoke the current workspace decision.
     Revoke,
@@ -502,12 +647,16 @@ enum ConfigCommand {
 enum ModelsCommand {
     /// List cached concrete models; use --refresh for live provider discovery.
     List {
+        #[command(flatten)]
+        output: MachineOutputArgs,
         /// Contact configured providers and update the private cache.
         #[arg(long)]
         refresh: bool,
     },
     /// Show one exact cached `provider/model` record.
     Show {
+        #[command(flatten)]
+        output: MachineOutputArgs,
         /// Concrete provider-qualified model id.
         id: String,
         /// Contact configured providers and update the private cache.
@@ -539,6 +688,190 @@ enum AuthCommand {
     },
 }
 
+fn validate_cli_option_scope(cli: &Cli) -> Result<()> {
+    let Some(command) = cli.command.as_ref() else {
+        return validate_default_command_options(cli);
+    };
+
+    let supports_output = command_supports_output(command);
+    let supports_engine_policy = matches!(
+        command,
+        Command::Serve { .. } | Command::Prompt { .. } | Command::McpServer { .. }
+    );
+    let supports_workspace_roots = supports_engine_policy;
+    let supports_project_trust = matches!(
+        command,
+        Command::Serve { .. }
+            | Command::Prompt { .. }
+            | Command::Config { .. }
+            | Command::McpServer { .. }
+            | Command::Mcp { .. }
+    );
+    let supports_model = matches!(command, Command::Serve { .. } | Command::Prompt { .. });
+    let supports_detach = matches!(command, Command::Serve { .. });
+    let supports_resume = matches!(command, Command::Prompt { .. });
+    let supports_scripted_provider =
+        matches!(command, Command::Serve { .. } | Command::McpServer { .. });
+
+    let mut invalid = Vec::new();
+    if cli.prompt.is_some() {
+        invalid.push("--prompt");
+    }
+    if cli.output_format.is_some() && !supports_output {
+        invalid.push("--output-format");
+    }
+    if cli.permission_mode.is_some() && !supports_engine_policy {
+        invalid.push("--permission-mode");
+    }
+    if cli.max_turns.is_some() && !supports_engine_policy {
+        invalid.push("--max-turns");
+    }
+    if cli.remote.is_some() {
+        invalid.push("--remote");
+    }
+    if cli.remote_workspace.is_some() {
+        invalid.push("--remote-workspace");
+    }
+    if cli.detach && !supports_detach {
+        invalid.push("--detach");
+    }
+    if cli.line {
+        invalid.push("--line");
+    }
+    if !cli.add_dirs.is_empty() && !supports_workspace_roots {
+        invalid.push("--add-dir");
+    }
+    if cli.dangerously_trust && !supports_project_trust {
+        invalid.push("--dangerously-trust");
+    }
+    if cli.resume.is_some() && !supports_resume {
+        invalid.push("--resume");
+    }
+    if cli.continue_latest {
+        invalid.push("--continue");
+    }
+    if cli.replay_dir.is_some() {
+        invalid.push("--replay-dir");
+    }
+    if cli.record_replay_script.is_some() {
+        invalid.push("--record-replay-script");
+    }
+    if cli.in_memory_replay_script.is_some() && !supports_scripted_provider {
+        invalid.push("--in-memory-replay-script");
+    }
+    if cli.record_script_delay_ms.is_some() && !supports_scripted_provider {
+        invalid.push("--record-script-delay-ms");
+    }
+    if cli.perf_markers {
+        invalid.push("--perf-markers");
+    }
+    if cli.replay_provider.is_some() {
+        invalid.push("--replay-provider");
+    }
+    if cli.model.is_some() && !supports_model {
+        invalid.push("--model");
+    }
+
+    if invalid.is_empty() {
+        Ok(())
+    } else {
+        Err(miette!(
+            "{} cannot be used with this subcommand",
+            invalid.join(", ")
+        ))
+    }
+}
+
+fn command_supports_output(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Prompt { .. }
+            | Command::Models {
+                command: ModelsCommand::List { .. } | ModelsCommand::Show { .. },
+            }
+            | Command::Sessions { .. }
+            | Command::Stats { .. }
+            | Command::Import { .. }
+            | Command::Doctor { .. }
+    )
+}
+
+fn validate_default_command_options(cli: &Cli) -> Result<()> {
+    let headless_or_line = cli.prompt.is_some()
+        || cli.line
+        || cli.replay_dir.is_some()
+        || cli.record_replay_script.is_some()
+        || cli.perf_markers;
+    if cli.output_format.is_some() && !headless_or_line {
+        return Err(miette!(
+            "--output-format requires --prompt, --line, or a replay/performance run"
+        ));
+    }
+    if cli.replay_provider.is_some()
+        && cli.replay_dir.is_none()
+        && cli.in_memory_replay_script.is_none()
+    {
+        return Err(miette!(
+            "--replay-provider requires --replay-dir or --in-memory-replay-script"
+        ));
+    }
+    if cli.record_script_delay_ms.is_some()
+        && cli.record_replay_script.is_none()
+        && cli.in_memory_replay_script.is_none()
+    {
+        return Err(miette!(
+            "--record-script-delay-ms requires a scripted provider"
+        ));
+    }
+    Ok(())
+}
+
+fn merge_cli_option<T>(name: &str, root: Option<T>, subcommand: Option<T>) -> Result<Option<T>> {
+    match (root, subcommand) {
+        (Some(_), Some(_)) => Err(miette!(
+            "{name} was supplied both before and after the subcommand"
+        )),
+        (Some(value), None) | (None, Some(value)) => Ok(Some(value)),
+        (None, None) => Ok(None),
+    }
+}
+
+fn merge_workspace_roots(mut root: Vec<PathBuf>, subcommand: Vec<PathBuf>) -> Vec<PathBuf> {
+    root.extend(subcommand);
+    root
+}
+
+fn output_format(
+    root: Option<OutputFormat>,
+    subcommand: Option<OutputFormat>,
+) -> Result<OutputFormat> {
+    Ok(merge_cli_option("--output-format", root, subcommand)?.unwrap_or_default())
+}
+
+fn max_turns(root: Option<usize>, subcommand: Option<usize>) -> Result<usize> {
+    Ok(merge_cli_option("--max-turns", root, subcommand)?.unwrap_or(DEFAULT_MAX_TURNS))
+}
+
+fn scripted_provider_options(
+    root_script: Option<PathBuf>,
+    subcommand_script: Option<PathBuf>,
+    root_delay_ms: Option<u64>,
+    subcommand_delay_ms: Option<u64>,
+) -> Result<(Option<PathBuf>, u64)> {
+    let script = merge_cli_option("--in-memory-replay-script", root_script, subcommand_script)?;
+    let delay_ms = merge_cli_option(
+        "--record-script-delay-ms",
+        root_delay_ms,
+        subcommand_delay_ms,
+    )?;
+    if delay_ms.is_some() && script.is_none() {
+        return Err(miette!(
+            "--record-script-delay-ms requires --in-memory-replay-script"
+        ));
+    }
+    Ok((script, delay_ms.unwrap_or_default()))
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
@@ -551,6 +884,7 @@ async fn main() -> Result<()> {
         .init();
 
     let mut cli = Cli::parse();
+    validate_cli_option_scope(&cli)?;
     upgrade::show_pending_release_notes();
     if let Some(host) = cli.remote.as_deref() {
         if cli.command.is_some() || cli.prompt.is_some() || cli.line {
@@ -564,57 +898,86 @@ async fn main() -> Result<()> {
             sync_install_paths(&paths)?;
         }
         Some(Command::Serve {
+            engine,
+            scripted_provider,
+            model,
+            detach,
             socket,
             token_file,
             session,
             workspace,
             wait_for_execution_lease,
         }) => {
+            let permission_mode = merge_cli_option(
+                "--permission-mode",
+                cli.permission_mode,
+                engine.permission_mode,
+            )?;
+            let max_turns = max_turns(cli.max_turns, engine.max_turns)?;
+            let model = merge_cli_option("--model", cli.model, model)?;
+            let add_dirs = merge_workspace_roots(cli.add_dirs, engine.add_dirs);
+            let (in_memory_replay_script, record_script_delay_ms) = scripted_provider_options(
+                cli.in_memory_replay_script,
+                scripted_provider.in_memory_replay_script,
+                cli.record_script_delay_ms,
+                scripted_provider.record_script_delay_ms,
+            )?;
             run_serve(
                 socket,
                 token_file,
                 session,
                 workspace,
-                cli.permission_mode,
-                cli.max_turns,
-                cli.model,
-                cli.detach,
-                cli.add_dirs,
-                cli.dangerously_trust,
-                cli.in_memory_replay_script,
-                cli.record_script_delay_ms,
+                permission_mode,
+                max_turns,
+                model,
+                cli.detach || detach,
+                add_dirs,
+                cli.dangerously_trust || engine.dangerously_trust,
+                in_memory_replay_script,
+                record_script_delay_ms,
                 wait_for_execution_lease,
             )
             .await?;
         }
         Some(Command::Prompt {
+            options,
             command: PromptCommand::Dump { turn },
         }) => {
-            runtime::run(runtime::RunOptions {
+            let output_format = output_format(cli.output_format, options.output_format)?;
+            let permission_mode = merge_cli_option(
+                "--permission-mode",
+                cli.permission_mode,
+                options.engine.permission_mode,
+            )?;
+            let max_turns = max_turns(cli.max_turns, options.engine.max_turns)?;
+            let resume = merge_cli_option("--resume", cli.resume.clone(), options.resume)?;
+            let model = merge_cli_option("--model", cli.model, options.model)?;
+            session::run(session::RunOptions {
                 prompt: None,
-                output_format: cli.output_format,
-                permission_mode: cli.permission_mode,
-                max_turns: cli.max_turns,
-                resume: cli.resume.clone(),
-                continue_latest: cli.resume.is_none(),
+                output_format: output_format.into(),
+                permission_mode: permission_mode.map(Into::into),
+                max_turns,
+                continue_latest: resume.is_none(),
+                resume,
                 replay_dir: None,
                 record_replay_script: None,
                 in_memory_replay_script: None,
                 record_script_delay_ms: 0,
                 perf_markers: false,
                 replay_provider: "prompt-dump-offline".to_owned(),
-                model: cli.model,
-                additional_workspaces: cli.add_dirs,
-                dangerously_trust: cli.dangerously_trust,
-                action: runtime::RunAction::PromptDump { turn },
+                model,
+                additional_workspaces: merge_workspace_roots(cli.add_dirs, options.engine.add_dirs),
+                dangerously_trust: cli.dangerously_trust || options.engine.dangerously_trust,
+                action: session::RunAction::PromptDump { turn },
             })
             .await?;
         }
         Some(Command::Config {
+            dangerously_trust,
             command: ConfigCommand::Check { overrides },
         }) => {
             let loader = rw_store::config::ConfigLoader::from_environment().into_diagnostic()?;
-            let loader = if cli.dangerously_trust {
+            let loader = if cli.dangerously_trust || dangerously_trust {
                 loader.dangerously_trust_project()
             } else {
                 loader
@@ -645,55 +1008,68 @@ async fn main() -> Result<()> {
             );
         }
         Some(Command::Models {
-            command: ModelsCommand::List { refresh },
+            command: ModelsCommand::List { output, refresh },
         }) => {
-            let catalog = runtime::discover_model_catalog(refresh).await?;
-            if cli.output_format == OutputFormat::Json {
-                println!(
+            let catalog = session::discover_model_catalog(refresh).await?;
+            let output_format = output_format(cli.output_format, output.output_format)?;
+            match output_format {
+                OutputFormat::Json => println!(
                     "{}",
                     serde_json::to_string_pretty(&catalog).into_diagnostic()?
-                );
-            } else {
-                println!("Aliases:");
-                for alias in &catalog.aliases {
-                    println!("  {} -> {}", alias.alias.0, alias.candidates.join(", "));
+                ),
+                OutputFormat::StreamJson => {
+                    println!("{}", serde_json::to_string(&catalog).into_diagnostic()?);
                 }
-                println!("Models:");
-                for model in &catalog.models {
-                    let marker = if model.current { "*" } else { " " };
-                    let state = if model.available {
-                        "available"
-                    } else {
-                        "unavailable"
-                    };
-                    println!("{marker} {}  {}  {state}", model.id, model.display_name);
-                    if let Some(status) = &model.status {
-                        println!("    {status}");
+                OutputFormat::Text => {
+                    println!("Aliases:");
+                    for alias in &catalog.aliases {
+                        println!("  {} -> {}", alias.alias.0, alias.candidates.join(", "));
                     }
-                }
-                println!("Providers:");
-                for provider in &catalog.providers {
-                    println!(
-                        "  {}  {:?}  models={}  {}",
-                        provider.name,
-                        provider.auth_kind,
-                        provider.model_count,
-                        provider.status.as_deref().unwrap_or("ready")
-                    );
+                    println!("Models:");
+                    for model in &catalog.models {
+                        let marker = if model.current { "*" } else { " " };
+                        let state = if model.available {
+                            "available"
+                        } else {
+                            "unavailable"
+                        };
+                        println!("{marker} {}  {}  {state}", model.id, model.display_name);
+                        if let Some(status) = &model.status {
+                            println!("    {status}");
+                        }
+                    }
+                    println!("Providers:");
+                    for provider in &catalog.providers {
+                        println!(
+                            "  {}  {:?}  models={}  {}",
+                            provider.name,
+                            provider.auth_kind,
+                            provider.model_count,
+                            provider.status.as_deref().unwrap_or("ready")
+                        );
+                    }
                 }
             }
         }
         Some(Command::Models {
-            command: ModelsCommand::Show { id, refresh },
+            command:
+                ModelsCommand::Show {
+                    output,
+                    id,
+                    refresh,
+                },
         }) => {
-            let catalog = runtime::discover_model_catalog(refresh).await?;
+            let catalog = session::discover_model_catalog(refresh).await?;
             let model = catalog
                 .models
                 .iter()
                 .find(|model| model.id == id)
                 .ok_or_else(|| miette!("model {id:?} is not present in the live catalog"))?;
-            if cli.output_format == OutputFormat::Json {
+            let output_format = output_format(cli.output_format, output.output_format)?;
+            if output_format == OutputFormat::Json {
                 println!("{}", serde_json::to_string_pretty(model).into_diagnostic()?);
+            } else if output_format == OutputFormat::StreamJson {
+                println!("{}", serde_json::to_string(model).into_diagnostic()?);
             } else {
                 println!("id: {}", model.id);
                 println!("name: {}", model.display_name);
@@ -824,25 +1200,39 @@ async fn main() -> Result<()> {
             command: ExtensionCommand::Disable { name },
         }) => extension_cli::disable(&configuration_root()?.join("extensions"), &name)?,
         Some(Command::McpServer {
+            engine,
+            scripted_provider,
             command: McpServerCommand::Stdio { workspace },
         }) => {
             let workspace = workspace.unwrap_or(std::env::current_dir().into_diagnostic()?);
-            let workspace_roots = canonical_workspace_roots(&workspace, &cli.add_dirs)?;
-            let provider_mode = if let Some(script) = cli.in_memory_replay_script.as_deref() {
-                runtime::HostedProviderMode::DeterministicReplay {
+            let add_dirs = merge_workspace_roots(cli.add_dirs, engine.add_dirs);
+            let workspace_roots = canonical_workspace_roots(&workspace, &add_dirs)?;
+            let (in_memory_replay_script, record_script_delay_ms) = scripted_provider_options(
+                cli.in_memory_replay_script,
+                scripted_provider.in_memory_replay_script,
+                cli.record_script_delay_ms,
+                scripted_provider.record_script_delay_ms,
+            )?;
+            let provider_mode = if let Some(script) = in_memory_replay_script.as_deref() {
+                session::HostedProviderMode::DeterministicReplay {
                     provider_name: "mcp-server-replay".to_owned(),
                     scripts: serde_json::from_slice(&fs::read(script).into_diagnostic()?)
                         .into_diagnostic()?,
-                    event_delay_ms: cli.record_script_delay_ms,
+                    event_delay_ms: record_script_delay_ms,
                 }
             } else {
-                runtime::HostedProviderMode::Live
+                session::HostedProviderMode::Live
             };
-            let options = host_runtime::CliHostOptions::from_environment(
+            let options = rw_runtime::RuntimeHostOptions::from_environment(
                 workspace_roots,
-                cli.dangerously_trust,
-                cli.permission_mode,
-                cli.max_turns,
+                cli.dangerously_trust || engine.dangerously_trust,
+                merge_cli_option(
+                    "--permission-mode",
+                    cli.permission_mode,
+                    engine.permission_mode,
+                )?
+                .map(Into::into),
+                max_turns(cli.max_turns, engine.max_turns)?,
                 provider_mode,
                 false,
             )
@@ -860,14 +1250,15 @@ async fn main() -> Result<()> {
             .await?;
         }
         Some(Command::Mcp {
+            dangerously_trust,
             command: McpCommand::Login { server },
-        }) => mcp_cli::login(&server, cli.dangerously_trust).await?,
+        }) => mcp_cli::login(&server, cli.dangerously_trust || dangerously_trust).await?,
         Some(Command::Replay { session, jsonl }) => {
             let storage_root = configuration_root_path()?;
-            let events = history::load_events(&storage_root, &session)?;
+            let events = session_history::load_events(&storage_root, &session)?;
             if jsonl {
                 io::stdout()
-                    .write_all(&history::replay_jsonl(&events)?)
+                    .write_all(&session_history::replay_jsonl(&events)?)
                     .into_diagnostic()?;
             } else {
                 run_history_replay(&storage_root, &session, events).await?;
@@ -880,29 +1271,40 @@ async fn main() -> Result<()> {
             force,
         }) => {
             let storage_root = configuration_root_path()?;
-            let events = history::load_events(&storage_root, &session)?;
-            let redactor = rw_core::runtime_support::FixtureRedactor::default();
-            runtime::register_credential_environment(&redactor);
-            let exported = history::export_transcript(&session, &events, format.into(), &redactor)?;
+            let events = session_history::load_events(&storage_root, &session)?;
+            let redactor = rw_providers::FixtureRedactor::default();
+            session::register_credential_environment(&redactor);
+            let exported =
+                session_history::export_transcript(&session, &events, format.into(), &redactor)?;
             if let Some(path) = output {
-                history::write_transcript_export(&storage_root, &path, &exported, force)?;
+                session_history::write_transcript_export(&storage_root, &path, &exported, force)?;
             } else {
                 io::stdout().write_all(&exported).into_diagnostic()?;
             }
         }
         Some(Command::Sessions {
+            output,
             command: SessionsCommand::Search { query, limit },
         }) => {
-            let sessions = history::search_sessions(&configuration_root_path()?, &query, limit)?;
-            render_session_search(&sessions, cli.output_format)?;
+            let sessions =
+                session_history::search_sessions(&configuration_root_path()?, &query, limit)?;
+            render_session_search(
+                &sessions,
+                output_format(cli.output_format, output.output_format)?,
+            )?;
         }
         Some(Command::Sessions {
+            output,
             command: SessionsCommand::List { limit } | SessionsCommand::Recent { limit },
         }) => {
-            let sessions = history::list_sessions(&configuration_root_path()?, limit)?;
-            render_session_search(&sessions, cli.output_format)?;
+            let sessions = session_history::list_sessions(&configuration_root_path()?, limit)?;
+            render_session_search(
+                &sessions,
+                output_format(cli.output_format, output.output_format)?,
+            )?;
         }
         Some(Command::Stats {
+            output,
             session,
             from,
             through,
@@ -916,18 +1318,16 @@ async fn main() -> Result<()> {
                     through_day: through,
                 },
             )?;
-            if json
-                || matches!(
-                    cli.output_format,
-                    OutputFormat::Json | OutputFormat::StreamJson
-                )
-            {
-                println!("{}", serde_json::to_string(&report).into_diagnostic()?);
-            } else {
-                print!("{}", stats::render_text(&report));
+            let output_format = output_format(cli.output_format, output.output_format)?;
+            match (json, output_format) {
+                (true, _) | (false, OutputFormat::Json | OutputFormat::StreamJson) => {
+                    println!("{}", serde_json::to_string(&report).into_diagnostic()?);
+                }
+                (false, OutputFormat::Text) => print!("{}", stats::render_text(&report)),
             }
         }
         Some(Command::Import {
+            output,
             source,
             source_root,
             target,
@@ -941,20 +1341,20 @@ async fn main() -> Result<()> {
                 target_root,
                 dry_run,
             })?;
-            if json
-                || matches!(
-                    cli.output_format,
-                    OutputFormat::Json | OutputFormat::StreamJson
-                )
-            {
-                println!("{}", serde_json::to_string(&report).into_diagnostic()?);
-            } else {
-                for item in report.items {
-                    println!("{:?}\t{}\t{}", item.status, item.target, item.detail);
+            let output_format = output_format(cli.output_format, output.output_format)?;
+            match (json, output_format) {
+                (true, _) | (false, OutputFormat::Json | OutputFormat::StreamJson) => {
+                    println!("{}", serde_json::to_string(&report).into_diagnostic()?);
+                }
+                (false, OutputFormat::Text) => {
+                    for item in report.items {
+                        println!("{:?}\t{}\t{}", item.status, item.target, item.detail);
+                    }
                 }
             }
         }
         Some(Command::Doctor {
+            output,
             network,
             timeout_ms,
             json,
@@ -964,15 +1364,12 @@ async fn main() -> Result<()> {
                 timeout_ms,
             })
             .await;
-            if json
-                || matches!(
-                    cli.output_format,
-                    OutputFormat::Json | OutputFormat::StreamJson
-                )
-            {
-                println!("{}", serde_json::to_string(&report).into_diagnostic()?);
-            } else {
-                print!("{}", doctor::render_text(&report));
+            let output_format = output_format(cli.output_format, output.output_format)?;
+            match (json, output_format) {
+                (true, _) | (false, OutputFormat::Json | OutputFormat::StreamJson) => {
+                    println!("{}", serde_json::to_string(&report).into_diagnostic()?);
+                }
+                (false, OutputFormat::Text) => print!("{}", doctor::render_text(&report)),
             }
             if report.has_failures() {
                 return Err(miette!("doctor found one or more blocking issues"));
@@ -999,23 +1396,25 @@ async fn main() -> Result<()> {
                 || cli.record_replay_script.is_some()
                 || cli.perf_markers;
             if headless_or_line {
-                runtime::run(runtime::RunOptions {
+                session::run(session::RunOptions {
                     prompt: cli.prompt,
-                    output_format: cli.output_format,
-                    permission_mode: cli.permission_mode,
-                    max_turns: cli.max_turns,
+                    output_format: cli.output_format.unwrap_or_default().into(),
+                    permission_mode: cli.permission_mode.map(Into::into),
+                    max_turns: cli.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
                     resume: cli.resume,
                     continue_latest: cli.continue_latest,
                     replay_dir: cli.replay_dir,
                     record_replay_script: cli.record_replay_script,
                     in_memory_replay_script: cli.in_memory_replay_script,
-                    record_script_delay_ms: cli.record_script_delay_ms,
+                    record_script_delay_ms: cli.record_script_delay_ms.unwrap_or_default(),
                     perf_markers: cli.perf_markers,
-                    replay_provider: cli.replay_provider,
+                    replay_provider: cli
+                        .replay_provider
+                        .unwrap_or_else(|| "cli-replay".to_owned()),
                     model: cli.model,
                     additional_workspaces: cli.add_dirs,
                     dangerously_trust: cli.dangerously_trust,
-                    action: runtime::RunAction::Agent,
+                    action: session::RunAction::Agent,
                 })
                 .await?;
             } else {
@@ -1103,7 +1502,7 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
         || project_assessment.project_execution_enabled())
     .then(|| project_assessment.inventory());
     let (user_home, user_rottweiler) =
-        runtime::extension_user_roots(&storage_root.join("credentials.toml"));
+        session::extension_user_roots(&storage_root.join("credentials.toml"));
     let tui_keybindings = tui_config::load_keybindings(
         Some(&workspace),
         project_inventory,
@@ -1119,7 +1518,7 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
         .config
         .ui
         .theme;
-    let session_id = runtime::select_interactive_session(
+    let session_id = session::select_interactive_session(
         &storage_root,
         &workspace,
         cli.resume.as_deref(),
@@ -1144,12 +1543,12 @@ async fn run_local_tui(cli: &Cli) -> Result<()> {
             tui_keybindings,
             tui_theme,
             permission_mode: cli.permission_mode,
-            max_turns: cli.max_turns,
+            max_turns: cli.max_turns.unwrap_or(DEFAULT_MAX_TURNS),
             model: cli.model.clone(),
             additional_workspaces: workspace_roots.into_iter().skip(1).collect(),
             dangerously_trust: cli.dangerously_trust,
             in_memory_replay_script: cli.in_memory_replay_script.clone(),
-            record_script_delay_ms: cli.record_script_delay_ms,
+            record_script_delay_ms: cli.record_script_delay_ms.unwrap_or_default(),
             shell_target: Some(shell_broker::ShellTarget::Local),
             detach: cli.detach,
             restart_policy: supervisor::RestartPolicy::default(),
@@ -1373,7 +1772,7 @@ async fn run_history_replay_with_tui(
     tui: &Path,
 ) -> Result<()> {
     let (user_home, user_rottweiler) =
-        runtime::extension_user_roots(&storage_root.join("credentials.toml"));
+        session::extension_user_roots(&storage_root.join("credentials.toml"));
     let keybindings = tui_config::load_keybindings(None, None, &user_home, &user_rottweiler)
         .map_err(|error| miette!(error.to_string()))?;
     let through_sequence = events.last().map(|envelope| envelope.sequence);
@@ -1422,8 +1821,8 @@ fn historical_replay_items(
 ) -> Result<Vec<HistoricalReplayItem>> {
     let mut output = Vec::new();
     let mut budget = HistoricalReplayBudget {
-        bytes: history::MAX_HISTORY_BYTES,
-        events: history::MAX_HISTORY_EVENTS,
+        bytes: session_history::MAX_HISTORY_BYTES,
+        events: session_history::MAX_HISTORY_EVENTS,
         sessions: MAX_REPLAY_CHILD_SESSIONS,
     };
     let root_session = SessionId(session.to_owned());
@@ -1545,9 +1944,9 @@ mod historical_replay_tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
-    use rw_core::runtime_support::SubagentId;
     use rw_core::{ClientRole, CommandMeta, EventMeta, RequestId};
     use rw_store::session::SessionEventLog;
+    use rw_types::SubagentId;
 
     fn meta() -> CommandMeta {
         CommandMeta {
@@ -1909,7 +2308,7 @@ async fn run_serve(
     let paths = resolve_server_paths(socket, token_file, &storage_root)?;
     let session_id = session
         .or_else(|| std::env::var("ROTTWEILER_SESSION_ID").ok())
-        .map_or_else(runtime::new_session_id, Ok)?;
+        .map_or_else(session::new_session_id, Ok)?;
     let workspace = workspace.unwrap_or(std::env::current_dir().into_diagnostic()?);
     let workspace_roots = canonical_workspace_roots(&workspace, &add_dirs)?;
 
@@ -1939,19 +2338,19 @@ async fn run_serve(
         ensure_configuration_root(&storage_root)?;
         let workspace = workspace_roots[0].clone();
         let provider_mode = if let Some(script) = in_memory_replay_script.as_deref() {
-            runtime::HostedProviderMode::DeterministicReplay {
+            session::HostedProviderMode::DeterministicReplay {
                 provider_name: "local-tui-replay".to_owned(),
                 scripts: serde_json::from_slice(&fs::read(script).into_diagnostic()?)
                     .into_diagnostic()?,
                 event_delay_ms: record_script_delay_ms,
             }
         } else {
-            runtime::HostedProviderMode::Live
+            session::HostedProviderMode::Live
         };
-        let options = host_runtime::CliHostOptions::from_environment(
+        let options = rw_runtime::RuntimeHostOptions::from_environment(
             workspace_roots,
             dangerously_trust,
-            permission_mode,
+            permission_mode.map(Into::into),
             max_turns,
             provider_mode,
             wait_for_execution_lease,
@@ -1959,18 +2358,16 @@ async fn run_serve(
         .map_err(|error| miette!(error.to_string()))?;
         let max_sessions = options.config.engine.max_concurrent_sessions;
         let factory = Arc::new(
-            host_runtime::CliSessionFactory::new(options)
+            rw_runtime::RuntimeSessionFactory::new(options)
                 .map_err(|error| miette!(error.to_string()))?,
         );
-        let host = EngineHost::new(
-            EngineHostConfig {
+        let host = rw_runtime::HeadlessRuntimeBuilder::new(factory)
+            .with_config(EngineHostConfig {
                 max_sessions,
                 ..EngineHostConfig::default()
-            },
-            factory.clone(),
-            factory,
-        )
-        .map_err(|error| miette!(error.to_string()))?;
+            })
+            .build()
+            .map_err(|error| miette!(error.to_string()))?;
         // The authenticated control plane is usable as soon as the host and
         // its bounded registries exist. Session composition and provider
         // discovery must never gate health or make the supervisor kill an
@@ -2047,30 +2444,30 @@ fn prompt_for_folder_trust(
     let store = rw_store::trust::FolderTrustStore::new(storage_root.join("trust.json"));
     for root in roots {
         let assessment = store.assess(root).into_diagnostic()?;
-        if assessment.project_execution_enabled() {
+        if !assessment.requires_confirmation() {
             continue;
         }
         eprintln!("{}", assessment.render_prompt());
         if std::io::stdin().is_terminal() {
-            eprint!("Trust this exact executable inventory? [y/N] ");
+            eprint!("Trust this exact project extension inventory? [y/N] ");
             std::io::stderr().flush().into_diagnostic()?;
             let mut answer = String::new();
             std::io::stdin().read_line(&mut answer).into_diagnostic()?;
             if matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
                 store.grant(&assessment).into_diagnostic()?;
                 eprintln!(
-                    "trusted {}; executable project changes require a session restart",
+                    "trusted {}; project extension changes require a session restart",
                     assessment.workspace().display()
                 );
             } else {
                 eprintln!(
-                    "project executable configuration remains inert for {}",
+                    "project extension configuration remains inert for {}",
                     assessment.workspace().display()
                 );
             }
         } else {
             eprintln!(
-                "project executable configuration remains inert; use `rw trust grant` interactively or --dangerously-trust in a controlled CI image"
+                "project extension configuration remains inert; use `rw trust grant` interactively or --dangerously-trust in a controlled CI image"
             );
         }
     }
@@ -2091,13 +2488,27 @@ fn run_trust_command(command: TrustCommand) -> Result<()> {
         }
         TrustCommand::Grant => {
             let assessment = store.assess(&workspace).into_diagnostic()?;
+            if !assessment.requires_confirmation() {
+                if assessment.project_execution_enabled() {
+                    println!(
+                        "{} is already trusted for its current project extension inventory",
+                        assessment.workspace().display()
+                    );
+                } else {
+                    println!(
+                        "no project extension configuration found in {}; nothing to trust",
+                        assessment.workspace().display()
+                    );
+                }
+                return Ok(());
+            }
             eprint!("{}", assessment.render_prompt());
             if !std::io::stdin().is_terminal() {
                 return Err(miette!(
                     "refusing to grant folder trust without an interactive terminal; use --dangerously-trust only for controlled CI images"
                 ));
             }
-            eprint!("Trust this exact executable inventory? [y/N] ");
+            eprint!("Trust this exact project extension inventory? [y/N] ");
             std::io::stderr().flush().into_diagnostic()?;
             let mut answer = String::new();
             std::io::stdin().read_line(&mut answer).into_diagnostic()?;
@@ -2106,14 +2517,14 @@ fn run_trust_command(command: TrustCommand) -> Result<()> {
             }
             store.grant(&assessment).into_diagnostic()?;
             println!(
-                "trusted {}; restart active sessions to load executable project configuration",
+                "trusted {}; restart active sessions to load project extension configuration",
                 assessment.workspace().display()
             );
         }
         TrustCommand::Revoke => {
             store.revoke(&workspace).into_diagnostic()?;
             println!(
-                "revoked trust for {}; restart active sessions to unload executable project configuration",
+                "revoked trust for {}; restart active sessions to unload project extension configuration",
                 workspace.display()
             );
         }
@@ -2133,14 +2544,14 @@ fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Result<()> {
         .parent()
         .ok_or_else(|| miette!("configuration root has no parent"))?
         .to_path_buf();
-    runtime::initialize_private_storage_root(&storage_root).into_diagnostic()?;
-    let (user_home, _) = runtime::extension_user_roots(&loader.credentials_path());
-    let catalog = m8_config::discover_executable_configs(
+    session::initialize_private_storage_root(&storage_root).into_diagnostic()?;
+    let (user_home, _) = session::extension_user_roots(&loader.credentials_path());
+    let catalog = executable_config::discover_executable_configs(
         &user_home,
         &workspace,
         effective_config.project_trusted(),
     )?;
-    let store = m8_runtime::PrivatePluginApprovalStore::open(&storage_root)?;
+    let store = rw_runtime::PrivatePluginApprovalStore::open(&storage_root)?;
     let selected = catalog
         .plugins
         .iter()
@@ -2164,14 +2575,13 @@ fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Result<()> {
         let manifest = plugin.load_manifest()?;
         let process = plugin.process_config()?;
         let scope = match plugin.origin {
-            m8_config::ExecutableConfigOrigin::User(_) => "user",
-            m8_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
+            executable_config::ExecutableConfigOrigin::User(_) => "user",
+            executable_config::ExecutableConfigOrigin::TrustedProject(_) => "project",
         };
         let origin = format!("{scope}:{}", plugin.origin.path().display());
-        let requirement = rw_core::runtime_support::plugin::plugin_launch_approval_requirement(
-            &store, &manifest, &process, &origin,
-        )
-        .map_err(|error| miette!(error.to_string()))?;
+        let requirement =
+            rw_ext::plugin_launch_approval_requirement(&store, &manifest, &process, &origin)
+                .map_err(|error| miette!(error.to_string()))?;
         let summary = serde_json::json!({
             "name": plugin.name, "origin": origin, "executable": process.executable(),
             "argv": process.argv().iter().map(|value| value.to_string_lossy()).collect::<Vec<_>>(),
@@ -2189,10 +2599,7 @@ fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Result<()> {
         if name.is_none() {
             continue;
         }
-        if matches!(
-            requirement,
-            rw_core::runtime_support::plugin::ApprovalRequirement::Approved
-        ) {
+        if matches!(requirement, rw_ext::ApprovalRequirement::Approved) {
             println!("plugin {} is already approved", plugin.name);
             continue;
         }
@@ -2208,10 +2615,8 @@ fn run_plugin_approval(name: Option<&str>, revoke: bool) -> Result<()> {
         if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
             return Err(miette!("plugin approval was not granted"));
         }
-        rw_core::runtime_support::plugin::approve_plugin_launch(
-            &store, &manifest, &process, &origin,
-        )
-        .map_err(|error| miette!(error.to_string()))?;
+        rw_ext::approve_plugin_launch(&store, &manifest, &process, &origin)
+            .map_err(|error| miette!(error.to_string()))?;
         println!(
             "approved plugin {}; restart active sessions to launch it",
             plugin.name
@@ -2643,7 +3048,7 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
     let session_id = cli
         .resume
         .clone()
-        .map_or_else(runtime::new_session_id, Ok)?;
+        .map_or_else(session::new_session_id, Ok)?;
     let storage_root = configuration_root()?;
     let local_paths = allocate_runtime_paths(&storage_root.join("run"))?;
     let _runtime_directory = RuntimeDirectoryGuard::capture(&local_paths.directory)?;
@@ -2675,7 +3080,7 @@ async fn run_remote_tui(host: &str, cli: &Cli) -> Result<()> {
     let tui_executable = locate_tui_executable()?;
     let fork_operation_directory = storage_root.join("control/pending-forks");
     let (user_home, user_rottweiler) =
-        runtime::extension_user_roots(&storage_root.join("credentials.toml"));
+        session::extension_user_roots(&storage_root.join("credentials.toml"));
     // Validate all fallible local-only TUI setup before starting a detached
     // remote engine, so invalid user configuration cannot create an orphan.
     let tui_keybindings = tui_config::load_keybindings(None, None, &user_home, &user_rottweiler)
@@ -3357,14 +3762,15 @@ fn sync_install_paths(paths: &[PathBuf]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-    use clap::Parser as _;
+    use clap::{CommandFactory as _, Parser as _};
 
     use super::{
-        Cli, Command, DeferredHostedEngine, DetachedServerReady, RuntimeDirectoryGuard,
-        TrustCommand, UpgradeChannel, append_execution_lease_restart_flag,
-        create_guarded_server_runtime, discover_local_workspace, resolve_tui_executable,
-        sync_install_paths, valid_bootstrap_token, write_github_device_prompt,
-        write_private_file_atomic,
+        Cli, Command, DeferredHostedEngine, DetachedServerReady, McpServerCommand, ModelsCommand,
+        OutputFormat, PromptCommand, RuntimeDirectoryGuard, UpgradeChannel,
+        append_execution_lease_restart_flag, create_guarded_server_runtime,
+        discover_local_workspace, resolve_tui_executable, scripted_provider_options,
+        sync_install_paths, valid_bootstrap_token, validate_cli_option_scope,
+        write_github_device_prompt, write_private_file_atomic,
     };
     #[cfg(unix)]
     use super::{rustix_device_id, rustix_mode_bits};
@@ -3547,24 +3953,246 @@ mod tests {
     }
 
     #[test]
-    fn trust_and_multi_root_flags_are_global_and_typed() {
-        let cli = Cli::try_parse_from([
+    fn cli_definition_is_internally_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn run_only_flags_are_not_accepted_after_a_subcommand() {
+        assert!(
+            Cli::try_parse_from(["rw", "trust", "status", "--detach"]).is_err(),
+            "subcommand help must not advertise or accept run-only flags"
+        );
+    }
+
+    #[test]
+    fn run_only_flags_before_a_subcommand_are_rejected_by_scope_validation() {
+        let cli = Cli::try_parse_from(["rw", "--add-dir", "/work/second", "trust", "status"])
+            .unwrap_or_else(|error| panic!("CLI should parse: {error}"));
+        let error = validate_cli_option_scope(&cli)
+            .err()
+            .unwrap_or_else(|| panic!("scope validation must reject --add-dir"));
+        assert!(error.to_string().contains("--add-dir"));
+
+        let explicit_defaults = Cli::try_parse_from([
             "rw",
-            "--add-dir",
-            "/work/second",
-            "--dangerously-trust",
+            "--output-format",
+            "text",
+            "--max-turns",
+            "32",
             "trust",
             "status",
         ])
         .unwrap_or_else(|error| panic!("CLI should parse: {error}"));
-        assert_eq!(cli.add_dirs, [std::path::PathBuf::from("/work/second")]);
-        assert!(cli.dangerously_trust);
+        let error = validate_cli_option_scope(&explicit_defaults)
+            .err()
+            .unwrap_or_else(|| panic!("scope validation must reject explicit defaults"));
+        assert!(error.to_string().contains("--output-format"));
+        assert!(error.to_string().contains("--max-turns"));
+    }
+
+    #[test]
+    fn output_format_cannot_be_silently_ignored_by_the_interactive_tui() {
+        let cli = Cli::try_parse_from(["rw", "--output-format", "json"])
+            .unwrap_or_else(|error| panic!("CLI should parse before semantic validation: {error}"));
+        let error = validate_cli_option_scope(&cli)
+            .err()
+            .unwrap_or_else(|| panic!("scope validation must reject ignored output"));
+        assert!(error.to_string().contains("--output-format"));
+
+        let print = Cli::try_parse_from(["rw", "--output-format", "stream-json", "-p", "hi"])
+            .unwrap_or_else(|error| panic!("print CLI should parse: {error}"));
+        validate_cli_option_scope(&print)
+            .unwrap_or_else(|error| panic!("print mode consumes output format: {error}"));
+    }
+
+    #[test]
+    fn engine_subcommands_accept_only_the_shared_options_they_consume() {
+        let prompt = Cli::try_parse_from([
+            "rw",
+            "--max-turns",
+            "4",
+            "--model",
+            "fast",
+            "prompt",
+            "dump",
+        ])
+        .unwrap_or_else(|error| panic!("CLI should parse: {error}"));
+        validate_cli_option_scope(&prompt)
+            .unwrap_or_else(|error| panic!("prompt consumes engine options: {error}"));
+
+        let prompt = Cli::try_parse_from([
+            "rw",
+            "prompt",
+            "--max-turns",
+            "5",
+            "dump",
+            "--model",
+            "fast",
+            "--output-format",
+            "stream-json",
+        ])
+        .unwrap_or_else(|error| {
+            panic!("prompt options should remain global in its subtree: {error}")
+        });
         assert!(matches!(
-            cli.command,
-            Some(Command::Trust {
-                command: TrustCommand::Status
-            })
+            prompt.command,
+            Some(Command::Prompt {
+                options,
+                command: PromptCommand::Dump { .. },
+            }) if options.engine.max_turns == Some(5)
+                && options.model.as_deref() == Some("fast")
+                && options.output_format == Some(OutputFormat::StreamJson)
         ));
+
+        let mcp_server = Cli::try_parse_from([
+            "rw",
+            "mcp-server",
+            "stdio",
+            "--permission-mode",
+            "auto-safe",
+            "--add-dir",
+            "/work/second",
+        ])
+        .unwrap_or_else(|error| panic!("MCP engine options should parse after stdio: {error}"));
+        assert!(matches!(
+            mcp_server.command,
+            Some(Command::McpServer {
+                engine,
+                command: McpServerCommand::Stdio { .. },
+                ..
+            }) if engine.permission_mode == Some(super::PermissionMode::AutoSafe)
+                && engine.add_dirs == [std::path::PathBuf::from("/work/second")]
+        ));
+
+        let serve = Cli::try_parse_from([
+            "rw",
+            "serve",
+            "--max-turns",
+            "6",
+            "--model",
+            "balanced",
+            "--detach",
+        ])
+        .unwrap_or_else(|error| panic!("serve options should parse after subcommand: {error}"));
+        assert!(matches!(
+            serve.command,
+            Some(Command::Serve {
+                engine,
+                model: Some(model),
+                detach: true,
+                ..
+            }) if engine.max_turns == Some(6) && model == "balanced"
+        ));
+
+        let models =
+            Cli::try_parse_from(["rw", "models", "list", "--output-format", "stream-json"])
+                .unwrap_or_else(|error| {
+                    panic!("model output option should parse at its leaf: {error}")
+                });
+        assert!(matches!(
+            models.command,
+            Some(Command::Models {
+                command: ModelsCommand::List { output, .. },
+            }) if output.output_format == Some(OutputFormat::StreamJson)
+        ));
+
+        let trust = Cli::try_parse_from(["rw", "--model", "fast", "trust", "status"])
+            .unwrap_or_else(|error| panic!("CLI should parse: {error}"));
+        let error = validate_cli_option_scope(&trust)
+            .err()
+            .unwrap_or_else(|| panic!("model must be rejected for trust"));
+        assert!(error.to_string().contains("--model"));
+    }
+
+    #[test]
+    fn scripted_provider_options_merge_across_command_placement() {
+        for argv in [
+            vec![
+                "rw",
+                "--in-memory-replay-script",
+                "fixture.json",
+                "serve",
+                "--record-script-delay-ms",
+                "7",
+            ],
+            vec![
+                "rw",
+                "--record-script-delay-ms",
+                "7",
+                "serve",
+                "--in-memory-replay-script",
+                "fixture.json",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(argv)
+                .unwrap_or_else(|error| panic!("cross-placement options should parse: {error}"));
+            let root_script = cli.in_memory_replay_script;
+            let root_delay = cli.record_script_delay_ms;
+            let Some(Command::Serve {
+                scripted_provider, ..
+            }) = cli.command
+            else {
+                panic!("serve command should parse");
+            };
+            let (script, delay) = scripted_provider_options(
+                root_script,
+                scripted_provider.in_memory_replay_script,
+                root_delay,
+                scripted_provider.record_script_delay_ms,
+            )
+            .unwrap_or_else(|error| panic!("cross-placement options should merge: {error}"));
+            assert_eq!(script, Some(std::path::PathBuf::from("fixture.json")));
+            assert_eq!(delay, 7);
+        }
+    }
+
+    #[test]
+    fn duplicate_scalar_placement_rejects_and_workspace_roots_accumulate() {
+        let cli = Cli::try_parse_from([
+            "rw",
+            "--max-turns",
+            "4",
+            "--add-dir",
+            "/work/root",
+            "serve",
+            "--max-turns",
+            "5",
+            "--add-dir",
+            "/work/serve",
+        ])
+        .unwrap_or_else(|error| panic!("placements should parse before merge: {error}"));
+        let Some(Command::Serve { engine, .. }) = cli.command else {
+            panic!("serve command should parse");
+        };
+        let error = super::max_turns(cli.max_turns, engine.max_turns)
+            .err()
+            .unwrap_or_else(|| panic!("duplicate scalar placement must reject"));
+        assert!(error.to_string().contains("both before and after"));
+        assert_eq!(
+            super::merge_workspace_roots(cli.add_dirs, engine.add_dirs),
+            [
+                std::path::PathBuf::from("/work/root"),
+                std::path::PathBuf::from("/work/serve"),
+            ]
+        );
+
+        let prompt = Cli::try_parse_from([
+            "rw",
+            "--output-format",
+            "json",
+            "prompt",
+            "--output-format",
+            "text",
+            "dump",
+        ])
+        .unwrap_or_else(|error| panic!("output placements should parse before merge: {error}"));
+        let Some(Command::Prompt { options, .. }) = prompt.command else {
+            panic!("prompt command should parse");
+        };
+        super::output_format(prompt.output_format, options.output_format)
+            .err()
+            .unwrap_or_else(|| panic!("duplicate output format must reject"));
     }
 
     #[test]
@@ -3588,6 +4216,7 @@ mod tests {
                 from: Some(ref from),
                 through: Some(ref through),
                 json: true,
+                ..
             }) if session == "session-1" && from == "2026-07-01" && through == "2026-07-31"
         ));
     }
@@ -3603,6 +4232,7 @@ mod tests {
                 network: true,
                 timeout_ms: 750,
                 json: true,
+                ..
             })
         ));
     }

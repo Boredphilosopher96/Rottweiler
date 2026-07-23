@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use rw_core::runtime_support::{
+use rw_core::{InitDepth, SessionCommandAction, SessionCommandContext, SessionCommandOutput};
+use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
     CommandRegistryError, CommandSource,
 };
-use rw_core::{InitDepth, SessionCommandAction, SessionCommandContext, SessionCommandOutput};
 use rw_store::ProjectMemoryStore;
 
 /// Add project-owned commands to the same registry used by core and extensions.
@@ -190,8 +190,8 @@ fn frame_memory_entries(entries: impl IntoIterator<Item = String>) -> String {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use rw_core::runtime_support::CommandRegistry;
     use rw_core::{InitDepth, SessionCommandAction, SessionCommandContext, SessionCommandOutput};
+    use rw_ext::CommandRegistry;
     use tempfile::tempdir;
 
     use super::{

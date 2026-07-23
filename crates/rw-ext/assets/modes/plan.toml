@@ -1,0 +1,5 @@
+id = "plan"
+description = "Develop a structured plan without changing the workspace"
+permission = "plan"
+prompt = "Active mode: Plan. Use only read-only tools. Finish by calling submit_plan with the complete structured plan artifact; do not mutate the workspace."
+allowed-tools = []

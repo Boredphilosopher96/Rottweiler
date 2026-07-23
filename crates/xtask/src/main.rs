@@ -14,7 +14,7 @@ use rw_types::{
     CompactionReason, ContextItemId, ContextItemKind, ContextItemSnapshot, ContextItemState,
     ContextSnapshot, Cost, CostSnapshot, DiffArtifact, EngineError, EngineErrorCategory,
     EngineEvent, EventMeta, ImageRef, McpApprovalReview, McpEnvironmentEntry, McpServerDescriptor,
-    McpServerState, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
+    McpServerState, ModeDescriptor, ModeId, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior,
     ModelCapabilities, ModelCatalogSnapshot, ModelContextTransfer, ModelDescriptor,
     ModelSwitchQuestion, PermissionAction, PermissionApprovalDescriptor, PermissionApprovalScope,
     PermissionModeDescriptor, PermissionRuleDescriptor, PermissionStateDescriptor, PlanArtifact,
@@ -1743,6 +1743,7 @@ fn generate_typescript() -> String {
     declaration!(ApprovalBinding);
     declaration!(ApprovalDecision);
     declaration!(ModeId);
+    declaration!(ModeDescriptor);
     declaration!(PlanStep);
     declaration!(PlanArtifact);
     declaration!(PlanDecision);
@@ -2335,6 +2336,7 @@ fn contract_fixture() -> ContractFixture {
             EngineEvent::ModeChanged {
                 meta: event_meta(19),
                 mode: ModeId("plan".to_owned()),
+                definition_fingerprint: None,
             },
             EngineEvent::ModelChanged {
                 meta: event_meta(20),

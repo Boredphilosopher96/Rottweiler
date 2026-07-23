@@ -131,6 +131,30 @@ describe("pure TUI state reducer", () => {
     expect(state.commandsTruncated).toBeTrue()
   })
 
+  test("projects a typed custom mode catalog and its completeness", () => {
+    const state = reduce(createInitialState(), {
+      type: "modes_listed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "client",
+        request_id: "modes",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session",
+      modes: [
+        { id: "execute", description: "Make changes", current: false },
+        { id: "audit", description: "Inspect controls", current: true },
+      ],
+      truncated: true,
+    })
+    expect(state.modes).toEqual([
+      { id: "execute", description: "Make changes", current: false },
+      { id: "audit", description: "Inspect controls", current: true },
+    ])
+    expect(state.modesTruncated).toBeTrue()
+    expect(state.mode).toBe("audit")
+  })
+
   test("defaults missing providers from older model-list events", () => {
     const state = reduce(createInitialState(), {
       type: "models_listed",
