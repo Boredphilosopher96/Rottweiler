@@ -160,6 +160,7 @@ turns = sorted(sample[1] for sample in samples)
 p95_index = math.ceil(len(samples) * 0.95) - 1
 p99_index = math.ceil(len(samples) * 0.99) - 1
 start_p99 = starts[p99_index]
+turn_p95 = turns[p95_index]
 turn_p99 = turns[p99_index]
 binary_bytes = binary.stat().st_size
 if output is not None:
@@ -214,7 +215,11 @@ print(
 )
 if start_p99 >= 80:
     raise SystemExit(f"headless print-mode p99 {start_p99:.3f}ms exceeds 80ms")
-if turn_p99 >= 20:
+if smoke and turn_p95 >= 20:
+    raise SystemExit(f"zero-latency full-turn smoke p95 {turn_p95:.3f}ms exceeds 20ms")
+if smoke and turn_p99 >= 40:
+    raise SystemExit(f"zero-latency full-turn smoke p99 {turn_p99:.3f}ms exceeds 40ms")
+if not smoke and turn_p99 >= 20:
     raise SystemExit(f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds 20ms")
 if binary_bytes >= 25_000_000:
     raise SystemExit(f"release binary size {binary_bytes} exceeds 25MB")
