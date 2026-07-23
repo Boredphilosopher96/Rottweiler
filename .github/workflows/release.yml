@@ -8,22 +8,85 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: signed-release
+  cancel-in-progress: false
+
 jobs:
-  build:
-    name: Build ${{ matrix.platform }}
-    runs-on: ${{ matrix.os }}
+  runner-contract:
+    name: Required release runner contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Fail closed when protected release runners are unavailable
+        env:
+          SELF_HOSTED_RUNNERS_ENABLED: ${{ vars.ROTTWEILER_SELF_HOSTED_RUNNERS }}
+        run: |
+          if [ "$SELF_HOSTED_RUNNERS_ENABLED" != "true" ]; then
+            echo "ROTTWEILER_SELF_HOSTED_RUNNERS must be true; release performance and acceptance jobs cannot queue without protected runners" >&2
+            exit 1
+          fi
+
+  linux-performance-build:
+    name: Build isolated Linux performance binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - name: Build performance binary outside the workspace
+        run: scripts/prepare-linux-performance-binary.sh
+      - name: Upload isolated Linux performance binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: linux-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-linux-performance-artifact.noindex
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  macos-performance-build:
+    name: Build isolated macOS performance binary
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - name: Build performance binary outside the workspace
+        run: scripts/prepare-macos-performance-binary.sh
+      - name: Upload isolated macOS performance binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  build-linux:
+    name: Build linux-x86_64
+    needs: [runner-contract, linux-performance-build]
+    # Exact-release p99 evidence is valid only on the calibrated protected lane.
+    runs-on: [self-hosted, Linux, X64, performance]
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
       attestations: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            platform: darwin-arm64
-          - os: ubuntu-latest
-            platform: linux-x86_64
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
       ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
@@ -71,6 +134,25 @@ jobs:
               if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != encoded:
                   raise SystemExit("embedded root key is not canonical 32-byte base64")
           PY
+      - run: mkdir -p perf-results
+      - name: Download isolated Linux performance binary
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: linux-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-linux-performance-download.noindex
+      - name: Verify isolated Linux performance binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/rottweiler-linux-performance-download.noindex"
+          sha256sum -c rw.sha256
+          chmod 700 rw
+      - name: Headless performance gate (Linux prebuilt binary)
+        run: crates/rw-cli/tests/perf_gate.sh
+        env:
+          ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
+          ROTTWEILER_PERF_SAMPLES: 500
+          ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-linux-performance-download.noindex/rw
       - name: Install Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
       - run: rustup override set 1.94.1
@@ -79,16 +161,10 @@ jobs:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
-      - run: mkdir -p perf-results
-      - name: Enforce exact-tag startup and protocol performance budgets
+      - name: Enforce exact-tag protocol performance budgets
         run: |
-          ROTTWEILER_PERF_OUTPUT=perf-results/headless.json ROTTWEILER_PERF_SAMPLES=500 crates/rw-cli/tests/perf_gate.sh
           ROTTWEILER_PERF_OUTPUT=perf-results/m4.json crates/rw-cli/tests/m4_release_gate.sh
-          if [ "$RUNNER_OS" = Linux ]; then
-            ROTTWEILER_PERF_OUTPUT=perf-results/m8.json crates/rw-cli/tests/m8_release_gate_linux.sh
-          else
-            ROTTWEILER_PERF_OUTPUT=perf-results/m8.json crates/rw-cli/tests/m8_release_gate.sh
-          fi
+          ROTTWEILER_PERF_OUTPUT=perf-results/m8.json crates/rw-cli/tests/m8_release_gate_linux.sh
       - run: bun run test:perf
         working-directory: packages/tui
         env:
@@ -100,13 +176,13 @@ jobs:
           set -euo pipefail
           archive=$(scripts/build-release.sh | tail -1)
           test -f "$archive"
-          test "$(basename "$archive")" = "rottweiler-${GITHUB_REF_NAME#v}-${{ matrix.platform }}.tar.gz"
+          test "$(basename "$archive")" = "rottweiler-${GITHUB_REF_NAME#v}-linux-x86_64.tar.gz"
           printf 'path=%s\n' "$archive" >> "$GITHUB_OUTPUT"
       - name: Enforce checked-in platform baseline without waivers
         run: >-
           python3 scripts/check-perf-baseline.py
           --baseline benchmarks/performance-baseline.json
-          --platform "${{ matrix.platform }}"
+          --platform linux-x86_64
           --suite core
           --require-measured
           --measurement perf-results/headless.json
@@ -118,26 +194,162 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: performance-${{ matrix.platform }}-${{ github.ref_name }}
+          name: performance-linux-x86_64-${{ github.ref_name }}-${{ github.run_attempt }}
           path: perf-results
           if-no-files-found: warn
           retention-days: 90
       - name: Attest archive provenance
-        uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: ${{ steps.archive.outputs.path }}
       - name: Upload unsigned archive for release signing
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-${{ matrix.platform }}
+          name: release-linux-x86_64
           path: ${{ steps.archive.outputs.path }}
           if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+          compression-level: 0
+
+  build-macos:
+    name: Build darwin-arm64
+    needs: [runner-contract, macos-performance-build]
+    # Exact-release p99 evidence is valid only on the calibrated protected lane.
+    runs-on: [self-hosted, macOS, ARM64, performance]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+      ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
+      ROTTWEILER_UPDATE_ROOT_THRESHOLD: ${{ vars.ROTTWEILER_UPDATE_ROOT_THRESHOLD }}
+      ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
+      ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Validate immutable release identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rw-cli"))')
+          test "$GITHUB_REF_NAME" = "v$version"
+          test -n "$ROTTWEILER_UPDATE_ROOT_VERSION"
+          test -n "$ROTTWEILER_UPDATE_ROOT_THRESHOLD"
+          test -n "$ROTTWEILER_UPDATE_ROOT_KEYS_JSON"
+          test -n "$ROTTWEILER_UPDATE_BASE_URL"
+          case "$ROTTWEILER_UPDATE_BASE_URL" in
+            */) ;;
+            *) echo 'ROTTWEILER_UPDATE_BASE_URL must end with /' >&2; exit 1 ;;
+          esac
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          from pathlib import Path
+
+          document = json.loads(Path("release/update/root-chain.json").read_text())
+          latest = document["roots"][-1]
+          envelope = json.loads(base64.b64decode(latest["envelope"], validate=True))
+          root = json.loads(base64.b64decode(envelope["payload"], validate=True))
+          embedded = json.loads(os.environ["ROTTWEILER_UPDATE_ROOT_KEYS_JSON"])
+          expected = {key_id: root["keys"][key_id] for key_id in root["root_key_ids"]}
+          if int(os.environ["ROTTWEILER_UPDATE_ROOT_VERSION"]) != root["version"]:
+              raise SystemExit("embedded root version does not match latest signed root")
+          if int(os.environ["ROTTWEILER_UPDATE_ROOT_THRESHOLD"]) != root["root_threshold"]:
+              raise SystemExit("embedded root threshold does not match latest signed root")
+          if embedded != expected:
+              raise SystemExit("embedded root keys do not match latest signed root role")
+          for encoded in embedded.values():
+              decoded = base64.b64decode(encoded, validate=True)
+              if len(decoded) != 32 or base64.b64encode(decoded).decode("ascii") != encoded:
+                  raise SystemExit("embedded root key is not canonical 32-byte base64")
+          PY
+      - run: mkdir -p perf-results
+      - name: Download isolated macOS performance binary
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: macos-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex
+      - name: Verify isolated macOS performance binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/rottweiler-macos-performance-download.noindex"
+          shasum -a 256 -c rw.sha256
+          chmod 700 rw
+      - name: Headless performance gate (macOS prebuilt binary)
+        run: crates/rw-cli/tests/perf_gate.sh
+        env:
+          ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
+          ROTTWEILER_PERF_SAMPLES: 500
+          ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex/rw
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+        working-directory: packages/tui
+      - name: Enforce exact-tag protocol performance budgets
+        run: |
+          ROTTWEILER_PERF_OUTPUT=perf-results/m4.json crates/rw-cli/tests/m4_release_gate.sh
+          ROTTWEILER_PERF_OUTPUT=perf-results/m8.json crates/rw-cli/tests/m8_release_gate.sh
+      - run: bun run test:perf
+        working-directory: packages/tui
+        env:
+          ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/perf-results/tui.json
+      - name: Build deterministic size-gated archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=$(scripts/build-release.sh | tail -1)
+          test -f "$archive"
+          test "$(basename "$archive")" = "rottweiler-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz"
+          printf 'path=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+      - name: Enforce checked-in platform baseline without waivers
+        run: >-
+          python3 scripts/check-perf-baseline.py
+          --baseline benchmarks/performance-baseline.json
+          --platform darwin-arm64
+          --suite core
+          --require-measured
+          --measurement perf-results/headless.json
+          --measurement perf-results/m4.json
+          --measurement perf-results/m8.json
+          --measurement perf-results/tui.json
+          --output perf-results/baseline-result.json
+      - name: Retain exact-tag performance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: performance-darwin-arm64-${{ github.ref_name }}-${{ github.run_attempt }}
+          path: perf-results
+          if-no-files-found: warn
+          retention-days: 90
+      - name: Attest archive provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: ${{ steps.archive.outputs.path }}
+      - name: Upload unsigned archive for release signing
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-darwin-arm64
+          path: ${{ steps.archive.outputs.path }}
+          if-no-files-found: error
+          overwrite: true
           retention-days: 7
           compression-level: 0
 
   release-gate:
     name: Exact-tag v1 acceptance gate
-    needs: build
+    needs: [build-linux, build-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 360
     environment: release
@@ -145,8 +357,6 @@ jobs:
       contents: read
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -211,6 +421,8 @@ jobs:
           rm -f "$RUNNER_TEMP/dogfood-ledger.jsonl"
       - name: Paid two-family record and network-denied replay canary
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           RW_LIVE_SMOKE: accept-paid-requests
           RW_LIVE_ANTHROPIC_MODEL: ${{ vars.ROTTWEILER_LIVE_ANTHROPIC_MODEL }}
           RW_LIVE_OPENAI_MODEL: ${{ vars.ROTTWEILER_LIVE_OPENAI_MODEL }}
@@ -235,21 +447,20 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-gate-evidence-${{ github.ref_name }}
+          name: release-gate-evidence-${{ github.ref_name }}-${{ github.run_attempt }}
           path: dogfood-gate-result.json
           if-no-files-found: warn
           retention-days: 90
 
   release-terminal-bench:
     name: Exact-tag Terminal-Bench capability gate
-    needs: build
+    needs: build-linux
     runs-on: [self-hosted, Linux, X64, terminal-bench]
     timeout-minutes: 720
     environment: release
     permissions:
       contents: read
     env:
-      ROTTWEILER_EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
       ROTTWEILER_CREDENTIAL_BACKEND: file
       ROTTWEILER_EVAL_MODEL: ${{ vars.ROTTWEILER_EVAL_MODEL }}
       ROTTWEILER_EVAL_CONCURRENCY: "4"
@@ -265,6 +476,8 @@ jobs:
       - name: Install pinned Harbor evaluation harness
         run: pipx install --force harbor==0.18.0
       - name: Run exact release archive through the pinned 20-task capability gate
+        env:
+          ROTTWEILER_EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
         run: |
           archive=$(find dist/release -maxdepth 1 -type f -name 'rottweiler-*-linux-x86_64.tar.gz' -print)
           test -n "$archive"
@@ -284,14 +497,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-terminal-bench-${{ github.ref_name }}
+          name: release-terminal-bench-${{ github.ref_name }}-${{ github.run_attempt }}
           path: terminal-bench-evidence
           if-no-files-found: warn
           retention-days: 90
 
   release-soak:
     name: Exact-tag eight-hour soak (${{ matrix.platform }})
-    needs: build
+    needs: [build-linux, build-macos]
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 510
     strategy:
@@ -385,7 +598,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: release-soak-${{ matrix.platform }}-${{ github.ref_name }}
+          name: release-soak-${{ matrix.platform }}-${{ github.ref_name }}-${{ github.run_attempt }}
           path: |
             soak-result.json
             soak-baseline-result.json
@@ -401,7 +614,7 @@ jobs:
 
   wsl2-acceptance:
     name: Exact-tag WSL2 acceptance
-    needs: build
+    needs: build-linux
     runs-on: [self-hosted, Windows, X64, wsl2]
     timeout-minutes: 90
     env:
@@ -435,7 +648,7 @@ jobs:
 
   release-linux-security:
     name: Exact-tag native Linux sandbox security acceptance
-    needs: build
+    needs: build-linux
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -448,7 +661,7 @@ jobs:
 
   sign-and-publish:
     name: Sign metadata and publish
-    needs: [build, release-gate, release-terminal-bench, release-soak, wsl2-acceptance, release-linux-security]
+    needs: [build-linux, build-macos, release-gate, release-terminal-bench, release-soak, wsl2-acceptance, release-linux-security]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -464,11 +677,16 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
       - run: rustup override set 1.94.1
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - name: Download unsigned macOS release archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
-          pattern: release-*
+          name: release-darwin-arm64
           path: dist/unsigned
-          merge-multiple: true
+      - name: Download unsigned Linux release archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: release-linux-x86_64
+          path: dist/unsigned
       - name: Validate public signing inputs
         shell: bash
         run: |
@@ -624,7 +842,7 @@ jobs:
           ruby -c dist/distribution/rottweiler.rb
           sh -n dist/distribution/rottweiler-install.sh
       - name: Attest signed release set
-        uses: actions/attest@f6bf1532d7d6793fce74eac584813a8eee607999 # v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: |
             dist/unsigned/*.tar.gz
@@ -639,6 +857,7 @@ jobs:
             dist/signed/*
             dist/distribution/*
           if-no-files-found: error
+          overwrite: true
           retention-days: 30
           compression-level: 0
       - name: Publish immutable GitHub release assets

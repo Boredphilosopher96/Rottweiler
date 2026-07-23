@@ -181,6 +181,14 @@ without treating host-wide scheduler stalls as product latency. Every measured
 sample is reported; neither tier retries, trims, nor substitutes a relative
 baseline.
 
+Full p99 consumers run on repository-protected self-hosted runners labeled
+`Linux`, `X64`, and `performance` or `macOS`, `ARM64`, and `performance`. Each
+release binary is built on a separate hosted runner, transferred with a
+checksum, and measured only after that handoff so link-time optimization and
+build load cannot contaminate latency. The protected runner's reviewed identity
+belongs in measured baseline provenance; a general-purpose hosted runner cannot
+establish or replace it.
+
 Regression policy: every executable latency and size gate writes integer,
 machine-readable metrics and keeps its fixed, platform-specific absolute
 budget. macOS is the reference latency platform; Linux may use the explicitly

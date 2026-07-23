@@ -102,10 +102,17 @@ class M8LinuxWrapperTests(unittest.TestCase):
         release = (REPO / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
         main_test = ci.split("  test:", 1)[1].split("  security-tests:", 1)[0]
-        security = ci.split("  security-tests:", 1)[1].split("  performance:", 1)[0]
-        performance = ci.split("  performance:", 1)[1].split("  m4-ssh-loopback:", 1)[0]
-        nightly_release = nightly.split("  cross-platform-release:", 1)[1].split(
-            "  eight-hour-soak:", 1
+        security = ci.split("  security-tests:", 1)[1].split(
+            "  performance-smoke:", 1
+        )[0]
+        performance = ci.split("  performance-linux:", 1)[1].split(
+            "  performance-macos:", 1
+        )[0]
+        release_linux = release.split("  build-linux:", 1)[1].split(
+            "  build-macos:", 1
+        )[0]
+        nightly_release = nightly.split("  linux-release-budget:", 1)[1].split(
+            "  macos-release-budget:", 1
         )[0]
         self.assertNotIn("m8_release_gate_linux.sh", main_test)
         self.assertIn("m8_release_gate_linux.sh", security)
@@ -115,8 +122,7 @@ class M8LinuxWrapperTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", nightly_release)
         self.assertIn("needs: [test, security-tests]", ci)
         self.assertIn("m8_release_gate_linux.sh", nightly)
-        self.assertIn('if [ "$RUNNER_OS" = Linux ]', release)
-        self.assertIn("m8_release_gate_linux.sh", release)
+        self.assertIn("m8_release_gate_linux.sh", release_linux)
 
 
 if __name__ == "__main__":

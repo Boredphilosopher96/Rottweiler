@@ -6,6 +6,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def workflow_job(workflow: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-z0-9][a-z0-9-]*:\n|\Z)",
+        workflow,
+    )
+    if match is None:
+        raise AssertionError(f"workflow job {name!r} is missing")
+    return match.group(1)
+
+
 class CiHardeningContractTests(unittest.TestCase):
     def assert_checkout_credentials_are_not_persisted(self, workflow: str) -> None:
         marker = "uses: actions/checkout@"
@@ -19,7 +29,7 @@ class CiHardeningContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assert_checkout_credentials_are_not_persisted(workflow)
         smoke = workflow.split("  performance-smoke:", 1)[1].split(
-            "  macos-performance-build:", 1
+            "  performance-runner-contract:", 1
         )[0]
         self.assertIn("needs: [test, security-tests]", smoke)
         self.assertNotIn("\n    if:", smoke)
@@ -32,16 +42,37 @@ class CiHardeningContractTests(unittest.TestCase):
     def test_nightly_budgets_are_blocking_and_missing_runners_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
         self.assert_checkout_credentials_are_not_persisted(workflow)
-        release = workflow.split("  cross-platform-release:", 1)[1].split(
+        linux_release = workflow.split("  linux-release-budget:", 1)[1].split(
+            "  macos-release-budget:", 1
+        )[0]
+        macos_release = workflow.split("  macos-release-budget:", 1)[1].split(
             "  eight-hour-soak:", 1
         )[0]
         runner_contract = workflow.split("  runner-contract:", 1)[1].split(
             "  fuzz:", 1
         )[0]
-        self.assertNotIn("continue-on-error", release)
+        self.assertNotIn("continue-on-error", linux_release + macos_release)
+        self.assertIn(
+            "needs: [runner-contract, linux-performance-build]", linux_release
+        )
+        self.assertNotIn("macos-performance-build", linux_release)
+        self.assertIn(
+            "needs: [runner-contract, macos-performance-build]", macos_release
+        )
+        self.assertIn(
+            "runs-on: [self-hosted, Linux, X64, performance]", linux_release
+        )
+        self.assertIn(
+            "runs-on: [self-hosted, macOS, ARM64, performance]", macos_release
+        )
+        self.assertIn("--platform linux-x86_64", linux_release)
+        self.assertIn("--platform darwin-arm64", macos_release)
+        for release_budget in (linux_release, macos_release):
+            self.assertIn("--require-measured", release_budget)
+            self.assertIn("scripts/build-release.sh", release_budget)
         self.assertIn("ROTTWEILER_SELF_HOSTED_RUNNERS", runner_contract)
         self.assertIn("exit 1", runner_contract)
-        self.assertEqual(workflow.count("needs: runner-contract"), 3)
+        self.assertEqual(workflow.count("runner-contract"), 6)
         for job_name in ("eight-hour-soak", "wsl2-acceptance", "terminal-bench"):
             match = re.search(
                 rf"(?ms)^  {re.escape(job_name)}:\n(.*?)(?=^  [a-z0-9][a-z0-9-]*:\n|\Z)",
@@ -56,6 +87,135 @@ class CiHardeningContractTests(unittest.TestCase):
         )[0]
         self.assertNotIn("secrets.ROTTWEILER_EVAL_API_KEY", job_environment)
         self.assertIn("secrets.ROTTWEILER_EVAL_API_KEY", run_step)
+
+    def test_protected_performance_consumers_fail_closed_before_queueing(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        nightly = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+        cases = (
+            (
+                ci,
+                "performance-runner-contract",
+                ("performance-linux", "performance-macos"),
+            ),
+            (
+                nightly,
+                "runner-contract",
+                ("linux-release-budget", "macos-release-budget"),
+            ),
+            (
+                release,
+                "runner-contract",
+                ("build-linux", "build-macos"),
+            ),
+        )
+        for workflow, contract_name, consumer_names in cases:
+            contract = workflow_job(workflow, contract_name)
+            with self.subTest(contract=contract_name):
+                self.assertIn("runs-on: ubuntu-latest", contract)
+                self.assertIn("timeout-minutes: 5", contract)
+                self.assertIn("vars.ROTTWEILER_SELF_HOSTED_RUNNERS", contract)
+                self.assertIn("exit 1", contract)
+            for consumer_name in consumer_names:
+                consumer = workflow_job(workflow, consumer_name)
+                with self.subTest(consumer=consumer_name):
+                    self.assertIn(contract_name, consumer.split("    runs-on:", 1)[0])
+
+    def test_signed_release_is_serialized_and_downloads_only_unsigned_archives(
+        self,
+    ) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        sign_and_publish = workflow.split("  sign-and-publish:", 1)[1]
+        attest_pin = (
+            "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0"
+        )
+
+        self.assertIn(
+            "concurrency:\n  group: signed-release\n  cancel-in-progress: false",
+            workflow,
+        )
+        self.assertEqual(workflow.count(attest_pin), 3)
+        self.assertNotIn("actions/attest@f6bf1532", workflow)
+        self.assertEqual(sign_and_publish.count("name: release-darwin-arm64"), 1)
+        self.assertEqual(sign_and_publish.count("name: release-linux-x86_64"), 1)
+        self.assertNotIn("pattern: release-*", sign_and_publish)
+        self.assertNotIn("merge-multiple:", sign_and_publish)
+
+    def test_release_provider_and_eval_secrets_are_step_scoped(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        release_gate = workflow_job(workflow, "release-gate")
+        release_gate_environment = release_gate.split("    steps:", 1)[0]
+        paid_step = release_gate.split(
+            "      - name: Paid two-family record and network-denied replay canary", 1
+        )[1].split("      - name:", 1)[0]
+        terminal_bench = workflow_job(workflow, "release-terminal-bench")
+        terminal_job_environment = terminal_bench.split("    steps:", 1)[0]
+        eval_step = terminal_bench.split(
+            "      - name: Run exact release archive through the pinned 20-task capability gate",
+            1,
+        )[1].split("      - name:", 1)[0]
+
+        for secret in ("secrets.OPENAI_API_KEY", "secrets.ANTHROPIC_API_KEY"):
+            self.assertNotIn(secret, release_gate_environment)
+            self.assertIn(secret, paid_step)
+        self.assertNotIn(
+            "secrets.ROTTWEILER_EVAL_API_KEY", terminal_job_environment
+        )
+        self.assertIn("secrets.ROTTWEILER_EVAL_API_KEY", eval_step)
+
+    def test_rerun_artifacts_preserve_producers_and_version_evidence(self) -> None:
+        workflows = {
+            name: (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
+            for name in ("ci", "nightly", "release")
+        }
+
+        for workflow_name, workflow in workflows.items():
+            for platform in ("linux", "macos"):
+                with self.subTest(workflow=workflow_name, producer=platform):
+                    producer = workflow_job(
+                        workflow, f"{platform}-performance-build"
+                    )
+                    self.assertIn(
+                        f"name: {platform}-performance-rw-${{{{ github.run_id }}}}",
+                        producer,
+                    )
+                    self.assertNotIn("github.run_attempt", producer)
+                    self.assertIn("overwrite: true", producer)
+
+        release = workflows["release"]
+        for platform in ("linux-x86_64", "darwin-arm64"):
+            with self.subTest(release_archive=platform):
+                build = workflow_job(
+                    release,
+                    "build-linux" if platform == "linux-x86_64" else "build-macos",
+                )
+                self.assertIn(f"name: release-{platform}", build)
+                self.assertIn("overwrite: true", build)
+
+        expected_evidence_names = {
+            "ci": (
+                "pr-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
+                "pr-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
+            ),
+            "nightly": (
+                "nightly-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
+                "nightly-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
+                "soak-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}",
+                "terminal-bench-${{ github.run_id }}-${{ github.run_attempt }}",
+            ),
+            "release": (
+                "performance-linux-x86_64-${{ github.ref_name }}-${{ github.run_attempt }}",
+                "performance-darwin-arm64-${{ github.ref_name }}-${{ github.run_attempt }}",
+                "release-gate-evidence-${{ github.ref_name }}-${{ github.run_attempt }}",
+                "release-terminal-bench-${{ github.ref_name }}-${{ github.run_attempt }}",
+                "release-soak-${{ matrix.platform }}-${{ github.ref_name }}-${{ github.run_attempt }}",
+            ),
+        }
+        for workflow_name, evidence_names in expected_evidence_names.items():
+            for artifact_name in evidence_names:
+                with self.subTest(workflow=workflow_name, evidence=artifact_name):
+                    self.assertIn(f"name: {artifact_name}", workflows[workflow_name])
 
 
 if __name__ == "__main__":

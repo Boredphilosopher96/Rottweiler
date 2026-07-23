@@ -16,13 +16,14 @@ jobs:
   runner-contract:
     name: Required hardening runner contract
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Fail closed when protected hardening runners are unavailable
         env:
           SELF_HOSTED_RUNNERS_ENABLED: ${{ vars.ROTTWEILER_SELF_HOSTED_RUNNERS }}
         run: |
           if [ "$SELF_HOSTED_RUNNERS_ENABLED" != "true" ]; then
-            echo "ROTTWEILER_SELF_HOSTED_RUNNERS must be true; soak, WSL2, and Terminal-Bench cannot silently skip" >&2
+            echo "ROTTWEILER_SELF_HOSTED_RUNNERS must be true; performance, soak, WSL2, and Terminal-Bench cannot silently skip" >&2
             exit 1
           fi
 
@@ -52,24 +53,82 @@ jobs:
       - name: Run bounded sanitizer-backed campaign
         run: cargo +nightly fuzz run "${{ matrix.target }}" -- -max_total_time=60 -rss_limit_mb=2048
 
-  cross-platform-release:
-    name: Release budgets (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    env:
-      ROTTWEILER_CREDENTIAL_BACKEND: file
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            platform: darwin-arm64
-          - os: ubuntu-latest
-            platform: linux-x86_64
+  linux-performance-build:
+    name: Build isolated Linux performance binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - name: Build performance binary outside the workspace
+        run: scripts/prepare-linux-performance-binary.sh
+      - name: Upload isolated Linux performance binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: linux-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-linux-performance-artifact.noindex
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  macos-performance-build:
+    name: Build isolated macOS performance binary
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - name: Build performance binary outside the workspace
+        run: scripts/prepare-macos-performance-binary.sh
+      - name: Upload isolated macOS performance binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+  linux-release-budget:
+    name: Release budgets (protected Linux)
+    needs: [runner-contract, linux-performance-build]
+    # Full absolute p99 evidence requires a calibrated, protected runner.
+    # Shared hosted runners remain limited to the bounded per-PR smoke gate.
+    runs-on: [self-hosted, Linux, X64, performance]
+    timeout-minutes: 60
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - run: mkdir -p perf-results
+      - name: Download isolated Linux performance binary
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: linux-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-linux-performance-download.noindex
+      - name: Verify isolated Linux performance binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/rottweiler-linux-performance-download.noindex"
+          sha256sum -c rw.sha256
+          chmod 700 rw
+      - name: Headless performance gate (Linux prebuilt binary)
+        run: crates/rw-cli/tests/perf_gate.sh
+        env:
+          ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
+          ROTTWEILER_PERF_SAMPLES: 500
+          ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-linux-performance-download.noindex/rw
       - name: Install Rust toolchain
         run: rustup toolchain install 1.94.1 --profile minimal
       - run: rustup override set 1.94.1
@@ -78,21 +137,83 @@ jobs:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
-      - run: mkdir -p perf-results
-      - run: crates/rw-cli/tests/perf_gate.sh
-        env:
-          ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
-          ROTTWEILER_PERF_SAMPLES: 500
       - run: crates/rw-cli/tests/m4_release_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m4.json
       - name: M8 production-composition performance gate (Linux)
-        if: runner.os == 'Linux'
         run: crates/rw-cli/tests/m8_release_gate_linux.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
+      - run: bun run test:perf
+        working-directory: packages/tui
+        env:
+          ROTTWEILER_PERF_OUTPUT: ${{ github.workspace }}/perf-results/tui.json
+      - run: scripts/build-release.sh
+      - name: Enforce checked-in platform baseline
+        run: >-
+          python3 scripts/check-perf-baseline.py
+          --baseline benchmarks/performance-baseline.json
+          --platform linux-x86_64
+          --suite core
+          --require-measured
+          --measurement perf-results/headless.json
+          --measurement perf-results/m4.json
+          --measurement perf-results/m8.json
+          --measurement perf-results/tui.json
+          --output perf-results/baseline-result.json
+      - name: Retain performance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: nightly-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: perf-results
+          if-no-files-found: warn
+          retention-days: 30
+
+  macos-release-budget:
+    name: Release budgets (protected macOS)
+    needs: [runner-contract, macos-performance-build]
+    # Full absolute p99 evidence requires a calibrated, protected runner.
+    # Shared hosted runners remain limited to the bounded per-PR smoke gate.
+    runs-on: [self-hosted, macOS, ARM64, performance]
+    timeout-minutes: 60
+    env:
+      ROTTWEILER_CREDENTIAL_BACKEND: file
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - run: mkdir -p perf-results
+      - name: Download isolated macOS performance binary
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: macos-performance-rw-${{ github.run_id }}
+          path: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex
+      - name: Verify isolated macOS performance binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/rottweiler-macos-performance-download.noindex"
+          shasum -a 256 -c rw.sha256
+          chmod 700 rw
+      - name: Headless performance gate (macOS prebuilt binary)
+        run: crates/rw-cli/tests/perf_gate.sh
+        env:
+          ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
+          ROTTWEILER_PERF_SAMPLES: 500
+          ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex/rw
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.94.1 --profile minimal
+      - run: rustup override set 1.94.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+      - run: bun install --frozen-lockfile
+        working-directory: packages/tui
+      - run: crates/rw-cli/tests/m4_release_gate.sh
+        env:
+          ROTTWEILER_PERF_OUTPUT: perf-results/m4.json
       - name: M8 production-composition performance gate (macOS)
-        if: runner.os != 'Linux'
         run: crates/rw-cli/tests/m8_release_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/m8.json
@@ -105,7 +226,7 @@ jobs:
         run: >-
           python3 scripts/check-perf-baseline.py
           --baseline benchmarks/performance-baseline.json
-          --platform "${{ matrix.platform }}"
+          --platform darwin-arm64
           --suite core
           --require-measured
           --measurement perf-results/headless.json
@@ -117,7 +238,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: nightly-performance-${{ matrix.platform }}-${{ github.run_id }}
+          name: nightly-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           path: perf-results
           if-no-files-found: warn
           retention-days: 30
@@ -174,7 +295,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: soak-${{ matrix.platform }}-${{ github.run_id }}
+          name: soak-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             soak-result.json
             soak-baseline-result.json
@@ -249,7 +370,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: terminal-bench-${{ github.run_id }}
+          name: terminal-bench-${{ github.run_id }}-${{ github.run_attempt }}
           path: terminal-bench-evidence
           if-no-files-found: error
           retention-days: 90
