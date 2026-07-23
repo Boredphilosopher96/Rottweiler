@@ -172,6 +172,13 @@ Property tests worth calling out:
 | Memory, 8-hour stress session (engine + TUI combined) | < 500MB RSS | soak test, nightly |
 | Release size | engine binary < 25MB; TUI bundle < 100MB on macOS / < 110MB on Linux | CI check |
 
+The required full, nightly, and release headless gates enforce the stated
+20ms turn-overhead budget at p99 over 500 fresh processes. The per-PR smoke
+runs on a shared hosted runner, so it is deliberately a screening gate rather
+than release evidence: it enforces the same 20ms budget at p95 over 100 fresh
+processes and also rejects a p99 at or above 40ms. Every measured sample is
+retained; neither tier retries, trims, nor substitutes a relative baseline.
+
 Regression policy: every executable latency and size gate writes integer,
 machine-readable metrics and keeps its fixed, platform-specific absolute
 budget. macOS is the reference latency platform; Linux may use the explicitly
