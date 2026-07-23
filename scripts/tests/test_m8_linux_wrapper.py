@@ -98,6 +98,9 @@ class M8LinuxWrapperTests(unittest.TestCase):
 
     def test_linux_workflow_call_sites_use_the_privileged_wrapper(self) -> None:
         ci = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        protected_performance = (
+            REPO / ".github/workflows/performance.yml"
+        ).read_text(encoding="utf-8")
         nightly = (REPO / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
         release = (REPO / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
@@ -105,7 +108,7 @@ class M8LinuxWrapperTests(unittest.TestCase):
         security = ci.split("  security-tests:", 1)[1].split(
             "  performance-smoke:", 1
         )[0]
-        performance = ci.split("  performance-linux:", 1)[1].split(
+        performance = protected_performance.split("  performance-linux:", 1)[1].split(
             "  performance-macos:", 1
         )[0]
         release_linux = release.split("  build-linux:", 1)[1].split(

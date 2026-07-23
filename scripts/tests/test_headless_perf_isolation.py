@@ -49,16 +49,17 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertIn("install -m 700", builder)
                 self.assertIn(checksum, builder)
 
-    def test_ci_builds_platform_binaries_on_isolated_runners(self) -> None:
-        workflow = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    def test_manual_performance_builds_platform_binaries_on_isolated_runners(self) -> None:
+        workflow = (REPO / ".github/workflows/performance.yml").read_text(
+            encoding="utf-8"
+        )
         linux_build = workflow_job(workflow, "linux-performance-build")
         macos_build = workflow_job(workflow, "macos-performance-build")
 
         for platform, build in (("linux", linux_build), ("macos", macos_build)):
             with self.subTest(platform=platform):
-                self.assertIn(
-                    "needs: [test, security-tests, performance-smoke]", build
-                )
+                self.assertNotIn("\n    needs:", build)
+                self.assertNotIn("\n    if:", build)
                 self.assertIn(
                     f"scripts/prepare-{platform}-performance-binary.sh", build
                 )
@@ -67,8 +68,10 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertIn("overwrite: true", build)
                 self.assertIn("timeout-minutes: 30", build)
 
-    def test_ci_performance_consumers_are_platform_independent(self) -> None:
-        workflow = (REPO / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    def test_manual_performance_consumers_are_platform_independent(self) -> None:
+        workflow = (REPO / ".github/workflows/performance.yml").read_text(
+            encoding="utf-8"
+        )
         cases = (
             (
                 "linux",
@@ -78,7 +81,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 "runs-on: [self-hosted, Linux, X64, performance]",
                 "sha256sum -c rw.sha256",
                 "Headless performance gate (Linux prebuilt binary)",
-                "pr-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
+                "manual-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
             ),
             (
                 "macos",
@@ -88,7 +91,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 "runs-on: [self-hosted, macOS, ARM64, performance]",
                 "shasum -a 256 -c rw.sha256",
                 "Headless performance gate (macOS prebuilt binary)",
-                "pr-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
+                "manual-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
             ),
         )
         for (
@@ -104,7 +107,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             with self.subTest(platform=platform):
                 self.assertIn(builder, performance)
                 self.assertNotIn(other_builder, performance)
-                self.assertIn("performance-runner-contract", performance)
+                self.assertIn("runner-contract", performance)
                 self.assertIn(runner, performance)
                 self.assertIn("actions/download-artifact@37930b1c", performance)
                 self.assertIn(checksum, performance)
