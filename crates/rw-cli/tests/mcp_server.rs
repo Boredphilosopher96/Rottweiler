@@ -15,17 +15,19 @@ fn arguments(value: &Value) -> rmcp::model::JsonObject {
     value.as_object().cloned().expect("object arguments")
 }
 
-fn structured(result: &rmcp::model::CallToolResult) -> &Value {
+fn structured<'a>(result: &'a rmcp::model::CallToolResult, operation: &str) -> &'a Value {
     assert_eq!(
         result.is_error,
         Some(false),
-        "tool returned an error: {:?}",
+        "{operation} returned an error: {:?}",
         result.content
     );
-    result
-        .structured_content
-        .as_ref()
-        .unwrap_or_else(|| panic!("tool returned no structured result: {:?}", result.content))
+    result.structured_content.as_ref().unwrap_or_else(|| {
+        panic!(
+            "{operation} returned no structured result: {:?}",
+            result.content
+        )
+    })
 }
 
 fn private_directory(path: &Path) {
@@ -96,7 +98,7 @@ async fn another_agent_drives_real_rw_process_without_seeing_foreign_sessions() 
         )
         .await
         .expect("create foreign session");
-    let foreign_id = structured(&foreign)["id"]
+    let foreign_id = structured(&foreign, "create foreign session")["id"]
         .as_str()
         .expect("foreign id")
         .to_owned();
@@ -113,7 +115,10 @@ async fn another_agent_drives_real_rw_process_without_seeing_foreign_sessions() 
         .await
         .expect("call approved read tool");
     assert_eq!(read.is_error, Some(false));
-    assert_eq!(structured(&read)["content"], "mcp-visible");
+    assert_eq!(
+        structured(&read, "read workspace file")["content"],
+        "mcp-visible"
+    );
 
     let created = second
         .call_tool(
@@ -122,7 +127,7 @@ async fn another_agent_drives_real_rw_process_without_seeing_foreign_sessions() 
         )
         .await
         .expect("create owned session");
-    let owned_id = structured(&created)["id"]
+    let owned_id = structured(&created, "create owned session")["id"]
         .as_str()
         .expect("owned id")
         .to_owned();
@@ -135,7 +140,9 @@ async fn another_agent_drives_real_rw_process_without_seeing_foreign_sessions() 
         )
         .await
         .expect("list sessions");
-    let sessions = structured(&listed).as_array().expect("session list");
+    let sessions = structured(&listed, "list owned sessions")
+        .as_array()
+        .expect("session list");
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0]["id"], owned_id);
     assert!(sessions.iter().all(|session| session["id"] != foreign_id));

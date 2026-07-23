@@ -85,6 +85,10 @@ const GIT_DIFF_DEADLINE: Duration = Duration::from_millis(500);
 const MAX_TEXT_PREVIEW_BYTES: usize = 1024 * 1024;
 const MAX_PREVIEW_BYTES: usize = 5 * 1024 * 1024;
 const QUERY_DEADLINE: Duration = Duration::from_millis(100);
+// Durable session queries run on Tokio's shared blocking pool. Keep them
+// bounded, but do not count ordinary blocking-pool scheduling contention
+// against the interactive workspace-picker budget above.
+const SESSION_QUERY_DEADLINE: Duration = Duration::from_secs(2);
 const WORKSPACE_STATUS_DEADLINE: Duration = Duration::from_millis(750);
 const WORKSPACE_DIFF_DEADLINE: Duration = Duration::from_secs(2);
 const SESSION_EXPORT_DEADLINE: Duration = Duration::from_secs(30);
@@ -1873,7 +1877,7 @@ impl SessionFactory for RuntimeSessionFactory {
     async fn persisted_sessions(&self) -> Result<Vec<SessionDescriptor>, HostError> {
         let factory = self.clone();
         tokio::time::timeout(
-            QUERY_DEADLINE,
+            SESSION_QUERY_DEADLINE,
             tokio::task::spawn_blocking(move || factory.persisted_sessions_blocking()),
         )
         .await
@@ -1889,7 +1893,7 @@ impl SessionFactory for RuntimeSessionFactory {
         let factory = self.clone();
         let query = query.to_owned();
         tokio::time::timeout(
-            QUERY_DEADLINE,
+            SESSION_QUERY_DEADLINE,
             tokio::task::spawn_blocking(move || factory.search_sessions_blocking(&query, limit)),
         )
         .await
@@ -3576,6 +3580,7 @@ mod tests {
     use std::time::Instant;
 
     use rw_core::{ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities, ModelDescriptor};
+    use rw_store::session::{SessionProjection, SessionSummary as StoredSessionSummary};
     use tempfile::tempdir;
 
     use super::*;
@@ -3663,6 +3668,64 @@ mod tests {
                 .expect("private test directory permissions");
         }
         fs::canonicalize(path).expect("canonical private test directory")
+    }
+
+    #[test]
+    fn durable_session_queries_tolerate_blocking_pool_scheduling_delay() {
+        let root = tempdir().expect("root");
+        let workspace = private_test_directory(&root.path().join("workspace"));
+        let factory = factory(root.path(), &workspace);
+        SessionIndex::open(&factory.options.storage_root)
+            .and_then(|index| {
+                index.upsert(&SessionProjection {
+                    summary: StoredSessionSummary {
+                        id: "scheduling-delay".to_owned(),
+                        title: "Scheduling delay".to_owned(),
+                        updated_unix_ms: 1,
+                        cost_micros: 0,
+                    },
+                    transcript: "durable query scheduling".to_owned(),
+                    projected_through: None,
+                })
+            })
+            .expect("searchable session index");
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_time()
+            .build()
+            .expect("bounded test runtime");
+
+        runtime.block_on(async move {
+            let (started, running) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = started.send(());
+                std::thread::sleep(Duration::from_millis(250));
+            });
+            running.await.expect("blocking worker started");
+            assert!(
+                factory
+                    .persisted_sessions()
+                    .await
+                    .expect("session list after scheduling delay")
+                    .is_empty()
+            );
+            blocker.await.expect("first blocker");
+
+            let (started, running) = tokio::sync::oneshot::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                let _ = started.send(());
+                std::thread::sleep(Duration::from_millis(250));
+            });
+            running.await.expect("blocking worker started");
+            let (sessions, truncated) = factory
+                .search_persisted_sessions("scheduling", 10)
+                .await
+                .expect("session search after scheduling delay");
+            assert!(sessions.is_empty());
+            assert!(!truncated);
+            blocker.await.expect("second blocker");
+        });
     }
 
     #[test]
