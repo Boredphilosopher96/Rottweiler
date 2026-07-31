@@ -165,6 +165,11 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("cargo llvm-cov", workflow)
         self.assertIn("cargo mutants", workflow)
         self.assertIn("--jobs 2", workflow)
+        self.assertIn("--re \"${{ matrix.filter }}\"", workflow)
+        self.assertIn("scripts/check-mutation-score.py", workflow)
+        self.assertIn("--minimum-score \"${{ matrix.minimum_score }}\"", workflow)
+        self.assertIn("--component llvm-tools-preview,rustfmt,clippy", workflow)
+        self.assertIn("--component rustfmt,clippy", workflow)
         self.assertNotIn("--in-place", workflow)
         self.assertEqual(
             workflow.count(

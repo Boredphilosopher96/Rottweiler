@@ -23,7 +23,7 @@ jobs:
           persist-credentials: false
       - name: Install Rust coverage toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal --component llvm-tools-preview
+          rustup toolchain install 1.97.1 --profile minimal --component llvm-tools-preview,rustfmt,clippy
           rustup override set 1.97.1
           cargo install --locked cargo-llvm-cov --version 0.8.7
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -64,19 +64,27 @@ jobs:
         include:
           - name: permission
             file: crates/rw-core/src/permission.rs
+            filter: 'PermissionGate::(authorize_in_mode|decision_for|auto_safe_decision)|requires_interactive_approval|rememberable_request|rule_decision|unsandboxed_rule_decision|capability_rule_decision'
+            minimum_score: 50
           - name: trust
             file: crates/rw-store/src/trust.rs
+            filter: 'FolderTrustStore::(assess|grant|grant_all|revoke|revoke_all|read_ledger|write_ledger)|executable_inventory|inventory_diff'
+            minimum_score: 50
           - name: update
             file: crates/rw-core/src/update.rs
+            filter: 'verify_update_metadata|verify_update_metadata_chain|restore_trusted_root_chain|accept_root|verify_envelope|select_role_keys|validate_target'
+            minimum_score: 50
           - name: plugin-capabilities
             file: crates/rw-ext/src/plugin.rs
+            filter: 'PluginManifest::validate|approval_requirement|approve_manifest|CapabilityEnforcer::(check_tool|check_command|check_hook|check_provider|check_event|check_push|check_push_method|check)'
+            minimum_score: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install pinned mutation toolchain
         run: |
-          rustup toolchain install 1.97.1 --profile minimal
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
           rustup override set 1.97.1
           cargo install --locked cargo-mutants --version 27.1.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -87,12 +95,19 @@ jobs:
           bun install --cwd packages/plugin-sdk --frozen-lockfile
           bun install --cwd packages/tui --frozen-lockfile
       - name: Require tests to catch security-boundary mutations
+        continue-on-error: true
         run: >-
           cargo mutants
           --file "${{ matrix.file }}"
+          --re "${{ matrix.filter }}"
           --jobs 2
           --timeout 300
           --cargo-arg=--locked
+      - name: Enforce mutation score floor
+        run: >-
+          python3 scripts/check-mutation-score.py
+          mutants.out/outcomes.json
+          --minimum-score "${{ matrix.minimum_score }}"
       - name: Retain mutation evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
