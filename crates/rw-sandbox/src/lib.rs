@@ -852,7 +852,7 @@ mod linux {
     use std::convert::TryInto as _;
     use std::io;
     use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
-    use std::os::fd::{AsFd as _, BorrowedFd};
+    use std::os::fd::AsFd as _;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
     use std::path::{Path, PathBuf};
@@ -952,13 +952,13 @@ mod linux {
             // open in this process. CLOEXEC closes it atomically when the
             // target replaces the helper, without shell-parsing an arbitrary
             // multi-digit descriptor number.
-            // SAFETY: inherited_helper_pin accepted this descriptor only
-            // after resolving it from /proc/self/fd, and the pinned file is
-            // still owned by this process until exec closes it.
-            let helper_pin = unsafe { BorrowedFd::borrow_raw(helper_pin) };
-            nix::fcntl::fcntl(
+            // nix 0.31 requires constructing a BorrowedFd, which would add
+            // unsafe code here. The compatibility API accepts the validated
+            // descriptor directly and is already present in the dependency
+            // graph through portable-pty.
+            nix_raw_fd::fcntl::fcntl(
                 helper_pin,
-                nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+                nix_raw_fd::fcntl::FcntlArg::F_SETFD(nix_raw_fd::fcntl::FdFlag::FD_CLOEXEC),
             )
             .map_err(sandbox_backend)?;
         }

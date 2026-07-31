@@ -26,6 +26,11 @@ webpki-roots = "1.0.8"
 landlock = "0.4.5"
 libc = "0.2.183"
 nix = { workspace = true, features = ["fs", "socket"] }
+# nix 0.31 intentionally requires an `AsFd` for `fcntl`, but the Linux
+# sandbox helper receives a validated inherited descriptor number. Keep the
+# already-transitive 0.28 API as a narrow, safe raw-descriptor bridge so the
+# workspace can continue to forbid unsafe code.
+nix-raw-fd = { package = "nix", version = "0.28.0", default-features = false, features = ["fs"] }
 rustix.workspace = true
 seccompiler = "0.5.0"
 
