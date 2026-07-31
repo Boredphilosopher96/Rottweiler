@@ -1800,7 +1800,7 @@ impl HookHandler for RpcHookHandler {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::sync::Mutex;
+    use std::sync::{Mutex, atomic::AtomicUsize};
 
     use super::*;
     use crate::{HookDispatchStatus, HookDispatcher, HookRegistration};
@@ -1960,6 +1960,7 @@ mod tests {
     struct ProcessState {
         violations: Mutex<Vec<CapabilityViolation>>,
         killed: AtomicBool,
+        kill_count: AtomicUsize,
     }
 
     impl SupervisedPluginProcess for ProcessState {
@@ -1972,6 +1973,7 @@ mod tests {
 
         fn kill_tree(&self) -> Result<(), PluginProcessError> {
             self.killed.store(true, Ordering::Release);
+            self.kill_count.fetch_add(1, Ordering::AcqRel);
             Ok(())
         }
     }
@@ -1983,6 +1985,21 @@ mod tests {
         assert!(enforcer.check_tool("secret_tool").is_err());
         assert!(enforcer.violated());
         assert!(process.killed.load(Ordering::Acquire));
+        assert_eq!(process.violations.lock().expect("violations").len(), 1);
+    }
+
+    #[test]
+    fn cached_violation_does_not_repeat_successful_process_termination() {
+        let process = Arc::new(ProcessState::default());
+        let enforcer = CapabilityEnforcer::new(&manifest(), process.clone());
+        let first = enforcer
+            .check_tool("secret_tool")
+            .expect_err("undeclared tool");
+        let cached = enforcer
+            .check_command("secret_command")
+            .expect_err("cached violation");
+        assert_eq!(cached, first);
+        assert_eq!(process.kill_count.load(Ordering::Acquire), 1);
         assert_eq!(process.violations.lock().expect("violations").len(), 1);
     }
 
