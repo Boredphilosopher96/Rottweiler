@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -48,6 +49,8 @@ class SoakHarnessTests(unittest.TestCase):
         self.assertEqual(tool_call[0]["name"], "read")
         self.assertEqual(tool_call[1]["arguments"], {"path": "soak.txt"})
         self.assertTrue(all(step.marker not in step.prompt for step in steps))
+        for index, step in enumerate(steps, start=1):
+            self.assertIn(f"SOAK_INPUT_{index:06d}", step.prompt)
         self.assertEqual(SOAK.TERMINAL_SUBMIT, b"\r")
 
     def test_process_tree_tracks_combined_rss_and_named_descendants(self) -> None:
@@ -90,6 +93,45 @@ class SoakHarnessTests(unittest.TestCase):
             self.assertGreater(probe.durable_bytes(), 0)
             log.write_text("durable marker removed\n", encoding="utf-8")
             self.assertFalse(probe.marker_persisted("SOAK_STEP_000001_DONE"))
+
+    def test_event_probe_tracks_input_acceptance_and_compaction_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            sessions = Path(temporary)
+            log = sessions / "session-1" / "events.jsonl"
+            log.parent.mkdir()
+            probe = SOAK.EventLogProbe(sessions)
+            log.write_text(
+                '{"event":{"type":"user_message_accepted",'
+                '"content":"SOAK_INPUT_000001"}}\n'
+                '{"event":{"type":"compaction_started"}}\n',
+                encoding="utf-8",
+            )
+
+            probe.poll()
+            self.assertTrue(probe.saw("SOAK_INPUT_000001"))
+            self.assertEqual(probe.event_count("user_message_accepted"), 1)
+            self.assertEqual(probe.event_count("compaction_started"), 1)
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write('{"event":{"type":"compaction_finished"}}\n')
+            probe.poll()
+            self.assertEqual(probe.event_count("compaction_started"), 1)
+            self.assertEqual(probe.event_count("compaction_finished"), 1)
+
+    def test_failure_result_is_written_for_artifact_retention(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "soak-result.json"
+            result = SOAK.failure_result(RuntimeError("accepted compaction stalled"))
+            SOAK.write_result(output, result)
+
+            self.assertEqual(
+                json.loads(output.read_text(encoding="utf-8")),
+                {
+                    "error": "accepted compaction stalled",
+                    "error_type": "RuntimeError",
+                    "schema_version": 1,
+                    "status": "fail",
+                },
+            )
 
 
 if __name__ == "__main__":

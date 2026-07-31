@@ -8,10 +8,12 @@ import json
 import math
 import os
 import pty
+import re
 import select
 import signal
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 from dataclasses import dataclass
@@ -22,6 +24,8 @@ DEFAULT_SECONDS = 8 * 60 * 60
 DEFAULT_RSS_LIMIT_MIB = 500
 DEFAULT_TURN_SECONDS = 2.0
 TERMINAL_SUBMIT = b"\r"
+SOAK_TOKEN = re.compile(rb"SOAK_(?:INPUT|STEP)_[0-9]{6}(?:_DONE)?")
+EVENT_TYPE = re.compile(rb'"type"\s*:\s*"([a-z0-9_]+)"')
 
 
 @dataclass(frozen=True)
@@ -206,13 +210,17 @@ def build_workload(
     prompt_filler = " retain production transcript state " + ("abcdefghij" * 32)
     for index in range(1, count + 1):
         marker = f"SOAK_STEP_{index:06d}_DONE"
+        input_marker = f"SOAK_INPUT_{index:06d}"
         if index % compact_every == 0:
             kind = "compact"
-            prompt = "/compact retain soak workload intent"
+            prompt = f"/compact retain soak workload intent {input_marker}"
             scripts.append(text_events(marker, index))
         elif index % tool_every == 0:
             kind = "tool"
-            prompt = f"Read soak.txt and report its stable contents.{prompt_filler}"
+            prompt = (
+                f"Read soak.txt and report its stable contents. {input_marker}"
+                f"{prompt_filler}"
+            )
             call_id = f"soak-read-{index:06d}"
             scripts.append(
                 [
@@ -228,7 +236,10 @@ def build_workload(
             scripts.append(text_events(marker, index))
         else:
             kind = "turn"
-            prompt = f"Acknowledge deterministic workload turn {index:06d}.{prompt_filler}"
+            prompt = (
+                f"Acknowledge deterministic workload turn {index:06d}. "
+                f"{input_marker}{prompt_filler}"
+            )
             scripts.append(text_events(marker, index))
         steps.append(WorkloadStep(prompt=prompt, marker=marker, kind=kind))
     return steps, scripts
@@ -243,6 +254,7 @@ class EventLogProbe:
         self.tails: dict[Path, bytes] = {}
         self.seen_markers: set[str] = set()
         self.marker_locations: dict[str, tuple[Path, int]] = {}
+        self.event_counts: dict[str, int] = {}
         self.bytes_observed = 0
 
     def poll(self, marker: str | None = None) -> bool:
@@ -263,20 +275,33 @@ class EventLogProbe:
                 tail = self.tails.get(path, b"")
                 combined = tail + raw
                 self.tails[path] = combined[-256:]
-                encoded_marker = marker.encode() if marker is not None else None
-                marker_index = (
-                    combined.find(encoded_marker) if encoded_marker is not None else -1
-                )
-                if marker is not None and marker_index >= 0:
-                    self.seen_markers.add(marker)
-                    self.marker_locations[marker] = (
+                for match in SOAK_TOKEN.finditer(combined):
+                    if match.end() <= len(tail):
+                        continue
+                    token = match.group().decode("ascii")
+                    self.seen_markers.add(token)
+                    self.marker_locations[token] = (
                         path,
-                        max(0, offset - len(tail) + marker_index),
+                        max(0, offset - len(tail) + match.start()),
                     )
+                for match in EVENT_TYPE.finditer(combined):
+                    if match.end() <= len(tail):
+                        continue
+                    event_type = match.group(1).decode("ascii")
+                    self.event_counts[event_type] = (
+                        self.event_counts.get(event_type, 0) + 1
+                    )
+                if marker is not None and marker in self.seen_markers:
                     found = True
             except FileNotFoundError:
                 continue
         return found
+
+    def saw(self, marker: str) -> bool:
+        return marker in self.seen_markers
+
+    def event_count(self, event_type: str) -> int:
+        return self.event_counts.get(event_type, 0)
 
     def marker_persisted(self, marker: str) -> bool:
         """Re-read only the exact recorded marker range from the durable log."""
@@ -399,6 +424,11 @@ def run_soak(
         probe = EventLogProbe(state / "sessions")
         waiting: WorkloadStep | None = None
         waiting_since = 0.0
+        waiting_accepted = False
+        waiting_submissions = 0
+        waiting_compaction_started = 0
+        waiting_compaction_finished = 0
+        acceptance_deadline = 0.0
         next_submit = started + 1.0
         next_sample = started
         restart_old_tui: int | None = None
@@ -466,10 +496,48 @@ def run_soak(
                         streamed_turns += 1
                     waiting = None
                     next_submit = now + turn_seconds
-                elif waiting is not None and now - waiting_since > 60:
-                    raise RuntimeError(
-                        f"workload step {waiting.marker} did not persist within 60 seconds"
-                    )
+                elif waiting is not None:
+                    input_marker = waiting.marker.replace(
+                        "SOAK_STEP_", "SOAK_INPUT_"
+                    ).removesuffix("_DONE")
+                    if not waiting_accepted:
+                        accepted = (
+                            probe.event_count("compaction_started")
+                            > waiting_compaction_started
+                            if waiting.kind == "compact"
+                            else probe.saw(input_marker)
+                        )
+                        if accepted:
+                            waiting_accepted = True
+                            waiting_since = now
+                        elif now >= acceptance_deadline:
+                            if waiting_submissions >= 3:
+                                raise RuntimeError(
+                                    f"workload step {waiting.marker} was not accepted after "
+                                    f"{waiting_submissions} PTY submissions; "
+                                    f"engine={engine_diagnostic}; terminal tail: "
+                                    f"{terminal_tail.decode('utf-8', errors='replace')[-4000:]}"
+                                )
+                            os.write(
+                                master, waiting.prompt.encode("utf-8") + TERMINAL_SUBMIT
+                            )
+                            waiting_submissions += 1
+                            acceptance_deadline = now + 5
+                    elif (
+                        waiting.kind == "compact"
+                        and probe.event_count("compaction_finished")
+                        > waiting_compaction_finished
+                    ):
+                        raise RuntimeError(
+                            f"workload step {waiting.marker} completed compaction without "
+                            "persisting its replay marker"
+                        )
+                    elif now - waiting_since > 60:
+                        raise RuntimeError(
+                            f"accepted workload step {waiting.marker} did not persist within "
+                            f"60 seconds; engine={engine_diagnostic}; terminal tail: "
+                            f"{terminal_tail.decode('utf-8', errors='replace')[-4000:]}"
+                        )
                 else:
                     probe.poll()
 
@@ -523,6 +591,15 @@ def run_soak(
                     os.write(master, waiting.prompt.encode("utf-8") + TERMINAL_SUBMIT)
                     submitted += 1
                     waiting_since = now
+                    waiting_accepted = False
+                    waiting_submissions = 1
+                    waiting_compaction_started = probe.event_count(
+                        "compaction_started"
+                    )
+                    waiting_compaction_finished = probe.event_count(
+                        "compaction_finished"
+                    )
+                    acceptance_deadline = now + 5
 
                 if now >= next_sample:
                     rows = process_table()
@@ -578,6 +655,19 @@ def run_soak(
     }
 
 
+def failure_result(error: Exception) -> dict[str, object]:
+    return {
+        "error": str(error),
+        "error_type": type(error).__name__,
+        "schema_version": 1,
+        "status": "fail",
+    }
+
+
+def write_result(path: Path, result: dict[str, object]) -> None:
+    path.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--rw", required=True, type=Path)
@@ -596,19 +686,25 @@ def main() -> None:
     parser.add_argument("--script-delay-ms", type=int, default=10)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
-    result = run_soak(
-        validate_executable(args.rw, "rw"),
-        validate_executable(args.tui, "TUI") if args.tui is not None else None,
-        args.duration_seconds,
-        args.sample_seconds,
-        args.rss_limit_mib * 1024 * 1024,
-        args.turn_seconds,
-        args.compact_every,
-        args.tool_every,
-        args.restart_after_turns,
-        args.script_delay_ms,
-    )
-    args.output.write_text(json.dumps(result, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        result = run_soak(
+            validate_executable(args.rw, "rw"),
+            validate_executable(args.tui, "TUI") if args.tui is not None else None,
+            args.duration_seconds,
+            args.sample_seconds,
+            args.rss_limit_mib * 1024 * 1024,
+            args.turn_seconds,
+            args.compact_every,
+            args.tool_every,
+            args.restart_after_turns,
+            args.script_delay_ms,
+        )
+    except Exception as error:
+        result = failure_result(error)
+        write_result(args.output, result)
+        print(json.dumps(result, sort_keys=True), file=sys.stderr)
+        raise
+    write_result(args.output, result)
     print(json.dumps(result, sort_keys=True))
 
 

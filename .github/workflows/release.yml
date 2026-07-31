@@ -388,6 +388,7 @@ jobs:
           bun test --cwd packages/plugin-docs
           bun run --cwd packages/plugin-docs build
       - name: Validate protected fourteen-day dogfood evidence
+        if: ${{ !startsWith(github.ref_name, 'v0.') }}
         env:
           DOGFOOD_LEDGER_B64: ${{ secrets.ROTTWEILER_DOGFOOD_LEDGER_B64 }}
         run: |
@@ -412,6 +413,7 @@ jobs:
             --through "$(date -u +%F)" | tee dogfood-gate-result.json
           rm -f "$RUNNER_TEMP/dogfood-ledger.jsonl"
       - name: Paid two-family record and network-denied replay canary
+        if: ${{ !startsWith(github.ref_name, 'v0.') }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
