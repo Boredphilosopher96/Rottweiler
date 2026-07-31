@@ -94,13 +94,23 @@ import {
   type ToolProjection,
 } from "./state"
 import {
-  MAX_BUFFERED_SUBAGENT_LIVE_BYTES,
   createSubagentReplayState,
   transitionSubagentReplay,
   type SubagentReplayEffect,
   type SubagentReplayInput,
   type SubagentReplayState,
 } from "./subagent-replay"
+import {
+  boundSubagentState,
+  childEngineEvent,
+  childPassiveInteractionState,
+  initialSubagentState,
+  mergeComposerDraft,
+  sanitizeSubagentDescriptor,
+  wireEventBytes,
+  type ComposerDraft,
+  type SubagentDescriptor,
+} from "./subagent-state"
 import {
   createSyntaxStyle,
   kennelTheme,
@@ -113,7 +123,6 @@ import {
   durableSequenceId,
   isRecord,
   isSessionForkedEvent,
-  isWireEngineEvent,
   type WireEngineEvent,
 } from "./transport"
 import {
@@ -198,12 +207,6 @@ type BudgetSettingKey =
   | "budget.warn_at_percent"
 const MAX_VISIBLE_SUBAGENTS = 256
 const EMPTY_TEXT_PROMPT_SENTINEL = "\u200B"
-const MAX_SUBAGENT_ID_LENGTH = 256
-
-interface ComposerDraft {
-  readonly content: string
-  readonly attachments: readonly Attachment[]
-}
 
 interface TimelineTurnChoice {
   readonly sequenceId: string
@@ -223,7 +226,6 @@ interface PendingRewindIntent {
   requestId: string | null
 }
 
-type SubagentDescriptor = Extract<EngineEvent, { type: "subagents_listed" }>["subagents"][number]
 type SubagentAction =
   | { readonly kind: "inspect"; readonly subagent: SubagentDescriptor }
   | { readonly kind: "continue"; readonly subagent: SubagentDescriptor }
@@ -5388,55 +5390,6 @@ export class RottweilerApp extends BoxRenderable {
   }
 }
 
-const MAX_CHILD_TRANSCRIPT_ENTRIES = 256
-const MAX_CHILD_PROJECTION_ENTRIES = 512
-
-function initialSubagentState(
-  parent: RottweilerState,
-  descriptor: SubagentDescriptor,
-): RottweilerState {
-  const state = createInitialState()
-  return {
-    ...state,
-    connection: { ...state.connection, phase: "connected" },
-    mode: parent.mode ?? "execute",
-    model: descriptor.model,
-  }
-}
-
-function sanitizeSubagentDescriptor(descriptor: SubagentDescriptor): SubagentDescriptor | null {
-  if (
-    !safeSubagentIdentifier(descriptor.subagent_id) ||
-    !safeSubagentIdentifier(descriptor.child_session_id)
-  ) return null
-  const task = boundedUiText(descriptor.task, 512)
-  return {
-    ...descriptor,
-    task: task.length === 0 ? "Untitled child agent" : task,
-    agent: boundedUiText(descriptor.agent, 128),
-    model: boundedUiText(descriptor.model, 256),
-  }
-}
-
-function safeSubagentIdentifier(value: string): boolean {
-  return value.length > 0 && value.length <= MAX_SUBAGENT_ID_LENGTH && !/[\u0000-\u001f\u007f]/.test(value)
-}
-
-function childEngineEvent(value: unknown, expectedSessionId: string): WireEngineEvent | null {
-  if (!isWireEngineEvent(value)) return null
-  const record = value as unknown as Record<string, unknown>
-  if (!isRecord(record.meta) || record.meta.session_id !== expectedSessionId) return null
-  return value
-}
-
-function wireEventBytes(event: WireEngineEvent): number {
-  try {
-    return new TextEncoder().encode(JSON.stringify(event)).byteLength
-  } catch {
-    return MAX_BUFFERED_SUBAGENT_LIVE_BYTES + 1
-  }
-}
-
 function timelineUserMessage(turn: RottweilerState["transcript"][number]["turn"]): {
   readonly content: string
   readonly hadAttachments: boolean
@@ -5449,54 +5402,6 @@ function timelineUserMessage(turn: RottweilerState["transcript"][number]["turn"]
   return {
     content: firstIsTextAttachment ? "" : first.text,
     hadAttachments: firstIsTextAttachment || turn.blocks.length > 1,
-  }
-}
-
-function mergeComposerDraft(
-  draft: ComposerDraft,
-  rejectedContent: string,
-  rejectedAttachments: readonly Attachment[],
-): ComposerDraft {
-  const content = draft.content.length === 0
-    ? rejectedContent
-    : `${rejectedContent}\n${draft.content}`
-  const attachments: Attachment[] = [...draft.attachments]
-  const identities = new Set(attachments.map((attachment) => JSON.stringify(attachment)))
-  for (const attachment of rejectedAttachments) {
-    const identity = JSON.stringify(attachment)
-    if (identities.has(identity) || attachments.length >= 16) continue
-    identities.add(identity)
-    attachments.push(attachment)
-  }
-  return { content, attachments }
-}
-
-function boundSubagentState(state: RottweilerState): RottweilerState {
-  return {
-    ...state,
-    transcript: state.transcript.slice(-MAX_CHILD_TRANSCRIPT_ENTRIES),
-    turns: boundProjectionRecord(state.turns),
-    tools: boundProjectionRecord(state.tools),
-    questions: boundProjectionRecord(state.questions),
-    commandAcks: boundProjectionRecord(state.commandAcks),
-  }
-}
-
-function boundProjectionRecord<T>(record: Readonly<Record<string, T>>): Readonly<Record<string, T>> {
-  const entries = Object.entries(record)
-  return entries.length <= MAX_CHILD_PROJECTION_ENTRIES
-    ? record
-    : Object.fromEntries(entries.slice(-MAX_CHILD_PROJECTION_ENTRIES))
-}
-
-function childPassiveInteractionState(state: RottweilerState): RottweilerState {
-  return {
-    ...state,
-    tools: Object.fromEntries(
-      Object.entries(state.tools).filter(([, tool]) => tool.status !== "awaiting_approval"),
-    ),
-    questions: {},
-    pendingPlan: null,
   }
 }
 

@@ -287,8 +287,19 @@ one-time fixture or a single development run.
 ## 6. CI pipeline summary
 
 Per-PR: fmt · clippy `-D warnings` · unit+integration (replay, network-denied) · protocol codegen check (schema → generated types are committed and in sync) · `bun test` + typecheck in `packages/tui` · TUI goldens · security tests · perf smoke (startup + latency) · `cargo deny`/`audit` · dependency-direction and guarded-network-boundary checks · docs build.
+Weekly/manual risk evidence: `cargo llvm-cov` records workspace line coverage
+without imposing an unreviewed percentage, while bounded `cargo-mutants`
+campaigns must catch mutations in permission, trust, signed-update, and plugin
+capability boundaries. Evidence is retained per exact run. Establish a required
+coverage threshold only after reviewing the first protected measurements;
+lowering a later threshold requires the same review as a performance waiver.
 Manual protected performance: independently built and checksummed Linux/macOS binaries · 500-sample full p99 gates on calibrated protected runners · M4/M8/TUI performance and release-size evidence.
 Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · non-optional terminal-bench subset with retained regression evidence · macOS + Linux release matrix · real WSL2 acceptance on a labeled self-hosted runner.
+Pre-release: the manually dispatched non-publishing preflight validates
+repository-owned public signing inputs, measured baselines, protected
+configuration, and the current 14-day dogfood ledger before invoking the exact
+protected-performance graph. It produces no release, channel metadata,
+Homebrew change, or deployment.
 Release: signing and publication depend on the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, 14-day dogfood ledger, paid two-family `--record` plus offline replay canary, pinned 20-task Terminal-Bench baseline, macOS/Linux eight-hour soak, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
 
 The long-running `soak`, `terminal-bench`, and `wsl2` labels are operational

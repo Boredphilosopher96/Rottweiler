@@ -1,0 +1,61 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    groups:
+      rust:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /packages/tui
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:15"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    groups:
+      tui:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /packages/plugin-sdk
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:30"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    groups:
+      plugin-sdk:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /packages/plugin-docs
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:45"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    groups:
+      plugin-docs:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "08:00"
+      timezone: America/Chicago
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]

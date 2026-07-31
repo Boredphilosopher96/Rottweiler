@@ -1,0 +1,108 @@
+name: Release preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-preflight
+  cancel-in-progress: false
+
+jobs:
+  repository-prerequisites:
+    name: Release repository and protected configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Validate measured baselines and public signing inputs
+        run: python3 scripts/check-release-readiness.py --output release-readiness.json
+      - name: Validate protected release configuration
+        shell: bash
+        env:
+          SELF_HOSTED_RUNNERS_ENABLED: ${{ vars.ROTTWEILER_SELF_HOSTED_RUNNERS }}
+          UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
+          UPDATE_ROOT_THRESHOLD: ${{ vars.ROTTWEILER_UPDATE_ROOT_THRESHOLD }}
+          UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
+          UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
+          LIVE_ANTHROPIC_MODEL: ${{ vars.ROTTWEILER_LIVE_ANTHROPIC_MODEL }}
+          LIVE_OPENAI_MODEL: ${{ vars.ROTTWEILER_LIVE_OPENAI_MODEL }}
+          EVAL_MODEL: ${{ vars.ROTTWEILER_EVAL_MODEL }}
+          TERMINAL_BENCH_BASELINE_JSON: ${{ vars.ROTTWEILER_TERMINAL_BENCH_BASELINE_JSON }}
+          UPDATE_RELEASE_KEYS_JSON: ${{ secrets.ROTTWEILER_UPDATE_RELEASE_KEYS_JSON }}
+          DOGFOOD_LEDGER_B64: ${{ secrets.ROTTWEILER_DOGFOOD_LEDGER_B64 }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          required=(
+            SELF_HOSTED_RUNNERS_ENABLED
+            UPDATE_ROOT_VERSION
+            UPDATE_ROOT_THRESHOLD
+            UPDATE_ROOT_KEYS_JSON
+            UPDATE_BASE_URL
+            LIVE_ANTHROPIC_MODEL
+            LIVE_OPENAI_MODEL
+            EVAL_MODEL
+            TERMINAL_BENCH_BASELINE_JSON
+            UPDATE_RELEASE_KEYS_JSON
+            DOGFOOD_LEDGER_B64
+            OPENAI_API_KEY
+            ANTHROPIC_API_KEY
+            EVAL_API_KEY
+            HOMEBREW_TAP_TOKEN
+          )
+          missing=()
+          for name in "${required[@]}"; do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -ne 0 ]; then
+            printf 'missing protected release configuration: %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+          test "$SELF_HOSTED_RUNNERS_ENABLED" = "true"
+          case "$UPDATE_BASE_URL" in
+            https://*/) ;;
+            *) echo "UPDATE_BASE_URL must be HTTPS and end in /" >&2; exit 1 ;;
+          esac
+      - name: Validate protected dogfood evidence
+        shell: bash
+        env:
+          DOGFOOD_LEDGER_B64: ${{ secrets.ROTTWEILER_DOGFOOD_LEDGER_B64 }}
+        run: |
+          set -euo pipefail
+          ledger=$(mktemp "$RUNNER_TEMP/rottweiler-preflight-dogfood.XXXXXX")
+          trap 'rm -f "$ledger"' EXIT
+          chmod 600 "$ledger"
+          LEDGER="$ledger" python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          encoded = os.environ.pop("DOGFOOD_LEDGER_B64", "")
+          Path(os.environ["LEDGER"]).write_bytes(base64.b64decode(encoded, validate=True))
+          PY
+          python3 scripts/check-dogfood-gate.py "$ledger" --through "$(date -u +%F)"
+      - name: Retain non-secret readiness evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-readiness.json
+          if-no-files-found: warn
+          retention-days: 30
+
+  protected-performance:
+    name: Exact protected performance graph
+    needs: repository-prerequisites
+    uses: ./.github/workflows/performance.yml
+    secrets: inherit

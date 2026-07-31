@@ -135,6 +135,43 @@ class CiHardeningContractTests(unittest.TestCase):
                 with self.subTest(consumer=consumer_name):
                     self.assertIn(contract_name, consumer.split("    runs-on:", 1)[0])
 
+    def test_release_preflight_reuses_protected_performance_and_stays_non_publishing(
+        self,
+    ) -> None:
+        preflight = (ROOT / ".github/workflows/release-preflight.yml").read_text(
+            encoding="utf-8"
+        )
+        performance = (ROOT / ".github/workflows/performance.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assert_checkout_credentials_are_not_persisted(preflight)
+        self.assertIn("workflow_call:", performance)
+        self.assertIn("environment: release", preflight)
+        self.assertIn("python3 scripts/check-release-readiness.py", preflight)
+        self.assertIn("python3 scripts/check-dogfood-gate.py", preflight)
+        self.assertIn("uses: ./.github/workflows/performance.yml", preflight)
+        self.assertIn("needs: repository-prerequisites", preflight)
+        self.assertNotIn("gh release create", preflight)
+        self.assertNotIn("git push", preflight)
+        self.assertNotIn("HOMEBREW_TAP_TOKEN:", preflight.split("    steps:", 1)[0])
+
+    def test_quality_workflow_pins_coverage_and_mutation_tools(self) -> None:
+        workflow = (ROOT / ".github/workflows/quality.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assert_checkout_credentials_are_not_persisted(workflow)
+        self.assertIn("cargo-llvm-cov --version 0.8.7", workflow)
+        self.assertIn("cargo-mutants --version 27.1.0", workflow)
+        self.assertIn("cargo llvm-cov", workflow)
+        self.assertIn("cargo mutants", workflow)
+        for boundary in (
+            "crates/rw-core/src/permission.rs",
+            "crates/rw-store/src/trust.rs",
+            "crates/rw-core/src/update.rs",
+            "crates/rw-ext/src/plugin.rs",
+        ):
+            self.assertIn(boundary, workflow)
+
     def test_signed_release_is_serialized_and_downloads_only_unsigned_archives(
         self,
     ) -> None:
