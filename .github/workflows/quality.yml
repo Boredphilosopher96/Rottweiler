@@ -65,18 +65,22 @@ jobs:
           - name: permission
             file: crates/rw-core/src/permission.rs
             filter: 'PermissionGate::(authorize_in_mode|decision_for|auto_safe_decision)|requires_interactive_approval|rememberable_request|rule_decision|unsandboxed_rule_decision|capability_rule_decision'
+            test_filter: 'permission::'
             minimum_score: 50
           - name: trust
             file: crates/rw-store/src/trust.rs
             filter: 'FolderTrustStore::(assess|grant|grant_all|revoke|revoke_all|read_ledger|write_ledger)|executable_inventory|inventory_diff'
+            test_filter: 'trust::'
             minimum_score: 50
           - name: update
             file: crates/rw-core/src/update.rs
             filter: 'verify_update_metadata|verify_update_metadata_chain|restore_trusted_root_chain|accept_root|verify_envelope|select_role_keys|validate_target'
+            test_filter: 'update::'
             minimum_score: 50
           - name: plugin-capabilities
             file: crates/rw-ext/src/plugin.rs
             filter: 'PluginManifest::validate|approval_requirement|approve_manifest|CapabilityEnforcer::(check_tool|check_command|check_hook|check_provider|check_event|check_push|check_push_method|check)'
+            test_filter: 'plugin'
             minimum_score: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -103,6 +107,7 @@ jobs:
           --jobs 2
           --timeout 300
           --cargo-arg=--locked
+          --cargo-test-arg="${{ matrix.test_filter }}"
       - name: Enforce mutation score floor
         run: >-
           python3 scripts/check-mutation-score.py
