@@ -13,7 +13,7 @@ command -v docker >/dev/null
 test -f "$ROTTWEILER_RELEASE_ARCHIVE"
 test "$(grep -c '^terminal-bench/[a-z0-9-][a-z0-9-]*$' "$tasks")" -eq 20
 case "$ROTTWEILER_EVAL_MODEL" in
-  *-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]|*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]|*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]|*@[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
   *) echo 'ROTTWEILER_EVAL_MODEL must use an immutable dated model id' >&2; exit 1 ;;
 esac
 
