@@ -164,17 +164,22 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("runs-on: macos-15", macos)
         self.assertNotIn("self-hosted", macos)
         self.assertIn("sha256sum -c rw.sha256", linux)
-        self.assertIn("shasum -a 256 -c rw.sha256", macos)
+        self.assertNotIn("actions/download-artifact@3e5f45b2", macos)
+        self.assertIn("scripts/prepare-macos-performance-binary.sh", macos)
         self.assertIn("Headless performance gate (Linux prebuilt binary)", linux)
-        self.assertIn("Headless performance gate (macOS prebuilt binary)", macos)
+        self.assertIn("Headless performance gate (macOS measurement-host binary)", macos)
         self.assertNotIn("Headless performance gate (Linux source build)", linux)
         for measured in (linux, macos):
             self.assertEqual(measured.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
             self.assertEqual(measured.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
-            self.assertLess(
-                measured.index("Headless performance gate"),
-                measured.index("Install Rust toolchain"),
-            )
+        self.assertLess(
+            linux.index("Headless performance gate"),
+            linux.index("Install Rust toolchain"),
+        )
+        self.assertLess(
+            macos.index("Install Rust toolchain"),
+            macos.index("Headless performance gate"),
+        )
 
     def test_release_reuses_isolated_platform_measurements_independently(self) -> None:
         release = (REPO / ".github/workflows/release.yml").read_text(encoding="utf-8")
@@ -201,21 +206,33 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 "macos-performance-build",
                 "linux-performance-build",
                 "runs-on: macos-15",
-                "shasum -a 256 -c rw.sha256",
-                "Headless performance gate (macOS prebuilt binary)",
+                None,
+                "Headless performance gate (macOS measurement-host binary)",
             ),
         ):
             with self.subTest(platform=platform):
                 self.assertIn(f"needs: [runner-contract, {builder}]", build)
                 self.assertNotIn(other_builder, build)
                 self.assertIn(runner, build)
-                self.assertIn(checksum, build)
+                if platform == "macos":
+                    self.assertNotIn("actions/download-artifact@3e5f45b2", build)
+                    self.assertIn("scripts/prepare-macos-performance-binary.sh", build)
+                else:
+                    assert checksum is not None
+                    self.assertIn(checksum, build)
                 self.assertIn(gate, build)
                 self.assertNotIn("Headless performance gate (Linux source build)", build)
                 self.assertEqual(build.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
                 self.assertEqual(build.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
                 self.assertIn("timeout-minutes: 60", build)
-                self.assertLess(build.index(gate), build.index("Install Rust toolchain"))
+                if platform == "macos":
+                    self.assertLess(
+                        build.index("Install Rust toolchain"), build.index(gate)
+                    )
+                else:
+                    self.assertLess(
+                        build.index(gate), build.index("Install Rust toolchain")
+                    )
                 self.assertIn("overwrite: true", build)
 
     def test_release_compresses_embedded_wasm_and_never_rewrites_compiled_elf(
