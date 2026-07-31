@@ -34,21 +34,21 @@
     "linux-x86_64": {
       "suites": {
         "core": {
-          "baseline_kind": "bootstrap",
-          "provenance": "bootstrap ceilings derived from fixed absolute v1 budgets; replace with reviewed runner measurements",
+          "baseline_kind": "measured",
+          "provenance": "reviewed GitHub Actions run 30651316120 at fea54eadf212d0a0855da75dd43bf909b791fb54 on native X64 ubuntu24 image 20260720.247.2",
           "metrics": {
-            "engine_binary_bytes": 22727272,
-            "engine_ready_p99_us": 45454,
-            "headless_print_p99_us": 72727,
-            "mcp_prompt_ready_p99_us": 227272,
-            "tui_bundle_bytes": 99999999,
-            "tui_first_paint_p99_us": 136363,
-            "tui_frame_p95_us": 36363,
-            "tui_frame_p999_us": 59999,
-            "tui_input_echo_p99_us": 14545,
-            "tui_vim_echo_p99_us": 14545,
-            "turn_overhead_p99_us": 18181,
-            "uds_event_p99_us": 1818
+            "engine_binary_bytes": 26375800,
+            "engine_ready_p99_us": 6031,
+            "headless_print_p99_us": 27103,
+            "mcp_prompt_ready_p99_us": 9439,
+            "tui_bundle_bytes": 137155816,
+            "tui_first_paint_p99_us": 50471,
+            "tui_frame_p95_us": 29727,
+            "tui_frame_p999_us": 40747,
+            "tui_input_echo_p99_us": 1493,
+            "tui_vim_echo_p99_us": 1277,
+            "turn_overhead_p99_us": 17824,
+            "uds_event_p99_us": 259
           }
         },
         "soak": {

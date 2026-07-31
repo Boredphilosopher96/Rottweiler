@@ -80,7 +80,13 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("exit 1", runner_contract)
         self.assertEqual(workflow.count("runner-contract"), 4)
         soak = workflow_job(workflow, "eight-hour-soak")
-        self.assertIn("needs: runner-contract", soak)
+        self.assertIn(
+            "needs: [runner-contract, linux-performance-build, macos-performance-build]",
+            soak,
+        )
+        self.assertNotIn("cargo-release.sh build", soak)
+        self.assertIn("${{ matrix.artifact }}", soak)
+        self.assertIn("rottweiler-soak-binary.noindex/rw", soak)
         wsl2 = workflow_job(workflow, "wsl2-acceptance")
         self.assertIn("runs-on: windows-2025", wsl2)
         self.assertNotIn("self-hosted", wsl2)

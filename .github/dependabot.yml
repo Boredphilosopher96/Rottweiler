@@ -3,8 +3,7 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
       time: "07:00"
       timezone: America/Chicago
     open-pull-requests-limit: 5
@@ -15,8 +14,7 @@ updates:
   - package-ecosystem: npm
     directory: /packages/tui
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
       time: "07:15"
       timezone: America/Chicago
     open-pull-requests-limit: 5
@@ -27,8 +25,7 @@ updates:
   - package-ecosystem: npm
     directory: /packages/plugin-sdk
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
       time: "07:30"
       timezone: America/Chicago
     open-pull-requests-limit: 5
@@ -39,8 +36,7 @@ updates:
   - package-ecosystem: npm
     directory: /packages/plugin-docs
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
       time: "07:45"
       timezone: America/Chicago
     open-pull-requests-limit: 5
@@ -51,8 +47,7 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
+      interval: daily
       time: "08:00"
       timezone: America/Chicago
     open-pull-requests-limit: 5
