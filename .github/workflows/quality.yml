@@ -76,7 +76,6 @@ jobs:
         run: >-
           cargo mutants
           --file "${{ matrix.file }}"
-          --in-place
           --jobs 2
           --timeout 300
           --cargo-arg=--locked

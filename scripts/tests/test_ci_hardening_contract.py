@@ -164,6 +164,8 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("cargo-mutants --version 27.1.0", workflow)
         self.assertIn("cargo llvm-cov", workflow)
         self.assertIn("cargo mutants", workflow)
+        self.assertIn("--jobs 2", workflow)
+        self.assertNotIn("--in-place", workflow)
         for boundary in (
             "crates/rw-core/src/permission.rs",
             "crates/rw-store/src/trust.rs",
