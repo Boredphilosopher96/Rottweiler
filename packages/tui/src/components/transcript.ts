@@ -48,6 +48,11 @@ export interface TranscriptRenderableOptions {
 }
 
 const MAX_VISIBLE_SUBAGENTS = 8
+// OpenTUI viewport culling skips paint work but retains every mounted renderable.
+// Keep the durable reducer projection intact for export/replay while bounding the
+// expensive live card tree. Long sessions otherwise grow by roughly one pair of
+// Markdown renderables per turn even after context compaction.
+const MAX_MOUNTED_TRANSCRIPT_ENTRIES = 128
 
 function entryKey(entry: TranscriptEntry): string {
   return `${entry.sequenceId}:${entry.agentTurn}:${entry.turn.role}`
@@ -983,10 +988,15 @@ class TurnCardRenderable extends BoxRenderable {
     return this.#viewModel
   }
 
+  canRecycleFor(viewModel: TurnCardViewModel): boolean {
+    return recyclablePlainEntry(this.#viewModel) && recyclablePlainEntry(viewModel)
+  }
+
   update(viewModel: TurnCardViewModel): void {
     const previous = this.#viewModel
     if (previous === viewModel) return
     const entryChanged = previous.entry !== viewModel.entry
+    const canRecycleEntry = recyclablePlainEntry(previous) && recyclablePlainEntry(viewModel)
     const widthChanged = previous.width !== viewModel.width
     const rootsChanged = previous.rootsGeneration !== viewModel.rootsGeneration
     this.#viewModel = viewModel
@@ -1003,11 +1013,22 @@ class TurnCardRenderable extends BoxRenderable {
       }
     }
     if (entryChanged) {
-      // Committed entries are normally immutable. If one is replaced under the
-      // same stable key, rebuild only its content region; keyed tool cards and
-      // the subagent panel remain mounted.
-      this.#clearEntryRegion()
-      this.#mountEntryRegion(viewModel)
+      if (canRecycleEntry) {
+        // A bounded transcript window must recycle its plain cards. Destroying
+        // and recreating one MarkdownRenderable per completed turn leaves
+        // native renderer allocations resident even after the JS objects are
+        // collected, which defeats the window's RSS bound.
+        this.#applyCardStyle(viewModel.entry, false)
+        this.#updateHeader(viewModel)
+        this.markdown.content = turnCardMarkdown(viewModel.entry, viewModel.width)
+        this.markdown.visible = true
+      } else {
+        // Committed entries are normally immutable. Structured replacements
+        // rebuild only their content region; keyed tool cards and the subagent
+        // panel remain mounted.
+        this.#clearEntryRegion()
+        this.#mountEntryRegion(viewModel)
+      }
     } else {
       if (rootsChanged) this.markdown.content = turnCardMarkdown(viewModel.entry, viewModel.width)
       if (previous.detail !== viewModel.detail) this.#updateHeader(viewModel)
@@ -1287,6 +1308,14 @@ class TurnCardRenderable extends BoxRenderable {
   }
 }
 
+function recyclablePlainEntry(viewModel: TurnCardViewModel): boolean {
+  const presentation = viewModel.entry.presentation
+  return (presentation === undefined || presentation === "conversation") &&
+    turnReasoningMarkdown(viewModel.entry.turn) === "" &&
+    viewModel.tools.length === 0 &&
+    viewModel.visibleSubagents.length === 0
+}
+
 function turnCardMarkdown(entry: TranscriptEntry, width: number): string {
   if (entry.presentation === "shell_result" && entry.shell !== undefined) return ""
   return terminalMarkdown(
@@ -1340,6 +1369,7 @@ export class TranscriptRenderable extends BoxRenderable {
   #agentName = "Rottweiler"
   #tailReasoningTurnId: string | null = null
   #compactionAttempt: number | null = null
+  #recycledSinceCollection = 0
 
   constructor(
     ctx: RenderContext,
@@ -1605,6 +1635,7 @@ export class TranscriptRenderable extends BoxRenderable {
     this.#workspaceRoots = state.workspaceRoots
     if (transcriptChanged || cardProjectionChanged) {
       this.#presentableTranscript = presentableTranscript(state)
+        .slice(-MAX_MOUNTED_TRANSCRIPT_ENTRIES)
     }
     this.emptyState.visible =
       !state.replay.active &&
@@ -1645,11 +1676,13 @@ export class TranscriptRenderable extends BoxRenderable {
     const width = Math.max(20, this.width || this.ctx.width)
     const transcript = this.#presentableTranscript
     const desiredKeys = new Set(transcript.map(entryKey))
+    const recyclableCards: TurnCardRenderable[] = []
     for (const [key, card] of this.mountedCards) {
       if (desiredKeys.has(key)) continue
       this.scroller.remove(card)
-      card.destroyRecursively()
       this.mountedCards.delete(key)
+      if (recyclablePlainEntry(card.viewModel)) recyclableCards.push(card)
+      else card.destroyRecursively()
     }
     const toolEntryKeys = projectionEntryKeys(transcript, "tool")
     const subagentEntryKeys = projectionEntryKeys(transcript, "assistant")
@@ -1709,21 +1742,39 @@ export class TranscriptRenderable extends BoxRenderable {
         reference = retained
         continue
       }
-      const card = new TurnCardRenderable(
-        this.ctx,
-        this.#theme,
-        this.#syntaxStyle,
-        viewModel,
-        (toolCallId, expanded) => this.#rememberToolExpansion(toolCallId, expanded),
-        (expanded) => this.#rememberReasoningExpansion(key, expanded),
-        this.#onInteraction,
-        this.#onOpenSubagent,
-        this.#onOpenToolOutput,
-        this.#treeSitterClient,
-      )
+      const recycled = recyclablePlainEntry(viewModel)
+        ? recyclableCards.pop()
+        : undefined
+      const card = recycled !== undefined && recycled.canRecycleFor(viewModel)
+        ? recycled
+        : new TurnCardRenderable(
+            this.ctx,
+            this.#theme,
+            this.#syntaxStyle,
+            viewModel,
+            (toolCallId, expanded) => this.#rememberToolExpansion(toolCallId, expanded),
+            (expanded) => this.#rememberReasoningExpansion(key, expanded),
+            this.#onInteraction,
+            this.#onOpenSubagent,
+            this.#onOpenToolOutput,
+            this.#treeSitterClient,
+          )
+      if (card === recycled) {
+        card.update(viewModel)
+        this.#recycledSinceCollection += 1
+      }
       this.scroller.insertBefore(card, reference)
       this.mountedCards.set(key, card)
       reference = card
+    }
+    for (const card of recyclableCards) card.destroyRecursively()
+    if (this.#recycledSinceCollection >= 64) {
+      // Rebinding Markdown renderables releases their prior incremental parse
+      // trees, but Bun may otherwise defer tracing those detached token graphs
+      // indefinitely in a continuously active terminal. Collect only after a
+      // full batch has accumulated, outside the per-frame streaming path.
+      Bun.gc(true)
+      this.#recycledSinceCollection = 0
     }
     this.#syncBlockSelection()
   }

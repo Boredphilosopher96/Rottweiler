@@ -313,6 +313,13 @@ protected-performance graph. It produces no release, channel metadata,
 Homebrew change, or deployment.
 Release: signing and publication depend on the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, macOS/Linux eight-hour soak, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. V1 and later tags additionally require the pinned 20-task Terminal-Bench baseline with a paid dated OpenAI or Anthropic model, the 14-day dogfood ledger, and paid two-family `--record` plus offline replay canary; these explicitly named v1 qualification gates do not block a pre-v1 tag. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs required by the tag's release tier leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
 
+The TUI keeps the complete durable transcript projection available to replay and
+export, but mounts only the newest 128 transcript cards in OpenTUI and recycles
+plain cards in fixed-size batches. A bounded Bun collection checkpoint releases
+the retired incremental Markdown parse trees after each batch. Viewport culling
+alone does not release renderable objects, so this lifecycle is part of the
+eight-hour RSS contract rather than a paint-only optimization.
+
 The self-hosted `soak` labels are operational security boundaries, not
 general-purpose shared runners. They are restricted to schedule, manual, and
 exact-tag jobs and never receive release or provider credentials. WSL2 and
