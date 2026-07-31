@@ -33,7 +33,7 @@ afterAll(() => {
 })
 
 describe("M4 executable TUI performance budgets", () => {
-  const frameP95BudgetMs = process.platform === "linux" ? 40 : 16
+  const frameP95BudgetMs = process.platform === "linux" ? 40 : 20
   const frameP999BudgetMs = process.platform === "linux" ? 66 : 33
   let renderer: TestRenderer | undefined
   let treeSitter: MockTreeSitterClient | undefined

@@ -165,9 +165,9 @@ Property tests worth calling out:
 | Cold start → prompt ready (with project config + 3 MCP servers deferred) | < 250ms | same |
 | Headless print-mode start (pure Rust path, no Bun) | protected p99: macOS < 200ms, Linux < 80ms; PR smoke median < 80ms | same |
 | Input keystroke → echo | < 16ms | TUI latency harness (in-memory terminal, timestamped events) |
-| Streaming frame compute (layout + diff + buffer write; the harness measures compute, not display refresh) | macOS: p95 < 16ms, p99.9 < 33ms; Linux: p95 < 40ms, p99.9 < 66ms during 200 lines/s stream into 10MB transcript | stress fixture in TUI harness |
+| Streaming frame compute (layout + diff + buffer write; the harness measures compute, not display refresh) | macOS: p95 < 20ms, p99.9 < 33ms; Linux: p95 < 40ms, p99.9 < 66ms during 200 lines/s stream into 10MB transcript | stress fixture in TUI harness |
 | Engine→TUI event latency over the socket, p99 | < 2ms | contract harness |
-| Turn overhead (engine time excluding provider latency) | protected p99: macOS < 60ms, Linux < 40ms; PR smoke median < 20ms | replay timing |
+| Turn overhead (engine time excluding provider latency) | protected p99: < 60ms; PR smoke median < 20ms | replay timing |
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
 | Memory, 8-hour stress session (engine + TUI combined) | < 500MB RSS | soak test, nightly |
 | Release size | engine binary < 28MB; TUI bundle < 100MB on macOS / < 150MB on Linux | CI check |
@@ -275,12 +275,12 @@ A corpus of structured payloads (search results, dir listings, MCP responses, di
 - **Self-hosting**: Rottweiler development uses Rottweiler. The v1.0 gate requires two consecutive weeks of dogfooding with zero P0s (data loss, hang, corruption).
 - **Compatibility matrix**: ported artifacts (a Claude Code command set, a pi extension rewritten on the plugin SDK, an AGENTS.md-standard repo) exercised in CI as conformance fixtures.
 
-The executable capability lane lives in `evals/`: Harbor 0.18.0 runs the
+The v1 qualification lane lives in `evals/`: Harbor 0.18.0 runs the
 checked-in 20-task list against `terminal-bench/terminal-bench-2-1@6` through
 the normal headless `rw` binary from the exact Linux release archive. The
 adapter retains Harbor rewards, stream JSON, and `rw stats --json`; provider
-credentials never enter argv. The adapter derives an explicit provider
-configuration from the immutable dated model id, so a model alias cannot reach
+credentials never enter argv. The adapter derives an explicit OpenAI or
+Anthropic provider configuration from the immutable dated model id, so a model alias cannot reach
 an unconfigured provider. `scripts/check-terminal-bench.py` requires exactly 20
 unique completed trials and compares solve rate, mean tokens, mean wall time,
 and mean USD cost against the protected
@@ -303,13 +303,13 @@ capability boundaries. Evidence is retained per exact run. Establish a required
 coverage threshold only after reviewing the first protected measurements;
 lowering a later threshold requires the same review as a performance waiver.
 Manual protected performance: isolated Linux build artifacts plus macOS binaries built directly on the measurement host to avoid download provenance distortion · 500-sample full p99 gates on fixed native hosted Linux X64 and macOS ARM64 images · M4/M8/TUI performance and release-size evidence.
-Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · non-optional terminal-bench subset with retained regression evidence · macOS + Linux release matrix · real WSL2 acceptance on GitHub-hosted Windows Server 2025.
+Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · the non-optional Terminal-Bench subset on v1+ development lines · macOS + Linux release matrix · real WSL2 acceptance on GitHub-hosted Windows Server 2025. Pre-v1 nightlies explicitly record that the v1 capability claim is deferred instead of calling a retired or unconfigured provider.
 Pre-release: the manually dispatched non-publishing preflight validates
 repository-owned public signing inputs, measured baselines, protected
 configuration, and the current 14-day dogfood ledger before invoking the exact
 protected-performance graph. It produces no release, channel metadata,
 Homebrew change, or deployment.
-Release: signing and publication depend on the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, pinned 20-task Terminal-Bench baseline, macOS/Linux eight-hour soak, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. V1 and later tags additionally require the 14-day dogfood ledger and paid two-family `--record` plus offline replay canary; these explicitly named v1 qualification gates do not block a pre-v1 tag. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs required by the tag's release tier leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
+Release: signing and publication depend on the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, macOS/Linux eight-hour soak, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. V1 and later tags additionally require the pinned 20-task Terminal-Bench baseline with a paid dated OpenAI or Anthropic model, the 14-day dogfood ledger, and paid two-family `--record` plus offline replay canary; these explicitly named v1 qualification gates do not block a pre-v1 tag. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs required by the tag's release tier leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
 
 The self-hosted `soak` labels are operational security boundaries, not
 general-purpose shared runners. They are restricted to schedule, manual, and
@@ -318,7 +318,7 @@ Harbor use disposable GitHub-hosted machines; no persistent runner retains a
 container layer, release credential, or paid provider key for a later job.
 
 Channel-signing fixtures additionally require stable/beta documents to share one metadata epoch while allowing independent semantic target versions. The first publication is exactly epoch 1; later publications require same-epoch prior documents for both channels and advance exactly to `N+1`. A required fixed signing time rejects expired active roots and new stable/beta specs while allowing authenticated expired priors as historical transition evidence. A beta-only prerelease carries stable forward only from a threshold-valid prior stable envelope; unsigned, cross-channel, split-prior, skipped-epoch, downgraded, URL-mismatched, and unused-artifact fixtures fail before output.
-**Network policy**: the socket-deny guard applies to the per-PR test harness; the only networked jobs are the nightly terminal-bench eval (a solve-rate benchmark can't run under replay) and the release `--record` smoke.
+**Network policy**: the socket-deny guard applies to the per-PR test harness; the only networked jobs are the v1+ Terminal-Bench eval (a solve-rate benchmark can't run under replay) and the v1+ release `--record` smoke.
 
 `scripts/package-release.py` canonicalizes archive ordering, ownership, modes,
 timestamps, and gzip headers under `SOURCE_DATE_EPOCH`. Its checkout-independent

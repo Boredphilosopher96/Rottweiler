@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: read
-  models: read
 
 concurrency:
   group: signed-release
@@ -456,7 +455,6 @@ jobs:
     environment: release
     permissions:
       contents: read
-      models: read
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
       ROTTWEILER_EVAL_MODEL: ${{ vars.ROTTWEILER_EVAL_MODEL }}
@@ -466,21 +464,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Resolve capability qualification tier
+        id: release_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          major=${version%%.*}
+          case "$major" in
+            ''|*[!0-9]*) echo "release version has an invalid major: $version" >&2; exit 1 ;;
+          esac
+          printf 'major=%s\n' "$major" >> "$GITHUB_OUTPUT"
+      - name: Record pre-v1 capability-eval deferral
+        if: steps.release_version.outputs.major == '0'
+        run: echo 'Terminal-Bench is a v1 qualification gate and is not claimed by this pre-v1 release.'
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: steps.release_version.outputs.major != '0'
         with:
           name: release-linux-x86_64
           path: dist/release
       - name: Install pinned Harbor evaluation harness
+        if: steps.release_version.outputs.major != '0'
         run: pipx install --force harbor==0.18.0
       - name: Run exact release archive through the pinned 20-task capability gate
+        if: steps.release_version.outputs.major != '0'
         env:
-          ROTTWEILER_EVAL_API_KEY: ${{ github.token }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           archive=$(find dist/release -maxdepth 1 -type f -name 'rottweiler-*-linux-x86_64.tar.gz' -print)
           test -n "$archive"
           test "$(printf '%s\n' "$archive" | wc -l)" -eq 1
-          ROTTWEILER_RELEASE_ARCHIVE="$archive" scripts/run-terminal-bench.sh
+          case "$ROTTWEILER_EVAL_MODEL" in
+            openai/*) key=$OPENAI_API_KEY ;;
+            anthropic/*) key=$ANTHROPIC_API_KEY ;;
+            *) echo 'ROTTWEILER_EVAL_MODEL must select OpenAI or Anthropic' >&2; exit 1 ;;
+          esac
+          test -n "$key"
+          ROTTWEILER_EVAL_API_KEY="$key" ROTTWEILER_RELEASE_ARCHIVE="$archive" \
+            scripts/run-terminal-bench.sh
       - name: Enforce protected Terminal-Bench baseline
+        if: steps.release_version.outputs.major != '0'
         env:
           TERMINAL_BENCH_BASELINE_JSON: ${{ vars.ROTTWEILER_TERMINAL_BENCH_BASELINE_JSON }}
         run: |
@@ -491,7 +515,7 @@ jobs:
             --expected-git "$GITHUB_SHA" --archive "$archive" \
             | tee terminal-bench-evidence/rottweiler-gate-result.json
       - name: Retain complete Harbor evidence
-        if: always()
+        if: ${{ always() && steps.release_version.outputs.major != '0' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-terminal-bench-${{ github.ref_name }}-${{ github.run_attempt }}

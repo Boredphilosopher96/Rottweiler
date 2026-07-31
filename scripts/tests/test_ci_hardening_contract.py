@@ -104,8 +104,11 @@ class CiHardeningContractTests(unittest.TestCase):
             "      - name:", 1
         )[0]
         self.assertNotIn("secrets.ROTTWEILER_EVAL_API_KEY", job_environment)
-        self.assertIn("ROTTWEILER_EVAL_API_KEY: ${{ github.token }}", run_step)
-        self.assertIn("models: read", workflow)
+        self.assertIn("secrets.OPENAI_API_KEY", run_step)
+        self.assertIn("secrets.ANTHROPIC_API_KEY", run_step)
+        self.assertIn('ROTTWEILER_EVAL_API_KEY="$key"', run_step)
+        self.assertIn("if: steps.release_version.outputs.major != '0'", run_step)
+        self.assertNotIn("models: read", workflow)
 
     def test_protected_performance_consumers_fail_closed_before_queueing(self) -> None:
         performance = (ROOT / ".github/workflows/performance.yml").read_text(
@@ -264,8 +267,11 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertNotIn(
             "secrets.ROTTWEILER_EVAL_API_KEY", terminal_job_environment
         )
-        self.assertIn("ROTTWEILER_EVAL_API_KEY: ${{ github.token }}", eval_step)
-        self.assertIn("models: read", terminal_bench)
+        for secret in ("secrets.OPENAI_API_KEY", "secrets.ANTHROPIC_API_KEY"):
+            self.assertIn(secret, eval_step)
+        self.assertIn('ROTTWEILER_EVAL_API_KEY="$key"', eval_step)
+        self.assertIn("if: steps.release_version.outputs.major != '0'", eval_step)
+        self.assertNotIn("models: read", terminal_bench)
         self.assertIn("runs-on: ubuntu-24.04", terminal_bench)
         self.assertNotIn("self-hosted", terminal_bench)
         wsl2 = workflow_job(workflow, "wsl2-acceptance")
@@ -285,7 +291,18 @@ class CiHardeningContractTests(unittest.TestCase):
         )
         self.assertNotIn("ROTTWEILER_EVAL_API_KEY", workflow)
         self.assertNotIn("EVAL_API_KEY", workflow)
-        self.assertIn("EVAL_MODEL must pin a GitHub Models catalog version", workflow)
+        self.assertIn(
+            "EVAL_MODEL must select an immutable dated OpenAI or Anthropic model",
+            workflow,
+        )
+        required = workflow.split("required=(", 1)[1].split(")", 1)[0]
+        v1_required = workflow.split('if [ "$RELEASE_MAJOR" -ge 1 ]; then', 1)[1].split(
+            "fi", 1
+        )[0]
+        self.assertNotIn("EVAL_MODEL", required)
+        self.assertNotIn("TERMINAL_BENCH_BASELINE_JSON", required)
+        self.assertIn("EVAL_MODEL", v1_required)
+        self.assertIn("TERMINAL_BENCH_BASELINE_JSON", v1_required)
 
     def test_rerun_artifacts_preserve_producers_and_version_evidence(self) -> None:
         workflows = {
