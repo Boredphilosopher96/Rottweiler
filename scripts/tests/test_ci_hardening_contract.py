@@ -166,6 +166,20 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("cargo mutants", workflow)
         self.assertIn("--jobs 2", workflow)
         self.assertNotIn("--in-place", workflow)
+        self.assertEqual(
+            workflow.count(
+                "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
+            ),
+            2,
+        )
+        self.assertEqual(
+            workflow.count("bun install --cwd packages/plugin-sdk --frozen-lockfile"),
+            2,
+        )
+        self.assertEqual(
+            workflow.count("bun install --cwd packages/tui --frozen-lockfile"),
+            2,
+        )
         for boundary in (
             "crates/rw-core/src/permission.rs",
             "crates/rw-store/src/trust.rs",
