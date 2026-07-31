@@ -164,6 +164,22 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("cargo-mutants --version 27.1.0", workflow)
         self.assertIn("cargo llvm-cov", workflow)
         self.assertIn("cargo mutants", workflow)
+        self.assertIn("--jobs 2", workflow)
+        self.assertNotIn("--in-place", workflow)
+        self.assertEqual(
+            workflow.count(
+                "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
+            ),
+            2,
+        )
+        self.assertEqual(
+            workflow.count("bun install --cwd packages/plugin-sdk --frozen-lockfile"),
+            2,
+        )
+        self.assertEqual(
+            workflow.count("bun install --cwd packages/tui --frozen-lockfile"),
+            2,
+        )
         for boundary in (
             "crates/rw-core/src/permission.rs",
             "crates/rw-store/src/trust.rs",
@@ -171,6 +187,14 @@ class CiHardeningContractTests(unittest.TestCase):
             "crates/rw-ext/src/plugin.rs",
         ):
             self.assertIn(boundary, workflow)
+
+    def test_dependabot_avoids_automatic_major_upgrades(self) -> None:
+        configuration = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
+        self.assertEqual(configuration.count("package-ecosystem:"), 5)
+        self.assertEqual(
+            configuration.count('update-types: ["version-update:semver-major"]'),
+            5,
+        )
 
     def test_signed_release_is_serialized_and_downloads_only_unsigned_archives(
         self,
