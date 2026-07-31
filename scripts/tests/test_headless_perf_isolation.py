@@ -89,8 +89,8 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 "macos-performance-build",
                 "linux-performance-build",
                 "runs-on: macos-15",
-                "shasum -a 256 -c rw.sha256",
-                "Headless performance gate (macOS prebuilt binary)",
+                None,
+                "Headless performance gate (macOS measurement-host binary)",
                 "manual-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
             ),
         )
@@ -109,18 +109,31 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertNotIn(other_builder, performance)
                 self.assertIn("runner-contract", performance)
                 self.assertIn(runner, performance)
-                self.assertIn("actions/download-artifact@3e5f45b2", performance)
-                self.assertIn(checksum, performance)
+                if platform == "macos":
+                    self.assertNotIn("actions/download-artifact@3e5f45b2", performance)
+                    self.assertIn(
+                        "scripts/prepare-macos-performance-binary.sh", performance
+                    )
+                else:
+                    self.assertIn("actions/download-artifact@3e5f45b2", performance)
+                    assert checksum is not None
+                    self.assertIn(checksum, performance)
                 self.assertEqual(performance.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
                 self.assertEqual(performance.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
                 self.assertIn(gate, performance)
                 self.assertNotIn("Headless performance gate (Linux source build)", performance)
                 self.assertIn(evidence, performance)
                 self.assertIn("timeout-minutes: 60", performance)
-                self.assertLess(
-                    performance.index(gate),
-                    performance.index("Install Rust toolchain"),
-                )
+                if platform == "macos":
+                    self.assertLess(
+                        performance.index("Install Rust toolchain"),
+                        performance.index(gate),
+                    )
+                else:
+                    self.assertLess(
+                        performance.index(gate),
+                        performance.index("Install Rust toolchain"),
+                    )
 
     def test_nightly_reuses_isolated_platform_measurements_independently(
         self,
