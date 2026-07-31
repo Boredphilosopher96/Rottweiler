@@ -1437,6 +1437,7 @@ pub struct CapabilityEnforcer {
     process: Arc<dyn SupervisedPluginProcess>,
     violated: AtomicBool,
     violation: Mutex<Option<CapabilityEnforcementError>>,
+    termination_retry: Mutex<()>,
 }
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
@@ -1455,6 +1456,7 @@ impl CapabilityEnforcer {
             process,
             violated: AtomicBool::new(false),
             violation: Mutex::new(None),
+            termination_retry: Mutex::new(()),
         }
     }
 
@@ -1602,18 +1604,31 @@ impl CapabilityEnforcer {
         name: &str,
         declared: bool,
     ) -> Result<(), CapabilityEnforcementError> {
-        if let Some(mut error) = self
-            .violation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
-            if error.termination_error.is_some() && self.process.kill_tree().is_ok() {
-                error.termination_error = None;
-                *self
+        let cached_violation = {
+            self.violation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        if let Some(mut error) = cached_violation {
+            if error.termination_error.is_some() {
+                let _retry = self
+                    .termination_retry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                error = self
                     .violation
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.clone());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    .unwrap_or(error);
+                if error.termination_error.is_some() && self.process.kill_tree().is_ok() {
+                    error.termination_error = None;
+                    *self
+                        .violation
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error.clone());
+                }
             }
             return Err(error);
         }
@@ -1800,7 +1815,11 @@ impl HookHandler for RpcHookHandler {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::sync::{Mutex, atomic::AtomicUsize};
+    use std::{
+        sync::{Barrier, Mutex, atomic::AtomicUsize},
+        thread,
+        time::Duration,
+    };
 
     use super::*;
     use crate::{HookDispatchStatus, HookDispatcher, HookRegistration};
@@ -2001,6 +2020,62 @@ mod tests {
         assert_eq!(cached, first);
         assert_eq!(process.kill_count.load(Ordering::Acquire), 1);
         assert_eq!(process.violations.lock().expect("violations").len(), 1);
+    }
+
+    #[derive(Default)]
+    struct RetryProcess {
+        kill_count: AtomicUsize,
+    }
+
+    impl SupervisedPluginProcess for RetryProcess {
+        fn mark_capability_violation(&self, _violation: &CapabilityViolation) {}
+
+        fn kill_tree(&self) -> Result<(), PluginProcessError> {
+            let attempt = self.kill_count.fetch_add(1, Ordering::AcqRel) + 1;
+            if attempt == 1 {
+                return Err(PluginProcessError {
+                    message: "initial termination failed".to_owned(),
+                });
+            }
+            if attempt == 2 {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn concurrent_cached_violation_checks_share_one_successful_retry() {
+        let process = Arc::new(RetryProcess::default());
+        let enforcer = Arc::new(CapabilityEnforcer::new(&manifest(), process.clone()));
+        let initial = enforcer
+            .check_tool("secret_tool")
+            .expect_err("initial violation");
+        assert!(initial.termination_error.is_some());
+
+        let start = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+        for _ in 0..2 {
+            let enforcer = enforcer.clone();
+            let start = start.clone();
+            workers.push(thread::spawn(move || {
+                start.wait();
+                enforcer
+                    .check_command("secret_command")
+                    .expect_err("cached violation")
+            }));
+        }
+        start.wait();
+        for worker in workers {
+            assert!(
+                worker
+                    .join()
+                    .expect("retry worker")
+                    .termination_error
+                    .is_none()
+            );
+        }
+        assert_eq!(process.kill_count.load(Ordering::Acquire), 2);
     }
 
     struct DenyClient;
