@@ -88,7 +88,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 workflow_job(workflow, "performance-macos"),
                 "macos-performance-build",
                 "linux-performance-build",
-                "runs-on: [self-hosted, macOS, ARM64, performance]",
+                "runs-on: macos-15",
                 "shasum -a 256 -c rw.sha256",
                 "Headless performance gate (macOS prebuilt binary)",
                 "manual-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
@@ -148,7 +148,8 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("needs: [runner-contract, macos-performance-build]", macos)
         self.assertNotIn("linux-performance-build", macos)
         self.assertIn("runs-on: ubuntu-24.04", linux)
-        self.assertIn("runs-on: [self-hosted, macOS, ARM64, performance]", macos)
+        self.assertIn("runs-on: macos-15", macos)
+        self.assertNotIn("self-hosted", macos)
         self.assertIn("sha256sum -c rw.sha256", linux)
         self.assertIn("shasum -a 256 -c rw.sha256", macos)
         self.assertIn("Headless performance gate (Linux prebuilt binary)", linux)
@@ -186,7 +187,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 macos,
                 "macos-performance-build",
                 "linux-performance-build",
-                "runs-on: [self-hosted, macOS, ARM64, performance]",
+                "runs-on: macos-15",
                 "shasum -a 256 -c rw.sha256",
                 "Headless performance gate (macOS prebuilt binary)",
             ),

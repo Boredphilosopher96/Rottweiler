@@ -182,11 +182,11 @@ jobs:
             "$RUNNER_TEMP/rottweiler-linux-performance-download.noindex"
 
   macos-release-budget:
-    name: Release budgets (protected macOS)
+    name: Release budgets (fixed hosted macOS)
     needs: [runner-contract, macos-performance-build]
-    # Full absolute p99 evidence requires a calibrated, protected runner.
-    # Shared hosted runners remain limited to the bounded per-PR smoke gate.
-    runs-on: [self-hosted, macOS, ARM64, performance]
+    # The fixed native ARM64 image avoids workstation Gatekeeper/XProtect
+    # provenance noise and records exact runner-image provenance in evidence.
+    runs-on: macos-15
     timeout-minutes: 60
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file

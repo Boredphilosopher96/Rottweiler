@@ -174,15 +174,16 @@ Property tests worth calling out:
 
 The required manually dispatched protected-performance, nightly, and release
 headless gates enforce the stated 20ms turn-overhead budget at p99 over 500
-fresh processes. The per-PR smoke runs on a shared hosted runner, so it is
+fresh processes on fixed native `ubuntu-24.04` X64 and `macos-15` ARM64 images.
+The per-PR smoke runs on an unpinned hosted image, so it is
 deliberately a screening gate rather than release evidence: it enforces the
 same absolute startup and turn limits at the median over 100 fresh processes,
 which detects sustained regressions without treating host-wide scheduler stalls
 as product latency. Every measured sample is reported; neither tier retries,
 trims, nor substitutes a relative baseline.
 
-Full p99 consumers run on repository-protected self-hosted runners labeled
-`Linux`, `X64`, and `performance` or `macOS`, `ARM64`, and `performance`. Each
+Full p99 consumers run on fixed native GitHub-hosted images and record the exact
+image version with every raw sample set. Each
 release binary is built on a separate hosted runner, transferred with a
 checksum, and measured only after that handoff so link-time optimization and
 build load cannot contaminate latency. The protected runner's reviewed identity
@@ -296,7 +297,7 @@ campaigns must catch mutations in permission, trust, signed-update, and plugin
 capability boundaries. Evidence is retained per exact run. Establish a required
 coverage threshold only after reviewing the first protected measurements;
 lowering a later threshold requires the same review as a performance waiver.
-Manual protected performance: independently built and checksummed Linux/macOS binaries · 500-sample full p99 gates on fixed native Linux and protected macOS runners · M4/M8/TUI performance and release-size evidence.
+Manual protected performance: independently built and checksummed Linux/macOS binaries · 500-sample full p99 gates on fixed native hosted Linux X64 and macOS ARM64 images · M4/M8/TUI performance and release-size evidence.
 Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · non-optional terminal-bench subset with retained regression evidence · macOS + Linux release matrix · real WSL2 acceptance on GitHub-hosted Windows Server 2025.
 Pre-release: the manually dispatched non-publishing preflight validates
 repository-owned public signing inputs, measured baselines, protected

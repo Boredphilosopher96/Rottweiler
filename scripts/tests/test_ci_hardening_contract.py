@@ -68,9 +68,8 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn(
             "runs-on: ubuntu-24.04", linux_release
         )
-        self.assertIn(
-            "runs-on: [self-hosted, macOS, ARM64, performance]", macos_release
-        )
+        self.assertIn("runs-on: macos-15", macos_release)
+        self.assertNotIn("self-hosted", macos_release)
         self.assertIn("--platform linux-x86_64", linux_release)
         self.assertIn("--platform darwin-arm64", macos_release)
         for release_budget in (linux_release, macos_release):

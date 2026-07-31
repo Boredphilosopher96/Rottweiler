@@ -227,8 +227,9 @@ jobs:
   build-macos:
     name: Build darwin-arm64
     needs: [runner-contract, macos-performance-build]
-    # Exact-release p99 evidence is valid only on the calibrated protected lane.
-    runs-on: [self-hosted, macOS, ARM64, performance]
+    # Build and measure the exact archive on the fixed native ARM64 image;
+    # the dedicated self-hosted macOS runner is reserved for the 8-hour soak.
+    runs-on: macos-15
     timeout-minutes: 60
     permissions:
       contents: read
