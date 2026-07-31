@@ -23,7 +23,7 @@ jobs:
           SELF_HOSTED_RUNNERS_ENABLED: ${{ vars.ROTTWEILER_SELF_HOSTED_RUNNERS }}
         run: |
           if [ "$SELF_HOSTED_RUNNERS_ENABLED" != "true" ]; then
-            echo "ROTTWEILER_SELF_HOSTED_RUNNERS must be true; performance, soak, WSL2, and Terminal-Bench cannot silently skip" >&2
+            echo "ROTTWEILER_SELF_HOSTED_RUNNERS must be true; protected performance and soak jobs cannot silently skip" >&2
             exit 1
           fi
 
@@ -169,6 +169,17 @@ jobs:
           path: perf-results
           if-no-files-found: warn
           retention-days: 30
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
+            "$RUNNER_TEMP/rottweiler-linux-performance-download.noindex"
 
   macos-release-budget:
     name: Release budgets (protected macOS)
@@ -242,10 +253,20 @@ jobs:
           path: perf-results
           if-no-files-found: warn
           retention-days: 30
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
+            "$RUNNER_TEMP/rottweiler-macos-performance-download.noindex"
 
   eight-hour-soak:
     name: Eight-hour supervised soak (${{ matrix.platform }})
-    # Gate until self-hosted runners exist; set ROTTWEILER_SELF_HOSTED_RUNNERS=true to re-enable.
     if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
     needs: runner-contract
     runs-on: ${{ fromJSON(matrix.runner) }}
@@ -301,13 +322,23 @@ jobs:
             soak-baseline-result.json
           if-no-files-found: error
           retention-days: 30
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/soak-result.json" \
+            "$GITHUB_WORKSPACE/soak-baseline-result.json" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules"
 
   wsl2-acceptance:
     name: WSL2 release, sandbox, doctor, and DrvFS acceptance
-    # Gate until self-hosted runners exist; set ROTTWEILER_SELF_HOSTED_RUNNERS=true to re-enable.
-    if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
-    needs: runner-contract
-    runs-on: [self-hosted, Windows, X64, wsl2]
+    # The Windows 2025 hosted image includes WSL2 and provides a clean native
+    # Windows/DrvFS boundary for every run.
+    runs-on: windows-2025
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -324,10 +355,9 @@ jobs:
 
   terminal-bench:
     name: Terminal-Bench 2.1 pinned subset
-    # Gate until self-hosted runners exist; set ROTTWEILER_SELF_HOSTED_RUNNERS=true to re-enable.
-    if: vars.ROTTWEILER_SELF_HOSTED_RUNNERS == 'true'
-    needs: runner-contract
-    runs-on: [self-hosted, Linux, X64, terminal-bench]
+    # Harbor's containers run on the disposable GitHub-hosted Linux machine,
+    # never on a maintainer workstation.
+    runs-on: ubuntu-24.04
     timeout-minutes: 720
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file

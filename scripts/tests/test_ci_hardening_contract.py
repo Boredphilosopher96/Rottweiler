@@ -78,14 +78,17 @@ class CiHardeningContractTests(unittest.TestCase):
             self.assertIn("scripts/build-release.sh", release_budget)
         self.assertIn("ROTTWEILER_SELF_HOSTED_RUNNERS", runner_contract)
         self.assertIn("exit 1", runner_contract)
-        self.assertEqual(workflow.count("runner-contract"), 6)
-        for job_name in ("eight-hour-soak", "wsl2-acceptance", "terminal-bench"):
-            match = re.search(
-                rf"(?ms)^  {re.escape(job_name)}:\n(.*?)(?=^  [a-z0-9][a-z0-9-]*:\n|\Z)",
-                workflow,
-            )
-            self.assertIsNotNone(match)
-            self.assertIn("needs: runner-contract", match.group(1))
+        self.assertEqual(workflow.count("runner-contract"), 4)
+        soak = workflow_job(workflow, "eight-hour-soak")
+        self.assertIn("needs: runner-contract", soak)
+        wsl2 = workflow_job(workflow, "wsl2-acceptance")
+        self.assertIn("runs-on: windows-2025", wsl2)
+        self.assertNotIn("self-hosted", wsl2)
+        self.assertNotIn("needs: runner-contract", wsl2)
+        hosted_terminal_bench = workflow_job(workflow, "terminal-bench")
+        self.assertIn("runs-on: ubuntu-24.04", hosted_terminal_bench)
+        self.assertNotIn("self-hosted", hosted_terminal_bench)
+        self.assertNotIn("needs: runner-contract", hosted_terminal_bench)
         terminal_bench = workflow.split("  terminal-bench:", 1)[1]
         job_environment = terminal_bench.split("    steps:", 1)[0]
         run_step = terminal_bench.split("      - name: Run pinned 20-task subset", 1)[1].split(
@@ -241,6 +244,11 @@ class CiHardeningContractTests(unittest.TestCase):
             "secrets.ROTTWEILER_EVAL_API_KEY", terminal_job_environment
         )
         self.assertIn("secrets.ROTTWEILER_EVAL_API_KEY", eval_step)
+        self.assertIn("runs-on: ubuntu-24.04", terminal_bench)
+        self.assertNotIn("self-hosted", terminal_bench)
+        wsl2 = workflow_job(workflow, "wsl2-acceptance")
+        self.assertIn("runs-on: windows-2025", wsl2)
+        self.assertNotIn("self-hosted", wsl2)
 
     def test_rerun_artifacts_preserve_producers_and_version_evidence(self) -> None:
         workflows = {

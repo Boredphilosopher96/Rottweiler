@@ -211,6 +211,17 @@ jobs:
           overwrite: true
           retention-days: 7
           compression-level: 0
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
+            "$RUNNER_TEMP/rottweiler-linux-performance-download.noindex"
 
   build-macos:
     name: Build darwin-arm64
@@ -346,6 +357,17 @@ jobs:
           overwrite: true
           retention-days: 7
           compression-level: 0
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
+            "$RUNNER_TEMP/rottweiler-macos-performance-download.noindex"
 
   release-gate:
     name: Exact-tag v1 acceptance gate
@@ -455,7 +477,9 @@ jobs:
   release-terminal-bench:
     name: Exact-tag Terminal-Bench capability gate
     needs: build-linux
-    runs-on: [self-hosted, Linux, X64, terminal-bench]
+    # Harbor's containers run on an ephemeral hosted machine, not on a
+    # maintainer workstation or either calibrated performance runner.
+    runs-on: ubuntu-24.04
     timeout-minutes: 720
     environment: release
     permissions:
@@ -611,11 +635,17 @@ jobs:
           if [ -n "${ROTTWEILER_SOAK_ROOT:-}" ]; then
             rm -rf "$ROTTWEILER_SOAK_ROOT"
           fi
+          rm -rf \
+            "$GITHUB_WORKSPACE/dist/soak-release" \
+            "$GITHUB_WORKSPACE/soak-result.json" \
+            "$GITHUB_WORKSPACE/soak-baseline-result.json"
 
   wsl2-acceptance:
     name: Exact-tag WSL2 acceptance
     needs: build-linux
-    runs-on: [self-hosted, Windows, X64, wsl2]
+    # Windows Server 2025 hosted runners ship with WSL2 and are discarded after
+    # the native Windows/DrvFS acceptance job.
+    runs-on: windows-2025
     timeout-minutes: 90
     env:
       ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
