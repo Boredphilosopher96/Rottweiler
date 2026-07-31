@@ -49,24 +49,19 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertIn("install -m 700", builder)
                 self.assertIn(checksum, builder)
 
-    def test_manual_performance_builds_platform_binaries_on_isolated_runners(self) -> None:
+    def test_manual_performance_builds_linux_artifact_only(self) -> None:
         workflow = (REPO / ".github/workflows/performance.yml").read_text(
             encoding="utf-8"
         )
         linux_build = workflow_job(workflow, "linux-performance-build")
-        macos_build = workflow_job(workflow, "macos-performance-build")
-
-        for platform, build in (("linux", linux_build), ("macos", macos_build)):
-            with self.subTest(platform=platform):
-                self.assertNotIn("\n    needs:", build)
-                self.assertNotIn("\n    if:", build)
-                self.assertIn(
-                    f"scripts/prepare-{platform}-performance-binary.sh", build
-                )
-                self.assertIn("actions/upload-artifact@043fb46d", build)
-                self.assertIn("if-no-files-found: error", build)
-                self.assertIn("overwrite: true", build)
-                self.assertIn("timeout-minutes: 30", build)
+        self.assertNotIn("  macos-performance-build:", workflow)
+        self.assertNotIn("\n    needs:", linux_build)
+        self.assertNotIn("\n    if:", linux_build)
+        self.assertIn("scripts/prepare-linux-performance-binary.sh", linux_build)
+        self.assertIn("actions/upload-artifact@043fb46d", linux_build)
+        self.assertIn("if-no-files-found: error", linux_build)
+        self.assertIn("overwrite: true", linux_build)
+        self.assertIn("timeout-minutes: 30", linux_build)
 
     def test_manual_performance_consumers_are_platform_independent(self) -> None:
         workflow = (REPO / ".github/workflows/performance.yml").read_text(
@@ -86,7 +81,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             (
                 "macos",
                 workflow_job(workflow, "performance-macos"),
-                "macos-performance-build",
+                "runner-contract",
                 "linux-performance-build",
                 "runs-on: macos-15",
                 None,
@@ -158,7 +153,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("actions/upload-artifact@043fb46d", macos_builder)
         self.assertIn("needs: [runner-contract, linux-performance-build]", linux)
         self.assertNotIn("macos-performance-build", linux)
-        self.assertIn("needs: [runner-contract, macos-performance-build]", macos)
+        self.assertIn("needs: runner-contract", macos)
         self.assertNotIn("linux-performance-build", macos)
         self.assertIn("runs-on: ubuntu-24.04", linux)
         self.assertIn("runs-on: macos-15", macos)
@@ -184,12 +179,11 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
     def test_release_reuses_isolated_platform_measurements_independently(self) -> None:
         release = (REPO / ".github/workflows/release.yml").read_text(encoding="utf-8")
         linux_builder = workflow_job(release, "linux-performance-build")
-        macos_builder = workflow_job(release, "macos-performance-build")
         linux = workflow_job(release, "build-linux")
         macos = workflow_job(release, "build-macos")
 
         self.assertIn("scripts/prepare-linux-performance-binary.sh", linux_builder)
-        self.assertIn("scripts/prepare-macos-performance-binary.sh", macos_builder)
+        self.assertNotIn("  macos-performance-build:", release)
         for platform, build, builder, other_builder, runner, checksum, gate in (
             (
                 "linux",
@@ -203,7 +197,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             (
                 "macos",
                 macos,
-                "macos-performance-build",
+                "runner-contract",
                 "linux-performance-build",
                 "runs-on: macos-15",
                 None,
@@ -211,7 +205,10 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             ),
         ):
             with self.subTest(platform=platform):
-                self.assertIn(f"needs: [runner-contract, {builder}]", build)
+                if platform == "macos":
+                    self.assertIn("needs: runner-contract", build)
+                else:
+                    self.assertIn(f"needs: [runner-contract, {builder}]", build)
                 self.assertNotIn(other_builder, build)
                 self.assertIn(runner, build)
                 if platform == "macos":

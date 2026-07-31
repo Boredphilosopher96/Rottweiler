@@ -53,30 +53,6 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  macos-performance-build:
-    name: Build isolated macOS performance binary
-    runs-on: macos-15
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - run: rustup override set 1.97.1
-      - name: Build performance binary outside the workspace
-        run: scripts/prepare-macos-performance-binary.sh
-      - name: Upload isolated macOS performance binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: macos-performance-rw-${{ github.run_id }}
-          path: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
   build-linux:
     name: Build linux-x86_64
     needs: [runner-contract, linux-performance-build]
@@ -226,7 +202,7 @@ jobs:
 
   build-macos:
     name: Build darwin-arm64
-    needs: [runner-contract, macos-performance-build]
+    needs: runner-contract
     # Build and measure the exact archive on the fixed native ARM64 image;
     # the dedicated self-hosted macOS runner is reserved for the 8-hour soak.
     runs-on: macos-15

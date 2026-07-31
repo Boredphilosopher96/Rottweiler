@@ -183,7 +183,7 @@ jobs:
 
   macos-release-budget:
     name: Release budgets (fixed hosted macOS)
-    needs: [runner-contract, macos-performance-build]
+    needs: runner-contract
     # The fixed native ARM64 image avoids workstation Gatekeeper/XProtect
     # provenance noise and records exact runner-image provenance in evidence.
     runs-on: macos-15
