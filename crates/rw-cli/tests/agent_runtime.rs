@@ -169,7 +169,8 @@ fn m7_parent_spawns_three_parallel_worktree_children_and_keeps_main_clean() {
         EngineEvent::TextDelta { text, .. } if text.contains("collated all three explorers")
     )));
     assert!(git_output(&run.workspace, &["diff", "--binary", "HEAD", "--"]).is_empty());
-    assert!(git_output(&run.workspace, &["status", "--porcelain=v1"]).is_empty());
+    let status = git_output(&run.workspace, &["status", "--porcelain=v1"]);
+    assert!(status.is_empty(), "parent status was not clean: {status:?}");
 }
 
 #[test]
@@ -1784,6 +1785,9 @@ fn base_command(workspace: &Path, home: &Path) -> Command {
         .current_dir(workspace)
         .env("HOME", &home)
         .env("ROTTWEILER_HOME", &home);
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
     command
 }
 
