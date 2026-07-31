@@ -945,22 +945,21 @@ mod linux {
         helper_pin: Option<u32>,
     ) -> Result<Command, SandboxError> {
         if let Some(helper_pin) = helper_pin {
+            struct InheritedHelperPin(i32);
+
+            impl std::os::fd::IntoRawFd for InheritedHelperPin {
+                fn into_raw_fd(self) -> i32 {
+                    self.0
+                }
+            }
+
             let helper_pin: i32 = helper_pin
                 .try_into()
                 .map_err(|_| SandboxError::MalformedHelper)?;
-            // The descriptor was validated from /proc/self/fd and remains
-            // open in this process. CLOEXEC closes it atomically when the
-            // target replaces the helper, without shell-parsing an arbitrary
-            // multi-digit descriptor number.
-            // nix 0.31 requires constructing a BorrowedFd, which would add
-            // unsafe code here. The compatibility API accepts the validated
-            // descriptor directly and is already present in the dependency
-            // graph through portable-pty.
-            nix_raw_fd::fcntl::fcntl(
-                helper_pin,
-                nix_raw_fd::fcntl::FcntlArg::F_SETFD(nix_raw_fd::fcntl::FdFlag::FD_CLOEXEC),
-            )
-            .map_err(sandbox_backend)?;
+            // The descriptor was validated from /proc/self/fd and was needed
+            // only to pin the helper across the unshare exec. Transfer its
+            // ownership to nix 0.31 and close it before launching the target.
+            nix::unistd::close(InheritedHelperPin(helper_pin)).map_err(sandbox_backend)?;
         }
         let mut command = Command::new(program);
         command.args(args);
