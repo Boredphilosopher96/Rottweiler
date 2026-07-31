@@ -951,3 +951,45 @@ jobs:
           expected=$(git -C "$tap" rev-parse HEAD)
           observed=$(git -C "$tap" ls-remote --exit-code origin refs/heads/main | awk '{print $1}')
           test "$observed" = "$expected"
+
+  deploy-update-repository:
+    name: Deploy no-redirect update repository
+    needs: sign-and-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: https://boredphilosopher96.github.io/Rottweiler/updates/
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the persistent update site
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: gh-pages
+          path: site
+      - name: Download the authenticated release set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-update-repository-${{ github.ref_name }}
+          path: release-set
+      - name: Publish metadata and immutable archives without deleting history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p site/updates
+          cp release-set/signed/root-chain.json site/updates/root-chain.json
+          cp release-set/signed/root.json site/updates/root.json
+          cp release-set/signed/stable.json site/updates/stable.json
+          cp release-set/signed/beta.json site/updates/beta.json
+          cp release-set/unsigned/*.tar.gz site/updates/
+          git -C site add updates
+          git -C site config user.name github-actions[bot]
+          git -C site config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          if ! git -C site diff --cached --quiet; then
+            git -C site commit -m "publish ${GITHUB_REF_NAME}"
+            git -C site push origin HEAD:gh-pages
+          fi
+          expected=$(git -C site rev-parse HEAD)
+          observed=$(git -C site ls-remote --exit-code origin refs/heads/gh-pages | awk '{print $1}')
+          test "$observed" = "$expected"

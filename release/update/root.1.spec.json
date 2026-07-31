@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "role": "root",
+  "version": 1,
+  "expires_unix": 2082758400,
+  "keys": {
+    "release-2026-01": "hd1MTOUmY6uX/RWkPnIY7Bfo/M62+87xHwVgAhJXOiU=",
+    "root-2026-01": "OUpQz8JhASrw1in8sb9No6Q7PiKDwvFhpbNdX7ovhMM="
+  },
+  "root_key_ids": [
+    "root-2026-01"
+  ],
+  "root_threshold": 1,
+  "release_key_ids": [
+    "release-2026-01"
+  ],
+  "release_threshold": 1
+}

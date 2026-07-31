@@ -249,6 +249,11 @@ class CiHardeningContractTests(unittest.TestCase):
         wsl2 = workflow_job(workflow, "wsl2-acceptance")
         self.assertIn("runs-on: windows-2025", wsl2)
         self.assertNotIn("self-hosted", wsl2)
+        deployment = workflow_job(workflow, "deploy-update-repository")
+        self.assertIn("needs: sign-and-publish", deployment)
+        self.assertIn("ref: gh-pages", deployment)
+        self.assertIn("git -C site push origin HEAD:gh-pages", deployment)
+        self.assertNotIn("rm -rf", deployment)
 
     def test_rerun_artifacts_preserve_producers_and_version_evidence(self) -> None:
         workflows = {
