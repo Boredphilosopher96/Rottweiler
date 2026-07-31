@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@opentui/core": "0.4.3",
+    "@opentui/core": "0.4.5",
     "@tree-sitter-grammars/tree-sitter-lua": "0.4.1",
     "@tree-sitter-grammars/tree-sitter-toml": "0.7.0",
     "@tree-sitter-grammars/tree-sitter-yaml": "0.7.1",
