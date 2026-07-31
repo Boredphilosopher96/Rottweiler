@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
+
 if [[ $# -lt 1 || $# -gt 2 ]]; then
   echo "usage: $0 WSL_PATH_TO_WINDOWS_CHECKOUT [WSL_PATH_TO_RELEASE_ARCHIVE]" >&2
   exit 2

@@ -375,6 +375,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Ubuntu 24.04 WSL2 installation failed" }
           wsl.exe --distribution Ubuntu-24.04 --user root --exec true
           if ($LASTEXITCODE -ne 0) { throw "Ubuntu 24.04 WSL2 initialization failed" }
+          $workspace = (wsl.exe --distribution Ubuntu-24.04 --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "checkout path could not be translated into WSL" }
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec bash "$workspace/scripts/provision-wsl-ci.sh"
+          if ($LASTEXITCODE -ne 0) { throw "WSL build-tool provisioning failed" }
       - name: Execute inside the configured WSL2 distribution
         shell: pwsh
         run: |
