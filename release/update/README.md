@@ -45,6 +45,13 @@ documented in `docs/07-VERIFICATION.md`. Dedicated self-hosted runners labeled
 signing: the workflow does not offer a skip flag for missing evidence or
 infrastructure.
 
+Before creating a tag, run the **Release preflight** workflow manually. It
+validates the measured baseline provenance, committed public signing inputs,
+protected variables/secrets, and dogfood ledger, then invokes the same
+calibrated protected-performance workflow used by release qualification. The
+preflight cannot sign metadata, publish a GitHub release, update Homebrew, or
+substitute for the exact-tag soak, WSL2, Terminal-Bench, and live replay gates.
+
 The tag workflow materializes those seeds as mode-0600 temporary files, signs
 the two channel documents, deletes the temporary directory, attests the archive
 and metadata bytes, and publishes the artifacts. Signature metadata is not the

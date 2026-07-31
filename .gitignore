@@ -7,6 +7,9 @@
 /soak-baseline-result.json
 /terminal-bench-evidence/
 /terminal-bench-baseline.json
+/mutants.out/
+/coverage.lcov
+/coverage-summary.txt
 *.profraw
 .DS_Store
 .idea/

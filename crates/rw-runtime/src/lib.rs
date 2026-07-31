@@ -15,6 +15,7 @@ mod plugin_process;
 mod project_commands;
 mod session_host;
 mod session_runtime;
+mod storage_root;
 mod subagent_metadata;
 mod workflow_runtime;
 

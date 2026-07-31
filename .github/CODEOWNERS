@@ -1,0 +1,17 @@
+# Default ownership and review routing.
+* @Boredphilosopher96
+
+# Release, CI, trust, sandbox, credentials, and protocol changes require the
+# repository owner to review the exact diff.
+/.github/ @Boredphilosopher96
+/release/ @Boredphilosopher96
+/packaging/ @Boredphilosopher96
+/scripts/build-release.sh @Boredphilosopher96
+/scripts/install-release.sh @Boredphilosopher96
+/crates/rw-core/src/permission.rs @Boredphilosopher96
+/crates/rw-core/src/update.rs @Boredphilosopher96
+/crates/rw-sandbox/ @Boredphilosopher96
+/crates/rw-store/src/credentials.rs @Boredphilosopher96
+/crates/rw-store/src/trust.rs @Boredphilosopher96
+/crates/rw-ext/ @Boredphilosopher96
+/protocol/ @Boredphilosopher96

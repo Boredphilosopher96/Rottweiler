@@ -1,0 +1,90 @@
+name: Risk-focused quality
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: risk-focused-quality
+  cancel-in-progress: true
+
+jobs:
+  rust-coverage:
+    name: Rust coverage evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install Rust coverage toolchain
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal --component llvm-tools-preview
+          rustup override set 1.94.1
+          cargo install --locked cargo-llvm-cov --version 0.8.7
+      - name: Measure workspace coverage
+        run: >-
+          cargo llvm-cov
+          --locked
+          --workspace
+          --all-features
+          --lcov
+          --output-path coverage.lcov
+      - name: Write coverage summary
+        run: cargo llvm-cov report --summary-only | tee coverage-summary.txt
+      - name: Retain coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rust-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            coverage.lcov
+            coverage-summary.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+  security-mutation:
+    name: Mutation ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: permission
+            file: crates/rw-core/src/permission.rs
+          - name: trust
+            file: crates/rw-store/src/trust.rs
+          - name: update
+            file: crates/rw-core/src/update.rs
+          - name: plugin-capabilities
+            file: crates/rw-ext/src/plugin.rs
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+      - name: Install pinned mutation toolchain
+        run: |
+          rustup toolchain install 1.94.1 --profile minimal
+          rustup override set 1.94.1
+          cargo install --locked cargo-mutants --version 27.1.0
+      - name: Require tests to catch security-boundary mutations
+        run: >-
+          cargo mutants
+          --file "${{ matrix.file }}"
+          --in-place
+          --jobs 2
+          --timeout 300
+          --cargo-arg=--locked
+      - name: Retain mutation evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: mutation-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: mutants.out
+          if-no-files-found: warn
+          retention-days: 30

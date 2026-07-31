@@ -176,6 +176,8 @@ decision.
 
 See the [security model](docs/05-SECURITY.md) for the threat model, sandbox
 coverage, permission semantics, credential handling, and acceptance tests.
+Report suspected vulnerabilities through the private process in
+[SECURITY.md](SECURITY.md), not a public issue.
 
 ## Configuration and extensions
 
