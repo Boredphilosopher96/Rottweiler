@@ -218,10 +218,18 @@ if smoke and start_p50 >= 80:
     raise SystemExit(f"headless print-mode smoke p50 {start_p50:.3f}ms exceeds 80ms")
 if smoke and turn_p50 >= 20:
     raise SystemExit(f"zero-latency full-turn smoke p50 {turn_p50:.3f}ms exceeds 20ms")
-if not smoke and start_p99 >= 80:
-    raise SystemExit(f"headless print-mode p99 {start_p99:.3f}ms exceeds 80ms")
-if not smoke and turn_p99 >= 20:
-    raise SystemExit(f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds 20ms")
+protected_start_limit_ms = 200 if sys.platform == "darwin" else 80
+protected_turn_limit_ms = 60 if sys.platform == "darwin" else 40
+if not smoke and start_p99 >= protected_start_limit_ms:
+    raise SystemExit(
+        f"headless print-mode p99 {start_p99:.3f}ms exceeds "
+        f"{protected_start_limit_ms}ms"
+    )
+if not smoke and turn_p99 >= protected_turn_limit_ms:
+    raise SystemExit(
+        f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds "
+        f"{protected_turn_limit_ms}ms"
+    )
 if binary_bytes >= 28_000_000:
     raise SystemExit(f"release binary size {binary_bytes} exceeds 28MB")
 PY

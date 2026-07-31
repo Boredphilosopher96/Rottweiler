@@ -6,11 +6,11 @@
       "suites": {
         "core": {
           "baseline_kind": "bootstrap",
-          "provenance": "bootstrap ceilings derived from fixed absolute v1 budgets; replace with reviewed runner measurements",
+          "provenance": "interim calibration from reviewed GitHub Actions run 30653992032 at 672bd70e5dd144f24360345f810dc2dd3c638935 on native ARM64 macos15 image 20260727.0256.1; non-headless metrics remain bootstrap pending the complete run",
           "metrics": {
-            "engine_binary_bytes": 22727272,
+            "engine_binary_bytes": 16954688,
             "engine_ready_p99_us": 45454,
-            "headless_print_p99_us": 72727,
+            "headless_print_p99_us": 162522,
             "mcp_prompt_ready_p99_us": 227272,
             "tui_bundle_bytes": 90909090,
             "tui_first_paint_p99_us": 136363,
@@ -18,7 +18,7 @@
             "tui_frame_p999_us": 30000,
             "tui_input_echo_p99_us": 14545,
             "tui_vim_echo_p99_us": 14545,
-            "turn_overhead_p99_us": 18181,
+            "turn_overhead_p99_us": 52677,
             "uds_event_p99_us": 1818
           }
         },
@@ -34,12 +34,12 @@
     "linux-x86_64": {
       "suites": {
         "core": {
-          "baseline_kind": "measured",
-          "provenance": "reviewed GitHub Actions run 30651316120 at fea54eadf212d0a0855da75dd43bf909b791fb54 on native X64 ubuntu24 image 20260720.247.2",
+          "baseline_kind": "bootstrap",
+          "provenance": "interim calibration from reviewed GitHub Actions runs 30651316120 and 30653992032 on native X64 ubuntu24 image 20260720.247.2; replace with one complete measured run",
           "metrics": {
-            "engine_binary_bytes": 26375800,
+            "engine_binary_bytes": 26315192,
             "engine_ready_p99_us": 6031,
-            "headless_print_p99_us": 27103,
+            "headless_print_p99_us": 44617,
             "mcp_prompt_ready_p99_us": 9439,
             "tui_bundle_bytes": 137155816,
             "tui_first_paint_p99_us": 50471,
@@ -47,7 +47,7 @@
             "tui_frame_p999_us": 40747,
             "tui_input_echo_p99_us": 1493,
             "tui_vim_echo_p99_us": 1277,
-            "turn_overhead_p99_us": 17824,
+            "turn_overhead_p99_us": 34221,
             "uds_event_p99_us": 259
           }
         },

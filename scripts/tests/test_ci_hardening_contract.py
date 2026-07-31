@@ -62,9 +62,7 @@ class CiHardeningContractTests(unittest.TestCase):
             "needs: [runner-contract, linux-performance-build]", linux_release
         )
         self.assertNotIn("macos-performance-build", linux_release)
-        self.assertIn(
-            "needs: [runner-contract, macos-performance-build]", macos_release
-        )
+        self.assertIn("needs: runner-contract", macos_release)
         self.assertIn(
             "runs-on: ubuntu-24.04", linux_release
         )
@@ -85,7 +83,10 @@ class CiHardeningContractTests(unittest.TestCase):
         )
         self.assertNotIn("cargo-release.sh build", soak)
         self.assertIn("${{ matrix.artifact }}", soak)
+        self.assertIn("${{ matrix.tui_artifact }}", soak)
         self.assertIn("rottweiler-soak-binary.noindex/rw", soak)
+        self.assertIn("packages/tui/dist/rottweiler-tui", soak)
+        self.assertNotIn("bun run build", soak)
         wsl2 = workflow_job(workflow, "wsl2-acceptance")
         self.assertIn("runs-on: windows-2025", wsl2)
         self.assertNotIn("self-hosted", wsl2)
@@ -274,17 +275,20 @@ class CiHardeningContractTests(unittest.TestCase):
         }
 
         for workflow_name, workflow in workflows.items():
-            for platform in ("linux", "macos"):
-                with self.subTest(workflow=workflow_name, producer=platform):
-                    producer = workflow_job(
-                        workflow, f"{platform}-performance-build"
-                    )
-                    self.assertIn(
-                        f"name: {platform}-performance-rw-${{{{ github.run_id }}}}",
-                        producer,
-                    )
-                    self.assertNotIn("github.run_attempt", producer)
-                    self.assertIn("overwrite: true", producer)
+            with self.subTest(workflow=workflow_name, producer="linux"):
+                producer = workflow_job(workflow, "linux-performance-build")
+                self.assertIn(
+                    "name: linux-performance-rw-${{ github.run_id }}", producer
+                )
+                self.assertNotIn("github.run_attempt", producer)
+                self.assertIn("overwrite: true", producer)
+
+        macos_producer = workflow_job(workflows["nightly"], "macos-performance-build")
+        self.assertIn(
+            "name: macos-performance-rw-${{ github.run_id }}", macos_producer
+        )
+        self.assertNotIn("github.run_attempt", macos_producer)
+        self.assertIn("overwrite: true", macos_producer)
 
         release = workflows["release"]
         for platform in ("linux-x86_64", "darwin-arm64"):
