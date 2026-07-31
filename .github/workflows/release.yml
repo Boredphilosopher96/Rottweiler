@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  models: read
 
 concurrency:
   group: signed-release
@@ -53,35 +54,12 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  macos-performance-build:
-    name: Build isolated macOS performance binary
-    runs-on: macos-15
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - run: rustup override set 1.97.1
-      - name: Build performance binary outside the workspace
-        run: scripts/prepare-macos-performance-binary.sh
-      - name: Upload isolated macOS performance binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: macos-performance-rw-${{ github.run_id }}
-          path: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
   build-linux:
     name: Build linux-x86_64
     needs: [runner-contract, linux-performance-build]
-    # Exact-release p99 evidence is valid only on the calibrated protected lane.
-    runs-on: [self-hosted, Linux, X64, performance]
+    # The fixed Ubuntu image provides native x86_64 exact-tag measurements and
+    # records its image version with the retained raw samples.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
@@ -211,12 +189,24 @@ jobs:
           overwrite: true
           retention-days: 7
           compression-level: 0
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
+            "$RUNNER_TEMP/rottweiler-linux-performance-download.noindex"
 
   build-macos:
     name: Build darwin-arm64
-    needs: [runner-contract, macos-performance-build]
-    # Exact-release p99 evidence is valid only on the calibrated protected lane.
-    runs-on: [self-hosted, macOS, ARM64, performance]
+    needs: runner-contract
+    # Build and measure the exact archive on the fixed native ARM64 image;
+    # the dedicated self-hosted macOS runner is reserved for the 8-hour soak.
+    runs-on: macos-15
     timeout-minutes: 60
     permissions:
       contents: read
@@ -270,27 +260,17 @@ jobs:
                   raise SystemExit("embedded root key is not canonical 32-byte base64")
           PY
       - run: mkdir -p perf-results
-      - name: Download isolated macOS performance binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: macos-performance-rw-${{ github.run_id }}
-          path: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex
-      - name: Verify isolated macOS performance binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/rottweiler-macos-performance-download.noindex"
-          shasum -a 256 -c rw.sha256
-          chmod 700 rw
-      - name: Headless performance gate (macOS prebuilt binary)
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
+      - name: Build isolated macOS binary on the measurement host
+        run: scripts/prepare-macos-performance-binary.sh
+      - name: Headless performance gate (macOS measurement-host binary)
         run: crates/rw-cli/tests/perf_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
           ROTTWEILER_PERF_SAMPLES: 500
-          ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex/rw
-      - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - run: rustup override set 1.97.1
+          ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex/rw
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
@@ -346,6 +326,18 @@ jobs:
           overwrite: true
           retention-days: 7
           compression-level: 0
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
+            "$RUNNER_TEMP/rottweiler-macos-performance-artifact.noindex" \
+            "$RUNNER_TEMP/rottweiler-macos-performance-build.noindex"
 
   release-gate:
     name: Exact-tag v1 acceptance gate
@@ -455,11 +447,14 @@ jobs:
   release-terminal-bench:
     name: Exact-tag Terminal-Bench capability gate
     needs: build-linux
-    runs-on: [self-hosted, Linux, X64, terminal-bench]
+    # Harbor's containers run on an ephemeral hosted machine, not on a
+    # maintainer workstation or either calibrated performance runner.
+    runs-on: ubuntu-24.04
     timeout-minutes: 720
     environment: release
     permissions:
       contents: read
+      models: read
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
       ROTTWEILER_EVAL_MODEL: ${{ vars.ROTTWEILER_EVAL_MODEL }}
@@ -477,7 +472,7 @@ jobs:
         run: pipx install --force harbor==0.18.0
       - name: Run exact release archive through the pinned 20-task capability gate
         env:
-          ROTTWEILER_EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
+          ROTTWEILER_EVAL_API_KEY: ${{ github.token }}
         run: |
           archive=$(find dist/release -maxdepth 1 -type f -name 'rottweiler-*-linux-x86_64.tar.gz' -print)
           test -n "$archive"
@@ -611,11 +606,17 @@ jobs:
           if [ -n "${ROTTWEILER_SOAK_ROOT:-}" ]; then
             rm -rf "$ROTTWEILER_SOAK_ROOT"
           fi
+          rm -rf \
+            "$GITHUB_WORKSPACE/dist/soak-release" \
+            "$GITHUB_WORKSPACE/soak-result.json" \
+            "$GITHUB_WORKSPACE/soak-baseline-result.json"
 
   wsl2-acceptance:
     name: Exact-tag WSL2 acceptance
     needs: build-linux
-    runs-on: [self-hosted, Windows, X64, wsl2]
+    # Windows Server 2025 hosted runners ship with WSL2 and are discarded after
+    # the native Windows/DrvFS acceptance job.
+    runs-on: windows-2025
     timeout-minutes: 90
     env:
       ROTTWEILER_UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
@@ -630,20 +631,34 @@ jobs:
         with:
           name: release-linux-x86_64
           path: dist/wsl-release
-      - shell: pwsh
+      - name: Provision clean Ubuntu 24.04 WSL2 distribution
+        shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           wsl.exe --status
           if ($LASTEXITCODE -ne 0) { throw "WSL2 is unavailable" }
-          $workspace = (wsl.exe wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          wsl.exe --set-default-version 2
+          if ($LASTEXITCODE -ne 0) { throw "WSL2 could not be selected" }
+          wsl.exe --install --distribution Ubuntu-24.04 --no-launch
+          if ($LASTEXITCODE -ne 0) { throw "Ubuntu 24.04 WSL2 installation failed" }
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec true
+          if ($LASTEXITCODE -ne 0) { throw "Ubuntu 24.04 WSL2 initialization failed" }
+          $workspace = (wsl.exe --distribution Ubuntu-24.04 --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "checkout path could not be translated into WSL" }
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec bash "$workspace/scripts/provision-wsl-ci.sh"
+          if ($LASTEXITCODE -ne 0) { throw "WSL build-tool provisioning failed" }
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $workspace = (wsl.exe --distribution Ubuntu-24.04 --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
           if ($LASTEXITCODE -ne 0) { throw "checkout path could not be translated into WSL" }
           if (-not $workspace.StartsWith("/mnt/")) { throw "checkout is not visible through WSL" }
           $archives = @(Get-ChildItem -Path "$env:GITHUB_WORKSPACE/dist/wsl-release" -File -Filter "rottweiler-*-linux-x86_64.tar.gz")
           if ($archives.Count -ne 1) { throw "expected exactly one Linux release archive" }
-          $archive = (wsl.exe wslpath -a "$($archives[0].FullName)").Trim()
+          $archive = (wsl.exe --distribution Ubuntu-24.04 --exec wslpath -a "$($archives[0].FullName)").Trim()
           if ($LASTEXITCODE -ne 0) { throw "release archive path could not be translated into WSL" }
           if (-not $archive.StartsWith("/mnt/")) { throw "release archive is not visible through WSL" }
-          wsl.exe --exec bash "$workspace/scripts/wsl-acceptance.sh" "$workspace" "$archive"
+          wsl.exe --distribution Ubuntu-24.04 --exec bash "$workspace/scripts/wsl-acceptance.sh" "$workspace" "$archive"
           if ($LASTEXITCODE -ne 0) { throw "WSL release acceptance failed" }
 
   release-linux-security:
@@ -864,13 +879,12 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
           options=(--verify-tag --generate-notes)
           case "$GITHUB_REF_NAME" in
             *-*) options+=(--prerelease) ;;
-            *) test -n "$HOMEBREW_TAP_TOKEN" ;;
+            *) ;;
           esac
           publication=$(mktemp -d "$RUNNER_TEMP/rottweiler-publication.XXXXXX")
           trap 'rm -rf "$publication"' EXIT
@@ -901,14 +915,24 @@ jobs:
         if: ${{ !contains(github.ref_name, '-') }}
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          test -n "$GH_TOKEN"
+          test -n "$HOMEBREW_TAP_DEPLOY_KEY"
+          private=$(mktemp -d "$RUNNER_TEMP/rottweiler-homebrew-key.XXXXXX")
+          trap 'rm -rf "$private"' EXIT
+          key="$private/id_ed25519"
+          known_hosts="$private/known_hosts"
+          umask 077
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$key"
+          printf '%s\n' \
+            'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+            > "$known_hosts"
+          unset HOMEBREW_TAP_DEPLOY_KEY
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
           tap="$RUNNER_TEMP/homebrew-tap"
           rm -rf "$tap"
-          gh auth setup-git
-          git clone --depth 1 https://github.com/Boredphilosopher96/homebrew-tap.git "$tap"
+          git clone --depth 1 git@github.com:Boredphilosopher96/homebrew-tap.git "$tap"
           test -d "$tap/Formula"
           install -m 644 dist/distribution/rottweiler.rb "$tap/Formula/rottweiler.rb"
           git -C "$tap" add Formula/rottweiler.rb
@@ -920,4 +944,48 @@ jobs:
           fi
           expected=$(git -C "$tap" rev-parse HEAD)
           observed=$(git -C "$tap" ls-remote --exit-code origin refs/heads/main | awk '{print $1}')
+          test "$observed" = "$expected"
+          rm -rf "$private"
+          trap - EXIT
+
+  deploy-update-repository:
+    name: Deploy no-redirect update repository
+    needs: sign-and-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: github-pages
+      url: https://boredphilosopher96.github.io/Rottweiler/updates/
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the persistent update site
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: gh-pages
+          path: site
+      - name: Download the authenticated release set
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-update-repository-${{ github.ref_name }}
+          path: release-set
+      - name: Publish metadata and immutable archives without deleting history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p site/updates
+          cp release-set/signed/root-chain.json site/updates/root-chain.json
+          cp release-set/signed/root.json site/updates/root.json
+          cp release-set/signed/stable.json site/updates/stable.json
+          cp release-set/signed/beta.json site/updates/beta.json
+          cp release-set/unsigned/*.tar.gz site/updates/
+          git -C site add updates
+          git -C site config user.name github-actions[bot]
+          git -C site config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          if ! git -C site diff --cached --quiet; then
+            git -C site commit -m "publish ${GITHUB_REF_NAME}"
+            git -C site push origin HEAD:gh-pages
+          fi
+          expected=$(git -C site rev-parse HEAD)
+          observed=$(git -C site ls-remote --exit-code origin refs/heads/gh-pages | awk '{print $1}')
           test "$observed" = "$expected"

@@ -1,2 +1,5 @@
 # Pinned upstream acceptance fixtures are byte-for-byte Git tree snapshots.
 crates/rw-core/tests/fixtures/init/** -text whitespace=-trailing-space
+
+# Windows-hosted WSL acceptance executes repository shell scripts directly.
+*.sh text eol=lf

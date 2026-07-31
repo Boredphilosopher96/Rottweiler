@@ -39,7 +39,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           set -euo pipefail
           required=(
@@ -57,7 +57,7 @@ jobs:
             OPENAI_API_KEY
             ANTHROPIC_API_KEY
             EVAL_API_KEY
-            HOMEBREW_TAP_TOKEN
+            HOMEBREW_TAP_DEPLOY_KEY
           )
           missing=()
           for name in "${required[@]}"; do

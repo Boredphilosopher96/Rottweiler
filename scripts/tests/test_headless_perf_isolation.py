@@ -49,24 +49,19 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertIn("install -m 700", builder)
                 self.assertIn(checksum, builder)
 
-    def test_manual_performance_builds_platform_binaries_on_isolated_runners(self) -> None:
+    def test_manual_performance_builds_linux_artifact_only(self) -> None:
         workflow = (REPO / ".github/workflows/performance.yml").read_text(
             encoding="utf-8"
         )
         linux_build = workflow_job(workflow, "linux-performance-build")
-        macos_build = workflow_job(workflow, "macos-performance-build")
-
-        for platform, build in (("linux", linux_build), ("macos", macos_build)):
-            with self.subTest(platform=platform):
-                self.assertNotIn("\n    needs:", build)
-                self.assertNotIn("\n    if:", build)
-                self.assertIn(
-                    f"scripts/prepare-{platform}-performance-binary.sh", build
-                )
-                self.assertIn("actions/upload-artifact@043fb46d", build)
-                self.assertIn("if-no-files-found: error", build)
-                self.assertIn("overwrite: true", build)
-                self.assertIn("timeout-minutes: 30", build)
+        self.assertNotIn("  macos-performance-build:", workflow)
+        self.assertNotIn("\n    needs:", linux_build)
+        self.assertNotIn("\n    if:", linux_build)
+        self.assertIn("scripts/prepare-linux-performance-binary.sh", linux_build)
+        self.assertIn("actions/upload-artifact@043fb46d", linux_build)
+        self.assertIn("if-no-files-found: error", linux_build)
+        self.assertIn("overwrite: true", linux_build)
+        self.assertIn("timeout-minutes: 30", linux_build)
 
     def test_manual_performance_consumers_are_platform_independent(self) -> None:
         workflow = (REPO / ".github/workflows/performance.yml").read_text(
@@ -78,7 +73,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 workflow_job(workflow, "performance-linux"),
                 "linux-performance-build",
                 "macos-performance-build",
-                "runs-on: [self-hosted, Linux, X64, performance]",
+                "runs-on: ubuntu-24.04",
                 "sha256sum -c rw.sha256",
                 "Headless performance gate (Linux prebuilt binary)",
                 "manual-performance-linux-x86_64-${{ github.run_id }}-${{ github.run_attempt }}",
@@ -86,11 +81,11 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             (
                 "macos",
                 workflow_job(workflow, "performance-macos"),
-                "macos-performance-build",
+                "runner-contract",
                 "linux-performance-build",
-                "runs-on: [self-hosted, macOS, ARM64, performance]",
-                "shasum -a 256 -c rw.sha256",
-                "Headless performance gate (macOS prebuilt binary)",
+                "runs-on: macos-15",
+                None,
+                "Headless performance gate (macOS measurement-host binary)",
                 "manual-performance-darwin-arm64-${{ github.run_id }}-${{ github.run_attempt }}",
             ),
         )
@@ -109,18 +104,31 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertNotIn(other_builder, performance)
                 self.assertIn("runner-contract", performance)
                 self.assertIn(runner, performance)
-                self.assertIn("actions/download-artifact@3e5f45b2", performance)
-                self.assertIn(checksum, performance)
+                if platform == "macos":
+                    self.assertNotIn("actions/download-artifact@3e5f45b2", performance)
+                    self.assertIn(
+                        "scripts/prepare-macos-performance-binary.sh", performance
+                    )
+                else:
+                    self.assertIn("actions/download-artifact@3e5f45b2", performance)
+                    assert checksum is not None
+                    self.assertIn(checksum, performance)
                 self.assertEqual(performance.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
                 self.assertEqual(performance.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
                 self.assertIn(gate, performance)
                 self.assertNotIn("Headless performance gate (Linux source build)", performance)
                 self.assertIn(evidence, performance)
                 self.assertIn("timeout-minutes: 60", performance)
-                self.assertLess(
-                    performance.index(gate),
-                    performance.index("Install Rust toolchain"),
-                )
+                if platform == "macos":
+                    self.assertLess(
+                        performance.index("Install Rust toolchain"),
+                        performance.index(gate),
+                    )
+                else:
+                    self.assertLess(
+                        performance.index(gate),
+                        performance.index("Install Rust toolchain"),
+                    )
 
     def test_nightly_reuses_isolated_platform_measurements_independently(
         self,
@@ -143,65 +151,87 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("scripts/prepare-macos-performance-binary.sh", macos_builder)
         self.assertIn("actions/upload-artifact@043fb46d", linux_builder)
         self.assertIn("actions/upload-artifact@043fb46d", macos_builder)
+        self.assertIn("linux-soak-tui-${{ github.run_id }}", linux_builder)
+        self.assertIn("macos-soak-tui-${{ github.run_id }}", macos_builder)
         self.assertIn("needs: [runner-contract, linux-performance-build]", linux)
         self.assertNotIn("macos-performance-build", linux)
-        self.assertIn("needs: [runner-contract, macos-performance-build]", macos)
+        self.assertIn("needs: runner-contract", macos)
         self.assertNotIn("linux-performance-build", macos)
-        self.assertIn("runs-on: [self-hosted, Linux, X64, performance]", linux)
-        self.assertIn("runs-on: [self-hosted, macOS, ARM64, performance]", macos)
+        self.assertIn("runs-on: ubuntu-24.04", linux)
+        self.assertIn("runs-on: macos-15", macos)
+        self.assertNotIn("self-hosted", macos)
         self.assertIn("sha256sum -c rw.sha256", linux)
-        self.assertIn("shasum -a 256 -c rw.sha256", macos)
+        self.assertNotIn("actions/download-artifact@3e5f45b2", macos)
+        self.assertIn("scripts/prepare-macos-performance-binary.sh", macos)
         self.assertIn("Headless performance gate (Linux prebuilt binary)", linux)
-        self.assertIn("Headless performance gate (macOS prebuilt binary)", macos)
+        self.assertIn("Headless performance gate (macOS measurement-host binary)", macos)
         self.assertNotIn("Headless performance gate (Linux source build)", linux)
         for measured in (linux, macos):
             self.assertEqual(measured.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
             self.assertEqual(measured.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
-            self.assertLess(
-                measured.index("Headless performance gate"),
-                measured.index("Install Rust toolchain"),
-            )
+        self.assertLess(
+            linux.index("Headless performance gate"),
+            linux.index("Install Rust toolchain"),
+        )
+        self.assertLess(
+            macos.index("Install Rust toolchain"),
+            macos.index("Headless performance gate"),
+        )
 
     def test_release_reuses_isolated_platform_measurements_independently(self) -> None:
         release = (REPO / ".github/workflows/release.yml").read_text(encoding="utf-8")
         linux_builder = workflow_job(release, "linux-performance-build")
-        macos_builder = workflow_job(release, "macos-performance-build")
         linux = workflow_job(release, "build-linux")
         macos = workflow_job(release, "build-macos")
 
         self.assertIn("scripts/prepare-linux-performance-binary.sh", linux_builder)
-        self.assertIn("scripts/prepare-macos-performance-binary.sh", macos_builder)
+        self.assertNotIn("  macos-performance-build:", release)
         for platform, build, builder, other_builder, runner, checksum, gate in (
             (
                 "linux",
                 linux,
                 "linux-performance-build",
                 "macos-performance-build",
-                "runs-on: [self-hosted, Linux, X64, performance]",
+                "runs-on: ubuntu-24.04",
                 "sha256sum -c rw.sha256",
                 "Headless performance gate (Linux prebuilt binary)",
             ),
             (
                 "macos",
                 macos,
-                "macos-performance-build",
+                "runner-contract",
                 "linux-performance-build",
-                "runs-on: [self-hosted, macOS, ARM64, performance]",
-                "shasum -a 256 -c rw.sha256",
-                "Headless performance gate (macOS prebuilt binary)",
+                "runs-on: macos-15",
+                None,
+                "Headless performance gate (macOS measurement-host binary)",
             ),
         ):
             with self.subTest(platform=platform):
-                self.assertIn(f"needs: [runner-contract, {builder}]", build)
+                if platform == "macos":
+                    self.assertIn("needs: runner-contract", build)
+                else:
+                    self.assertIn(f"needs: [runner-contract, {builder}]", build)
                 self.assertNotIn(other_builder, build)
                 self.assertIn(runner, build)
-                self.assertIn(checksum, build)
+                if platform == "macos":
+                    self.assertNotIn("actions/download-artifact@3e5f45b2", build)
+                    self.assertIn("scripts/prepare-macos-performance-binary.sh", build)
+                else:
+                    assert checksum is not None
+                    self.assertIn(checksum, build)
                 self.assertIn(gate, build)
                 self.assertNotIn("Headless performance gate (Linux source build)", build)
                 self.assertEqual(build.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
                 self.assertEqual(build.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
                 self.assertIn("timeout-minutes: 60", build)
-                self.assertLess(build.index(gate), build.index("Install Rust toolchain"))
+                if platform == "macos":
+                    self.assertLess(
+                        build.index("Install Rust toolchain"), build.index(gate)
+                    )
+                else:
+                    self.assertLess(
+                        build.index(gate), build.index("Install Rust toolchain")
+                    )
                 self.assertIn("overwrite: true", build)
 
     def test_release_compresses_embedded_wasm_and_never_rewrites_compiled_elf(
@@ -261,8 +291,10 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertNotIn("warmup_count", gate)
         self.assertIn("if smoke and start_p50 >= 80", gate)
         self.assertIn("if smoke and turn_p50 >= 20", gate)
-        self.assertIn("if not smoke and start_p99 >= 80", gate)
-        self.assertIn("if not smoke and turn_p99 >= 20", gate)
+        self.assertIn('protected_start_limit_ms = 200 if sys.platform == "darwin" else 80', gate)
+        self.assertIn('protected_turn_limit_ms = 60 if sys.platform == "darwin" else 40', gate)
+        self.assertIn("if not smoke and start_p99 >= protected_start_limit_ms", gate)
+        self.assertIn("if not smoke and turn_p99 >= protected_turn_limit_ms", gate)
         self.assertIn("sample_count > 5000", gate)
         self.assertIn('"samples": [', gate)
         self.assertIn('"runner": {', gate)

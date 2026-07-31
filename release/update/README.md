@@ -40,10 +40,11 @@ repository values:
 
 The protected `release` environment also supplies the paid live-smoke keys,
 dated model ids, external dogfood-ledger secret, and Terminal-Bench baseline
-documented in `docs/07-VERIFICATION.md`. Dedicated self-hosted runners labeled
-`soak`, `terminal-bench`, and `wsl2` must be online. These are prerequisites to
-signing: the workflow does not offer a skip flag for missing evidence or
-infrastructure.
+documented in `docs/07-VERIFICATION.md`. The native macOS ARM64 runner and the
+Linux X64 soak runner must be online. Linux core measurements, WSL2, and
+Harbor's containers use fixed disposable GitHub-hosted images. These are
+prerequisites to signing: the workflow does not offer a skip flag for missing
+evidence or infrastructure.
 
 Before creating a tag, run the **Release preflight** workflow manually. It
 validates the measured baseline provenance, committed public signing inputs,
@@ -54,9 +55,9 @@ substitute for the exact-tag soak, WSL2, Terminal-Bench, and live replay gates.
 
 The tag workflow materializes those seeds as mode-0600 temporary files, signs
 the two channel documents, deletes the temporary directory, attests the archive
-and metadata bytes, and publishes the artifacts. Signature metadata is not the
-host: copy the signed set plus archives to the configured no-redirect update
-origin as an explicit release-deployment step.
+and metadata bytes, and publishes the artifacts. It then overlays the signed
+set and archives onto the persistent `gh-pages` update repository. Historical
+archives are retained, and the exact repository commit is verified after push.
 
 Manual release signing must pass that same origin explicitly with
 `--base-url "$ROTTWEILER_UPDATE_BASE_URL"` and a single captured signing time as

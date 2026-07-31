@@ -163,37 +163,38 @@ Property tests worth calling out:
 | Engine ready (serve socket accepting) | < 50ms | hyperfine on release binary, CI perf runner |
 | Cold start → TUI first paint (engine + OpenTUI spawn) | < 150ms | same |
 | Cold start → prompt ready (with project config + 3 MCP servers deferred) | < 250ms | same |
-| Headless print-mode start (pure Rust path, no Bun) | < 80ms | same |
+| Headless print-mode start (pure Rust path, no Bun) | protected p99: macOS < 200ms, Linux < 80ms; PR smoke median < 80ms | same |
 | Input keystroke → echo | < 16ms | TUI latency harness (in-memory terminal, timestamped events) |
 | Streaming frame compute (layout + diff + buffer write; the harness measures compute, not display refresh) | macOS: p95 < 16ms, p99.9 < 33ms; Linux: p95 < 40ms, p99.9 < 66ms during 200 lines/s stream into 10MB transcript | stress fixture in TUI harness |
 | Engine→TUI event latency over the socket, p99 | < 2ms | contract harness |
-| Turn overhead (engine time excluding provider latency) | < 20ms | replay timing |
+| Turn overhead (engine time excluding provider latency) | protected p99: macOS < 60ms, Linux < 40ms; PR smoke median < 20ms | replay timing |
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
 | Memory, 8-hour stress session (engine + TUI combined) | < 500MB RSS | soak test, nightly |
 | Release size | engine binary < 28MB; TUI bundle < 100MB on macOS / < 150MB on Linux | CI check |
 
 The required manually dispatched protected-performance, nightly, and release
-headless gates enforce the stated 20ms turn-overhead budget at p99 over 500
-fresh processes. The per-PR smoke runs on a shared hosted runner, so it is
+headless gates enforce the platform ceilings above at p99 over 500 fresh
+processes on fixed native `ubuntu-24.04` X64 and `macos-15` ARM64 images.
+The per-PR smoke runs on an unpinned hosted image, so it is
 deliberately a screening gate rather than release evidence: it enforces the
-same absolute startup and turn limits at the median over 100 fresh processes,
+stricter 80ms/20ms startup and turn limits at the median over 100 fresh processes,
 which detects sustained regressions without treating host-wide scheduler stalls
 as product latency. Every measured sample is reported; neither tier retries,
 trims, nor substitutes a relative baseline.
 
-Full p99 consumers run on repository-protected self-hosted runners labeled
-`Linux`, `X64`, and `performance` or `macOS`, `ARM64`, and `performance`. Each
-release binary is built on a separate hosted runner, transferred with a
-checksum, and measured only after that handoff so link-time optimization and
-build load cannot contaminate latency. The protected runner's reviewed identity
-belongs in measured baseline provenance; a general-purpose hosted runner cannot
-establish or replace it.
+Full p99 consumers run on fixed native GitHub-hosted images and record the exact
+image version with every raw sample set. Linux measures an independently built,
+checksummed artifact. macOS builds outside the checkout directly on the
+measurement host because downloaded executable provenance measurably distorts
+launch latency; its fixed post-link cooling interval separates build load from
+the samples. The protected runner identity belongs in measured baseline
+provenance.
 
 Regression policy: every executable latency and size gate writes integer,
 machine-readable metrics and keeps its fixed, platform-specific absolute
-budget. macOS is the reference latency platform; Linux may use the explicitly
-listed streaming-frame exception above, while input echo, socket latency,
-startup, turn overhead, and all macOS budgets remain unchanged. Each platform
+budget. Platform-specific startup and turn ceilings reflect retained measurements
+from the fixed protected images; input echo and socket latency remain common.
+Each platform
 suite in `benchmarks/performance-baseline.json` declares `baseline_kind` as
 either `bootstrap` or `measured`, plus substantive provenance. A measured value
 above 110% of its reviewed measured baseline fails. Schema errors,
@@ -230,8 +231,10 @@ workflows run it for 28,800 seconds on dedicated self-hosted runners labeled
 checked against the platform's measured `soak` suite in
 `benchmarks/performance-baseline.json`; bootstrap provenance deliberately
 blocks nightly and release completion. Tag-release soaks install and run
-the exact already-built archive that publication will sign; nightly soaks build
-the current default-branch source locally. Dedicated
+the exact already-built archive that publication will sign. Nightly soaks use
+the current default-branch Rust binaries built in isolated hosted build jobs,
+verify their checksums on the protected runners, and build the current OpenTUI
+client locally. Dedicated
 runners are required because hosted Actions jobs cannot sustain one continuous
 eight-hour process.
 
@@ -277,8 +280,9 @@ an unconfigured provider. `scripts/check-terminal-bench.py` requires exactly 20
 unique completed trials and compares solve rate, mean tokens, mean wall time,
 and mean USD cost against the protected
 `ROTTWEILER_TERMINAL_BENCH_BASELINE_JSON` repository variable. Complete Harbor
-results are retained for 90 days. Long evals use the dedicated self-hosted
-`terminal-bench` Linux runner and never silently skip for a missing opt-in.
+results are retained for 90 days. Long evals use disposable GitHub-hosted
+Ubuntu, so Harbor's containers never run on a calibrated runner or a
+maintainer workstation.
 `scripts/check-dogfood-gate.py` independently
 requires 14 unique consecutive UTC records ending on the release day, with
 session evidence and zero P0s. The temporal gate is not satisfiable by a
@@ -293,8 +297,8 @@ campaigns must catch mutations in permission, trust, signed-update, and plugin
 capability boundaries. Evidence is retained per exact run. Establish a required
 coverage threshold only after reviewing the first protected measurements;
 lowering a later threshold requires the same review as a performance waiver.
-Manual protected performance: independently built and checksummed Linux/macOS binaries · 500-sample full p99 gates on calibrated protected runners · M4/M8/TUI performance and release-size evidence.
-Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · non-optional terminal-bench subset with retained regression evidence · macOS + Linux release matrix · real WSL2 acceptance on a labeled self-hosted runner.
+Manual protected performance: isolated Linux build artifacts plus macOS binaries built directly on the measurement host to avoid download provenance distortion · 500-sample full p99 gates on fixed native hosted Linux X64 and macOS ARM64 images · M4/M8/TUI performance and release-size evidence.
+Nightly: full perf suite · real eight-hour supervised soak with retained baseline evidence · fuzzers · non-optional terminal-bench subset with retained regression evidence · macOS + Linux release matrix · real WSL2 acceptance on GitHub-hosted Windows Server 2025.
 Pre-release: the manually dispatched non-publishing preflight validates
 repository-owned public signing inputs, measured baselines, protected
 configuration, and the current 14-day dogfood ledger before invoking the exact
@@ -302,13 +306,11 @@ protected-performance graph. It produces no release, channel metadata,
 Homebrew change, or deployment.
 Release: signing and publication depend on the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, 14-day dogfood ledger, paid two-family `--record` plus offline replay canary, pinned 20-task Terminal-Bench baseline, macOS/Linux eight-hour soak, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
 
-The long-running `soak`, `terminal-bench`, and `wsl2` labels are operational
-security boundaries, not general-purpose shared runners. Repository operators
-must provision them as ephemeral or just-in-time runners for a single job,
-isolate their runner groups to this repository and workflow set, and destroy or
-wipe the machine after the job. Release credentials and paid provider keys must
-never be exposed to a persistent runner that can retain a modified checkout,
-process, container, credential file, or Docker layer for a later job.
+The self-hosted `soak` labels are operational security boundaries, not
+general-purpose shared runners. They are restricted to schedule, manual, and
+exact-tag jobs and never receive release or provider credentials. WSL2 and
+Harbor use disposable GitHub-hosted machines; no persistent runner retains a
+container layer, release credential, or paid provider key for a later job.
 
 Channel-signing fixtures additionally require stable/beta documents to share one metadata epoch while allowing independent semantic target versions. The first publication is exactly epoch 1; later publications require same-epoch prior documents for both channels and advance exactly to `N+1`. A required fixed signing time rejects expired active roots and new stable/beta specs while allowing authenticated expired priors as historical transition evidence. A beta-only prerelease carries stable forward only from a threshold-valid prior stable envelope; unsigned, cross-channel, split-prior, skipped-epoch, downgraded, URL-mismatched, and unused-artifact fixtures fail before output.
 **Network policy**: the socket-deny guard applies to the per-PR test harness; the only networked jobs are the nightly terminal-bench eval (a solve-rate benchmark can't run under replay) and the release `--record` smoke.

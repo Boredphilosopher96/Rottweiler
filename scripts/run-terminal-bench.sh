@@ -6,14 +6,40 @@ tasks="$repo/evals/terminal-bench-20.txt"
 : "${ROTTWEILER_RELEASE_ARCHIVE:?set to a Linux release archive from scripts/build-release.sh}"
 : "${ROTTWEILER_EVAL_MODEL:?set to a pinned provider/model identifier}"
 : "${ROTTWEILER_EVAL_OUTPUT_DIR:?set to a dedicated Harbor evidence directory}"
+: "${ROTTWEILER_EVAL_API_KEY:?set to the job-scoped model credential}"
 
 command -v harbor >/dev/null
 command -v docker >/dev/null
 test -f "$ROTTWEILER_RELEASE_ARCHIVE"
 test "$(grep -c '^terminal-bench/[a-z0-9-][a-z0-9-]*$' "$tasks")" -eq 20
 case "$ROTTWEILER_EVAL_MODEL" in
-  *-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]|*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+  *-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]|*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]|*@[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
   *) echo 'ROTTWEILER_EVAL_MODEL must use an immutable dated model id' >&2; exit 1 ;;
+esac
+
+case "$ROTTWEILER_EVAL_MODEL" in
+  github/*@*)
+    model_id=${ROTTWEILER_EVAL_MODEL#github/}
+    expected_version=${model_id##*@}
+    model_id=${model_id%@*}
+    catalog=$(curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+      -H "Accept: application/vnd.github+json" \
+      -H "Authorization: Bearer $ROTTWEILER_EVAL_API_KEY" \
+      -H "X-GitHub-Api-Version: 2026-03-10" \
+      https://models.github.ai/catalog/models)
+    MODEL_ID="$model_id" EXPECTED_VERSION="$expected_version" python3 -c '
+import json
+import os
+import sys
+
+models = {item["id"]: item for item in json.load(sys.stdin)}
+model = models.get(os.environ["MODEL_ID"])
+if model is None:
+    raise SystemExit("pinned GitHub model is absent from the catalog")
+if model.get("version") != os.environ["EXPECTED_VERSION"]:
+    raise SystemExit("GitHub model catalog version changed")
+' <<<"$catalog"
+    ;;
 esac
 
 harbor_version=$(harbor --version 2>&1)

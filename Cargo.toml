@@ -72,7 +72,7 @@ nix = { version = "0.31.3", features = ["poll"] }
 portable-pty = "0.9.0"
 rpassword = "=7.5.4"
 regex = "1.12.2"
-rmcp = { version = "=3.0.1", default-features = false, features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client", "transport-streamable-http-server"] }
+rmcp = { version = "=3.1.0", default-features = false, features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
 schemars = { version = "1.2.1", features = ["preserve_order"] }
@@ -90,7 +90,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 url = "2.5"
-wasmtime = { version = "47.0.2", default-features = false, features = ["async", "component-model-async", "cranelift", "pulley", "runtime", "std"] }
+wasmtime = { version = "47.0.3", default-features = false, features = ["async", "component-model-async", "cranelift", "pulley", "runtime", "std"] }
 
 rw-context = { version = "0.1.0", path = "crates/rw-context" }
 rw-core = { version = "0.1.0", path = "crates/rw-core" }

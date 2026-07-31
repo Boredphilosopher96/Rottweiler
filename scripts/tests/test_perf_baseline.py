@@ -52,18 +52,28 @@ class PerfBaselineTests(unittest.TestCase):
     def test_checked_in_baseline_has_both_platforms_and_explicit_provenance(self) -> None:
         document = MODULE.load(Path(__file__).parents[2] / "benchmarks/performance-baseline.json")
         self.assertEqual(set(document["platforms"]), {"darwin-arm64", "linux-x86_64"})
-        for platform in document["platforms"].values():
-            for suite in platform["suites"].values():
-                self.assertIn("bootstrap", suite["provenance"])
-                self.assertEqual(suite["baseline_kind"], "bootstrap")
+        darwin_suites = document["platforms"]["darwin-arm64"]["suites"]
+        linux_suites = document["platforms"]["linux-x86_64"]["suites"]
+        self.assertEqual(darwin_suites["core"]["baseline_kind"], "measured")
+        self.assertIn("30655148886", darwin_suites["core"]["provenance"])
+        self.assertEqual(darwin_suites["soak"]["baseline_kind"], "bootstrap")
+        self.assertIn("bootstrap", darwin_suites["soak"]["provenance"])
+        self.assertEqual(linux_suites["core"]["baseline_kind"], "measured")
+        self.assertIn("30655148886", linux_suites["core"]["provenance"])
+        self.assertEqual(linux_suites["soak"]["baseline_kind"], "bootstrap")
         darwin = document["platforms"]["darwin-arm64"]["suites"]["core"]["metrics"]
         linux = document["platforms"]["linux-x86_64"]["suites"]["core"]["metrics"]
-        self.assertEqual(darwin["tui_bundle_bytes"], 90_909_090)
-        self.assertEqual(darwin["tui_frame_p95_us"], 14_545)
-        self.assertEqual(darwin["tui_frame_p999_us"], 30_000)
-        self.assertEqual(linux["tui_bundle_bytes"], 99_999_999)
-        self.assertEqual(linux["tui_frame_p95_us"], 36_363)
-        self.assertEqual(linux["tui_frame_p999_us"], 59_999)
+        self.assertEqual(darwin["headless_print_p99_us"], 162_522)
+        self.assertEqual(darwin["turn_overhead_p99_us"], 52_677)
+        self.assertEqual(darwin["tui_bundle_bytes"], 83_199_920)
+        self.assertEqual(darwin["tui_frame_p95_us"], 6_889)
+        self.assertEqual(darwin["tui_frame_p999_us"], 11_694)
+        self.assertEqual(linux["engine_binary_bytes"], 26_375_800)
+        self.assertEqual(linux["headless_print_p99_us"], 54_819)
+        self.assertEqual(linux["turn_overhead_p99_us"], 34_221)
+        self.assertEqual(linux["tui_bundle_bytes"], 137_155_816)
+        self.assertEqual(linux["tui_frame_p95_us"], 30_153)
+        self.assertEqual(linux["tui_frame_p999_us"], 40_747)
 
     def test_require_measured_rejects_bootstrap_and_accepts_reviewed_measurement(self) -> None:
         document = baseline()

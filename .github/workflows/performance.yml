@@ -48,34 +48,12 @@ jobs:
           overwrite: true
           retention-days: 1
 
-  macos-performance-build:
-    name: Build isolated macOS performance binary
-    runs-on: macos-15
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - run: rustup override set 1.97.1
-      - name: Build performance binary outside the workspace
-        run: scripts/prepare-macos-performance-binary.sh
-      - name: Upload isolated macOS performance binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: macos-performance-rw-${{ github.run_id }}
-          path: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 1
-
   performance-linux:
     name: Performance budgets (linux-x86_64)
     needs: [runner-contract, linux-performance-build]
-    # Full absolute p99 evidence requires a calibrated, protected runner.
-    # Shared hosted runners remain limited to the bounded per-PR smoke gate.
-    runs-on: [self-hosted, Linux, X64, performance]
+    # The fixed Ubuntu image is a native x86_64 lane and records its exact
+    # runner-image provenance with every raw sample set.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
@@ -142,13 +120,24 @@ jobs:
           path: perf-results
           if-no-files-found: warn
           retention-days: 30
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
+            "$RUNNER_TEMP/rottweiler-linux-performance-download.noindex"
 
   performance-macos:
     name: Performance budgets (darwin-arm64)
-    needs: [runner-contract, macos-performance-build]
-    # Full absolute p99 evidence requires a calibrated, protected runner.
-    # Shared hosted runners remain limited to the bounded per-PR smoke gate.
-    runs-on: [self-hosted, macOS, ARM64, performance]
+    needs: runner-contract
+    # The fixed native ARM64 image avoids workstation Gatekeeper/XProtect
+    # provenance noise and records exact runner-image provenance in evidence.
+    runs-on: macos-15
     timeout-minutes: 60
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
@@ -157,27 +146,17 @@ jobs:
         with:
           persist-credentials: false
       - run: mkdir -p perf-results
-      - name: Download isolated macOS performance binary
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: macos-performance-rw-${{ github.run_id }}
-          path: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex
-      - name: Verify isolated macOS performance binary
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP/rottweiler-macos-performance-download.noindex"
-          shasum -a 256 -c rw.sha256
-          chmod 700 rw
-      - name: Headless performance gate (macOS prebuilt binary)
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
+      - name: Build isolated macOS binary on the measurement host
+        run: scripts/prepare-macos-performance-binary.sh
+      - name: Headless performance gate (macOS measurement-host binary)
         run: crates/rw-cli/tests/perf_gate.sh
         env:
           ROTTWEILER_PERF_OUTPUT: perf-results/headless.json
           ROTTWEILER_PERF_SAMPLES: 500
-          ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex/rw
-      - name: Install Rust toolchain
-        run: rustup toolchain install 1.97.1 --profile minimal
-      - run: rustup override set 1.97.1
+          ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-macos-performance-artifact.noindex/rw
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
@@ -215,3 +194,15 @@ jobs:
           path: perf-results
           if-no-files-found: warn
           retention-days: 30
+      - name: Reclaim persistent runner workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/dist" \
+            "$GITHUB_WORKSPACE/perf-results" \
+            "$GITHUB_WORKSPACE/packages/tui/dist" \
+            "$GITHUB_WORKSPACE/packages/tui/node_modules" \
+            "$RUNNER_TEMP/rottweiler-macos-performance-artifact.noindex" \
+            "$RUNNER_TEMP/rottweiler-macos-performance-build.noindex"
