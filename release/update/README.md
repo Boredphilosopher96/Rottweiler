@@ -39,12 +39,12 @@ repository values:
   must both be unique; at most 32 keys are accepted.
 
 For v1 and later, the protected `release` environment also supplies the paid
-live-smoke keys, dated provider model ids, and external dogfood-ledger secret
-documented in `docs/07-VERIFICATION.md`. Those v1 qualification inputs are not
-required for a pre-v1 tag. Every release tier requires the Terminal-Bench
-baseline and its dated evaluation model. Terminal-Bench authenticates to a
-version-checked GitHub Models entry with the job-scoped `GITHUB_TOKEN`; it does
-not use a persistent evaluation API-key secret. The native macOS ARM64 runner
+live-smoke keys, a dated OpenAI or Anthropic evaluation model, its reviewed
+Terminal-Bench baseline, and the external dogfood-ledger secret documented in
+`docs/07-VERIFICATION.md`. Those v1 qualification inputs are not required for a
+pre-v1 tag. GitHub Models was retired on 2026-07-30 and is not a release
+dependency; Terminal-Bench selects the matching paid provider key only inside
+its step. The native macOS ARM64 runner
 and the Linux X64 soak runner must be online. Linux core measurements, WSL2,
 and Harbor's containers use fixed disposable GitHub-hosted images. These are
 prerequisites to signing for the applicable release tier: the workflow does not
@@ -55,7 +55,8 @@ validates the measured baseline provenance, committed public signing inputs,
 protected variables/secrets, and dogfood ledger, then invokes the same
 calibrated protected-performance workflow used by release qualification. The
 preflight cannot sign metadata, publish a GitHub release, update Homebrew, or
-substitute for the exact-tag soak, WSL2, Terminal-Bench, and live replay gates.
+substitute for the exact-tag soak and WSL2 gates, or for the v1+ Terminal-Bench
+and live replay gates.
 
 The tag workflow materializes those seeds as mode-0600 temporary files, signs
 the two channel documents, deletes the temporary directory, attests the archive

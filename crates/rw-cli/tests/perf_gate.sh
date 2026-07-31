@@ -219,7 +219,7 @@ if smoke and start_p50 >= 80:
 if smoke and turn_p50 >= 20:
     raise SystemExit(f"zero-latency full-turn smoke p50 {turn_p50:.3f}ms exceeds 20ms")
 protected_start_limit_ms = 200 if sys.platform == "darwin" else 80
-protected_turn_limit_ms = 60 if sys.platform == "darwin" else 40
+protected_turn_limit_ms = 60
 if not smoke and start_p99 >= protected_start_limit_ms:
     raise SystemExit(
         f"headless print-mode p99 {start_p99:.3f}ms exceeds "

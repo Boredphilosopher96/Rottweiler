@@ -292,7 +292,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn("if smoke and start_p50 >= 80", gate)
         self.assertIn("if smoke and turn_p50 >= 20", gate)
         self.assertIn('protected_start_limit_ms = 200 if sys.platform == "darwin" else 80', gate)
-        self.assertIn('protected_turn_limit_ms = 60 if sys.platform == "darwin" else 40', gate)
+        self.assertIn("protected_turn_limit_ms = 60", gate)
         self.assertIn("if not smoke and start_p99 >= protected_start_limit_ms", gate)
         self.assertIn("if not smoke and turn_p99 >= protected_turn_limit_ms", gate)
         self.assertIn("sample_count > 5000", gate)

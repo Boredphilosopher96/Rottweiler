@@ -59,8 +59,6 @@ jobs:
             UPDATE_ROOT_THRESHOLD
             UPDATE_ROOT_KEYS_JSON
             UPDATE_BASE_URL
-            EVAL_MODEL
-            TERMINAL_BENCH_BASELINE_JSON
             UPDATE_RELEASE_KEYS_JSON
             HOMEBREW_TAP_DEPLOY_KEY
           )
@@ -71,6 +69,8 @@ jobs:
             required+=(
               LIVE_ANTHROPIC_MODEL
               LIVE_OPENAI_MODEL
+              EVAL_MODEL
+              TERMINAL_BENCH_BASELINE_JSON
               DOGFOOD_LEDGER_B64
               OPENAI_API_KEY
               ANTHROPIC_API_KEY
@@ -87,10 +87,12 @@ jobs:
             exit 1
           fi
           test "$SELF_HOSTED_RUNNERS_ENABLED" = "true"
-          case "$EVAL_MODEL" in
-            github/*@[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
-            *) echo "EVAL_MODEL must pin a GitHub Models catalog version" >&2; exit 1 ;;
-          esac
+          if [ "$RELEASE_MAJOR" -ge 1 ]; then
+            case "$EVAL_MODEL" in
+              openai/*-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]|anthropic/*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+              *) echo "EVAL_MODEL must select an immutable dated OpenAI or Anthropic model" >&2; exit 1 ;;
+            esac
+          fi
           case "$UPDATE_BASE_URL" in
             https://*/) ;;
             *) echo "UPDATE_BASE_URL must be HTTPS and end in /" >&2; exit 1 ;;
