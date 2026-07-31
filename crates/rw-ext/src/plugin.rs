@@ -1602,12 +1602,13 @@ impl CapabilityEnforcer {
         name: &str,
         declared: bool,
     ) -> Result<(), CapabilityEnforcementError> {
-        if let Some(mut error) = self
-            .violation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-        {
+        let cached_violation = {
+            self.violation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        if let Some(mut error) = cached_violation {
             if error.termination_error.is_some() && self.process.kill_tree().is_ok() {
                 error.termination_error = None;
                 *self
