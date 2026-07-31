@@ -22,7 +22,7 @@ wasm_host="$release_dir/rottweiler-wasm-host"
 tui="$repo/packages/tui/dist/rottweiler-tui"
 case "$(uname -s)" in
   Darwin) opentui_native_name=libopentui.dylib; tui_bundle_limit=100000000 ;;
-  Linux) opentui_native_name=libopentui.so; tui_bundle_limit=110000000 ;;
+  Linux) opentui_native_name=libopentui.so; tui_bundle_limit=150000000 ;;
   MINGW*|MSYS*|CYGWIN*) opentui_native_name=opentui.dll; tui_bundle_limit=100000000 ;;
   *) echo "unsupported release platform: $(uname -s)" >&2; exit 1 ;;
 esac

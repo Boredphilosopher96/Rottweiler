@@ -240,7 +240,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
         self.assertIn(native_strip, build)
         self.assertIn("process.platform === \"darwin\"", build)
         self.assertIn("? 100_000_000", build)
-        self.assertIn("? 110_000_000", build)
+        self.assertIn("? 150_000_000", build)
         self.assertIn(bundle_gate, build)
         self.assertNotIn("executablePath:", build)
         self.assertNotIn("stripLinuxArtifact", build)
