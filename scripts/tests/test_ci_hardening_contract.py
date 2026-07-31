@@ -188,13 +188,12 @@ class CiHardeningContractTests(unittest.TestCase):
         ):
             self.assertIn(boundary, workflow)
 
-    def test_dependabot_avoids_automatic_major_upgrades(self) -> None:
+    def test_dependabot_covers_every_ecosystem_without_hiding_major_upgrades(
+        self,
+    ) -> None:
         configuration = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
         self.assertEqual(configuration.count("package-ecosystem:"), 5)
-        self.assertEqual(
-            configuration.count('update-types: ["version-update:semver-major"]'),
-            5,
-        )
+        self.assertNotIn("version-update:semver-major", configuration)
 
     def test_signed_release_is_serialized_and_downloads_only_unsigned_archives(
         self,

@@ -52,7 +52,7 @@ Upgrade a HEAD installation with `brew upgrade --fetch-HEAD rottweiler`.
 
 ### Build from source
 
-Source builds require Rust 1.94.1 and Bun 1.3.14. The TUI is compiled into a
+Source builds require Rust 1.97.1 and Bun 1.3.14. The TUI is compiled into a
 self-contained executable; Node is not required at runtime.
 
 ```sh

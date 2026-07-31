@@ -110,6 +110,7 @@ const embeddedAssets = [
 export interface MaterializedTreeSitterRuntime {
   readonly root: string
   readonly workerPath: string
+  readonly wasmPath: string
   readonly assetsPath: string
   cleanup(): Promise<void>
   cleanupSync(): void
@@ -229,12 +230,18 @@ export async function materializeTreeSitterRuntime(): Promise<MaterializedTreeSi
       if (relative === "parser.worker.js") {
         const source = new TextDecoder().decode(bytes)
         const external = 'from "web-tree-sitter"'
-        if (source.split(external).length !== 2) {
+        const externalOccurrences = source.split(external).length - 1
+        const bundledDependency =
+          source.includes("node_modules/.bun/web-tree-sitter@0.25.10/") &&
+          source.includes('resolveAssetPath("web-tree-sitter/tree-sitter.wasm"')
+        if (externalOccurrences !== 1 && !bundledDependency) {
           throw new Error("embedded Tree-sitter worker has an unexpected dependency shape")
         }
-        bytes = new TextEncoder().encode(
-          source.replace(external, 'from "./node_modules/web-tree-sitter/tree-sitter.js"'),
-        )
+        if (externalOccurrences === 1) {
+          bytes = new TextEncoder().encode(
+            source.replace(external, 'from "./node_modules/web-tree-sitter/tree-sitter.js"'),
+          )
+        }
       }
       if (bytes.byteLength === 0 || bytes.byteLength > MAX_ASSET_BYTES) {
         throw new Error(`embedded Tree-sitter asset has invalid size: ${relative}`)
@@ -276,6 +283,7 @@ export async function materializeTreeSitterRuntime(): Promise<MaterializedTreeSi
   return {
     root,
     workerPath: join(root, "parser.worker.js"),
+    wasmPath: join(root, "node_modules/web-tree-sitter/tree-sitter.wasm"),
     assetsPath: join(root, "assets"),
     async cleanup() {
       if (cleaned) return

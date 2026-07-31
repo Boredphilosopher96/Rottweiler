@@ -409,14 +409,13 @@ impl SignalTarget for PtySignalTarget {
             .map_err(|_| io::Error::other("PTY master lock was poisoned"))?
             .get_termios()
             .ok_or_else(|| io::Error::other("PTY termios is unavailable"))?;
-        if !termios
-            .local_flags
-            .contains(nix::sys::termios::LocalFlags::ISIG)
-        {
+        // portable-pty owns this termios value through its nix version.
+        // Compare the stable libc representation so our direct nix major can
+        // advance independently without mixing incompatible bitflags types.
+        if termios.local_flags.bits() & nix::libc::ISIG == 0 {
             return Ok(None);
         }
-        let interrupt =
-            termios.control_chars[nix::sys::termios::SpecialCharacterIndices::VINTR as usize];
+        let interrupt = termios.control_chars[nix::libc::VINTR];
         Ok((interrupt != nix::libc::_POSIX_VDISABLE).then_some(interrupt))
     }
 }

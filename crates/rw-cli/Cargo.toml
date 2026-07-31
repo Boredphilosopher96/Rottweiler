@@ -37,7 +37,7 @@ rw-store.workspace = true
 rw-tools.workspace = true
 rw-types.workspace = true
 rustix.workspace = true
-rustyline = "=17.0.2"
+rustyline = "=18.0.1"
 serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true

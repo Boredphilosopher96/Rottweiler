@@ -701,7 +701,7 @@ impl StreamableHttpClient for ProductionMcpHttpClient {
     async fn get_stream(
         &self,
         uri: Arc<str>,
-        session_id: Arc<str>,
+        session_id: Option<Arc<str>>,
         last_event_id: Option<String>,
         auth_header: Option<String>,
         custom_headers: HashMap<HeaderName, HeaderValue>,
@@ -712,7 +712,7 @@ impl StreamableHttpClient for ProductionMcpHttpClient {
                 &uri,
                 mcp_http_headers(
                     auth_header,
-                    Some(&session_id),
+                    session_id.as_deref(),
                     last_event_id,
                     custom_headers,
                     false,

@@ -109,7 +109,7 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
                 self.assertNotIn(other_builder, performance)
                 self.assertIn("runner-contract", performance)
                 self.assertIn(runner, performance)
-                self.assertIn("actions/download-artifact@37930b1c", performance)
+                self.assertIn("actions/download-artifact@3e5f45b2", performance)
                 self.assertIn(checksum, performance)
                 self.assertEqual(performance.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
                 self.assertEqual(performance.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)

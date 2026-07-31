@@ -5,7 +5,6 @@
     "lib": ["ESNext"],
     "module": "Preserve",
     "moduleResolution": "Bundler",
-    "baseUrl": ".",
     "paths": {
       "@rottweiler/plugin": ["./src/index.ts"]
     },

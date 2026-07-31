@@ -54,6 +54,8 @@ async function main(): Promise<void> {
         await openTui.destroyTreeSitterClient()
         await treeSitterRuntime?.cleanup()
         treeSitterRuntime = null
+        delete process.env.ROTTWEILER_TREE_SITTER_WASM_PATH
+        delete process.env.OTUI_TREE_SITTER_WORKER_PATH
       })()
     },
   })
@@ -132,7 +134,8 @@ async function main(): Promise<void> {
   try {
     const { embeddedParserConfigurations, materializeTreeSitterRuntime } = await import("./tree-sitter-runtime")
     treeSitterRuntime = await materializeTreeSitterRuntime()
-    const { assetsPath, workerPath } = treeSitterRuntime
+    const { assetsPath, wasmPath, workerPath } = treeSitterRuntime
+    process.env.ROTTWEILER_TREE_SITTER_WASM_PATH = wasmPath
     process.env.OTUI_TREE_SITTER_WORKER_PATH = workerPath
     openTui.addDefaultParsers(embeddedParserConfigurations(assetsPath))
   } catch {
