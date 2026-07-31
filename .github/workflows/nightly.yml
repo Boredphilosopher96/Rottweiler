@@ -363,14 +363,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Execute inside the configured WSL2 distribution
+      - name: Provision clean Ubuntu 24.04 WSL2 distribution
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           wsl.exe --status
-          $workspace = (wsl.exe wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "WSL2 is unavailable" }
+          wsl.exe --set-default-version 2
+          if ($LASTEXITCODE -ne 0) { throw "WSL2 could not be selected" }
+          wsl.exe --install --distribution Ubuntu-24.04 --no-launch
+          if ($LASTEXITCODE -ne 0) { throw "Ubuntu 24.04 WSL2 installation failed" }
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec true
+          if ($LASTEXITCODE -ne 0) { throw "Ubuntu 24.04 WSL2 initialization failed" }
+      - name: Execute inside the configured WSL2 distribution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $workspace = (wsl.exe --distribution Ubuntu-24.04 --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          if ($LASTEXITCODE -ne 0) { throw "checkout path could not be translated into WSL" }
           if (-not $workspace.StartsWith("/mnt/")) { throw "checkout is not visible through WSL" }
-          wsl.exe bash -lc "bash '$workspace/scripts/wsl-acceptance.sh' '$workspace'"
+          wsl.exe --distribution Ubuntu-24.04 --exec bash "$workspace/scripts/wsl-acceptance.sh" "$workspace"
+          if ($LASTEXITCODE -ne 0) { throw "WSL acceptance failed" }
 
   terminal-bench:
     name: Terminal-Bench 2.1 pinned subset

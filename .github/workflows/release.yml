@@ -662,20 +662,30 @@ jobs:
         with:
           name: release-linux-x86_64
           path: dist/wsl-release
-      - shell: pwsh
+      - name: Provision clean Ubuntu 24.04 WSL2 distribution
+        shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           wsl.exe --status
           if ($LASTEXITCODE -ne 0) { throw "WSL2 is unavailable" }
-          $workspace = (wsl.exe wslpath -a "$env:GITHUB_WORKSPACE").Trim()
+          wsl.exe --set-default-version 2
+          if ($LASTEXITCODE -ne 0) { throw "WSL2 could not be selected" }
+          wsl.exe --install --distribution Ubuntu-24.04 --no-launch
+          if ($LASTEXITCODE -ne 0) { throw "Ubuntu 24.04 WSL2 installation failed" }
+          wsl.exe --distribution Ubuntu-24.04 --user root --exec true
+          if ($LASTEXITCODE -ne 0) { throw "Ubuntu 24.04 WSL2 initialization failed" }
+      - shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $workspace = (wsl.exe --distribution Ubuntu-24.04 --exec wslpath -a "$env:GITHUB_WORKSPACE").Trim()
           if ($LASTEXITCODE -ne 0) { throw "checkout path could not be translated into WSL" }
           if (-not $workspace.StartsWith("/mnt/")) { throw "checkout is not visible through WSL" }
           $archives = @(Get-ChildItem -Path "$env:GITHUB_WORKSPACE/dist/wsl-release" -File -Filter "rottweiler-*-linux-x86_64.tar.gz")
           if ($archives.Count -ne 1) { throw "expected exactly one Linux release archive" }
-          $archive = (wsl.exe wslpath -a "$($archives[0].FullName)").Trim()
+          $archive = (wsl.exe --distribution Ubuntu-24.04 --exec wslpath -a "$($archives[0].FullName)").Trim()
           if ($LASTEXITCODE -ne 0) { throw "release archive path could not be translated into WSL" }
           if (-not $archive.StartsWith("/mnt/")) { throw "release archive is not visible through WSL" }
-          wsl.exe --exec bash "$workspace/scripts/wsl-acceptance.sh" "$workspace" "$archive"
+          wsl.exe --distribution Ubuntu-24.04 --exec bash "$workspace/scripts/wsl-acceptance.sh" "$workspace" "$archive"
           if ($LASTEXITCODE -ne 0) { throw "WSL release acceptance failed" }
 
   release-linux-security:
