@@ -36,12 +36,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal
-      - run: rustup override set 1.94.1
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
       - name: Build performance binary outside the workspace
         run: scripts/prepare-linux-performance-binary.sh
       - name: Upload isolated Linux performance binary
@@ -60,12 +60,12 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal
-      - run: rustup override set 1.94.1
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
       - name: Build performance binary outside the workspace
         run: scripts/prepare-macos-performance-binary.sh
       - name: Upload isolated macOS performance binary
@@ -94,7 +94,7 @@ jobs:
       ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
       ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Validate immutable release identity
@@ -136,7 +136,7 @@ jobs:
           PY
       - run: mkdir -p perf-results
       - name: Download isolated Linux performance binary
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: linux-performance-rw-${{ github.run_id }}
           path: ${{ runner.temp }}/rottweiler-linux-performance-download.noindex
@@ -154,8 +154,8 @@ jobs:
           ROTTWEILER_PERF_SAMPLES: 500
           ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-linux-performance-download.noindex/rw
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal
-      - run: rustup override set 1.94.1
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
@@ -229,7 +229,7 @@ jobs:
       ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
       ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Validate immutable release identity
@@ -271,7 +271,7 @@ jobs:
           PY
       - run: mkdir -p perf-results
       - name: Download isolated macOS performance binary
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: macos-performance-rw-${{ github.run_id }}
           path: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex
@@ -289,8 +289,8 @@ jobs:
           ROTTWEILER_PERF_SAMPLES: 500
           ROTTWEILER_PERF_PREBUILT_RW: ${{ runner.temp }}/rottweiler-macos-performance-download.noindex/rw
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal
-      - run: rustup override set 1.94.1
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
@@ -358,15 +358,15 @@ jobs:
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Install Rust and Bun toolchains
         run: |
-          rustup toolchain install 1.94.1 --profile minimal --component clippy,rustfmt
-          rustup override set 1.94.1
-          cargo install --locked cargo-audit --version 0.22.1
-          cargo install --locked cargo-deny --version 0.19.1
+          rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+          rustup override set 1.97.1
+          cargo install --locked cargo-audit --version 0.22.2
+          cargo install --locked cargo-deny --version 0.20.2
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
@@ -466,10 +466,10 @@ jobs:
       ROTTWEILER_EVAL_CONCURRENCY: "4"
       ROTTWEILER_EVAL_OUTPUT_DIR: ${{ github.workspace }}/terminal-bench-evidence
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-linux-x86_64
           path: dist/release
@@ -522,10 +522,10 @@ jobs:
       ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
       ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-${{ matrix.platform }}
           path: dist/soak-release
@@ -623,10 +623,10 @@ jobs:
       ROTTWEILER_UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
       ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-linux-x86_64
           path: dist/wsl-release
@@ -654,7 +654,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - run: crates/rw-sandbox/tests/linux_security_gate.sh
@@ -671,19 +671,19 @@ jobs:
     env:
       ROTTWEILER_UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
       - name: Install Rust toolchain
-        run: rustup toolchain install 1.94.1 --profile minimal
-      - run: rustup override set 1.94.1
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - run: rustup override set 1.97.1
       - name: Download unsigned macOS release archive
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-darwin-arm64
           path: dist/unsigned
       - name: Download unsigned Linux release archive
-        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-linux-x86_64
           path: dist/unsigned

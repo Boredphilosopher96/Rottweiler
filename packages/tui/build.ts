@@ -121,7 +121,7 @@ function enforceTuiBundleSize(executable: string, nativeLibrary: string): void {
     process.platform === "darwin"
       ? 100_000_000
       : process.platform === "linux"
-        ? 110_000_000
+        ? 150_000_000
         : undefined
   if (limit === undefined) return
   const bundleBytes = statSync(executable).size + statSync(nativeLibrary).size

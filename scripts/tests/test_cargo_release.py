@@ -19,7 +19,7 @@ class CargoReleaseTests(unittest.TestCase):
             log = root / "cargo.json"
             target = root / "target output"
             (tools / "rustc").write_text(
-                f"#!/bin/sh\nprintf 'rustc 1.94.1\\nhost: {host}\\n'\n",
+                f"#!/bin/sh\nprintf 'rustc 1.97.1\\nhost: {host}\\n'\n",
                 encoding="utf-8",
             )
             (tools / "cargo").write_text(

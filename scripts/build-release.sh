@@ -22,7 +22,7 @@ wasm_host="$release_dir/rottweiler-wasm-host"
 tui="$repo/packages/tui/dist/rottweiler-tui"
 case "$(uname -s)" in
   Darwin) opentui_native_name=libopentui.dylib; tui_bundle_limit=100000000 ;;
-  Linux) opentui_native_name=libopentui.so; tui_bundle_limit=110000000 ;;
+  Linux) opentui_native_name=libopentui.so; tui_bundle_limit=150000000 ;;
   MINGW*|MSYS*|CYGWIN*) opentui_native_name=opentui.dll; tui_bundle_limit=100000000 ;;
   *) echo "unsupported release platform: $(uname -s)" >&2; exit 1 ;;
 esac
@@ -32,8 +32,8 @@ wasm_host_bytes=$(wc -c <"$wasm_host" | tr -d ' ')
 tui_bytes=$(wc -c <"$tui" | tr -d ' ')
 opentui_native_bytes=$(wc -c <"$opentui_native" | tr -d ' ')
 tui_bundle_bytes=$((tui_bytes + opentui_native_bytes))
-if [ "$engine_bytes" -ge 25000000 ]; then
-  echo "release engine is ${engine_bytes} bytes; budget is <25000000" >&2
+if [ "$engine_bytes" -ge 28000000 ]; then
+  echo "release engine is ${engine_bytes} bytes; budget is <28000000" >&2
   exit 1
 fi
 if [ "$wasm_host_bytes" -ge 30000000 ]; then

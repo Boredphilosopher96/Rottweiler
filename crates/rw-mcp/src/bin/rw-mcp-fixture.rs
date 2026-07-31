@@ -3,9 +3,10 @@ use std::sync::Arc;
 use rmcp::{
     ErrorData, ServerHandler, ServiceExt as _,
     model::{
-        CallToolRequestParams, CallToolResult, ContentBlock, GetPromptRequestParams,
-        GetPromptResult, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
-        Prompt, PromptMessage, ReadResourceRequestParams, ReadResourceResult, Resource,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+        GetPromptRequestParams, GetPromptResponse, GetPromptResult, Implementation,
+        ListPromptsResult, ListResourcesResult, ListToolsResult, Prompt, PromptMessage,
+        ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
         ResourceContents, Role, ServerCapabilities, ServerInfo, Tool,
     },
 };
@@ -34,25 +35,22 @@ impl ServerHandler for Fixture {
         _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         let suffix = self.profile.replace('-', "_");
-        Ok(ListToolsResult {
-            tools: vec![
+        Ok(ListToolsResult::with_all_items(vec![
                 Tool::new(format!("echo_{suffix}"), format!("Echo one value for {}", self.profile), Arc::new(json!({"type":"object","required":["value"],"properties":{"value":{"type":"string","maxLength":4096}}}).as_object().cloned().unwrap_or_default())),
                 Tool::new(format!("search_{suffix}"), format!("Search bounded {} records", self.profile), Arc::new(json!({"type":"object","required":["query"],"properties":{"query":{"type":"string"},"filters":{"type":"object","additionalProperties":{"type":"string"}},"limit":{"type":"integer","minimum":1,"maximum":100}}}).as_object().cloned().unwrap_or_default())),
                 Tool::new(format!("create_{suffix}"), format!("Create one {} record", self.profile), Arc::new(json!({"type":"object","required":["title","body"],"properties":{"title":{"type":"string"},"body":{"type":"string"},"labels":{"type":"array","items":{"type":"string"}},"metadata":{"type":"object"}}}).as_object().cloned().unwrap_or_default())),
-            ],
-            next_cursor: None,
-            meta: None,
-        })
+            ]))
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
+    ) -> Result<CallToolResponse, ErrorData> {
         Ok(CallToolResult::success(vec![ContentBlock::text(
             serde_json::to_string(&request.arguments).unwrap_or_default(),
-        )]))
+        )])
+        .into())
     }
 
     async fn list_resources(
@@ -60,28 +58,21 @@ impl ServerHandler for Fixture {
         _: Option<rmcp::model::PaginatedRequestParams>,
         _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        Ok(ListResourcesResult {
-            resources: vec![
-                Resource::new(
-                    format!("memory://{}/guide", self.profile),
-                    format!("{} guide", self.profile),
-                )
-                .with_description(format!("Fixture guide for {}", self.profile)),
-            ],
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(vec![
+            Resource::new(
+                format!("memory://{}/guide", self.profile),
+                format!("{} guide", self.profile),
+            )
+            .with_description(format!("Fixture guide for {}", self.profile)),
+        ]))
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> Result<ReadResourceResult, ErrorData> {
-        Ok(ReadResourceResult::new(vec![ResourceContents::text(
-            "fixture",
-            request.uri,
-        )]))
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        Ok(ReadResourceResult::new(vec![ResourceContents::text("fixture", request.uri)]).into())
     }
 
     async fn list_prompts(
@@ -89,26 +80,19 @@ impl ServerHandler for Fixture {
         _: Option<rmcp::model::PaginatedRequestParams>,
         _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListPromptsResult, ErrorData> {
-        Ok(ListPromptsResult {
-            prompts: vec![Prompt::new(
-                format!("review_{}", self.profile.replace('-', "_")),
-                Some(format!("Review {}", self.profile)),
-                None,
-            )],
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListPromptsResult::with_all_items(vec![Prompt::new(
+            format!("review_{}", self.profile.replace('-', "_")),
+            Some(format!("Review {}", self.profile)),
+            None,
+        )]))
     }
 
     async fn get_prompt(
         &self,
         _: GetPromptRequestParams,
         _: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> Result<GetPromptResult, ErrorData> {
-        Ok(GetPromptResult::new(vec![PromptMessage::new_text(
-            Role::User,
-            "review",
-        )]))
+    ) -> Result<GetPromptResponse, ErrorData> {
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(Role::User, "review")]).into())
     }
 }
 

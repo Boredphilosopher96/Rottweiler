@@ -198,7 +198,7 @@ fn sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake() {
             server.readable().await.expect("server readable");
             let mut request = [0_u8; 10];
             assert_eq!(
-                nix::unistd::read(server.as_raw_fd(), &mut request).expect("server read"),
+                nix::unistd::read(&server, &mut request).expect("server read"),
                 request.len()
             );
             assert_eq!(&request, b"initialize");
@@ -210,7 +210,7 @@ fn sandboxed_tokio_unix_pair_child_completes_a_bounded_handshake() {
             client.readable().await.expect("client readable");
             let mut response = [0_u8; 5];
             assert_eq!(
-                nix::unistd::read(client.as_raw_fd(), &mut response).expect("client read"),
+                nix::unistd::read(&client, &mut response).expect("client read"),
                 response.len()
             );
             assert_eq!(&response, b"ready");

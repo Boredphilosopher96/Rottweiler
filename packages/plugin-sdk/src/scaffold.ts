@@ -36,7 +36,7 @@ export function renderTypeScriptScaffold(options: ScaffoldOptions = {}): readonl
             typecheck: "tsc --noEmit",
           },
           dependencies: { "@rottweiler/plugin": "^0.1.0" },
-          devDependencies: { "@types/bun": "^1.3.14", typescript: "^5.9.3" },
+          devDependencies: { "@types/bun": "^1.3.14", typescript: "^7.0.2" },
         },
         null,
         2,

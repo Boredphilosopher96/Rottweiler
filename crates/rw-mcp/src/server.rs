@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use rmcp::{
     ErrorData as McpProtocolError, ServerHandler, ServiceExt as _,
     model::{
-        CallToolRequestParams, CallToolResult, ContentBlock, Implementation, ListToolsResult,
-        ServerCapabilities, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ListToolsResult, ServerCapabilities, ServerInfo, Tool,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -208,18 +208,19 @@ fn parse<T: serde::de::DeserializeOwned>(
         .map_err(|error| McpProtocolError::invalid_params(error.to_string(), None))
 }
 
-fn result(value: Value) -> CallToolResult {
+fn result(value: Value) -> CallToolResponse {
     let bytes = serde_json::to_vec(&value).unwrap_or_default();
     if bytes.len() > MAX_SERVER_RESULT {
         return tool_error("Rottweiler MCP server result exceeded its size cap");
     }
-    CallToolResult::structured(value)
+    CallToolResult::structured(value).into()
 }
 
-fn tool_error(message: &str) -> CallToolResult {
+fn tool_error(message: &str) -> CallToolResponse {
     CallToolResult::error(vec![ContentBlock::text(
         message.chars().take(512).collect::<String>(),
     )])
+    .into()
 }
 
 impl ServerHandler for RottweilerMcpServer {
@@ -234,11 +235,7 @@ impl ServerHandler for RottweilerMcpServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListToolsResult, McpProtocolError> {
-        Ok(ListToolsResult {
-            tools: Self::builtin_tools(),
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListToolsResult::with_all_items(Self::builtin_tools()))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
@@ -252,7 +249,7 @@ impl ServerHandler for RottweilerMcpServer {
         &self,
         request: CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> Result<CallToolResult, McpProtocolError> {
+    ) -> Result<CallToolResponse, McpProtocolError> {
         if serde_json::to_vec(&request.arguments)
             .is_ok_and(|bytes| bytes.len() > MAX_SERVER_ARGUMENTS)
         {

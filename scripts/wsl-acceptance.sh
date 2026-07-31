@@ -21,8 +21,8 @@ mkdir -p "$work/repo"
 cp -a "$source_root/." "$work/repo/"
 cd "$work/repo"
 
-rustup toolchain install 1.94.1 --profile minimal --component clippy,rustfmt
-rustup override set 1.94.1
+rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+rustup override set 1.97.1
 
 export ROTTWEILER_CREDENTIAL_BACKEND=file
 if [[ $# -eq 2 ]]; then

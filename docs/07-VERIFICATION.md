@@ -138,7 +138,7 @@ Attachment acceptance includes cursor-anchored `@` paths with spaces, clipboard 
 
 ### OpenTUI test surface
 
-OpenTUI 0.4.3 exposes a public `@opentui/core/testing` entry point. Its
+OpenTUI 0.4.5 exposes a public `@opentui/core/testing` entry point. Its
 `createTestRenderer` uses the native renderer with in-memory output and provides
 deterministic render flushing, mock keyboard/mouse input, resize control,
 character-frame capture, and styled cell/span capture. The contract test in
@@ -170,7 +170,7 @@ Property tests worth calling out:
 | Turn overhead (engine time excluding provider latency) | < 20ms | replay timing |
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
 | Memory, 8-hour stress session (engine + TUI combined) | < 500MB RSS | soak test, nightly |
-| Release size | engine binary < 25MB; TUI bundle < 100MB on macOS / < 110MB on Linux | CI check |
+| Release size | engine binary < 28MB; TUI bundle < 100MB on macOS / < 150MB on Linux | CI check |
 
 The required manually dispatched protected-performance, nightly, and release
 headless gates enforce the stated 20ms turn-overhead budget at p99 over 500

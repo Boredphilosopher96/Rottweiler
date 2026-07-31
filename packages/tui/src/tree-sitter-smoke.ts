@@ -7,6 +7,7 @@ import { embeddedParserConfigurations, materializeTreeSitterRuntime } from "./tr
 /** Compiled-executable acceptance used by release tests; not part of normal startup. */
 export async function runCompiledTreeSitterSmoke(reportPath: string): Promise<void> {
   const runtime = await materializeTreeSitterRuntime()
+  process.env.ROTTWEILER_TREE_SITTER_WASM_PATH = runtime.wasmPath
   process.env.OTUI_TREE_SITTER_WORKER_PATH = runtime.workerPath
   addDefaultParsers(embeddedParserConfigurations(runtime.assetsPath))
   const client = getTreeSitterClient()
@@ -89,5 +90,7 @@ export async function runCompiledTreeSitterSmoke(reportPath: string): Promise<vo
     syntax.destroy()
     await destroyTreeSitterClient()
     await runtime.cleanup()
+    delete process.env.ROTTWEILER_TREE_SITTER_WASM_PATH
+    delete process.env.OTUI_TREE_SITTER_WORKER_PATH
   }
 }

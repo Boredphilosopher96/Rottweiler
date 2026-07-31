@@ -5,7 +5,7 @@ repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
 # This pinned Docker Official Image is the canonical Linux M8 sandbox and
 # protocol-performance environment. Host-native headless/M4 gates still cover
 # the release runner and archive outside this container.
-image=${ROTTWEILER_LINUX_M8_IMAGE:-docker.io/library/rust:1.94.1-bookworm@sha256:6ae102bdbf528294bc79ad6e1fae682f6f7c2a6e6621506ba959f9685b308a55}
+image=${ROTTWEILER_LINUX_M8_IMAGE:-docker.io/library/rust:1.97.1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa}
 cargo_volume=${ROTTWEILER_LINUX_CARGO_VOLUME:-rottweiler-linux-cargo}
 container="rottweiler-m8-${PPID}-$$"
 m8_tmpfs_size=${ROTTWEILER_LINUX_M8_TMPFS_SIZE:-3g}
