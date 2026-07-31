@@ -71,7 +71,7 @@ class PerfBaselineTests(unittest.TestCase):
         self.assertEqual(darwin["tui_first_paint_p99_us"], 109_219)
         self.assertEqual(darwin["tui_frame_p95_us"], 17_360)
         self.assertEqual(darwin["tui_frame_p999_us"], 26_171)
-        self.assertEqual(darwin["tui_input_echo_p99_us"], 2_435)
+        self.assertEqual(darwin["tui_input_echo_p99_us"], 3_302)
         self.assertEqual(darwin["tui_vim_echo_p99_us"], 2_572)
         self.assertEqual(darwin["uds_event_p99_us"], 751)
         self.assertEqual(linux["engine_binary_bytes"], 26_375_800)
