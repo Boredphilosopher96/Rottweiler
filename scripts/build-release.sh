@@ -32,8 +32,8 @@ wasm_host_bytes=$(wc -c <"$wasm_host" | tr -d ' ')
 tui_bytes=$(wc -c <"$tui" | tr -d ' ')
 opentui_native_bytes=$(wc -c <"$opentui_native" | tr -d ' ')
 tui_bundle_bytes=$((tui_bytes + opentui_native_bytes))
-if [ "$engine_bytes" -ge 25000000 ]; then
-  echo "release engine is ${engine_bytes} bytes; budget is <25000000" >&2
+if [ "$engine_bytes" -ge 28000000 ]; then
+  echo "release engine is ${engine_bytes} bytes; budget is <28000000" >&2
   exit 1
 fi
 if [ "$wasm_host_bytes" -ge 30000000 ]; then

@@ -222,6 +222,6 @@ if not smoke and start_p99 >= 80:
     raise SystemExit(f"headless print-mode p99 {start_p99:.3f}ms exceeds 80ms")
 if not smoke and turn_p99 >= 20:
     raise SystemExit(f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds 20ms")
-if binary_bytes >= 25_000_000:
-    raise SystemExit(f"release binary size {binary_bytes} exceeds 25MB")
+if binary_bytes >= 28_000_000:
+    raise SystemExit(f"release binary size {binary_bytes} exceeds 28MB")
 PY

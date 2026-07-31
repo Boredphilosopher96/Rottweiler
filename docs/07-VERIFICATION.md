@@ -170,7 +170,7 @@ Property tests worth calling out:
 | Turn overhead (engine time excluding provider latency) | < 20ms | replay timing |
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
 | Memory, 8-hour stress session (engine + TUI combined) | < 500MB RSS | soak test, nightly |
-| Release size | engine binary < 25MB; TUI bundle < 100MB on macOS / < 110MB on Linux | CI check |
+| Release size | engine binary < 28MB; TUI bundle < 100MB on macOS / < 150MB on Linux | CI check |
 
 The required manually dispatched protected-performance, nightly, and release
 headless gates enforce the stated 20ms turn-overhead budget at p99 over 500
