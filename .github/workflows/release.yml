@@ -895,13 +895,12 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
           options=(--verify-tag --generate-notes)
           case "$GITHUB_REF_NAME" in
             *-*) options+=(--prerelease) ;;
-            *) test -n "$HOMEBREW_TAP_TOKEN" ;;
+            *) ;;
           esac
           publication=$(mktemp -d "$RUNNER_TEMP/rottweiler-publication.XXXXXX")
           trap 'rm -rf "$publication"' EXIT
@@ -932,14 +931,24 @@ jobs:
         if: ${{ !contains(github.ref_name, '-') }}
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           set -euo pipefail
-          test -n "$GH_TOKEN"
+          test -n "$HOMEBREW_TAP_DEPLOY_KEY"
+          private=$(mktemp -d "$RUNNER_TEMP/rottweiler-homebrew-key.XXXXXX")
+          trap 'rm -rf "$private"' EXIT
+          key="$private/id_ed25519"
+          known_hosts="$private/known_hosts"
+          umask 077
+          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$key"
+          printf '%s\n' \
+            'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+            > "$known_hosts"
+          unset HOMEBREW_TAP_DEPLOY_KEY
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
           tap="$RUNNER_TEMP/homebrew-tap"
           rm -rf "$tap"
-          gh auth setup-git
-          git clone --depth 1 https://github.com/Boredphilosopher96/homebrew-tap.git "$tap"
+          git clone --depth 1 git@github.com:Boredphilosopher96/homebrew-tap.git "$tap"
           test -d "$tap/Formula"
           install -m 644 dist/distribution/rottweiler.rb "$tap/Formula/rottweiler.rb"
           git -C "$tap" add Formula/rottweiler.rb
@@ -952,6 +961,8 @@ jobs:
           expected=$(git -C "$tap" rev-parse HEAD)
           observed=$(git -C "$tap" ls-remote --exit-code origin refs/heads/main | awk '{print $1}')
           test "$observed" = "$expected"
+          rm -rf "$private"
+          trap - EXIT
 
   deploy-update-repository:
     name: Deploy no-redirect update repository

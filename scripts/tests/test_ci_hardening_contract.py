@@ -157,6 +157,8 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertNotIn("gh release create", preflight)
         self.assertNotIn("git push", preflight)
         self.assertNotIn("HOMEBREW_TAP_TOKEN:", preflight.split("    steps:", 1)[0])
+        self.assertIn("HOMEBREW_TAP_DEPLOY_KEY", preflight)
+        self.assertNotIn("HOMEBREW_TAP_TOKEN", preflight)
 
     def test_quality_workflow_pins_coverage_and_mutation_tools(self) -> None:
         workflow = (ROOT / ".github/workflows/quality.yml").read_text(
