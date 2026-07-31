@@ -133,6 +133,28 @@ class SoakHarnessTests(unittest.TestCase):
                 },
             )
 
+    def test_memory_failure_retains_process_and_workload_diagnostics(self) -> None:
+        error = SOAK.SoakFailure(
+            "combined engine/TUI RSS 700 exceeds limit 600",
+            {
+                "max_rss_bytes": 700,
+                "process_rss": [
+                    {"executable": "rw", "pid": 10, "rss_bytes": 300},
+                    {"executable": "rottweiler-tui", "pid": 11, "rss_bytes": 400},
+                ],
+                "rss_limit_bytes": 600,
+                "turns_completed": 20,
+            },
+        )
+
+        result = SOAK.failure_result(error)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["max_rss_bytes"], 700)
+        self.assertEqual(result["rss_limit_bytes"], 600)
+        self.assertEqual(result["turns_completed"], 20)
+        self.assertEqual(len(result["process_rss"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

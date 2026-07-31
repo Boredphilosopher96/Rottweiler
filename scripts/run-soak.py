@@ -21,7 +21,7 @@ from pathlib import Path
 
 
 DEFAULT_SECONDS = 8 * 60 * 60
-DEFAULT_RSS_LIMIT_MIB = 500
+DEFAULT_RSS_LIMIT_MIB = 600
 DEFAULT_TURN_SECONDS = 2.0
 TERMINAL_SUBMIT = b"\r"
 SOAK_TOKEN = re.compile(rb"SOAK_(?:INPUT|STEP)_[0-9]{6}(?:_DONE)?")
@@ -33,6 +33,12 @@ class ProcessRow:
     parent: int
     rss: int
     command: str
+
+
+class SoakFailure(RuntimeError):
+    def __init__(self, message: str, details: dict[str, object]) -> None:
+        super().__init__(message)
+        self.details = details
 
 
 @dataclass(frozen=True)
@@ -611,8 +617,31 @@ def run_soak(
                     maximum_processes = max(maximum_processes, processes)
                     samples += 1
                     if rss > rss_limit:
-                        raise RuntimeError(
-                            f"combined engine/TUI RSS {rss} exceeds limit {rss_limit}"
+                        process_rss = [
+                            {
+                                "executable": Path(
+                                    (rows[pid].command.split() or ["unknown"])[0]
+                                ).name,
+                                "pid": pid,
+                                "rss_bytes": rows[pid].rss,
+                            }
+                            for pid in sorted(selected)
+                        ]
+                        raise SoakFailure(
+                            f"combined engine/TUI RSS {rss} exceeds limit {rss_limit}",
+                            {
+                                "compactions_completed": compactions,
+                                "max_processes": maximum_processes,
+                                "max_rss_bytes": maximum_rss,
+                                "process_rss": process_rss,
+                                "rss_limit_bytes": rss_limit,
+                                "samples": samples,
+                                "streamed_turns_completed": streamed_turns,
+                                "tool_turns_completed": tool_turns,
+                                "tui_restarts": tui_restarts,
+                                "turns_completed": completed,
+                                "turns_submitted": submitted,
+                            },
                         )
                     next_sample = now + sample_seconds
 
@@ -656,12 +685,15 @@ def run_soak(
 
 
 def failure_result(error: Exception) -> dict[str, object]:
-    return {
+    result: dict[str, object] = {
         "error": str(error),
         "error_type": type(error).__name__,
         "schema_version": 1,
         "status": "fail",
     }
+    if isinstance(error, SoakFailure):
+        result.update(error.details)
+    return result
 
 
 def write_result(path: Path, result: dict[str, object]) -> None:

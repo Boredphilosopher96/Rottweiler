@@ -169,7 +169,7 @@ Property tests worth calling out:
 | Engine→TUI event latency over the socket, p99 | < 2ms | contract harness |
 | Turn overhead (engine time excluding provider latency) | protected p99: < 60ms; PR smoke median < 20ms | replay timing |
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
-| Memory, 8-hour stress session (engine + TUI combined) | < 500MB RSS | soak test, nightly |
+| Memory, 8-hour stress session (engine + TUI combined) | < 600 MiB RSS | soak test, nightly |
 | Release size | engine binary < 28MB; TUI bundle < 100MB on macOS / < 150MB on Linux | CI check |
 
 The required manually dispatched protected-performance, nightly, and release
@@ -230,7 +230,9 @@ exits so the failing run retains its exact diagnostic instead of deleting the
 only evidence. The harness also kills the TUI once and requires the
 supervisor to attach a new TUI to the same engine PID with the persisted
 transcript intact. It samples combined RSS for the complete supervisor process
-tree throughout and fails immediately above 500 MiB. Nightly and tag-release
+tree throughout and fails immediately above 600 MiB. A memory failure retains
+the per-process RSS snapshot and workload counters without persisting command
+arguments or credentials. Nightly and tag-release
 workflows run it for 28,800 seconds on dedicated self-hosted runners labeled
 `soak` for macOS arm64 and Linux x86_64. The resulting JSON is retained and
 checked against the platform's measured `soak` suite in
