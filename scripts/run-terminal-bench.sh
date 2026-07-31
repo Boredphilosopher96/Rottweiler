@@ -40,6 +40,10 @@ if model.get("version") != os.environ["EXPECTED_VERSION"]:
     raise SystemExit("GitHub model catalog version changed")
 ' <<<"$catalog"
     ;;
+  *)
+    echo 'ROTTWEILER_EVAL_MODEL must select a version-pinned GitHub Models entry' >&2
+    exit 1
+    ;;
 esac
 
 harbor_version=$(harbor --version 2>&1)

@@ -38,11 +38,13 @@ repository values:
   base64 encoding of its exact 32-byte Ed25519 seed. Key ids and seed material
   must both be unique; at most 32 keys are accepted.
 
-The protected `release` environment also supplies the paid live-smoke keys,
+The protected `release` environment supplies the paid live-smoke keys,
 dated model ids, external dogfood-ledger secret, and Terminal-Bench baseline
-documented in `docs/07-VERIFICATION.md`. The native macOS ARM64 runner and the
-Linux X64 soak runner must be online. Linux core measurements, WSL2, and
-Harbor's containers use fixed disposable GitHub-hosted images. These are
+documented in `docs/07-VERIFICATION.md`. Terminal-Bench authenticates to a
+version-checked GitHub Models entry with the job-scoped `GITHUB_TOKEN`; it does
+not use a persistent evaluation API-key secret. The native macOS ARM64 runner
+and the Linux X64 soak runner must be online. Linux core measurements, WSL2,
+and Harbor's containers use fixed disposable GitHub-hosted images. These are
 prerequisites to signing: the workflow does not offer a skip flag for missing
 evidence or infrastructure.
 

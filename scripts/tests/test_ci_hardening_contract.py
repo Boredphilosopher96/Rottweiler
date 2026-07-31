@@ -270,6 +270,14 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("git -C site push origin HEAD:gh-pages", deployment)
         self.assertNotIn("rm -rf", deployment)
 
+    def test_preflight_uses_job_scoped_eval_authentication_contract(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-preflight.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("ROTTWEILER_EVAL_API_KEY", workflow)
+        self.assertNotIn("EVAL_API_KEY", workflow)
+        self.assertIn("EVAL_MODEL must pin a GitHub Models catalog version", workflow)
+
     def test_rerun_artifacts_preserve_producers_and_version_evidence(self) -> None:
         workflows = {
             name: (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
