@@ -902,6 +902,66 @@ describe("M4 retained components", () => {
     expect(app.transcript.mountedKeys.at(-1)).toBe("120:120:assistant")
   })
 
+  test("bounds mounted transcript cards while retaining the durable projection", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 24, useThread: false })
+    renderer = setup.renderer
+    const transcript = Array.from({ length: 600 }, (_, index) => ({
+      sequenceId: String(index + 1),
+      agentTurn: String(index + 1),
+      turn: {
+        role: "assistant" as const,
+        blocks: [{ type: "text" as const, text: `Durable turn ${index + 1}.` }],
+        meta: { synthetic: false, summary: false },
+      },
+    }))
+    const state = { ...createInitialState(), transcript }
+    const app = createRottweilerApp(renderer, { initialState: state })
+    renderer.root.add(app)
+    await setup.renderOnce()
+
+    expect(app.state.transcript).toHaveLength(600)
+    expect(app.transcript.mountedEntryCount).toBe(128)
+    expect(app.transcript.mountedKeys.at(0)).toBe("473:473:assistant")
+    expect(app.transcript.mountedKeys.at(-1)).toBe("600:600:assistant")
+  })
+
+  test("recycles the bounded plain-card pool as new turns arrive", async () => {
+    const setup = await createTestRenderer({ width: 86, height: 24, useThread: false })
+    renderer = setup.renderer
+    const entries = (start: number, count: number) =>
+      Array.from({ length: count }, (_, offset) => {
+        const sequence = start + offset
+        return {
+          sequenceId: String(sequence),
+          agentTurn: String(sequence),
+          turn: {
+            role: "assistant" as const,
+            blocks: [{ type: "text" as const, text: `Recyclable turn ${sequence}.` }],
+            meta: { synthetic: false, summary: false },
+          },
+        }
+      })
+    const initial = { ...createInitialState(), transcript: entries(1, 128) }
+    const app = createRottweilerApp(renderer, { initialState: initial })
+    renderer.root.add(app)
+    await setup.renderOnce()
+    const originalCards = new Set(app.transcript.mountedCards.values())
+
+    app.setState({ ...initial, transcript: [...initial.transcript, ...entries(129, 32)] })
+    await setup.renderOnce()
+
+    expect(app.transcript.mountedEntryCount).toBe(128)
+    expect(app.transcript.mountedKeys.at(0)).toBe("33:33:assistant")
+    expect(app.transcript.mountedKeys.at(-1)).toBe("160:160:assistant")
+    expect(
+      [...app.transcript.mountedCards.values()]
+        .filter((card) => originalCards.has(card))
+        .length,
+    ).toBe(128)
+    expect(app.transcript.mountedCards.get("160:160:assistant")?.markdown.content)
+      .toContain("Recyclable turn 160")
+  })
+
   test("retains a command-result card for an identical structured projection", async () => {
     const setup = await createTestRenderer({ width: 86, height: 18, useThread: false })
     renderer = setup.renderer

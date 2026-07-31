@@ -88,7 +88,7 @@ describe("M4 executable TUI performance budgets", () => {
     renderer.root.add(app)
     await setup.waitFor(() => treeSitter?.isHighlighting() === false)
     await setup.flush()
-    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
+    expect(app.transcript.mountedEntryCount).toBe(128)
 
     for (let warmup = 0; warmup < 10; warmup += 1) {
       app.setState({
@@ -123,7 +123,7 @@ describe("M4 executable TUI performance budgets", () => {
     emittedMetrics.tui_frame_p999_us = Math.ceil(p999 * 1_000)
     expect(p95).toBeLessThan(frameP95BudgetMs)
     expect(p999).toBeLessThan(frameP999BudgetMs)
-    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
+    expect(app.transcript.mountedEntryCount).toBe(128)
     const native = setup.getNativeStats()
     // OpenTUI's native stats expose frame duration in microseconds.
     expect(native.nativeLastFrameTime).toBeLessThan(frameP999BudgetMs * 1_000)
