@@ -80,7 +80,7 @@ jobs:
           - name: plugin-capabilities
             file: crates/rw-ext/src/plugin.rs
             filter: 'PluginManifest::validate|approval_requirement|approve_manifest|CapabilityEnforcer::(check_tool|check_command|check_hook|check_provider|check_event|check_push|check_push_method|check)'
-            test_filter: 'plugin::'
+            test_filter: 'plugin'
             minimum_score: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
