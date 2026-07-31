@@ -66,7 +66,7 @@ class CiHardeningContractTests(unittest.TestCase):
             "needs: [runner-contract, macos-performance-build]", macos_release
         )
         self.assertIn(
-            "runs-on: [self-hosted, Linux, X64, performance]", linux_release
+            "runs-on: ubuntu-24.04", linux_release
         )
         self.assertIn(
             "runs-on: [self-hosted, macOS, ARM64, performance]", macos_release

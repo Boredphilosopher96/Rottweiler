@@ -100,9 +100,9 @@ jobs:
   linux-release-budget:
     name: Release budgets (protected Linux)
     needs: [runner-contract, linux-performance-build]
-    # Full absolute p99 evidence requires a calibrated, protected runner.
-    # Shared hosted runners remain limited to the bounded per-PR smoke gate.
-    runs-on: [self-hosted, Linux, X64, performance]
+    # The fixed Ubuntu image is a native x86_64 lane and records its exact
+    # runner-image provenance with every raw sample set.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file

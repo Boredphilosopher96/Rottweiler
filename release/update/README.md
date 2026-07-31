@@ -40,11 +40,11 @@ repository values:
 
 The protected `release` environment also supplies the paid live-smoke keys,
 dated model ids, external dogfood-ledger secret, and Terminal-Bench baseline
-documented in `docs/07-VERIFICATION.md`. Dedicated self-hosted macOS ARM64 and
-Linux X64 runners labeled `performance` and `soak` must be online. WSL2 runs on
-the GitHub-hosted Windows Server 2025 image, while Harbor's containers run only
-on disposable GitHub-hosted Ubuntu. These are prerequisites to signing: the
-workflow does not offer a skip flag for missing evidence or infrastructure.
+documented in `docs/07-VERIFICATION.md`. The native macOS ARM64 runner and the
+Linux X64 soak runner must be online. Linux core measurements, WSL2, and
+Harbor's containers use fixed disposable GitHub-hosted images. These are
+prerequisites to signing: the workflow does not offer a skip flag for missing
+evidence or infrastructure.
 
 Before creating a tag, run the **Release preflight** workflow manually. It
 validates the measured baseline provenance, committed public signing inputs,

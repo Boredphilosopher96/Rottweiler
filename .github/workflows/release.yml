@@ -80,8 +80,9 @@ jobs:
   build-linux:
     name: Build linux-x86_64
     needs: [runner-contract, linux-performance-build]
-    # Exact-release p99 evidence is valid only on the calibrated protected lane.
-    runs-on: [self-hosted, Linux, X64, performance]
+    # The fixed Ubuntu image provides native x86_64 exact-tag measurements and
+    # records its image version with the retained raw samples.
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
