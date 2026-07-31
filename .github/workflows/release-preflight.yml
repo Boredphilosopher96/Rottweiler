@@ -20,12 +20,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Resolve release qualification tier
+        id: release_version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "rw-cli"))')
+          major=${version%%.*}
+          case "$major" in
+            ''|*[!0-9]*) echo "release version has an invalid major: $version" >&2; exit 1 ;;
+          esac
+          printf 'major=%s\n' "$major" >> "$GITHUB_OUTPUT"
       - name: Validate measured baselines and public signing inputs
         run: python3 scripts/check-release-readiness.py --output release-readiness.json
       - name: Validate protected release configuration
         shell: bash
         env:
           SELF_HOSTED_RUNNERS_ENABLED: ${{ vars.ROTTWEILER_SELF_HOSTED_RUNNERS }}
+          RELEASE_MAJOR: ${{ steps.release_version.outputs.major }}
           UPDATE_ROOT_VERSION: ${{ vars.ROTTWEILER_UPDATE_ROOT_VERSION }}
           UPDATE_ROOT_THRESHOLD: ${{ vars.ROTTWEILER_UPDATE_ROOT_THRESHOLD }}
           UPDATE_ROOT_KEYS_JSON: ${{ vars.ROTTWEILER_UPDATE_ROOT_KEYS_JSON }}
@@ -47,16 +59,23 @@ jobs:
             UPDATE_ROOT_THRESHOLD
             UPDATE_ROOT_KEYS_JSON
             UPDATE_BASE_URL
-            LIVE_ANTHROPIC_MODEL
-            LIVE_OPENAI_MODEL
             EVAL_MODEL
             TERMINAL_BENCH_BASELINE_JSON
             UPDATE_RELEASE_KEYS_JSON
-            DOGFOOD_LEDGER_B64
-            OPENAI_API_KEY
-            ANTHROPIC_API_KEY
             HOMEBREW_TAP_DEPLOY_KEY
           )
+          case "$RELEASE_MAJOR" in
+            ''|*[!0-9]*) echo "RELEASE_MAJOR must be numeric" >&2; exit 1 ;;
+          esac
+          if [ "$RELEASE_MAJOR" -ge 1 ]; then
+            required+=(
+              LIVE_ANTHROPIC_MODEL
+              LIVE_OPENAI_MODEL
+              DOGFOOD_LEDGER_B64
+              OPENAI_API_KEY
+              ANTHROPIC_API_KEY
+            )
+          fi
           missing=()
           for name in "${required[@]}"; do
             if [ -z "${!name}" ]; then
@@ -77,6 +96,7 @@ jobs:
             *) echo "UPDATE_BASE_URL must be HTTPS and end in /" >&2; exit 1 ;;
           esac
       - name: Validate protected dogfood evidence
+        if: steps.release_version.outputs.major != '0'
         shell: bash
         env:
           DOGFOOD_LEDGER_B64: ${{ secrets.ROTTWEILER_DOGFOOD_LEDGER_B64 }}

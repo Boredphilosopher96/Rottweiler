@@ -162,6 +162,10 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("environment: release", preflight)
         self.assertIn("python3 scripts/check-release-readiness.py", preflight)
         self.assertIn("python3 scripts/check-dogfood-gate.py", preflight)
+        self.assertIn("id: release_version", preflight)
+        self.assertIn("RELEASE_MAJOR: ${{ steps.release_version.outputs.major }}", preflight)
+        self.assertIn('if [ "$RELEASE_MAJOR" -ge 1 ]; then', preflight)
+        self.assertIn("if: steps.release_version.outputs.major != '0'", preflight)
         self.assertIn("uses: ./.github/workflows/performance.yml", preflight)
         self.assertIn("needs: repository-prerequisites", preflight)
         self.assertNotIn("gh release create", preflight)
@@ -242,6 +246,9 @@ class CiHardeningContractTests(unittest.TestCase):
         paid_step = release_gate.split(
             "      - name: Paid two-family record and network-denied replay canary", 1
         )[1].split("      - name:", 1)[0]
+        dogfood_step = release_gate.split(
+            "      - name: Validate protected fourteen-day dogfood evidence", 1
+        )[1].split("      - name:", 1)[0]
         terminal_bench = workflow_job(workflow, "release-terminal-bench")
         terminal_job_environment = terminal_bench.split("    steps:", 1)[0]
         eval_step = terminal_bench.split(
@@ -252,6 +259,8 @@ class CiHardeningContractTests(unittest.TestCase):
         for secret in ("secrets.OPENAI_API_KEY", "secrets.ANTHROPIC_API_KEY"):
             self.assertNotIn(secret, release_gate_environment)
             self.assertIn(secret, paid_step)
+        self.assertIn("if: ${{ !startsWith(github.ref_name, 'v0.') }}", paid_step)
+        self.assertIn("if: ${{ !startsWith(github.ref_name, 'v0.') }}", dogfood_step)
         self.assertNotIn(
             "secrets.ROTTWEILER_EVAL_API_KEY", terminal_job_environment
         )

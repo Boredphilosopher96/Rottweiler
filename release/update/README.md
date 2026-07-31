@@ -38,15 +38,17 @@ repository values:
   base64 encoding of its exact 32-byte Ed25519 seed. Key ids and seed material
   must both be unique; at most 32 keys are accepted.
 
-The protected `release` environment supplies the paid live-smoke keys,
-dated model ids, external dogfood-ledger secret, and Terminal-Bench baseline
-documented in `docs/07-VERIFICATION.md`. Terminal-Bench authenticates to a
+For v1 and later, the protected `release` environment also supplies the paid
+live-smoke keys, dated provider model ids, and external dogfood-ledger secret
+documented in `docs/07-VERIFICATION.md`. Those v1 qualification inputs are not
+required for a pre-v1 tag. Every release tier requires the Terminal-Bench
+baseline and its dated evaluation model. Terminal-Bench authenticates to a
 version-checked GitHub Models entry with the job-scoped `GITHUB_TOKEN`; it does
 not use a persistent evaluation API-key secret. The native macOS ARM64 runner
 and the Linux X64 soak runner must be online. Linux core measurements, WSL2,
 and Harbor's containers use fixed disposable GitHub-hosted images. These are
-prerequisites to signing: the workflow does not offer a skip flag for missing
-evidence or infrastructure.
+prerequisites to signing for the applicable release tier: the workflow does not
+offer a skip flag for missing evidence or infrastructure.
 
 Before creating a tag, run the **Release preflight** workflow manually. It
 validates the measured baseline provenance, committed public signing inputs,
