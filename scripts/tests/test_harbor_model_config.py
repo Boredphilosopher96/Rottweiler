@@ -18,8 +18,27 @@ class HarborModelConfigTests(unittest.TestCase):
             credential_environment("anthropic/claude-sonnet-pinned"), "ANTHROPIC_API_KEY"
         )
 
+        github = build_model_config("github/openai/gpt-4.1@2025-04-14")
+        self.assertIn('benchmark = ["github/openai/gpt-4.1"]', github)
+        self.assertIn("[providers.github]\nkind = \"openai\"", github)
+        self.assertIn(
+            'base_url = "https://models.github.ai/inference/chat/completions"',
+            github,
+        )
+        self.assertEqual(
+            credential_environment("github/openai/gpt-4.1@2025-04-14"),
+            "GITHUB_MODELS_TOKEN",
+        )
+
     def test_unknown_or_unpinned_provider_is_rejected(self) -> None:
-        for value in (None, "", "gpt-5-mini", "gateway/model", "openai/$MODEL"):
+        for value in (
+            None,
+            "",
+            "gpt-5-mini",
+            "gateway/model",
+            "openai/$MODEL",
+            "github/openai/gpt-4.1",
+        ):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 build_model_config(value)
 

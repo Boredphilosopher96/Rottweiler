@@ -104,7 +104,8 @@ class CiHardeningContractTests(unittest.TestCase):
             "      - name:", 1
         )[0]
         self.assertNotIn("secrets.ROTTWEILER_EVAL_API_KEY", job_environment)
-        self.assertIn("secrets.ROTTWEILER_EVAL_API_KEY", run_step)
+        self.assertIn("ROTTWEILER_EVAL_API_KEY: ${{ github.token }}", run_step)
+        self.assertIn("models: read", workflow)
 
     def test_protected_performance_consumers_fail_closed_before_queueing(self) -> None:
         performance = (ROOT / ".github/workflows/performance.yml").read_text(
@@ -254,7 +255,8 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertNotIn(
             "secrets.ROTTWEILER_EVAL_API_KEY", terminal_job_environment
         )
-        self.assertIn("secrets.ROTTWEILER_EVAL_API_KEY", eval_step)
+        self.assertIn("ROTTWEILER_EVAL_API_KEY: ${{ github.token }}", eval_step)
+        self.assertIn("models: read", terminal_bench)
         self.assertIn("runs-on: ubuntu-24.04", terminal_bench)
         self.assertNotIn("self-hosted", terminal_bench)
         wsl2 = workflow_job(workflow, "wsl2-acceptance")

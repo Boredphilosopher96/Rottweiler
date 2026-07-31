@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  models: read
 
 concurrency:
   group: signed-release
@@ -453,6 +454,7 @@ jobs:
     environment: release
     permissions:
       contents: read
+      models: read
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
       ROTTWEILER_EVAL_MODEL: ${{ vars.ROTTWEILER_EVAL_MODEL }}
@@ -470,7 +472,7 @@ jobs:
         run: pipx install --force harbor==0.18.0
       - name: Run exact release archive through the pinned 20-task capability gate
         env:
-          ROTTWEILER_EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
+          ROTTWEILER_EVAL_API_KEY: ${{ github.token }}
         run: |
           archive=$(find dist/release -maxdepth 1 -type f -name 'rottweiler-*-linux-x86_64.tar.gz' -print)
           test -n "$archive"

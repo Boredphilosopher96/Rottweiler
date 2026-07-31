@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  models: read
 
 concurrency:
   group: nightly-hardening
@@ -466,7 +467,7 @@ jobs:
       - name: Run pinned 20-task subset
         run: scripts/run-terminal-bench.sh
         env:
-          ROTTWEILER_EVAL_API_KEY: ${{ secrets.ROTTWEILER_EVAL_API_KEY }}
+          ROTTWEILER_EVAL_API_KEY: ${{ github.token }}
       - name: Enforce protected solve-rate, token, wall-time, and cost baseline
         env:
           TERMINAL_BENCH_BASELINE_JSON: ${{ vars.ROTTWEILER_TERMINAL_BENCH_BASELINE_JSON }}
