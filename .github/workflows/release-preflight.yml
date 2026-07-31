@@ -32,8 +32,12 @@ jobs:
           esac
           printf 'major=%s\n' "$major" >> "$GITHUB_OUTPUT"
       - name: Validate measured baselines and public signing inputs
+        id: repository_readiness
+        continue-on-error: true
         run: python3 scripts/check-release-readiness.py --output release-readiness.json
       - name: Validate protected release configuration
+        id: protected_configuration
+        continue-on-error: true
         shell: bash
         env:
           SELF_HOSTED_RUNNERS_ENABLED: ${{ vars.ROTTWEILER_SELF_HOSTED_RUNNERS }}
@@ -98,6 +102,8 @@ jobs:
             *) echo "UPDATE_BASE_URL must be HTTPS and end in /" >&2; exit 1 ;;
           esac
       - name: Validate protected dogfood evidence
+        id: dogfood
+        continue-on-error: true
         if: steps.release_version.outputs.major != '0'
         shell: bash
         env:
@@ -124,6 +130,36 @@ jobs:
           path: release-readiness.json
           if-no-files-found: warn
           retention-days: 30
+      - name: Enforce aggregate release readiness
+        if: always()
+        shell: bash
+        env:
+          RELEASE_MAJOR: ${{ steps.release_version.outputs.major }}
+          REPOSITORY_OUTCOME: ${{ steps.repository_readiness.outcome }}
+          CONFIGURATION_OUTCOME: ${{ steps.protected_configuration.outcome }}
+          DOGFOOD_OUTCOME: ${{ steps.dogfood.outcome }}
+        run: |
+          set -euo pipefail
+          failed=()
+          if [ "$REPOSITORY_OUTCOME" != success ]; then
+            failed+=(repository-readiness)
+          fi
+          if [ "$CONFIGURATION_OUTCOME" != success ]; then
+            failed+=(protected-configuration)
+          fi
+          case "$RELEASE_MAJOR" in
+            ''|*[!0-9]*) failed+=(release-version) ;;
+            0) ;;
+            *)
+              if [ "$DOGFOOD_OUTCOME" != success ]; then
+                failed+=(dogfood-evidence)
+              fi
+              ;;
+          esac
+          if [ "${#failed[@]}" -ne 0 ]; then
+            printf 'release preflight failed checks: %s\n' "${failed[*]}" >&2
+            exit 1
+          fi
 
   protected-performance:
     name: Exact protected performance graph
