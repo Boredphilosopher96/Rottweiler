@@ -21,6 +21,7 @@ import time
 
 
 PROMPT_READY_MARKER = b"rw_perf_prompt_ready=1\n"
+STATUS_READY_TIMEOUT_SECONDS = 10.0
 FINGERPRINT = re.compile(rb"/mcp approve ([A-Za-z0-9_.-]+) ([0-9a-f]{64})")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 PROJECT_TRUST_PROMPT = "Trust this exact project extension inventory? [y/N] "
@@ -508,7 +509,11 @@ def one_sample(
                 f"terminal={terminal_output[-1500:]!r} stderr={captured_stderr[-1500:]!r}"
             )
         write_terminal_line(terminal_master, "/mcp status")
-        status_deadline = time.monotonic() + 5
+        # Status rendering is a functional assertion after the measured
+        # prompt-ready interval. Protected runners can briefly deschedule the
+        # PTY consumer while the command is already queued, so give that
+        # unmeasured hand-off the same tail allowance as MCP activation.
+        status_deadline = time.monotonic() + STATUS_READY_TIMEOUT_SECONDS
         status_ready = False
         while time.monotonic() < status_deadline:
             ready, _, _ = select.select(
