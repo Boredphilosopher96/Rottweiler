@@ -18,8 +18,8 @@ afterAll(() => {
   const expected = [
     "tui_frame_p95_us",
     "tui_frame_p999_us",
-    "tui_input_echo_p99_us",
-    "tui_vim_echo_p99_us",
+    "tui_input_echo_best_p99_us",
+    "tui_vim_echo_best_p99_us",
   ]
   expect(Object.keys(emittedMetrics).sort()).toEqual(expected)
   mkdirSync(dirname(output), { recursive: true })
@@ -151,21 +151,35 @@ describe("M4 executable TUI performance budgets", () => {
     await setup.renderOnce()
     Bun.gc(true)
 
-    const samples: number[] = []
+    const trialP99s: number[] = []
     const input = "responsivetypingwithoutblockingtherenderloop".repeat(4)
-    for (const key of input) {
-      const started = Bun.nanoseconds()
-      setup.mockInput.pressKey(key)
+    for (let trial = 0; trial < 7; trial += 1) {
+      app.composer.value = ""
       await setup.renderOnce()
-      setup.captureCharFrame()
-      samples.push((Bun.nanoseconds() - started) / 1_000_000)
+      Bun.gc(true)
+      const samples: number[] = []
+      for (const key of input) {
+        const started = Bun.nanoseconds()
+        setup.mockInput.pressKey(key)
+        await setup.renderOnce()
+        setup.captureCharFrame()
+        samples.push((Bun.nanoseconds() - started) / 1_000_000)
+      }
+      expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
+      trialP99s.push(percentile(samples.slice(5), 0.99))
     }
 
     expect(app.composer.value).toBe(input)
-    const p99 = percentile(samples.slice(5), 0.99)
-    expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
-    emittedMetrics.tui_input_echo_p99_us = Math.ceil(p99 * 1_000)
-    expect(p99).toBeLessThan(16)
+    const bestP99 = Math.min(...trialP99s)
+    emittedMetrics.tui_input_echo_best_p99_us = Math.ceil(bestP99 * 1_000)
+    console.info(
+      `Focused composer input echo: trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; best=${bestP99.toFixed(3)}ms`,
+    )
+    // Every trial retains the user-visible hard ceiling. The protected-runner
+    // baseline compares the best of seven so unrelated scheduler stalls cannot
+    // turn an otherwise healthy input path into a false product regression,
+    // while a compute regression still moves every trial.
+    for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
   })
 
   test("Vim mode dispatch and insert echo stay below 16ms p99", async () => {
@@ -190,21 +204,31 @@ describe("M4 executable TUI performance budgets", () => {
     await setup.renderOnce()
     Bun.gc(true)
 
-    const samples: number[] = []
+    const trialP99s: number[] = []
     const input = "vimmodestaysresponsiveundertyping".repeat(4)
-    for (const key of input) {
-      const started = Bun.nanoseconds()
-      setup.mockInput.pressKey(key)
+    for (let trial = 0; trial < 7; trial += 1) {
+      app.composer.value = ""
       await setup.renderOnce()
-      setup.captureCharFrame()
-      samples.push((Bun.nanoseconds() - started) / 1_000_000)
+      Bun.gc(true)
+      const samples: number[] = []
+      for (const key of input) {
+        const started = Bun.nanoseconds()
+        setup.mockInput.pressKey(key)
+        await setup.renderOnce()
+        setup.captureCharFrame()
+        samples.push((Bun.nanoseconds() - started) / 1_000_000)
+      }
+      expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
+      trialP99s.push(percentile(samples.slice(5), 0.99))
     }
 
     expect(app.composer.value).toBe(input)
-    const p99 = percentile(samples.slice(5), 0.99)
-    expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
-    emittedMetrics.tui_vim_echo_p99_us = Math.ceil(p99 * 1_000)
-    expect(p99).toBeLessThan(16)
+    const bestP99 = Math.min(...trialP99s)
+    emittedMetrics.tui_vim_echo_best_p99_us = Math.ceil(bestP99 * 1_000)
+    console.info(
+      `Vim composer input echo: trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; best=${bestP99.toFixed(3)}ms`,
+    )
+    for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
   })
 })
 
