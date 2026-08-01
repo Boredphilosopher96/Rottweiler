@@ -440,6 +440,7 @@ def run_soak(
         restart_old_tui: int | None = None
         restart_engine: int | None = None
         restart_deadline = 0.0
+        forced_restart_completed = False
         last_completed_marker: str | None = None
         terminal_tail = bytearray()
         engine_diagnostic = "not observed"
@@ -462,6 +463,10 @@ def run_soak(
                     try:
                         while chunk := os.read(master, 64 * 1024):
                             driver_ready_count += chunk.count(b"SOAK_DRIVER_READY")
+                            # The first marker is initial readiness; every later
+                            # marker is a successfully reattached TUI, including
+                            # planned memory recycles and the forced probe below.
+                            tui_restarts = max(tui_restarts, driver_ready_count - 1)
                             terminal_tail.extend(chunk)
                             del terminal_tail[:-16_384]
                             diagnostic_source = terminal_tail.decode(
@@ -548,7 +553,7 @@ def run_soak(
                     probe.poll()
 
                 if (
-                    tui_restarts == 0
+                    not forced_restart_completed
                     and restart_old_tui is None
                     and completed >= restart_after_turns
                     and waiting is None
@@ -575,7 +580,7 @@ def run_soak(
                             last_completed_marker
                         ):
                             raise RuntimeError("durable transcript was lost across TUI restart")
-                        tui_restarts += 1
+                        forced_restart_completed = True
                         restart_old_tui = None
                         next_submit = now + 0.5
                     elif now >= restart_deadline:
@@ -657,7 +662,7 @@ def run_soak(
                 )
             if streamed_turns == 0 or tool_turns == 0 or compactions == 0:
                 raise RuntimeError("soak did not exercise every required production path")
-            if tui_restarts != 1:
+            if not forced_restart_completed or tui_restarts < 1:
                 raise RuntimeError("soak did not complete the supervised TUI reconnect")
             durable_bytes = probe.durable_bytes()
             if durable_bytes <= 0 or last_completed_marker is None:

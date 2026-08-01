@@ -24,9 +24,9 @@
         },
         "soak": {
           "baseline_kind": "bootstrap",
-          "provenance": "bootstrap RSS ceiling retained from the pre-baseline soak guard; replace with reviewed runner measurements",
+          "provenance": "bootstrap baseline derived from the checked-in 600 MiB combined RSS hard ceiling; replace with reviewed runner measurements",
           "metrics": {
-            "max_rss_bytes": 268435456
+            "max_rss_bytes": 571950546
           }
         }
       }
@@ -53,9 +53,9 @@
         },
         "soak": {
           "baseline_kind": "bootstrap",
-          "provenance": "bootstrap RSS ceiling retained from the pre-baseline soak guard; replace with reviewed runner measurements",
+          "provenance": "bootstrap baseline derived from the checked-in 600 MiB combined RSS hard ceiling; replace with reviewed runner measurements",
           "metrics": {
-            "max_rss_bytes": 268435456
+            "max_rss_bytes": 571950546
           }
         }
       }

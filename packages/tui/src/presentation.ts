@@ -16,6 +16,8 @@ export class PresentationController<T> {
   #dirty = false
   #frameHandle: unknown | null = null
   #presenting = false
+  #suspended = false
+  #coalesceWhileSuspended = false
   #lastFlushAt = performance.now() - 16
 
   constructor(options: PresentationControllerOptions<T>) {
@@ -23,22 +25,29 @@ export class PresentationController<T> {
   }
 
   enqueue(item: T, deferToFrame: boolean): void {
+    if (this.#suspended && this.#coalesceWhileSuspended) {
+      this.#queue = [item]
+      return
+    }
     this.#queue.push(item)
+    if (this.#suspended) return
     if (deferToFrame) this.#scheduleFrame()
     else this.flush()
   }
 
   markDirty(deferToFrame: boolean): void {
     this.#dirty = true
+    if (this.#suspended) return
     if (deferToFrame) this.#scheduleFrame()
     else this.flush()
   }
 
   flushBeforeStateChange(): void {
-    if (!this.#presenting && this.#queue.length > 0) this.flush()
+    if (!this.#suspended && !this.#presenting && this.#queue.length > 0) this.flush()
   }
 
   flush(): void {
+    if (this.#suspended) return
     this.#cancelFrame()
     if (this.#options.destroyed() || (this.#queue.length === 0 && !this.#dirty)) return
     const pending = this.#queue
@@ -59,6 +68,20 @@ export class PresentationController<T> {
     this.#cancelFrame()
     this.#queue = []
     this.#dirty = false
+  }
+
+  suspend(coalesce = false): void {
+    this.#suspended = true
+    this.#coalesceWhileSuspended = coalesce
+    if (coalesce && this.#queue.length > 1) this.#queue = [this.#queue.at(-1)!]
+    this.#cancelFrame()
+  }
+
+  resume(): void {
+    if (!this.#suspended) return
+    this.#suspended = false
+    this.#coalesceWhileSuspended = false
+    this.flush()
   }
 
   #scheduleFrame(): void {

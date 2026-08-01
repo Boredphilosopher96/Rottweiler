@@ -44,6 +44,16 @@ class TestApp implements RuntimeApp {
   state = createInitialState()
   sessionId = ""
   readonly connectionPhases: string[] = []
+  initialReplayBatchesStarted = 0
+  initialReplayBatchesFinished = 0
+
+  beginInitialReplayBatch(): void {
+    this.initialReplayBatchesStarted += 1
+  }
+
+  endInitialReplayBatch(): void {
+    this.initialReplayBatchesFinished += 1
+  }
 
   handleEvent(event: WireEngineEvent): void {
     this.state = reduceRottweilerState(this.state, engineEvent(event))
@@ -500,6 +510,8 @@ describe("OpenTUI engine runtime", () => {
     expect(app.connectionPhases).toContain("reconnecting")
     expect(app.state.mode).toBe("plan")
     expect(app.state.lastSequence).toBe("5")
+    expect(app.initialReplayBatchesStarted).toBe(1)
+    expect(app.initialReplayBatchesFinished).toBe(1)
     expect(files.writes).toEqual([{ path: "/private/cursor", content: "5\n" }])
     expect(JSON.stringify(app.state)).not.toContain("secret-never-rendered")
 

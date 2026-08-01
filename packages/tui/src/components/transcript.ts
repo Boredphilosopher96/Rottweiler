@@ -49,10 +49,10 @@ export interface TranscriptRenderableOptions {
 
 const MAX_VISIBLE_SUBAGENTS = 8
 // OpenTUI viewport culling skips paint work but retains every mounted renderable.
-// Keep the durable reducer projection intact for export/replay while bounding the
-// expensive live card tree. Long sessions otherwise grow by roughly one pair of
-// Markdown renderables per turn even after context compaction.
-const MAX_MOUNTED_TRANSCRIPT_ENTRIES = 128
+// Bound the expensive live card tree independently of the reducer's retained
+// recent history. Long sessions otherwise grow by roughly one pair of Markdown
+// renderables per turn even after context compaction.
+const MAX_MOUNTED_TRANSCRIPT_ENTRIES = 16
 
 function entryKey(entry: TranscriptEntry): string {
   return `${entry.sequenceId}:${entry.agentTurn}:${entry.turn.role}`
@@ -267,8 +267,8 @@ export class ToolBlockRenderable extends BoxRenderable {
   #userSetExpansion: boolean
   #selected = false
   #availableWidth: number
-  readonly #startedAt = Date.now()
-  readonly blockId: string
+  #startedAt = Date.now()
+  blockId: string
 
   constructor(
     ctx: RenderContext,
@@ -360,6 +360,31 @@ export class ToolBlockRenderable extends BoxRenderable {
     this.#bodyContainer.add(this.body)
     this.#bodyContainer.add(this.truncationMarker)
     this.add(this.#bodyContainer)
+    this.update(tool)
+  }
+
+  retarget(
+    tool: ToolProjection,
+    expanded?: boolean,
+    onExpansionChange?: (expanded: boolean) => void,
+  ): void {
+    const blockId = `tool:${tool.toolCallId}`
+    this.blockId = blockId
+    this.id = `tool-${tool.toolCallId}`
+    this.header.id = `${blockId}:header`
+    this.#bodyContainer.id = `tool-body-${tool.toolCallId}`
+    const successfulFileEdit =
+      tool.status === "finished" && tool.isError !== true && tool.diff !== null
+    this.#collapsed = expanded === undefined
+      ? tool.status !== "awaiting_approval" && !successfulFileEdit
+      : !expanded
+    this.#userSetExpansion = expanded !== undefined
+    this.#onExpansionChange = onExpansionChange
+    this.#startedAt = Date.now()
+    this.#selected = false
+    this.header.bg = this.#theme.background
+    this.#bodyContainer.visible = !this.#collapsed
+    this.#tool = tool
     this.update(tool)
   }
 
@@ -992,7 +1017,7 @@ class TurnCardRenderable extends BoxRenderable {
     return recyclablePlainEntry(this.#viewModel) && recyclablePlainEntry(viewModel)
   }
 
-  update(viewModel: TurnCardViewModel): void {
+  update(viewModel: TurnCardViewModel, toolPool?: ToolBlockRenderable[]): void {
     const previous = this.#viewModel
     if (previous === viewModel) return
     const entryChanged = previous.entry !== viewModel.entry
@@ -1033,7 +1058,7 @@ class TurnCardRenderable extends BoxRenderable {
       if (rootsChanged) this.markdown.content = turnCardMarkdown(viewModel.entry, viewModel.width)
       if (previous.detail !== viewModel.detail) this.#updateHeader(viewModel)
     }
-    this.#reconcileTools(viewModel, previous)
+    this.#reconcileTools(viewModel, previous, toolPool)
     if (
       previous.visibleSubagents !== viewModel.visibleSubagents ||
       previous.subagentTotal !== viewModel.subagentTotal
@@ -1220,13 +1245,15 @@ class TurnCardRenderable extends BoxRenderable {
   #reconcileTools(
     viewModel: TurnCardViewModel,
     previous: TurnCardViewModel | undefined,
+    toolPool?: ToolBlockRenderable[],
   ): void {
     const retained = new Set(viewModel.tools.map((tool) => tool.toolCallId))
+    const recyclableCards = toolPool ?? []
     for (const [toolCallId, card] of this.#toolCards) {
       if (retained.has(toolCallId)) continue
       if (card.parent === this) this.remove(card)
-      card.destroyRecursively()
       this.#toolCards.delete(toolCallId)
+      recyclableCards.push(card)
     }
     const previousTools = new Map(
       (previous?.tools ?? []).map((tool) => [tool.toolCallId, tool] as const),
@@ -1234,22 +1261,31 @@ class TurnCardRenderable extends BoxRenderable {
     for (const [index, tool] of viewModel.tools.entries()) {
       let card = this.#toolCards.get(tool.toolCallId)
       if (card === undefined) {
-        card = new ToolBlockRenderable(
-          this.ctx,
-          this.#theme,
-          tool,
-          viewModel.toolExpansion[index],
-          (expanded) => this.#onToolExpansionChange(tool.toolCallId, expanded),
-          {
-            syntaxStyle: this.#syntaxStyle,
-            ...(this.#treeSitterClient === undefined
-              ? {}
-              : { treeSitterClient: this.#treeSitterClient }),
-            ...(this.#onOpenToolOutput === undefined
-              ? {}
-              : { onOpenToolOutput: this.#onOpenToolOutput }),
-          },
-        )
+        card = recyclableCards.pop()
+        if (card === undefined) {
+          card = new ToolBlockRenderable(
+            this.ctx,
+            this.#theme,
+            tool,
+            viewModel.toolExpansion[index],
+            (expanded) => this.#onToolExpansionChange(tool.toolCallId, expanded),
+            {
+              syntaxStyle: this.#syntaxStyle,
+              ...(this.#treeSitterClient === undefined
+                ? {}
+                : { treeSitterClient: this.#treeSitterClient }),
+              ...(this.#onOpenToolOutput === undefined
+                ? {}
+                : { onOpenToolOutput: this.#onOpenToolOutput }),
+            },
+          )
+        } else {
+          card.retarget(
+            tool,
+            viewModel.toolExpansion[index],
+            (expanded) => this.#onToolExpansionChange(tool.toolCallId, expanded),
+          )
+        }
         this.#toolCards.set(tool.toolCallId, card)
         card.update(tool, viewModel.width)
       } else if (
@@ -1276,6 +1312,18 @@ class TurnCardRenderable extends BoxRenderable {
       }
       this.#toolOrder = nextOrder
     }
+    if (toolPool === undefined) {
+      for (const card of recyclableCards) card.destroyRecursively()
+    }
+  }
+
+  releaseToolCards(pool: ToolBlockRenderable[]): void {
+    for (const [toolCallId, card] of this.#toolCards) {
+      if (card.parent === this) this.remove(card)
+      this.#toolCards.delete(toolCallId)
+      pool.push(card)
+    }
+    this.#toolOrder = []
   }
 
   #reconcileSubagents(viewModel: TurnCardViewModel): void {
@@ -1312,7 +1360,6 @@ function recyclablePlainEntry(viewModel: TurnCardViewModel): boolean {
   const presentation = viewModel.entry.presentation
   return (presentation === undefined || presentation === "conversation") &&
     turnReasoningMarkdown(viewModel.entry.turn) === "" &&
-    viewModel.tools.length === 0 &&
     viewModel.visibleSubagents.length === 0
 }
 
@@ -1356,7 +1403,9 @@ export class TranscriptRenderable extends BoxRenderable {
   readonly #onOpenSubagent: ((subagentId: string) => void) | undefined
   readonly #onOpenToolOutput: ((toolCallId: string) => void) | undefined
   readonly #toolExpansion = new Map<string, boolean>()
+  readonly #historicalToolPool: ToolBlockRenderable[] = []
   readonly #tailToolCards = new Map<string, ToolBlockRenderable>()
+  readonly #tailToolPool: ToolBlockRenderable[] = []
   readonly #reasoningExpansion = new Map<string, boolean>()
   #selectedBlockId: string | null = null
   #state: RottweilerState | null = null
@@ -1677,12 +1726,16 @@ export class TranscriptRenderable extends BoxRenderable {
     const transcript = this.#presentableTranscript
     const desiredKeys = new Set(transcript.map(entryKey))
     const recyclableCards: TurnCardRenderable[] = []
+    const recyclableToolCards = this.#historicalToolPool
     for (const [key, card] of this.mountedCards) {
       if (desiredKeys.has(key)) continue
       this.scroller.remove(card)
       this.mountedCards.delete(key)
       if (recyclablePlainEntry(card.viewModel)) recyclableCards.push(card)
-      else card.destroyRecursively()
+      else {
+        card.releaseToolCards(recyclableToolCards)
+        card.destroyRecursively()
+      }
     }
     const toolEntryKeys = projectionEntryKeys(transcript, "tool")
     const subagentEntryKeys = projectionEntryKeys(transcript, "assistant")
@@ -1738,7 +1791,7 @@ export class TranscriptRenderable extends BoxRenderable {
         ? previous
         : candidateViewModel
       if (retained !== undefined) {
-        retained.update(viewModel)
+        retained.update(viewModel, recyclableToolCards)
         reference = retained
         continue
       }
@@ -1760,14 +1813,18 @@ export class TranscriptRenderable extends BoxRenderable {
             this.#treeSitterClient,
           )
       if (card === recycled) {
-        card.update(viewModel)
+        card.update(viewModel, recyclableToolCards)
         this.#recycledSinceCollection += 1
       }
       this.scroller.insertBefore(card, reference)
       this.mountedCards.set(key, card)
       reference = card
     }
-    for (const card of recyclableCards) card.destroyRecursively()
+    for (const card of recyclableCards) {
+      card.releaseToolCards(recyclableToolCards)
+      card.destroyRecursively()
+    }
+    while (recyclableToolCards.length > 16) recyclableToolCards.shift()?.destroyRecursively()
     if (this.#recycledSinceCollection >= 64) {
       // Rebinding Markdown renderables releases their prior incremental parse
       // trees, but Bun may otherwise defer tracing those detached token graphs
@@ -1872,34 +1929,52 @@ export class TranscriptRenderable extends BoxRenderable {
     for (const [toolCallId, card] of this.#tailToolCards) {
       if (retained.has(toolCallId)) continue
       this.#tailTools.remove(card)
-      card.destroyRecursively()
       this.#tailToolCards.delete(toolCallId)
+      this.#tailToolPool.push(card)
     }
     for (const tool of tools) {
       let card = this.#tailToolCards.get(tool.toolCallId)
       if (card === undefined) {
-        card = new ToolBlockRenderable(
-          this.ctx,
-          this.#theme,
-          tool,
-          this.#toolExpansion.get(tool.toolCallId),
-          (expanded) => this.#rememberToolExpansion(tool.toolCallId, expanded),
-          {
-            syntaxStyle: this.#syntaxStyle,
-            ...(this.#treeSitterClient === undefined
-              ? {}
-              : { treeSitterClient: this.#treeSitterClient }),
-            ...(this.#onOpenToolOutput === undefined
-              ? {}
-              : { onOpenToolOutput: this.#onOpenToolOutput }),
-          },
-        )
+        card = this.#tailToolPool.pop()
+        if (card === undefined) {
+          card = new ToolBlockRenderable(
+            this.ctx,
+            this.#theme,
+            tool,
+            this.#toolExpansion.get(tool.toolCallId),
+            (expanded) => this.#rememberToolExpansion(tool.toolCallId, expanded),
+            {
+              syntaxStyle: this.#syntaxStyle,
+              ...(this.#treeSitterClient === undefined
+                ? {}
+                : { treeSitterClient: this.#treeSitterClient }),
+              ...(this.#onOpenToolOutput === undefined
+                ? {}
+                : { onOpenToolOutput: this.#onOpenToolOutput }),
+            },
+          )
+        } else {
+          card.retarget(
+            tool,
+            this.#toolExpansion.get(tool.toolCallId),
+            (expanded) => this.#rememberToolExpansion(tool.toolCallId, expanded),
+          )
+        }
         this.#tailToolCards.set(tool.toolCallId, card)
         this.#tailTools.add(card)
       } else {
         card.update(tool)
       }
     }
+    while (this.#tailToolPool.length > 16) this.#tailToolPool.shift()?.destroyRecursively()
+  }
+
+  override destroy(): void {
+    for (const card of this.#historicalToolPool) card.destroyRecursively()
+    this.#historicalToolPool.length = 0
+    for (const card of this.#tailToolPool) card.destroyRecursively()
+    this.#tailToolPool.length = 0
+    super.destroy()
   }
 
   #rememberToolExpansion(toolCallId: string, expanded: boolean): void {

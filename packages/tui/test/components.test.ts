@@ -344,7 +344,7 @@ describe("M4 retained components", () => {
     expect(app.transcript.scroller.scrollTop).toBeGreaterThan(0)
   })
 
-  test("retains selection and expansion memory when entry identity recreates a selected tool card", async () => {
+  test("retains selection and expansion memory when entry identity recycles a selected tool card", async () => {
     const setup = await createTestRenderer({ width: 90, height: 24, useThread: false })
     renderer = setup.renderer
     const initial = transcriptBlockState()
@@ -374,8 +374,8 @@ describe("M4 retained components", () => {
       .find((card) => card.getChildren().some((child) => child instanceof ToolBlockRenderable))
     const recreatedTool = recreatedCard?.getChildren()
       .find((child): child is ToolBlockRenderable => child instanceof ToolBlockRenderable)
-    expect(recreatedCard).not.toBe(previousCard)
-    expect(recreatedTool).not.toBe(previousTool)
+    expect(recreatedCard).toBe(previousCard)
+    expect(recreatedTool).toBe(previousTool)
     expect(app.transcript.selectedBlockId).toBe("tool:block-tool-first")
     expect(recreatedTool?.header.bg.toInts()).toEqual(rgba(kennelTheme.selection))
     expect(recreatedTool?.body.visible).toBeTrue()
@@ -886,7 +886,7 @@ describe("M4 retained components", () => {
     await setup.waitFor(() => treeSitter?.isHighlighting() === false)
     await setup.flush()
 
-    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
+    expect(app.transcript.mountedEntryCount).toBe(16)
     const streamingMarkdown = app.transcript.streamingMarkdown
     app.setState({
       ...initial,
@@ -894,11 +894,11 @@ describe("M4 retained components", () => {
     })
     await setup.renderOnce()
     expect(app.transcript.streamingMarkdown).toBe(streamingMarkdown)
-    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
+    expect(app.transcript.mountedEntryCount).toBe(16)
 
     app.transcript.setScrollOffset(5_000_000)
     await setup.flush()
-    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
+    expect(app.transcript.mountedEntryCount).toBe(16)
     expect(app.transcript.mountedKeys.at(-1)).toBe("120:120:assistant")
   })
 
@@ -920,8 +920,8 @@ describe("M4 retained components", () => {
     await setup.renderOnce()
 
     expect(app.state.transcript).toHaveLength(600)
-    expect(app.transcript.mountedEntryCount).toBe(128)
-    expect(app.transcript.mountedKeys.at(0)).toBe("473:473:assistant")
+    expect(app.transcript.mountedEntryCount).toBe(16)
+    expect(app.transcript.mountedKeys.at(0)).toBe("585:585:assistant")
     expect(app.transcript.mountedKeys.at(-1)).toBe("600:600:assistant")
   })
 
@@ -941,25 +941,25 @@ describe("M4 retained components", () => {
           },
         }
       })
-    const initial = { ...createInitialState(), transcript: entries(1, 128) }
+    const initial = { ...createInitialState(), transcript: entries(1, 16) }
     const app = createRottweilerApp(renderer, { initialState: initial })
     renderer.root.add(app)
     await setup.renderOnce()
     const originalCards = new Set(app.transcript.mountedCards.values())
 
-    app.setState({ ...initial, transcript: [...initial.transcript, ...entries(129, 32)] })
+    app.setState({ ...initial, transcript: [...initial.transcript, ...entries(17, 32)] })
     await setup.renderOnce()
 
-    expect(app.transcript.mountedEntryCount).toBe(128)
+    expect(app.transcript.mountedEntryCount).toBe(16)
     expect(app.transcript.mountedKeys.at(0)).toBe("33:33:assistant")
-    expect(app.transcript.mountedKeys.at(-1)).toBe("160:160:assistant")
+    expect(app.transcript.mountedKeys.at(-1)).toBe("48:48:assistant")
     expect(
       [...app.transcript.mountedCards.values()]
         .filter((card) => originalCards.has(card))
         .length,
-    ).toBe(128)
-    expect(app.transcript.mountedCards.get("160:160:assistant")?.markdown.content)
-      .toContain("Recyclable turn 160")
+    ).toBe(16)
+    expect(app.transcript.mountedCards.get("48:48:assistant")?.markdown.content)
+      .toContain("Recyclable turn 48")
   })
 
   test("retains a command-result card for an identical structured projection", async () => {
@@ -1029,7 +1029,7 @@ describe("M4 retained components", () => {
 
     expect(app.transcript.scroller.scrollTop).toBeLessThan(app.transcript.scroller.scrollHeight)
     expect(app.transcript.mountedKeys).toEqual(tailKeys)
-    expect(app.transcript.mountedEntryCount).toBe(transcript.length)
+    expect(app.transcript.mountedEntryCount).toBe(16)
     expect(
       [...app.transcript.mountedCards.values()].some((card) =>
         card.markdown.content.includes("Visible transcript row")

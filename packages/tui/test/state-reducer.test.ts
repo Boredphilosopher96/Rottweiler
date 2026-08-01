@@ -12,6 +12,9 @@ import {
   createInitialState,
   engineEvent,
   MAX_COMPACTION_STREAM_BYTES,
+  MAX_RETAINED_TOOL_PROJECTIONS,
+  MAX_RETAINED_TRANSCRIPT_ENTRIES,
+  MAX_RETAINED_TURN_PROJECTIONS,
   MAX_SHELL_OUTPUT_LINES,
   MAX_SUBAGENT_TASK_BYTES,
   MAX_TERMINAL_SUBAGENT_HISTORY,
@@ -63,6 +66,92 @@ function childResult(
 }
 
 describe("pure TUI state reducer", () => {
+  test("bounds retained transcript and completed turn history", () => {
+    let state = createInitialState()
+    const total = MAX_RETAINED_TRANSCRIPT_ENTRIES + 8
+    for (let index = 0; index < total; index += 1) {
+      const turnId = `${index + 1}`
+      const sequence = index * 3
+      state = reduce(state, {
+        type: "turn_started",
+        meta: meta(`${sequence + 1}`),
+        turn_id: turnId,
+      })
+      state = reduce(state, {
+        type: "conversation_turn_committed",
+        meta: meta(`${sequence + 2}`),
+        agent_turn: turnId,
+        turn: {
+          role: "assistant",
+          blocks: [{ type: "text", text: `turn ${turnId}` }],
+          meta: { synthetic: false, summary: false },
+        },
+      })
+      state = reduce(state, {
+        type: "turn_finished",
+        meta: meta(`${sequence + 3}`),
+        turn_id: turnId,
+        status: "completed",
+        usage: {
+          input_tokens: "1",
+          output_tokens: "1",
+          cache_read_tokens: "0",
+          cache_write_tokens: "0",
+          reasoning_tokens: "0",
+        },
+        cost: { kind: "unavailable", reason: "fixture" },
+      })
+    }
+
+    expect(state.transcript).toHaveLength(MAX_RETAINED_TRANSCRIPT_ENTRIES)
+    expect(state.transcript[0]?.agentTurn).toBe("9")
+    expect(Object.keys(state.turns)).toHaveLength(MAX_RETAINED_TURN_PROJECTIONS)
+    expect(state.turns["1"]).toBeUndefined()
+    expect(state.turns[`${total}`]?.status).toBe("completed")
+  })
+
+  test("bounds completed tool projections while preserving active work", () => {
+    let state = createInitialState()
+    for (let index = 0; index < MAX_RETAINED_TOOL_PROJECTIONS + 4; index += 1) {
+      const toolCallId = `tool-${index}`
+      state = reduce(state, {
+        type: "tool_call_started",
+        meta: meta(`${index * 2 + 1}`),
+        turn_id: `${index + 1}`,
+        tool_call_id: toolCallId,
+        name: "read",
+        args: { path: `${toolCallId}.txt` },
+        call_index: 0,
+      })
+      state = reduce(state, {
+        type: "tool_call_finished",
+        meta: meta(`${index * 2 + 2}`),
+        turn_id: `${index + 1}`,
+        tool_call_id: toolCallId,
+        output: { type: "text", text: "done" },
+        is_error: false,
+        call_index: 0,
+      })
+    }
+
+    expect(Object.keys(state.tools)).toHaveLength(MAX_RETAINED_TOOL_PROJECTIONS)
+    expect(state.tools["tool-0"]).toBeUndefined()
+    expect(state.tools[`tool-${MAX_RETAINED_TOOL_PROJECTIONS + 3}`]?.status).toBe("finished")
+
+    const activeToolId = "tool-active"
+    state = reduce(state, {
+      type: "tool_call_started",
+      meta: meta(`${(MAX_RETAINED_TOOL_PROJECTIONS + 4) * 2 + 1}`),
+      turn_id: "100",
+      tool_call_id: activeToolId,
+      name: "bash",
+      args: { command: "sleep 1" },
+      call_index: 0,
+    })
+    expect(state.tools[activeToolId]?.status).toBe("running")
+    expect(Object.keys(state.tools)).toHaveLength(MAX_RETAINED_TOOL_PROJECTIONS)
+  })
+
   test("projects only the live runtime services returned by the host", () => {
     const state = reduce(createInitialState(), {
       type: "runtime_services_listed",

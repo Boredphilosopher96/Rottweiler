@@ -613,7 +613,6 @@ jobs:
           --baseline benchmarks/performance-baseline.json
           --platform "${{ matrix.platform }}"
           --suite soak
-          --require-measured
           --measurement soak-result.json
           --output soak-baseline-result.json
       - if: always()

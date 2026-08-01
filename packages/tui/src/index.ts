@@ -38,6 +38,7 @@ async function main(): Promise<void> {
   } | null = null
   let treeSitterRuntime: import("./tree-sitter-runtime").MaterializedTreeSitterRuntime | null = null
   let exitRequested = false
+  let rssRecycleTimer: ReturnType<typeof setInterval> | undefined
   const renderer = await openTui.createCliRenderer({
     exitOnCtrlC: true,
     targetFps: 60,
@@ -45,6 +46,7 @@ async function main(): Promise<void> {
     // so terminal navigation can never masquerade as the external-editor key.
     useKittyKeyboard: enhancedKeyboardOptions,
     onDestroy: () => {
+      if (rssRecycleTimer !== undefined) clearInterval(rssRecycleTimer)
       // Closing the renderer must release the SSE/runtime handles so a normal
       // Ctrl+C can let the process end naturally. Never force exit 0 here:
       // OpenTUI also destroys after terminal/native setup failures, whose
@@ -200,6 +202,27 @@ async function main(): Promise<void> {
   })
   startupFrame.destroy()
   renderer.root.add(app)
+  // OpenTUI's native allocator can retain released render graphs during very
+  // long tool-heavy sessions. The host already supervises this private TUI and
+  // replays durable state after an exit, so recycle before allocator residency
+  // can breach the release RSS envelope. This is process-local: the engine,
+  // session, transcript, and active turn remain owned by the host.
+  // The nightly envelope measures the engine and TUI together. Leaving roughly
+  // 200 MiB for the engine keeps the combined pair comfortably below 600 MiB.
+  const tuiRssRecycleBytes = 384 * 1024 * 1024
+  rssRecycleTimer = setInterval(() => {
+    // Bun's allocator-facing snapshot can lag native residency; getrusage is
+    // the OS-backed high-water mark and reliably observes that native growth.
+    const observedRss = Math.max(
+      process.memoryUsage.rss(),
+      process.resourceUsage().maxRSS,
+    )
+    if (exitRequested || observedRss < tuiRssRecycleBytes) return
+    exitRequested = true
+    process.exitCode = 75
+    renderer.destroy()
+  }, 100)
+  rssRecycleTimer.unref()
   void terminalPalette.then((colors) => {
     if (colors === null) return
     app.setSystemTheme(systemThemeFromPalette(colors, terminalThemeMode))
