@@ -28,6 +28,7 @@ const WAIT_FOR_EXECUTION_LEASE_ARG: &str = "--wait-for-execution-lease";
 const TUI_KEYBINDINGS_ENV: &str = "ROTTWEILER_TUI_KEYBINDINGS";
 const TUI_THEME_ENV: &str = "ROTTWEILER_TUI_THEME";
 const ENGINE_STDERR_TAIL_BYTES: usize = 16 * 1024;
+const TUI_RECYCLE_EXIT_CODE: i32 = 75;
 
 type ShellBrokerResult = Result<(), crate::shell_broker::ShellBrokerError>;
 type ShellBrokerTask = tokio::task::JoinHandle<ShellBrokerResult>;
@@ -572,9 +573,14 @@ impl<B: ProcessBackend> Supervisor<B> {
                             }
                             return Ok(());
                         }
-                        let delay = budget.failure_delay()?;
-                        if await_or_shutdown!(self.backend.sleep(delay)).is_none() {
-                            return Ok(());
+                        // Exit 75 is a deliberate process-local memory recycle.
+                        // Durable session state remains in the engine, so this
+                        // is neither a crash nor a consecutive startup failure.
+                        if !tui_exit_is_recycle(status) {
+                            let delay = budget.failure_delay()?;
+                            if await_or_shutdown!(self.backend.sleep(delay)).is_none() {
+                                return Ok(());
+                            }
                         }
                         let Some(spawned) = await_or_shutdown!(self.spawn_tui()) else {
                             return Ok(());
@@ -715,6 +721,10 @@ fn tui_exit_is_user_close(status: ExitStatus) -> bool {
     status.success()
         || status.code() == Some(130)
         || status.signal() == Some(rustix::process::Signal::INT.as_raw())
+}
+
+fn tui_exit_is_recycle(status: ExitStatus) -> bool {
+    status.code() == Some(TUI_RECYCLE_EXIT_CODE)
 }
 
 #[derive(Clone, Copy)]
@@ -1131,6 +1141,7 @@ mod tests {
         EngineStartupFailure,
         EngineWaitError,
         TuiRestartBudget,
+        TuiRecycle,
     }
 
     struct MockBackend {
@@ -1248,7 +1259,8 @@ mod tests {
                     Scenario::TuiCrash
                     | Scenario::ShutdownSignal
                     | Scenario::ReadinessFailure
-                    | Scenario::TuiRestartBudget,
+                    | Scenario::TuiRestartBudget
+                    | Scenario::TuiRecycle,
                     0,
                     true,
                 ) => ("engine-1", None, false),
@@ -1259,6 +1271,16 @@ mod tests {
                 (Scenario::TuiRestartBudget, 2, false) => {
                     ("tui-2", Some(ExitStatus::from_raw(1 << 8)), false)
                 }
+                (Scenario::TuiRecycle, 1..=3, false) => (
+                    match index {
+                        1 => "tui-1",
+                        2 => "tui-2",
+                        _ => "tui-3",
+                    },
+                    Some(ExitStatus::from_raw(TUI_RECYCLE_EXIT_CODE << 8)),
+                    false,
+                ),
+                (Scenario::TuiRecycle, 4, false) => ("tui-4", Some(ExitStatus::from_raw(0)), false),
                 _ => return Err(io::Error::other("unexpected mock spawn")),
             };
             Ok(MockChild {
@@ -1382,6 +1404,21 @@ mod tests {
         assert!(tui_exit_is_user_close(ExitStatus::from_raw(130 << 8)));
         assert!(tui_exit_is_user_close(ExitStatus::from_raw(2)));
         assert!(!tui_exit_is_user_close(ExitStatus::from_raw(1 << 8)));
+        assert!(tui_exit_is_recycle(ExitStatus::from_raw(
+            TUI_RECYCLE_EXIT_CODE << 8
+        )));
+    }
+
+    #[tokio::test]
+    async fn planned_tui_recycles_do_not_consume_the_crash_budget() {
+        let mut config = fixture_config();
+        config.restart_policy.max_consecutive_failures = 1;
+        let (result, specs, lifecycle) =
+            run_scenario_with_config(Scenario::TuiRecycle, config).await;
+        result.expect("planned recycles must remain restartable");
+        assert_eq!(specs.len(), 5);
+        assert!(!lifecycle.iter().any(|event| event == "backoff"));
+        assert!(lifecycle.contains(&"signal:engine-1:Terminate".to_owned()));
     }
 
     #[tokio::test]

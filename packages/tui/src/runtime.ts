@@ -59,6 +59,8 @@ export interface RuntimeApp {
   handleEvent(event: WireEngineEvent): void
   setState(state: RottweilerState): void
   setSessionId(sessionId: string): void
+  beginInitialReplayBatch?(): void
+  endInitialReplayBatch?(): void
 }
 
 export interface RuntimeEngineClient {
@@ -458,6 +460,22 @@ export class TuiEngineRuntime {
       })
       this.#subscriptionController = subscriptionController
       this.#sessionId = sessionId
+      const boundForBatch = this.#requiredApp()
+      let initialReplayTimer: ReturnType<typeof setTimeout> | undefined
+      let initialReplayBatch = true
+      const finishInitialReplayBatch = () => {
+        if (!initialReplayBatch) return
+        initialReplayBatch = false
+        if (initialReplayTimer !== undefined) clearTimeout(initialReplayTimer)
+        boundForBatch.endInitialReplayBatch?.()
+      }
+      const extendInitialReplayBatch = () => {
+        if (!initialReplayBatch) return
+        if (initialReplayTimer !== undefined) clearTimeout(initialReplayTimer)
+        initialReplayTimer = setTimeout(finishInitialReplayBatch, 25)
+      }
+      boundForBatch.beginInitialReplayBatch?.()
+      initialReplayTimer = setTimeout(finishInitialReplayBatch, 250)
 
       let subscriptionReady = false
       let resolveSubscriptionReady!: () => void
@@ -522,6 +540,7 @@ export class TuiEngineRuntime {
               return
             }
             const bound = this.#requiredApp()
+            extendInitialReplayBatch()
             if (
               isSessionForkedEvent(event) &&
               this.#forkRequests.get(event.meta.request_id) === event.parent_session_id
@@ -535,6 +554,7 @@ export class TuiEngineRuntime {
             const previousGap = bound.state.connection.gap
             const previousSequence = bound.state.lastSequence
             bound.handleEvent(event)
+            if (event.type === "session_replay_completed") finishInitialReplayBatch()
             const nextGap = bound.state.connection.gap
             if (nextGap === null) {
               this.#recoveringSequenceGap = false
@@ -564,6 +584,7 @@ export class TuiEngineRuntime {
           }
         })
         .finally(() => {
+          finishInitialReplayBatch()
           if (!subscriptionReady && !subscriptionController.signal.aborted) {
             rejectSubscriptionReady(
               new EngineRuntimeError("engine event stream closed before becoming ready"),

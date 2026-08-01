@@ -96,6 +96,8 @@ describe("retained transcript layout", () => {
       initialState: { ...createInitialState(), transcript },
     })
     renderer.renderer.root.add(app)
+    expect(app.transcript.mountedEntryCount).toBe(16)
+    expect(app.transcript.mountedKeys.at(0)).toBe("9:9:assistant")
     await settleMarkdownHighlights(
       [...app.transcript.mountedCards.values()].map((card) => card.markdown),
       renderer,
@@ -128,7 +130,7 @@ describe("retained transcript layout", () => {
       priorTop = nextTop
     }
     expect(app.transcript.scroller.scrollTop).toBe(0)
-    expect(renderer.captureCharFrame()).toContain("CARD_0")
+    expect(renderer.captureCharFrame()).toContain("CARD_8")
 
     let priorBottomTop = app.transcript.scroller.scrollTop
     const bottom = () => Math.max(

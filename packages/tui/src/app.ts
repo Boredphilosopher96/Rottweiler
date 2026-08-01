@@ -1151,6 +1151,17 @@ export class RottweilerApp extends BoxRenderable {
     )
   }
 
+  beginInitialReplayBatch(): void {
+    // Historical events have already been reduced into durable state. Retain
+    // only the newest projection while replaying so the queue cannot pin every
+    // immutable intermediate transcript (or re-run historical UI effects).
+    this.#presentation.suspend(true)
+  }
+
+  endInitialReplayBatch(): void {
+    this.#presentation.resume()
+  }
+
   #afterPresentedEvent(item: PendingPresentationEvent): void {
     const { event, eventRecord, commandRequestId, previous, next } = item
     if (
