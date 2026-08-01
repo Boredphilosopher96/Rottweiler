@@ -136,16 +136,16 @@ jobs:
         env:
           ROTTWEILER_PERF_SMOKE: 1
           ROTTWEILER_PERF_SAMPLES: 100
-      - name: Enforce TUI transport and render-loop budgets
-        run: bun run test:perf
-        working-directory: packages/tui
-
-  macos-tui-performance-smoke:
-    name: Per-PR macOS TUI performance smoke
-    runs-on: macos-15
+  tui-performance-smoke:
+    name: Per-PR TUI performance smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     env:
       ROTTWEILER_CREDENTIAL_BACKEND: file
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -155,7 +155,7 @@ jobs:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
         working-directory: packages/tui
-      - name: Enforce macOS TUI transport and render-loop budgets
+      - name: Enforce TUI transport and render-loop budgets
         run: bun run test:perf
         working-directory: packages/tui
 
