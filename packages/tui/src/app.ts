@@ -1165,7 +1165,7 @@ export class RottweilerApp extends BoxRenderable {
     // presentation. Reconcile it from the final durable projection so an
     // engine restart cannot leave OpenTUI reading while a foreground shell
     // still owns the supervisor's broker.
-    if (this.#state.shell.active) {
+    if (!this.#state.replay.active && this.#state.shell.active) {
       this.#clearPendingShellTimer()
       this.#suspendTerminal()
     } else {
@@ -1274,7 +1274,7 @@ export class RottweilerApp extends BoxRenderable {
     if (next.pluginNotifications.at(-1) !== previous.pluginNotifications.at(-1)) {
       this.#schedulePluginNotificationDismissal(next.pluginNotifications.at(-1))
     }
-    if (event.type === "user_shell_state_changed") {
+    if (event.type === "user_shell_state_changed" && !next.replay.active) {
       if (event.active) {
         this.#clearPendingShellTimer()
         this.#suspendTerminal()

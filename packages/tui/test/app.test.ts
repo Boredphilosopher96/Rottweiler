@@ -8018,6 +8018,38 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(ordering).toEqual(["suspend", "resume"])
   })
 
+  test("does not hand terminal ownership to a historical replay shell", async () => {
+    const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
+    renderer = setup.renderer
+    const ordering: string[] = []
+    const app = createRottweilerApp(renderer, {
+      replaySessionId: "historical-session",
+      terminalHandover: {
+        suspend: () => ordering.push("suspend"),
+        resume: () => ordering.push("resume"),
+      },
+    })
+    renderer.root.add(app)
+
+    app.beginInitialReplayBatch()
+    app.handleEvent({
+      type: "user_shell_state_changed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "historical-session",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      shell_id: "historical-shell",
+      command: "python -q",
+      active: true,
+    })
+    app.endInitialReplayBatch()
+
+    expect(app.state.replay.active).toBeTrue()
+    expect(ordering).toEqual([])
+  })
+
   test("preserves a rejected draft and surfaces the protocol error", async () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer
