@@ -151,21 +151,34 @@ describe("M4 executable TUI performance budgets", () => {
     await setup.renderOnce()
     Bun.gc(true)
 
-    const samples: number[] = []
+    const trialP99s: number[] = []
     const input = "responsivetypingwithoutblockingtherenderloop".repeat(4)
-    for (const key of input) {
-      const started = Bun.nanoseconds()
-      setup.mockInput.pressKey(key)
+    for (let trial = 0; trial < 3; trial += 1) {
+      app.composer.value = ""
       await setup.renderOnce()
-      setup.captureCharFrame()
-      samples.push((Bun.nanoseconds() - started) / 1_000_000)
+      Bun.gc(true)
+      const samples: number[] = []
+      for (const key of input) {
+        const started = Bun.nanoseconds()
+        setup.mockInput.pressKey(key)
+        await setup.renderOnce()
+        setup.captureCharFrame()
+        samples.push((Bun.nanoseconds() - started) / 1_000_000)
+      }
+      expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
+      trialP99s.push(percentile(samples.slice(5), 0.99))
     }
 
     expect(app.composer.value).toBe(input)
-    const p99 = percentile(samples.slice(5), 0.99)
-    expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
+    const p99 = percentile(trialP99s, 0.5)
     emittedMetrics.tui_input_echo_p99_us = Math.ceil(p99 * 1_000)
-    expect(p99).toBeLessThan(16)
+    console.info(
+      `Focused composer input echo: trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; median=${p99.toFixed(3)}ms`,
+    )
+    // Every trial retains the user-visible hard ceiling. The protected-runner
+    // baseline compares their median so one unrelated scheduler stall cannot
+    // turn an otherwise healthy input path into a false product regression.
+    for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
   })
 
   test("Vim mode dispatch and insert echo stay below 16ms p99", async () => {
@@ -190,21 +203,31 @@ describe("M4 executable TUI performance budgets", () => {
     await setup.renderOnce()
     Bun.gc(true)
 
-    const samples: number[] = []
+    const trialP99s: number[] = []
     const input = "vimmodestaysresponsiveundertyping".repeat(4)
-    for (const key of input) {
-      const started = Bun.nanoseconds()
-      setup.mockInput.pressKey(key)
+    for (let trial = 0; trial < 3; trial += 1) {
+      app.composer.value = ""
       await setup.renderOnce()
-      setup.captureCharFrame()
-      samples.push((Bun.nanoseconds() - started) / 1_000_000)
+      Bun.gc(true)
+      const samples: number[] = []
+      for (const key of input) {
+        const started = Bun.nanoseconds()
+        setup.mockInput.pressKey(key)
+        await setup.renderOnce()
+        setup.captureCharFrame()
+        samples.push((Bun.nanoseconds() - started) / 1_000_000)
+      }
+      expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
+      trialP99s.push(percentile(samples.slice(5), 0.99))
     }
 
     expect(app.composer.value).toBe(input)
-    const p99 = percentile(samples.slice(5), 0.99)
-    expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
+    const p99 = percentile(trialP99s, 0.5)
     emittedMetrics.tui_vim_echo_p99_us = Math.ceil(p99 * 1_000)
-    expect(p99).toBeLessThan(16)
+    console.info(
+      `Vim composer input echo: trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; median=${p99.toFixed(3)}ms`,
+    )
+    for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
   })
 })
 
