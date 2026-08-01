@@ -24,6 +24,7 @@ export const MAX_COMMAND_ACKS = 256
 export const MAX_COMPACTION_STREAM_BYTES = 256 * 1_024
 export const MAX_RETAINED_TOOL_PROJECTIONS = 16
 export const MAX_RETAINED_TRANSCRIPT_ENTRIES = 256
+export const MAX_RETAINED_TODO_TOOL_PROJECTIONS = MAX_RETAINED_TRANSCRIPT_ENTRIES
 export const MAX_RETAINED_TURN_PROJECTIONS = 256
 export const MAX_SHELL_COMMAND_BYTES = 8 * 1_024
 export const MAX_SHELL_OUTPUT_BYTES = 64 * 1_024
@@ -35,14 +36,69 @@ function retainRecentTools(
   tool: ToolProjection,
 ): RottweilerState["tools"] {
   const next = { ...current, [toolCallId]: tool }
+
+  // A successful todo call is also a rewind checkpoint. Keep the latest
+  // checkpoint for every retained turn independently from the small display
+  // cache, otherwise ordinary tool traffic can make rewind restore stale todos.
+  const todoCheckpoints = Object.entries(next).filter(([, projection]) =>
+    isSuccessfulTodoCheckpoint(projection)
+  )
+  const latestTodoByTurn = new Map<string, readonly [string, ToolProjection]>()
+  for (const entry of todoCheckpoints) {
+    const existing = latestTodoByTurn.get(entry[1].turnId)
+    if (existing === undefined || compareToolOrder(existing[1], entry[1]) < 0) {
+      latestTodoByTurn.set(entry[1].turnId, entry)
+    }
+  }
+  const retainedTodoIds = new Set([...latestTodoByTurn.values()].map(([id]) => id))
+  for (const [id] of todoCheckpoints) {
+    if (!retainedTodoIds.has(id)) delete next[id]
+  }
+
+  const orderedTodos = [...latestTodoByTurn.values()].sort((left, right) =>
+    compareToolOrder(left[1], right[1])
+  )
+  for (const [id] of orderedTodos.slice(0, -MAX_RETAINED_TODO_TOOL_PROJECTIONS)) {
+    delete next[id]
+    retainedTodoIds.delete(id)
+  }
+
   const entries = Object.entries(next)
-  if (entries.length <= MAX_RETAINED_TOOL_PROJECTIONS) return next
-  const removable = entries.filter(([, projection]) => projection.status === "finished")
+  let regularCount = entries.filter(([id]) => !retainedTodoIds.has(id)).length
+  if (regularCount <= MAX_RETAINED_TOOL_PROJECTIONS) return next
+  const removable = entries.filter(
+    ([id, projection]) => !retainedTodoIds.has(id) && projection.status === "finished",
+  )
   for (const [id] of removable) {
-    if (Object.keys(next).length <= MAX_RETAINED_TOOL_PROJECTIONS) break
+    if (regularCount <= MAX_RETAINED_TOOL_PROJECTIONS) break
     if (id !== toolCallId) delete next[id]
+    if (id !== toolCallId) regularCount -= 1
   }
   return next
+}
+
+function isSuccessfulTodoCheckpoint(tool: ToolProjection): boolean {
+  return (
+    tool.name === "todo" &&
+    tool.status === "finished" &&
+    tool.isError === false &&
+    tool.output !== null &&
+    projectTodoOutput(tool.output) !== null
+  )
+}
+
+function compareToolOrder(left: ToolProjection, right: ToolProjection): number {
+  const leftTurn = parseU64(left.turnId)
+  const rightTurn = parseU64(right.turnId)
+  if (leftTurn !== null && rightTurn !== null) {
+    if (leftTurn < rightTurn) return -1
+    if (leftTurn > rightTurn) return 1
+  } else {
+    const turnOrder = left.turnId.localeCompare(right.turnId)
+    if (turnOrder !== 0) return turnOrder
+  }
+  if (left.callIndex !== right.callIndex) return left.callIndex - right.callIndex
+  return left.toolCallId.localeCompare(right.toolCallId)
 }
 
 function retainTranscriptEntry(

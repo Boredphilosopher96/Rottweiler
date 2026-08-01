@@ -87,6 +87,7 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("rottweiler-soak-binary.noindex/rw", soak)
         self.assertIn("packages/tui/dist/rottweiler-tui", soak)
         self.assertNotIn("bun run build", soak)
+        self.assertNotIn("--require-measured", soak)
         wsl2 = workflow_job(workflow, "wsl2-acceptance")
         self.assertIn("runs-on: windows-2025", wsl2)
         self.assertNotIn("self-hosted", wsl2)
@@ -109,6 +110,18 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn('ROTTWEILER_EVAL_API_KEY="$key"', run_step)
         self.assertIn("if: steps.release_version.outputs.major != '0'", run_step)
         self.assertNotIn("models: read", workflow)
+
+    def test_release_soak_requires_reviewed_measured_baselines(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(
+            encoding="utf-8"
+        )
+        soak = workflow_job(workflow, "release-soak")
+
+        self.assertIn("--suite soak", soak)
+        self.assertIn("--require-measured", soak)
+        self.assertIn("needs: [build-linux, build-macos]", soak)
+        sign_and_publish = workflow_job(workflow, "sign-and-publish")
+        self.assertIn("release-soak", sign_and_publish)
 
     def test_protected_performance_consumers_fail_closed_before_queueing(self) -> None:
         performance = (ROOT / ".github/workflows/performance.yml").read_text(

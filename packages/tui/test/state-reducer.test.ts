@@ -13,6 +13,7 @@ import {
   engineEvent,
   MAX_COMPACTION_STREAM_BYTES,
   MAX_RETAINED_TOOL_PROJECTIONS,
+  MAX_RETAINED_TODO_TOOL_PROJECTIONS,
   MAX_RETAINED_TRANSCRIPT_ENTRIES,
   MAX_RETAINED_TURN_PROJECTIONS,
   MAX_SHELL_OUTPUT_LINES,
@@ -150,6 +151,82 @@ describe("pure TUI state reducer", () => {
     })
     expect(state.tools[activeToolId]?.status).toBe("running")
     expect(Object.keys(state.tools)).toHaveLength(MAX_RETAINED_TOOL_PROJECTIONS)
+  })
+
+  test("retains bounded todo rewind checkpoints independently from display tools", () => {
+    let state = createInitialState()
+    for (let turn = 1; turn <= MAX_RETAINED_TODO_TOOL_PROJECTIONS + 1; turn += 1) {
+      state = reduce(state, {
+        type: "tool_call_started",
+        meta: meta(`${turn * 2 - 1}`),
+        turn_id: `${turn}`,
+        tool_call_id: `todo-${turn}`,
+        name: "todo",
+        args: { action: "replace" },
+        call_index: 0,
+      })
+      state = reduce(state, {
+        type: "tool_call_finished",
+        meta: meta(`${turn * 2}`),
+        turn_id: `${turn}`,
+        tool_call_id: `todo-${turn}`,
+        output: {
+          type: "structured",
+          value: {
+            data: {
+              items: [{ id: `${turn}`, content: `Task ${turn}`, status: "pending" }],
+              count: 1,
+            },
+            truncated: false,
+          },
+        },
+        is_error: false,
+        call_index: 0,
+      })
+    }
+
+    for (let index = 0; index < MAX_RETAINED_TOOL_PROJECTIONS + 4; index += 1) {
+      const toolCallId = `read-${index}`
+      const sequence = (MAX_RETAINED_TODO_TOOL_PROJECTIONS + 1) * 2 + index * 2 + 1
+      state = reduce(state, {
+        type: "tool_call_started",
+        meta: meta(`${sequence}`),
+        turn_id: `${1_000 + index}`,
+        tool_call_id: toolCallId,
+        name: "read",
+        args: { path: `${index}.txt` },
+        call_index: 0,
+      })
+      state = reduce(state, {
+        type: "tool_call_finished",
+        meta: meta(`${sequence + 1}`),
+        turn_id: `${1_000 + index}`,
+        tool_call_id: toolCallId,
+        output: { type: "text", text: "done" },
+        is_error: false,
+        call_index: 0,
+      })
+    }
+
+    expect(state.tools["todo-1"]).toBeUndefined()
+    expect(state.tools["todo-2"]?.name).toBe("todo")
+    expect(Object.values(state.tools).filter((tool) => tool.name === "todo")).toHaveLength(
+      MAX_RETAINED_TODO_TOOL_PROJECTIONS,
+    )
+    expect(Object.values(state.tools).filter((tool) => tool.name === "read")).toHaveLength(
+      MAX_RETAINED_TOOL_PROJECTIONS,
+    )
+
+    state = reduce(state, {
+      type: "conversation_rewound",
+      meta: meta(
+        `${(MAX_RETAINED_TODO_TOOL_PROJECTIONS + 1) * 2 + (MAX_RETAINED_TOOL_PROJECTIONS + 4) * 2 + 1}`,
+      ),
+      to_agent_turn: "2",
+      operation_id: "rewind-retained-todo",
+      unrestorable_paths: [],
+    })
+    expect(state.todos).toEqual([{ id: "2", content: "Task 2", status: "pending" }])
   })
 
   test("projects only the live runtime services returned by the host", () => {
