@@ -7971,6 +7971,53 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(setup.captureCharFrame()).toContain("hello from shell")
   })
 
+  test("reconciles foreground-shell terminal ownership after coalesced replay", async () => {
+    const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
+    renderer = setup.renderer
+    const ordering: string[] = []
+    const app = createRottweilerApp(renderer, {
+      terminalHandover: {
+        suspend: () => ordering.push("suspend"),
+        resume: () => ordering.push("resume"),
+      },
+    })
+    renderer.root.add(app)
+
+    app.beginInitialReplayBatch()
+    app.handleEvent({
+      type: "user_shell_state_changed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-tui-test",
+        sequence_id: "1",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      shell_id: "shell-replayed",
+      command: "python -q",
+      active: true,
+    })
+    expect(ordering).toEqual([])
+
+    app.endInitialReplayBatch()
+    expect(ordering).toEqual(["suspend"])
+
+    app.handleEvent({
+      type: "user_shell_state_changed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-tui-test",
+        sequence_id: "2",
+        emitted_at: "2026-01-01T00:00:01Z",
+      },
+      shell_id: "shell-replayed",
+      command: "python -q",
+      active: false,
+      status: 23,
+      captured_output: "interrupted",
+    })
+    expect(ordering).toEqual(["suspend", "resume"])
+  })
+
   test("preserves a rejected draft and surfaces the protocol error", async () => {
     const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
     renderer = setup.renderer

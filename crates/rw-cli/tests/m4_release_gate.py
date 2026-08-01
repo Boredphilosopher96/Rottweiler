@@ -35,6 +35,7 @@ RESPONSE_MARKER = "M4_REATTACH_RESPONSE_34d1"
 SHELL_READY_MARKER = "M4_SHELL_CHILD_READY_f003"
 SHELL_STDIN_MARKER = "M4_SHELL_CHILD_STDIN_0a19"
 SHELL_INTERRUPT_MARKER = "M4_SHELL_CHILD_INTERRUPT_82bc"
+SHELL_EXIT_MARKER = "Shell · exited 23"
 BLOCKED_TURN_MARKER = "M4_BLOCKED_AGENT_TURN_6d77"
 SHELL_SECRET_VALUE = "M4_SHELL_SECRET_d10f7e62"
 # The gate drives an xterm-compatible PTY, so send the same carriage return a
@@ -1057,10 +1058,19 @@ def shell_handover_gate(
             raise RuntimeError("agent provider turn started while foreground shell was active")
 
         # The controlling terminal sends SIGINT to rw; the broker must forward
-        # it to the foreground child's process group.
+        # it to the foreground child's process group. Wait for the durable
+        # inactive-shell frame: replay reconciliation keeps OpenTUI suspended
+        # while the shell is active, and renderer resume precedes this repaint.
+        # The composer's unchanged placeholder is not a PTY readiness signal.
         os.write(process.fd, b"\x03")
-        read_until(process, SHELL_INTERRUPT_MARKER.encode(), timeout=3)
-        read_until(process, b"Message Rottweiler", timeout=5)
+        read_until_all(
+            process,
+            (
+                SHELL_INTERRUPT_MARKER.encode(),
+                SHELL_EXIT_MARKER.encode(),
+            ),
+            timeout=5,
+        )
         # Normal agent execution resumes only after durable shell completion.
         os.write(process.fd, PROMPT_MARKER.encode())
         read_until(process, PROMPT_MARKER.encode(), timeout=3)

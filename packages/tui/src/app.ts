@@ -1160,6 +1160,17 @@ export class RottweilerApp extends BoxRenderable {
 
   endInitialReplayBatch(): void {
     this.#presentation.resume()
+    // Replay coalescing intentionally skips historical UI side effects, but
+    // terminal ownership is current process state rather than historical
+    // presentation. Reconcile it from the final durable projection so an
+    // engine restart cannot leave OpenTUI reading while a foreground shell
+    // still owns the supervisor's broker.
+    if (this.#state.shell.active) {
+      this.#clearPendingShellTimer()
+      this.#suspendTerminal()
+    } else {
+      this.#resumeTerminal()
+    }
   }
 
   #afterPresentedEvent(item: PendingPresentationEvent): void {
