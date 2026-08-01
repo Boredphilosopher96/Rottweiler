@@ -485,6 +485,14 @@ def spawn_pty(
 
 
 def read_until(process: PtyProcess, marker: bytes, timeout: float = 5.0) -> bytes:
+    return read_until_all(process, (marker,), timeout)
+
+
+def read_until_all(
+    process: PtyProcess, markers: tuple[bytes, ...], timeout: float = 5.0
+) -> bytes:
+    if not markers or any(not marker for marker in markers):
+        raise ValueError("PTY markers must be non-empty")
     deadline = time.monotonic() + timeout
     captured = bytearray()
     while time.monotonic() < deadline:
@@ -498,7 +506,7 @@ def read_until(process: PtyProcess, marker: bytes, timeout: float = 5.0) -> byte
         if not chunk:
             break
         captured.extend(chunk)
-        if marker in captured:
+        if all(marker in captured for marker in markers):
             return bytes(captured)
         if len(captured) > 4 * 1024 * 1024:
             del captured[: len(captured) - 2 * 1024 * 1024]
@@ -508,7 +516,7 @@ def read_until(process: PtyProcess, marker: bytes, timeout: float = 5.0) -> byte
         if found == process.pid:
             child_status = f"exited with wait status {status}"
     raise RuntimeError(
-        f"PTY process {process.pid} did not render marker {marker!r} ({child_status}); "
+        f"PTY process {process.pid} did not render markers {markers!r} ({child_status}); "
         f"tail={bytes(captured[-4000:])!r}"
     )
 
@@ -930,9 +938,14 @@ def supervisor_reattach_gate(
         second_tui = wait_for_tui_child(process.pid, tui, exclude=first_tui)
         if second_tui == first_tui:
             raise RuntimeError("supervisor did not replace the SIGKILLed TUI process")
-        rebuilt = read_until(process, RESPONSE_MARKER.encode(), timeout=8)
-        if PROMPT_MARKER.encode() not in rebuilt:
-            raise RuntimeError("reattached TUI omitted the durable user message")
+        # A single coalesced replay frame may repaint terminal rows in either
+        # order. Wait for both durable rows instead of stopping as soon as the
+        # lower assistant row appears and racing the user-row repaint.
+        rebuilt = read_until_all(
+            process,
+            (PROMPT_MARKER.encode(), RESPONSE_MARKER.encode()),
+            timeout=8,
+        )
         print(
             "M4 supervisor reattach: actual compiled TUI was SIGKILLed and the replacement "
             "re-rendered the complete durable prompt/response transcript"
