@@ -153,7 +153,7 @@ describe("M4 executable TUI performance budgets", () => {
 
     const trialP99s: number[] = []
     const input = "responsivetypingwithoutblockingtherenderloop".repeat(4)
-    for (let trial = 0; trial < 3; trial += 1) {
+    for (let trial = 0; trial < 7; trial += 1) {
       app.composer.value = ""
       await setup.renderOnce()
       Bun.gc(true)
@@ -205,7 +205,7 @@ describe("M4 executable TUI performance budgets", () => {
 
     const trialP99s: number[] = []
     const input = "vimmodestaysresponsiveundertyping".repeat(4)
-    for (let trial = 0; trial < 3; trial += 1) {
+    for (let trial = 0; trial < 7; trial += 1) {
       app.composer.value = ""
       await setup.renderOnce()
       Bun.gc(true)
