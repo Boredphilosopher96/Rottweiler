@@ -6,7 +6,7 @@
       "suites": {
         "core": {
           "baseline_kind": "measured",
-          "provenance": "reviewed per-metric maxima from GitHub Actions runs 30653992032, 30655148886, 30656726278, 30656728117, 30662988767, and 30668744088 at 672bd70e5dd144f24360345f810dc2dd3c638935, 0f515d5822a846dd1f7eed2e935a148c8d40fd80, 9c0c957419287be9aa0ed51ff5a2faff2592b2c1, 5de94fbef192943a95e31849af8aad2e64dea3db, and 280595dde132271a682aa82fb167fe646b8ebf2f on native ARM64 macos15 image 20260727.0256.1; TUI input metrics report the median of seven p99 trials while every trial retains the 16ms wall ceiling",
+          "provenance": "reviewed per-metric maxima from GitHub Actions runs 30653992032, 30655148886, 30656726278, 30656728117, 30662988767, and 30668744088 at 672bd70e5dd144f24360345f810dc2dd3c638935, 0f515d5822a846dd1f7eed2e935a148c8d40fd80, 9c0c957419287be9aa0ed51ff5a2faff2592b2c1, 5de94fbef192943a95e31849af8aad2e64dea3db, and 280595dde132271a682aa82fb167fe646b8ebf2f on native ARM64 macos15 image 20260727.0256.1; TUI input best-p99 values recalibrated from seven retained trials in GitHub Actions run 30684369607 at 53fa13f14f0fa831e48608a640ff00cca6f265d9 on macos-15 while every trial retains the 16ms wall ceiling",
           "metrics": {
             "engine_binary_bytes": 16954688,
             "engine_ready_p99_us": 40485,
@@ -16,8 +16,8 @@
             "tui_first_paint_p99_us": 109219,
             "tui_frame_p95_us": 17360,
             "tui_frame_p999_us": 26171,
-            "tui_input_echo_p99_us": 3302,
-            "tui_vim_echo_p99_us": 2572,
+            "tui_input_echo_best_p99_us": 1471,
+            "tui_vim_echo_best_p99_us": 1010,
             "turn_overhead_p99_us": 52677,
             "uds_event_p99_us": 751
           }
@@ -35,7 +35,7 @@
       "suites": {
         "core": {
           "baseline_kind": "measured",
-          "provenance": "reviewed per-metric maxima from GitHub Actions runs 30651316120, 30653992032, 30655148886, 30656726278, 30656728117, and 30662542666 at fea54eadf212d0a0855da75dd43bf909b791fb54, 672bd70e5dd144f24360345f810dc2dd3c638935, 0f515d5822a846dd1f7eed2e935a148c8d40fd80, 9c0c957419287be9aa0ed51ff5a2faff2592b2c1, and 5de94fbef192943a95e31849af8aad2e64dea3db on native X64 ubuntu24 image 20260720.247.2; TUI input metrics report the median of seven p99 trials while every trial retains the 16ms wall ceiling",
+          "provenance": "reviewed per-metric maxima from GitHub Actions runs 30651316120, 30653992032, 30655148886, 30656726278, 30656728117, and 30662542666 at fea54eadf212d0a0855da75dd43bf909b791fb54, 672bd70e5dd144f24360345f810dc2dd3c638935, 0f515d5822a846dd1f7eed2e935a148c8d40fd80, 9c0c957419287be9aa0ed51ff5a2faff2592b2c1, and 5de94fbef192943a95e31849af8aad2e64dea3db on native X64 ubuntu24 image 20260720.247.2; TUI input best-p99 values recalibrated from seven retained trials in GitHub Actions run 30684369607 at 53fa13f14f0fa831e48608a640ff00cca6f265d9 on ubuntu-latest while every trial retains the 16ms wall ceiling",
           "metrics": {
             "engine_binary_bytes": 26375800,
             "engine_ready_p99_us": 6031,
@@ -45,8 +45,8 @@
             "tui_first_paint_p99_us": 50471,
             "tui_frame_p95_us": 34148,
             "tui_frame_p999_us": 49352,
-            "tui_input_echo_p99_us": 2123,
-            "tui_vim_echo_p99_us": 1532,
+            "tui_input_echo_best_p99_us": 1041,
+            "tui_vim_echo_best_p99_us": 833,
             "turn_overhead_p99_us": 49490,
             "uds_event_p99_us": 264
           }

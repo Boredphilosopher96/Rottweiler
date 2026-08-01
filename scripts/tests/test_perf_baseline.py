@@ -71,8 +71,8 @@ class PerfBaselineTests(unittest.TestCase):
         self.assertEqual(darwin["tui_first_paint_p99_us"], 109_219)
         self.assertEqual(darwin["tui_frame_p95_us"], 17_360)
         self.assertEqual(darwin["tui_frame_p999_us"], 26_171)
-        self.assertEqual(darwin["tui_input_echo_p99_us"], 3_302)
-        self.assertEqual(darwin["tui_vim_echo_p99_us"], 2_572)
+        self.assertEqual(darwin["tui_input_echo_best_p99_us"], 1_471)
+        self.assertEqual(darwin["tui_vim_echo_best_p99_us"], 1_010)
         self.assertEqual(darwin["uds_event_p99_us"], 751)
         self.assertEqual(linux["engine_binary_bytes"], 26_375_800)
         self.assertEqual(linux["headless_print_p99_us"], 69_361)
@@ -81,8 +81,8 @@ class PerfBaselineTests(unittest.TestCase):
         self.assertEqual(linux["mcp_prompt_ready_p99_us"], 10_699)
         self.assertEqual(linux["tui_frame_p95_us"], 34_148)
         self.assertEqual(linux["tui_frame_p999_us"], 49_352)
-        self.assertEqual(linux["tui_input_echo_p99_us"], 2_123)
-        self.assertEqual(linux["tui_vim_echo_p99_us"], 1_532)
+        self.assertEqual(linux["tui_input_echo_best_p99_us"], 1_041)
+        self.assertEqual(linux["tui_vim_echo_best_p99_us"], 833)
 
     def test_require_measured_rejects_bootstrap_and_accepts_reviewed_measurement(self) -> None:
         document = baseline()
