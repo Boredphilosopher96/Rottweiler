@@ -186,9 +186,10 @@ Full p99 consumers run on fixed native GitHub-hosted images and record the exact
 image version with every raw sample set. Linux measures an independently built,
 checksummed artifact. macOS builds outside the checkout directly on the
 measurement host because downloaded executable provenance measurably distorts
-launch latency; its fixed post-link cooling interval separates build load from
-the samples. The protected runner identity belongs in measured baseline
-provenance.
+launch latency. Both fixed hosted images use the same one-minute conditioning
+interval before fixed warmups and measurement so image-provisioning work and
+post-link inspection are outside the sample window. The protected runner
+identity belongs in measured baseline provenance.
 
 Regression policy: every executable latency and size gate writes integer,
 machine-readable metrics and keeps its fixed, platform-specific absolute
