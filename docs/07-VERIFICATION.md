@@ -210,6 +210,14 @@ which detects sustained regressions without treating host-wide scheduler stalls
 as product latency. Every measured sample is reported; neither tier retries,
 trims, nor substitutes a relative baseline.
 
+The required pull-request and `main` TUI smoke applies the same distinction to
+input echo: it measures input dispatch plus render compute with process CPU time
+on shared hosted runners, excluding time while the process is descheduled, and
+still requires every trial's p99 to remain below 16ms. Protected performance,
+nightly, and release TUI gates retain wall-clock input-to-echo measurement on
+their fixed native images; those gates remain the user-visible latency
+authority.
+
 Full p99 consumers run on fixed native GitHub-hosted images and record the exact
 image version with every raw sample set. Linux measures an independently built,
 checksummed artifact. macOS builds outside the checkout directly on the

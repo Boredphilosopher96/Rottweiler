@@ -159,11 +159,11 @@ describe("M4 executable TUI performance budgets", () => {
       Bun.gc(true)
       const samples: number[] = []
       for (const key of input) {
-        const started = Bun.nanoseconds()
+        const elapsed = startInputLatencySample()
         setup.mockInput.pressKey(key)
         await setup.renderOnce()
         setup.captureCharFrame()
-        samples.push((Bun.nanoseconds() - started) / 1_000_000)
+        samples.push(elapsed())
       }
       expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
       trialP99s.push(percentile(samples.slice(5), 0.99))
@@ -173,12 +173,11 @@ describe("M4 executable TUI performance budgets", () => {
     const bestP99 = Math.min(...trialP99s)
     emittedMetrics.tui_input_echo_best_p99_us = Math.ceil(bestP99 * 1_000)
     console.info(
-      `Focused composer input echo: trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; best=${bestP99.toFixed(3)}ms`,
+      `Focused composer input echo (${inputLatencyClock()}): trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; best=${bestP99.toFixed(3)}ms`,
     )
-    // Every trial retains the user-visible hard ceiling. The protected-runner
-    // baseline compares the best of seven so unrelated scheduler stalls cannot
-    // turn an otherwise healthy input path into a false product regression,
-    // while a compute regression still moves every trial.
+    // Every trial retains the 16ms hard ceiling. Protected runs use wall time;
+    // shared-runner smoke uses process CPU time so descheduling is not charged
+    // as input/render compute. A compute regression still moves every trial.
     for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
   })
 
@@ -212,11 +211,11 @@ describe("M4 executable TUI performance budgets", () => {
       Bun.gc(true)
       const samples: number[] = []
       for (const key of input) {
-        const started = Bun.nanoseconds()
+        const elapsed = startInputLatencySample()
         setup.mockInput.pressKey(key)
         await setup.renderOnce()
         setup.captureCharFrame()
-        samples.push((Bun.nanoseconds() - started) / 1_000_000)
+        samples.push(elapsed())
       }
       expect(samples.slice(5).length).toBeGreaterThanOrEqual(100)
       trialP99s.push(percentile(samples.slice(5), 0.99))
@@ -226,7 +225,7 @@ describe("M4 executable TUI performance budgets", () => {
     const bestP99 = Math.min(...trialP99s)
     emittedMetrics.tui_vim_echo_best_p99_us = Math.ceil(bestP99 * 1_000)
     console.info(
-      `Vim composer input echo: trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; best=${bestP99.toFixed(3)}ms`,
+      `Vim composer input echo (${inputLatencyClock()}): trial p99s=${trialP99s.map((value) => value.toFixed(3)).join(",")}ms; best=${bestP99.toFixed(3)}ms`,
     )
     for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
   })
@@ -236,4 +235,20 @@ function percentile(values: readonly number[], quantile: number): number {
   const sorted = [...values].sort((left, right) => left - right)
   const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * quantile) - 1)
   return sorted[Math.max(0, index)] ?? Number.POSITIVE_INFINITY
+}
+
+function inputLatencyClock(): "process CPU" | "wall" {
+  return process.env.ROTTWEILER_PERF_SMOKE === "1" ? "process CPU" : "wall"
+}
+
+function startInputLatencySample(): () => number {
+  if (process.env.ROTTWEILER_PERF_SMOKE === "1") {
+    const started = process.cpuUsage()
+    return () => {
+      const used = process.cpuUsage(started)
+      return (used.user + used.system) / 1_000
+    }
+  }
+  const started = Bun.nanoseconds()
+  return () => (Bun.nanoseconds() - started) / 1_000_000
 }
