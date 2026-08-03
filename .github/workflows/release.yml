@@ -176,7 +176,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
       - name: Attest archive provenance
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: ${{ steps.archive.outputs.path }}
       - name: Upload unsigned archive for release signing
@@ -313,7 +313,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
       - name: Attest archive provenance
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: ${{ steps.archive.outputs.path }}
       - name: Upload unsigned archive for release signing
@@ -883,7 +883,7 @@ jobs:
           ruby -c dist/distribution/rottweiler.rb
           sh -n dist/distribution/rottweiler-install.sh
       - name: Attest signed release set
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: |
             dist/unsigned/*.tar.gz
