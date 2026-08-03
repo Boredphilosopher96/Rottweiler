@@ -42,6 +42,7 @@ struct ExtensionFixtureProvider {
     private_name: String,
     capabilities: Capabilities,
     metadata: Option<ProviderModelMetadata>,
+    metadata_by_model: BTreeMap<String, ProviderModelMetadata>,
 }
 
 struct StartFailProvider;
@@ -125,6 +126,13 @@ impl Provider for ExtensionFixtureProvider {
         self.metadata.clone()
     }
 
+    fn cached_model_metadata_for(&self, model: &str) -> Option<ProviderModelMetadata> {
+        self.metadata_by_model
+            .get(model)
+            .cloned()
+            .or_else(|| self.metadata.clone())
+    }
+
     async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
         Ok(Some(DiscoveredProviderCatalog {
             provider: "private-extension".to_owned(),
@@ -133,9 +141,12 @@ impl Provider for ExtensionFixtureProvider {
                     id: "model-a".to_owned(),
                     display_name: Some("Model A".to_owned()),
                     description: None,
-                    capabilities: Some(self.capabilities.clone()),
+                    capabilities: Some(
+                        self.cached_model_metadata_for("model-a")
+                            .map_or_else(|| self.capabilities.clone(), |value| value.capabilities),
+                    ),
                     pricing: self
-                        .metadata
+                        .cached_model_metadata_for("model-a")
                         .as_ref()
                         .and_then(|value| value.pricing.clone()),
                 },
@@ -143,8 +154,13 @@ impl Provider for ExtensionFixtureProvider {
                     id: "new-model".to_owned(),
                     display_name: Some("New Model".to_owned()),
                     description: None,
-                    capabilities: Some(self.capabilities.clone()),
-                    pricing: None,
+                    capabilities: Some(
+                        self.cached_model_metadata_for("new-model")
+                            .map_or_else(|| self.capabilities.clone(), |value| value.capabilities),
+                    ),
+                    pricing: self
+                        .cached_model_metadata_for("new-model")
+                        .and_then(|value| value.pricing),
                 },
             ],
         }))
@@ -948,6 +964,7 @@ fn extension_provider(
         private_name: private_name.to_owned(),
         capabilities: extension_capabilities(),
         metadata,
+        metadata_by_model: BTreeMap::new(),
     })
 }
 
@@ -1282,6 +1299,78 @@ async fn extension_metadata_is_preserved_and_unknown_pricing_stays_unpriced() {
         unknown.accounting_for_alias("fast", rw_providers::TokenUsage::default()),
         Cost::Unavailable { .. }
     ));
+}
+
+#[tokio::test]
+async fn multi_model_extension_binds_each_models_cached_metadata() {
+    let metadata =
+        |display_name: &str, capabilities: Capabilities, input, output| ProviderModelMetadata {
+            pricing: Some(ModelPricing {
+                display_name: display_name.to_owned(),
+                max_context_tokens: capabilities.max_context_tokens,
+                max_output_tokens: capabilities.max_output_tokens,
+                supports_tools: capabilities.tool_calling,
+                supports_thinking: capabilities.thinking,
+                reasoning_efforts: Vec::new(),
+                input_per_million_micros_usd: input,
+                output_per_million_micros_usd: output,
+                cache_read_per_million_micros_usd: None,
+                cache_write_per_million_micros_usd: None,
+                reasoning_per_million_micros_usd: None,
+            }),
+            accounting: UsageAccounting::ApiDollars,
+            capabilities,
+        };
+    let text_capabilities = Capabilities {
+        tool_calling: false,
+        ..extension_capabilities()
+    };
+    let vision_capabilities = Capabilities {
+        vision: true,
+        thinking: true,
+        ..extension_capabilities()
+    };
+    let text_metadata = metadata("Text", text_capabilities.clone(), 1, 2);
+    let vision_metadata = metadata("Vision", vision_capabilities.clone(), 3, 4);
+    let provider: Arc<dyn Provider> = Arc::new(ExtensionFixtureProvider {
+        private_name: "private-multi-model".to_owned(),
+        capabilities: Capabilities {
+            tool_calling: false,
+            ..extension_capabilities()
+        },
+        metadata: None,
+        metadata_by_model: BTreeMap::from([
+            ("model-a".to_owned(), text_metadata.clone()),
+            ("new-model".to_owned(), vision_metadata.clone()),
+        ]),
+    });
+    let mut config = extension_config("custom/model-a");
+    config.models.aliases.insert(
+        "fast".to_owned(),
+        vec!["custom/model-a".to_owned(), "custom/new-model".to_owned()],
+    );
+    let runtime = extension_factory()
+        .with_extension_providers([("custom/", provider)])
+        .build(&config)
+        .unwrap_or_else(|error| panic!("multi-model extension must build: {error}"));
+
+    let text = runtime
+        .resolved_model("custom/model-a")
+        .unwrap_or_else(|| panic!("text model must resolve"));
+    assert_eq!(text.capabilities(), &text_capabilities);
+    assert_eq!(text.pricing(), text_metadata.pricing.as_ref());
+    let vision = runtime
+        .resolved_model("custom/new-model")
+        .unwrap_or_else(|| panic!("vision model must resolve"));
+    assert_eq!(vision.capabilities(), &vision_capabilities);
+    assert_eq!(vision.pricing(), vision_metadata.pricing.as_ref());
+    assert_eq!(
+        runtime
+            .model_metadata("custom/new-model")
+            .await
+            .unwrap_or_else(|error| panic!("vision metadata must resolve: {error}")),
+        vision_metadata
+    );
 }
 
 #[test]

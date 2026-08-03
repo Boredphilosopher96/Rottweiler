@@ -121,6 +121,16 @@ pub trait PluginBoundaryRedactor: Send + Sync {
         value.to_vec()
     }
 
+    /// Redacts the safely-emittable prefix while returning the original tail
+    /// needed to detect a credential completed by the next transport chunk.
+    fn redact_streaming_prefix(&self, value: &[u8], retain: usize) -> (Vec<u8>, Vec<u8>) {
+        if retain == 0 {
+            (self.redact_bytes(value), Vec::new())
+        } else {
+            (Vec::new(), value.to_vec())
+        }
+    }
+
     /// Longest registered credential, used to retain an exact cross-chunk overlap.
     fn maximum_secret_bytes(&self) -> usize {
         0
@@ -797,6 +807,7 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
             Ok(count) => count,
         };
         let Ok(frames) = decoder.push(&buffer[..count]) else {
+            cancel_active_provider_http(&state.active_provider_http);
             terminate_and_reap(state.process.as_ref()).await;
             fail_pending(
                 &state.pending,
@@ -818,6 +829,7 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
         for frame in frames {
             let continue_reading = process_incoming_frame(frame, &state).await;
             if !continue_reading {
+                cancel_active_provider_http(&state.active_provider_http);
                 terminate_and_reap(state.process.as_ref()).await;
                 fail_pending(
                     &state.pending,
@@ -838,6 +850,7 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
             }
         }
     }
+    cancel_active_provider_http(&state.active_provider_http);
     fail_pending(
         &state.pending,
         rpc_error("connection_closed", "plugin RPC connection closed"),
@@ -848,6 +861,14 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
         &rpc_error("connection_closed", "plugin RPC connection closed"),
     );
     terminate_and_reap(state.process.as_ref()).await;
+}
+
+fn cancel_active_provider_http(active: &ActiveProviderHttp) {
+    if let Ok(mut active) = active.lock() {
+        for (_, cancellation) in std::mem::take(&mut *active) {
+            cancellation.cancel();
+        }
+    }
 }
 
 async fn terminate_and_reap(process: &dyn SupervisedPluginProcess) {
@@ -1156,26 +1177,14 @@ async fn stream_provider_http_body(
             break;
         };
         pending.extend_from_slice(&chunk?);
-        let redacted_pending = redactor.redact_bytes(&pending);
-        if redacted_pending != pending {
-            pending.clear();
-            send_provider_http_event(
-                writer,
-                redactor,
-                json!({
-                    "request_id": id,
-                    "event": {"type":"body","data_base64":BASE64_STANDARD.encode(redacted_pending)},
-                }),
-            )
-            .await?;
-            continue;
-        }
         if pending.len() <= overlap {
             continue;
         }
-        let emit = pending.len() - overlap;
-        let tail = pending.split_off(emit);
-        let bytes = std::mem::replace(&mut pending, tail);
+        let (bytes, tail) = redactor.redact_streaming_prefix(&pending, overlap);
+        pending = tail;
+        if bytes.is_empty() {
+            continue;
+        }
         send_provider_http_event(
             writer,
             redactor,
@@ -1840,6 +1849,7 @@ struct RpcProviderCatalogCache {
     catalog: Option<DiscoveredProviderCatalog>,
     aggregate_capabilities: Option<Capabilities>,
     single_model_metadata: Option<ProviderModelMetadata>,
+    metadata_by_model: BTreeMap<String, ProviderModelMetadata>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1948,6 +1958,7 @@ impl RpcProviderAdapter {
         let mut ids = BTreeSet::new();
         let mut models = Vec::with_capacity(response.models.len());
         let mut metadata = Vec::with_capacity(response.models.len());
+        let mut metadata_by_model = BTreeMap::new();
         for model in response.models {
             if model.id.is_empty()
                 || model.id.len() > MAX_NAME_BYTES
@@ -2004,7 +2015,7 @@ impl RpcProviderAdapter {
                     .reasoning
                     .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
             });
-            metadata.push(ProviderModelMetadata {
+            let model_metadata = ProviderModelMetadata {
                 capabilities: capabilities.clone(),
                 accounting: if pricing.is_some() {
                     UsageAccounting::ApiDollars
@@ -2012,7 +2023,9 @@ impl RpcProviderAdapter {
                     UsageAccounting::UnpricedApi
                 },
                 pricing: pricing.clone(),
-            });
+            };
+            metadata_by_model.insert(model.id.clone(), model_metadata.clone());
+            metadata.push(model_metadata);
             models.push(DiscoveredModel {
                 id: model.id,
                 display_name: model.display_name,
@@ -2029,6 +2042,7 @@ impl RpcProviderAdapter {
             }),
             aggregate_capabilities: Some(aggregate_capabilities),
             single_model_metadata: (metadata.len() == 1).then(|| metadata.remove(0)),
+            metadata_by_model,
         })
     }
 }
@@ -2092,6 +2106,14 @@ impl Provider for RpcProviderAdapter {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .single_model_metadata
             .clone()
+    }
+    fn cached_model_metadata_for(&self, model: &str) -> Option<ProviderModelMetadata> {
+        self.catalog_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .metadata_by_model
+            .get(model)
+            .cloned()
     }
     async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
         if !self.model_catalog {
@@ -2420,6 +2442,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protocol_two_catalog_caches_metadata_per_model() {
+        let provider = catalog_adapter(json!({"models":[{
+            "id":"text-only",
+            "capabilities":{
+                "tool_calling":false,"vision":false,"thinking":false,"cache_breakpoints":"none"
+            },
+            "pricing":{
+                "input_per_million_micros_usd":1_000_000,
+                "output_per_million_micros_usd":2_000_000
+            }
+        },{
+            "id":"vision-thinking",
+            "capabilities":{
+                "tool_calling":true,"vision":true,"thinking":true,"cache_breakpoints":"explicit"
+            },
+            "pricing":{
+                "input_per_million_micros_usd":3_000_000,
+                "output_per_million_micros_usd":4_000_000
+            }
+        }]}));
+        provider
+            .discover_models()
+            .await
+            .expect("valid multi-model catalog");
+
+        assert!(provider.cached_model_metadata().is_none());
+        let text = provider
+            .cached_model_metadata_for("text-only")
+            .expect("text model metadata");
+        assert!(!text.capabilities.tool_calling);
+        assert!(!text.capabilities.vision);
+        assert_eq!(
+            text.pricing
+                .expect("text pricing")
+                .input_per_million_micros_usd,
+            1_000_000
+        );
+        let vision = provider
+            .cached_model_metadata_for("vision-thinking")
+            .expect("vision model metadata");
+        assert!(vision.capabilities.tool_calling);
+        assert!(vision.capabilities.vision);
+        assert!(vision.capabilities.thinking);
+        assert_eq!(
+            vision
+                .pricing
+                .expect("vision pricing")
+                .input_per_million_micros_usd,
+            3_000_000
+        );
+        assert!(provider.cached_model_metadata_for("missing").is_none());
+    }
+
+    #[tokio::test]
     async fn malformed_provider_catalog_degrades_only_that_adapter() {
         let provider = catalog_adapter(json!({"models":[{
             "id":"duplicate",
@@ -2580,6 +2656,11 @@ mod tests {
                 .into_bytes()
         }
 
+        fn redact_streaming_prefix(&self, value: &[u8], retain: usize) -> (Vec<u8>, Vec<u8>) {
+            let redactor = rw_providers::FixtureRedactor::new([HTTP_SECRET.to_owned()]);
+            redactor.redact_streaming_prefix(value, retain)
+        }
+
         fn maximum_secret_bytes(&self) -> usize {
             HTTP_SECRET.len()
         }
@@ -2645,6 +2726,48 @@ mod tests {
                 body: Box::pin(futures_util::stream::iter(chunks)),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn provider_http_redaction_retains_overlap_after_an_earlier_match() {
+        let partial = 8;
+        let first = format!("prefix {HTTP_SECRET} {}", &HTTP_SECRET[..partial]);
+        let second = format!("{} suffix", &HTTP_SECRET[partial..]);
+        let mut body: PluginHttpByteStream = Box::pin(futures_util::stream::iter([
+            Ok(first.into_bytes()),
+            Ok(second.into_bytes()),
+        ]));
+        let (writer, mut receiver) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+
+        stream_provider_http_body(
+            &RpcId::String("stream-redaction".to_owned()),
+            &mut body,
+            &CancellationToken::default(),
+            &writer,
+            &HttpSecretRedactor,
+        )
+        .await
+        .expect("stream redaction");
+        drop(writer);
+
+        let mut rendered = Vec::new();
+        while let Some(frame) = receiver.recv().await {
+            let RpcFrame::Notification(notification) = frame else {
+                panic!("provider HTTP body must emit notifications");
+            };
+            let params = notification.params.expect("notification params");
+            if params.pointer("/event/type").and_then(Value::as_str) == Some("body") {
+                let encoded = params
+                    .pointer("/event/data_base64")
+                    .and_then(Value::as_str)
+                    .expect("encoded body");
+                rendered.extend(BASE64_STANDARD.decode(encoded).expect("valid body base64"));
+            }
+        }
+        assert_eq!(
+            String::from_utf8(rendered).expect("UTF-8 fixture"),
+            "prefix [REDACTED] [REDACTED] suffix"
+        );
     }
 
     #[async_trait]
@@ -3087,6 +3210,47 @@ mod tests {
             .shutdown(Duration::from_millis(30))
             .await
             .expect("bounded kill/reap");
+        assert!(process.killed.load(Ordering::Acquire) >= 1);
+    }
+
+    #[tokio::test]
+    async fn reader_exit_cancels_and_drains_active_provider_http() {
+        let process = Arc::new(FakeProcess::default());
+        let (plugin_output, host_stdout) = tokio::io::duplex(1024);
+        drop(plugin_output);
+        let (writer, _receiver) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+        let active_provider_http = Arc::new(StdMutex::new(BTreeMap::new()));
+        let cancellation = CancellationToken::default();
+        active_provider_http
+            .lock()
+            .expect("active HTTP lock")
+            .insert(
+                RpcId::String("active-http".to_owned()),
+                cancellation.clone(),
+            );
+        let enforcer = Arc::new(CapabilityEnforcer::new(&manifest(), process.clone()));
+        let state = ReaderState {
+            writer,
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
+            provider_streams: Arc::new(StdMutex::new(BTreeMap::new())),
+            provider_http: Arc::new(DenyPluginProviderHttpHandler),
+            active_provider_http: Arc::clone(&active_provider_http),
+            abandoned: Arc::new(Mutex::new(BTreeSet::new())),
+            enforcer,
+            push_handler: Arc::new(DenyPushHandler),
+            redactor: Arc::new(NoopPluginBoundaryRedactor),
+            process: process.clone(),
+        };
+
+        reader_loop(Box::pin(BufReader::new(host_stdout)), state).await;
+
+        assert!(cancellation.is_cancelled());
+        assert!(
+            active_provider_http
+                .lock()
+                .expect("active HTTP lock")
+                .is_empty()
+        );
         assert!(process.killed.load(Ordering::Acquire) >= 1);
     }
 

@@ -578,6 +578,13 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Returns cached metadata for one concrete model from a multi-model
+    /// catalog. Providers whose metadata is not model-specific may use the
+    /// default aggregate result.
+    fn cached_model_metadata_for(&self, _model: &str) -> Option<ProviderModelMetadata> {
+        self.cached_model_metadata()
+    }
+
     /// Queries the authenticated provider for its currently selectable models.
     /// Static and replay-only providers use the default `None` result.
     ///

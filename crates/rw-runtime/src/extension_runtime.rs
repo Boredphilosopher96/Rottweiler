@@ -1731,6 +1731,13 @@ impl PluginBoundaryRedactor for SharedPluginRedactor {
             .redact_bytes(value)
     }
 
+    fn redact_streaming_prefix(&self, value: &[u8], retain: usize) -> (Vec<u8>, Vec<u8>) {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .redact_streaming_prefix(value, retain)
+    }
+
     fn maximum_secret_bytes(&self) -> usize {
         self.0
             .read()

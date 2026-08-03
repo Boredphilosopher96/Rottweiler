@@ -1010,7 +1010,7 @@ impl ProviderRuntime {
         };
         let configured_pricing = declared_pricing(&self.config, provider_name, model);
         let metadata_accounting = inner
-            .cached_model_metadata()
+            .cached_model_metadata_for(model)
             .map_or(UsageAccounting::UnpricedApi, |value| value.accounting);
         if configured_pricing.is_some()
             && matches!(
@@ -1648,7 +1648,7 @@ where
         let mut route_candidates = BTreeMap::new();
         for (index, (candidate, (provider_name, model))) in unique_candidates.iter().enumerate() {
             if let Some(inner) = extension_providers.get(&format!("{provider_name}/")) {
-                let metadata = inner.cached_model_metadata();
+                let metadata = inner.cached_model_metadata_for(model);
                 let capabilities = metadata
                     .as_ref()
                     .map_or_else(|| inner.capabilities(), |value| value.capabilities.clone());
@@ -2770,7 +2770,11 @@ impl Provider for ModelBoundProvider {
     }
 
     async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
-        self.inner.model_metadata().await
+        let discovered = self.inner.model_metadata().await?;
+        Ok(self
+            .inner
+            .cached_model_metadata_for(&self.expected_model)
+            .or(discovered))
     }
 
     async fn discover_models(
@@ -2780,7 +2784,13 @@ impl Provider for ModelBoundProvider {
     }
 
     fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
-        self.inner.cached_model_metadata()
+        self.inner.cached_model_metadata_for(&self.expected_model)
+    }
+
+    fn cached_model_metadata_for(&self, model: &str) -> Option<ProviderModelMetadata> {
+        (model == self.expected_model)
+            .then(|| self.inner.cached_model_metadata_for(model))
+            .flatten()
     }
 
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {

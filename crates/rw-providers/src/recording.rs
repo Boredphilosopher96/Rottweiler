@@ -274,6 +274,43 @@ impl FixtureRedactor {
         }
     }
 
+    /// Redacts the safely-emittable prefix of a streaming buffer while
+    /// retaining enough original bytes to detect credentials split across the
+    /// next transport chunk.
+    #[must_use]
+    pub fn redact_streaming_prefix(&self, value: &[u8], retain: usize) -> (Vec<u8>, Vec<u8>) {
+        let initial_boundary = value.len().saturating_sub(retain);
+        let extend_boundary = |secrets: &[String]| {
+            let mut boundary = initial_boundary;
+            loop {
+                let extended = secrets.iter().fold(boundary, |extended, secret| {
+                    if secret.is_empty() || secret.len() > value.len() {
+                        return extended;
+                    }
+                    value
+                        .windows(secret.len())
+                        .enumerate()
+                        .filter(|(start, window)| *start < extended && *window == secret.as_bytes())
+                        .map(|(start, _)| start + secret.len())
+                        .max()
+                        .map_or(extended, |end| extended.max(end))
+                });
+                if extended == boundary {
+                    return boundary;
+                }
+                boundary = extended.min(value.len());
+            }
+        };
+        let boundary = match self.secrets.read() {
+            Ok(secrets) => extend_boundary(&secrets),
+            Err(poisoned) => extend_boundary(&poisoned.into_inner()),
+        };
+        (
+            self.redact_bytes(&value[..boundary]),
+            value[boundary..].to_vec(),
+        )
+    }
+
     fn redact(&self, value: &str) -> String {
         let redact_with = |secrets: &[String]| {
             let rendered = secrets.iter().fold(value.to_owned(), |rendered, secret| {
@@ -576,6 +613,10 @@ impl Provider for Recorder {
 
     fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
         self.inner.cached_model_metadata()
+    }
+
+    fn cached_model_metadata_for(&self, model: &str) -> Option<ProviderModelMetadata> {
+        self.inner.cached_model_metadata_for(model)
     }
 
     async fn discover_models(
