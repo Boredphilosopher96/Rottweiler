@@ -1,10 +1,24 @@
 # 04 — Extensibility
 
-Goal: pi-grade extensibility — nothing in the harness is magic. The test: **every built-in command, mode, agent, and tool registers through the APIs documented here.** If a built-in needs a private hook, the public API grows until it doesn't.
+Goal: pi-grade extensibility — nothing in the harness is magic. Built-in tools,
+commands, and modes use the shared registries documented here, and built-in and
+RPC providers meet at the same provider abstraction. If a built-in needs a
+private hook, the public API grows until it does not.
+Protocol-2 provider plugins now have the model metadata and host-mediated
+authentication needed for first-class routing; their remaining replay and
+execution-tier boundaries are stated below.
 
 ## Tier 1 — Declarative (no code)
 
 Discovery order (ADR-014), first match by name wins: `.agents/` (project) → `.rottweiler/` (project) → `~/.agents/` (user) → `~/.rottweiler/` (user). The open `.agents` location is primary so your config stays portable across harnesses; project-level artifacts are inert until their project extension inventory is trusted (05-SECURITY Layer 0).
+
+> **Durable discovery contract:** malformed, unreadable, or unsafe declarative
+> artifacts are skipped and reported as diagnostics. They must never prevent
+> Rottweiler from starting. Here, *fail closed* means that the individual
+> artifact does not load—not that discovery aborts the program. An untrusted
+> root that cannot be inventoried completely is discarded as a unit, receives
+> no fingerprint, and cannot be granted trust. A regression in this contract is
+> a bug.
 
 | Kind | Location | Format |
 |---|---|---|
@@ -54,12 +68,16 @@ Plugin returns a manifest on `initialize`:
 
 ```json
 {
-  "name": "my-plugin", "version": "1.0.0", "protocol": 1,
+  "name": "my-plugin", "version": "1.0.0", "protocol": 2,
   "capabilities": {
     "tools": [ { "name": "...", "description": "...", "schema": {...}, "caps": ["reads-fs"] } ],
     "commands": [ ... ],
     "hooks": [ "pre_tool", "post_tool", "session_start" ],
-    "providers": [ { "alias-prefix": "custom/" } ],
+    "providers": [ {
+      "alias-prefix": "custom/",
+      "capabilities": ["models"],
+      "credential-references": ["providers.custom.api_key"]
+    } ],
     "event_subscriptions": [ "ToolCallFinished", "TurnFinished" ]
   }
 }
@@ -87,11 +105,35 @@ Plugins can also *push*: `session/inject_message`, `session/set_status`, `ui/not
 
 ### Provider plugins
 
-A plugin can register a provider (capability `providers`): the router forwards IR requests for matching aliases over RPC. This keeps "endless extensibility" true even at the model layer (custom gateways, exotic providers) without touching core.
+A plugin can register an inference route (capability `providers`): the router
+forwards provider-neutral IR requests for matching aliases over RPC. Protocol 2
+can declare the approval-fingerprinted `models` capability and answer
+`provider/models` with a bounded catalog containing model capabilities,
+cache-breakpoint behavior, context/output limits, and optional pricing. The
+`RpcProviderAdapter` exposes that discovery and metadata through the normal live
+catalog, model binding, and accounting paths. Protocol-1 providers are unchanged
+and retain conservative fixed capabilities and unpriced API accounting.
+
+Protocol-2 providers can also declare bounded, approval-fingerprinted
+`credential-references`. For `provider/http`, the plugin sends the declared
+reference and a credential-free request. The host resolves and registers the
+secret, attaches it to the requested header, and owns the guarded HTTP request;
+the raw credential and authenticated request representation never enter a
+JSON-RPC value. `provider/http_event` streams a redacted response head and
+redacted body chunks (including secrets split across source chunks), while
+`provider/http_cancel` propagates cancellation. Requests remain constrained to
+the plugin's public `allowed_domains` entries, matching an exact host or
+subdomain. An undeclared alias/reference pair is a capability violation and
+terminates the plugin (ADR-022).
+
+Provider plugins are recordable and replayable, but currently at normalized
+provider-event fidelity: their adapter uses `WireMode::NormalizedReplay`.
+Replaying an arbitrary plugin-specific wire dialect through the plugin would
+require a larger protocol design.
 
 ### SDKs
 
-Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second (a crate wrapping the protocol). The protocol doc + JSON schema is the source of truth; SDKs are conveniences.
+Official plugin SDKs: **TypeScript first** (npm `@rottweiler/plugin`), Rust second (a crate wrapping the protocol). The protocol document plus checked-in schemas and canonical fixtures are the source of truth; SDKs are conveniences.
 
 ### Executable configuration and approval
 
@@ -144,11 +186,11 @@ allowed_domains = []
 
 `rw plugin status|approve|revoke` manages the separately fingerprinted plugin approval ledger. Production approval pins and displays the executable plus every explicit interpreter entrypoint and adjacent dependency descriptor by canonical path, length, and BLAKE3 identity; identities are revalidated immediately before launch, and eval/module/package-runner forms are rejected because their executed content cannot be attested narrowly. A separately pinned `code_root` (the manifest's parent directory) is the only plugin-owned directory readable without `reads-fs`; it must be a strict descendant of an approved workspace root, never the workspace root itself. Omit `cwd` to default it to that code root. The TypeScript production path is the scaffold's `bun run build`, which emits a standalone `dist/plugin`; `bun run start` remains the development path. `rw plugin scaffold --lang ts` emits the canonical protocol-1 TypeScript template and manifest. `rw plugin dev <path> --allow-dev-exec` is an explicit local-development escape hatch: it runs under the restrictive plugin sandbox, watches source files without a build loop, and never grants or mutates production approval.
 
-Protocol 1 is frozen by the plugin conformance suite: the Rust host runs the canonical generated scaffold plus independent tool/hook, event/push, and provider fixtures, and kills an undeclared-capability fixture. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Wire details and limits live in `packages/plugin-sdk/PROTOCOL.md` and its checked-in JSON schema.
+Protocol 2 is stable; protocol 1 remains frozen and supported unchanged. The Rust host and TypeScript SDK consume canonical fixtures for both generations. Provider plugins emit request-correlated `provider/event` notifications incrementally and receive `provider/cancel` when the consumer drops; their streams are bounded and cancellation-cleaned without a whole-call five-second deadline. Protocol-2 catalog and host-HTTP requests are separately bounded and negotiated. Wire details and limits live in `packages/plugin-sdk/PROTOCOL.md` and its checked-in JSON schemas/fixtures.
 
 The protocol documentation site is generated deterministically by
-`packages/plugin-docs` from that frozen Markdown, schema, and canonical wire
-fixture. It adds searchable navigation and direct schema/fixture downloads
+`packages/plugin-docs` from the stable Markdown, schemas, and canonical wire
+fixtures. It adds searchable navigation and direct schema/fixture downloads
 without introducing a second protocol source; CI rebuilds and tests the static
 site alongside the TypeScript SDK.
 
@@ -178,10 +220,29 @@ Registry catalogs are bounded refreshable caches, and every entry is validated b
 
 - `rw plugin scaffold --lang ts` generates a working plugin skeleton with tests.
 - `rw plugin dev <path>` runs a plugin with hot-restart and RPC tracing for debugging.
-- Protocol is versioned (`protocol: 1`); engine supports N and N-1.
+- Protocol is versioned (`protocol: 2`); the engine supports N and N-1, so
+  protocol-1 plugins remain compatible.
 
 ## What extensions can never do
 
-- Read credentials/API keys from the engine.
+These are permanent security invariants, not gaps awaiting work. Any future
+protocol version must preserve them.
+
+- Read raw credentials/API keys from the engine.
 - Bypass the permission engine or sandbox (a plugin tool's `caps` manifest is enforced, not trusted).
 - See redacted secrets (redaction runs before events reach plugins).
+
+## What extensions cannot do yet
+
+These are known gaps in the current protocol, not deliberate restrictions. They
+are expected to close without weakening any invariant above.
+
+- Preserve arbitrary provider-specific wire frames in recordings. RPC provider
+  plugins replay their normalized event stream; wire-fidelity replay through a
+  plugin needs a larger replay-through-plugin protocol.
+- Add a new core `AdapterKind` or `WireMode` through configuration. Those enums
+  remain closed correctness boundaries (ADR-024); a novel dialect belongs in a
+  versioned RPC provider.
+- Run a provider in the WASM component tier. Its current ABI accepts hooks only;
+  provider streaming, cancellation, host-mediated authentication, and
+  recordable framing remain on the trusted native RPC tier (ADR-025).

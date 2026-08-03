@@ -1881,7 +1881,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
-    let (mut runtime_hooks, wasm_startup_notifications, validated_wasm_hooks) =
+    let (mut runtime_hooks, mut wasm_startup_notifications, validated_wasm_hooks) =
         compose_runtime_hooks_with_extensions_validated(
             &loaded_config.config.toolchain,
             &toolchain_runtime,
@@ -1889,6 +1889,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
             Arc::clone(&built_tools.code_intelligence),
         )
         .await?;
+    wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     if let Some(plugins) = &plugin_runtime {
         for (registration, handler) in &plugins.hooks {
             runtime_hooks
@@ -2678,7 +2679,7 @@ pub(crate) async fn compose_hosted_actor(
     if let Some(index) = skill_index_turn(&extension_catalog)? {
         initial_context.push(index);
     }
-    let (mut runtime_hooks, wasm_startup_notifications, validated_wasm_hooks) =
+    let (mut runtime_hooks, mut wasm_startup_notifications, validated_wasm_hooks) =
         compose_runtime_hooks_with_extensions_validated(
             &options.config.toolchain,
             &toolchain_runtime,
@@ -2686,6 +2687,7 @@ pub(crate) async fn compose_hosted_actor(
             Arc::clone(&built_tools.code_intelligence),
         )
         .await?;
+    wasm_startup_notifications.extend(extension_startup_notifications(&extension_catalog));
     if let Some(plugins) = &plugin_runtime {
         for (registration, handler) in &plugins.hooks {
             runtime_hooks
@@ -5081,8 +5083,7 @@ impl RuntimeWorkspaceRootController {
             &self.extension_user_home,
             &self.extension_user_rottweiler,
             child_project_trusted,
-        )
-        .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
+        );
         let instruction_roots = Arc::new(RwLock::new(roots.clone()));
         let active_sources = Arc::new(RwLock::new(BTreeSet::new()));
         let mut hooks = compose_runtime_hooks_with_extensions(
@@ -5518,7 +5519,9 @@ fn trust_confirmation_token(assessments: &[rw_store::trust::FolderTrustAssessmen
                 .to_le_bytes(),
         );
         hasher.update(workspace);
-        hasher.update(assessment.executable_hash().as_bytes());
+        if let Some(executable_hash) = assessment.executable_hash() {
+            hasher.update(executable_hash.as_bytes());
+        }
     }
     hasher.finalize().to_hex().to_string()
 }
@@ -5550,9 +5553,19 @@ impl FolderTrustController for RuntimeFolderTrustController {
                 .iter()
                 .map(|workspace| store.assess(workspace).map_err(&trust_error))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            let untrustable = assessments
+                .iter()
+                .find_map(rw_store::trust::FolderTrustAssessment::inventory_failure);
             match operation {
                 FolderTrustOperation::Status => Ok(render_trust_assessments(&assessments)),
                 FolderTrustOperation::Grant { confirmation: None } => {
+                    if let Some(failure) = untrustable {
+                        return Err(AgentLoopError::InvalidConfiguration(format!(
+                            "refusing to grant folder trust because the project extension inventory is incomplete at {}: {}",
+                            failure.path().display(),
+                            failure.message()
+                        )));
+                    }
                     let token = trust_confirmation_token(&assessments);
                     Ok(format!(
                         "{}\nreview the exact inventory and confirm with `/trust grant {token}`\n",
@@ -5562,6 +5575,13 @@ impl FolderTrustController for RuntimeFolderTrustController {
                 FolderTrustOperation::Grant {
                     confirmation: Some(confirmation),
                 } => {
+                    if let Some(failure) = untrustable {
+                        return Err(AgentLoopError::InvalidConfiguration(format!(
+                            "refusing to grant folder trust because the project extension inventory is incomplete at {}: {}",
+                            failure.path().display(),
+                            failure.message()
+                        )));
+                    }
                     let expected = trust_confirmation_token(&assessments);
                     if confirmation != expected {
                         return Err(AgentLoopError::InvalidConfiguration(
@@ -9560,7 +9580,16 @@ fn register_declarative_hooks(
     Ok(())
 }
 
-pub(crate) fn discover_runtime_extensions(
+/// Discovers runtime extensions after applying folder-trust policy.
+///
+/// Active and inert artifact failures are returned in the usable catalog
+/// diagnostics; this function remains fallible for trust-store assessment.
+///
+/// # Errors
+///
+/// Returns an error when no workspace root is supplied or folder trust cannot
+/// be assessed.
+pub fn discover_runtime_extensions(
     workspace_roots: &[PathBuf],
     trust_store_path: &Path,
     user_home: &Path,
@@ -9586,8 +9615,9 @@ pub(crate) fn discover_runtime_extensions(
     for root in additional {
         config = config.with_additional_project_root(root, trusted(root)?);
     }
-    ExtensionCatalog::discover(&config)
-        .map_err(|error| miette!("extension discovery failed: {error}"))
+    let catalog = ExtensionCatalog::discover(&config);
+    warn_extension_diagnostics(&catalog);
+    Ok(catalog)
 }
 
 fn discover_runtime_extensions_derived(
@@ -9595,12 +9625,43 @@ fn discover_runtime_extensions_derived(
     user_home: &Path,
     user_rottweiler_root: &Path,
     project_trusted: bool,
-) -> Result<ExtensionCatalog> {
+) -> ExtensionCatalog {
     let config = ExtensionDiscoveryConfig::new(workspace_root, user_home)
         .with_project_trusted(project_trusted)
         .with_user_rottweiler_root(user_rottweiler_root);
-    ExtensionCatalog::discover(&config)
-        .map_err(|error| miette!("extension discovery failed: {error}"))
+    let catalog = ExtensionCatalog::discover(&config);
+    warn_extension_diagnostics(&catalog);
+    catalog
+}
+
+fn warn_extension_diagnostics(catalog: &ExtensionCatalog) {
+    for diagnostic in catalog.diagnostics() {
+        tracing::warn!(
+            path = %diagnostic.path().display(),
+            scope = ?diagnostic.scope(),
+            location = ?diagnostic.location(),
+            kind = ?diagnostic.kind(),
+            message = diagnostic.message(),
+            "declarative extension was skipped during discovery"
+        );
+    }
+}
+
+fn extension_startup_notifications(catalog: &ExtensionCatalog) -> Vec<StartupNotification> {
+    catalog
+        .diagnostics()
+        .iter()
+        .enumerate()
+        .map(|(index, diagnostic)| StartupNotification {
+            plugin_id: format!("extension-discovery:{}", index.saturating_add(1)),
+            status: "unavailable".to_owned(),
+            title: "Declarative extension unavailable".to_owned(),
+            message: sanitized_wasm_notice_text(
+                &format!("{}: {}", diagnostic.path().display(), diagnostic.message()),
+                1_024,
+            ),
+        })
+        .collect()
 }
 
 pub fn extension_user_roots(credentials_path: &Path) -> (PathBuf, PathBuf) {
@@ -12550,6 +12611,74 @@ mod tests {
             self.0.fetch_add(1, Ordering::SeqCst);
             ApprovalDecision::Deny
         }
+    }
+
+    #[test]
+    fn runtime_extension_startup_accepts_malformed_user_skill() {
+        let fixture = tempdir().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let storage = fixture.path().join("storage");
+        std::fs::create_dir_all(&project).expect("project");
+        let skill = home.join(".agents/skills/broken/SKILL.md");
+        std::fs::create_dir_all(skill.parent().expect("skill parent")).expect("skill directory");
+        std::fs::write(&skill, "missing frontmatter").expect("skill fixture");
+
+        let catalog = discover_runtime_extensions(
+            &[project],
+            &storage.join("trust.json"),
+            &home,
+            &home.join(".rottweiler"),
+            false,
+        )
+        .expect("startup discovery remains usable");
+
+        assert!(catalog.skills().next().is_none());
+        assert_eq!(catalog.diagnostics().len(), 1);
+        assert_eq!(catalog.diagnostics()[0].path(), skill);
+        let notifications = extension_startup_notifications(&catalog);
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].status, "unavailable");
+        assert!(notifications[0].message.contains("must start"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_extension_startup_accepts_uninventoriable_untrusted_project() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = tempdir().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let storage = fixture.path().join("storage");
+        let offending = project.join(".agents/commands/foo.md");
+        std::fs::create_dir_all(offending.parent().expect("commands")).expect("commands");
+        std::fs::write(fixture.path().join("outside.md"), "outside").expect("outside");
+        symlink(fixture.path().join("outside.md"), &offending).expect("symlink");
+
+        let catalog = discover_runtime_extensions(
+            &[project],
+            &storage.join("trust.json"),
+            &home,
+            &home.join(".rottweiler"),
+            false,
+        )
+        .expect("startup discovery remains usable");
+
+        assert!(catalog.commands().next().is_none());
+        assert!(catalog.inert_project_artifacts().is_empty());
+        assert_eq!(catalog.uninventoried_project_roots().len(), 1);
+        assert!(
+            catalog
+                .diagnostics()
+                .iter()
+                .any(|item| item.path() == offending)
+        );
+        assert!(
+            extension_startup_notifications(&catalog)
+                .iter()
+                .any(|item| item.message.contains(&offending.display().to_string()))
+        );
     }
 
     #[test]
@@ -15790,8 +15919,7 @@ mod tests {
         )
         .expect("skill resource");
 
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("catalog");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let index = skill_index_turn(&catalog)
             .expect("index")
             .expect("skill index");
@@ -15870,8 +15998,7 @@ mod tests {
             "---\ndescription: shell\n---\nresult=!`fixture-shell`",
         )
         .expect("command");
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("catalog");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let executor = Arc::new(FixtureToolchainExecutor::default());
         let mut tools = ToolRegistry::new();
         tools
@@ -15924,8 +16051,7 @@ mod tests {
         )
         .expect("hooks");
         std::fs::write(project.join("lib.rs"), "fn main() {}\n").expect("source");
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("catalog");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let executor = Arc::new(FixtureToolchainExecutor::default());
         let runtime = Arc::new(ToolchainRuntime::new(
             executor.clone(),
@@ -16025,8 +16151,7 @@ mod tests {
             executor,
             std::slice::from_ref(&project),
         ));
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("catalog");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let mut dispatcher = builtin_hook_dispatcher().expect("dispatcher");
         let error = register_declarative_hooks(&mut dispatcher, &catalog, &runtime)
             .expect_err("mutating lifecycle hook rejected");
@@ -16037,8 +16162,7 @@ mod tests {
             "[[hook]]\nevent = \"pre_compact\"\nmatcher = \"*\"\neffect = \"read-only\"\nrun = \"fixture-shell\"\n",
         )
         .expect("read-only lifecycle hook");
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("read-only catalog");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let mut dispatcher = builtin_hook_dispatcher().expect("dispatcher");
         register_declarative_hooks(&mut dispatcher, &catalog, &runtime)
             .expect("read-only lifecycle hook registers");
@@ -16083,8 +16207,7 @@ mod tests {
             scratch,
             std::slice::from_ref(&project),
         ));
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("catalog");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let mut dispatcher = builtin_hook_dispatcher().expect("dispatcher");
         register_declarative_hooks(&mut dispatcher, &catalog, &runtime).expect("hooks register");
 
@@ -18678,6 +18801,37 @@ mod tests {
                 assert!(!output.contains(&workspace.to_string_lossy().to_string()));
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_trust_grant_refuses_uninventoriable_root() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let offending = workspace.join(".agents/commands/foo.md");
+        std::fs::create_dir_all(offending.parent().expect("commands")).expect("commands");
+        std::fs::write(root.path().join("outside.md"), "outside").expect("outside");
+        symlink(root.path().join("outside.md"), &offending).expect("symlink");
+        let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
+        let offending = workspace.join(".agents/commands/foo.md");
+        let ledger = root.path().join("private/trust.json");
+        let controller = RuntimeFolderTrustController::new(ledger.clone(), vec![workspace]);
+
+        let status = controller
+            .execute(FolderTrustOperation::Status)
+            .await
+            .expect("status remains available");
+        assert!(status.contains("state: Untrustable"));
+        assert!(status.contains(&offending.display().to_string()));
+        let error = controller
+            .execute(FolderTrustOperation::Grant { confirmation: None })
+            .await
+            .expect_err("grant must be refused");
+        assert!(error.to_string().contains("inventory is incomplete"));
+        assert!(error.to_string().contains(&offending.display().to_string()));
+        assert!(!ledger.exists());
     }
 
     #[test]

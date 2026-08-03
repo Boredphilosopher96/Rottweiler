@@ -13,7 +13,7 @@ use crate::types::RawSseFrame;
 use crate::{
     AuthProvider, BoxEventStream, CacheBreakpointSupport, Capabilities, DiscoveredModel,
     DiscoveredProviderCatalog, FinishReason, NativeWebSearchCapability, NetworkPolicy, Provider,
-    ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyAuthentication,
+    ProviderError, ProviderErrorKind, ProviderEvent, ProviderRequest, ProxyAuthentication, Secret,
     ThinkingLevel, TokenUsage, ToolChoice, WireFrameSink, WireMode,
     http::{build_client_with_proxy_auth, require_network, response_error, transport_error},
     sse::{SseDecoder, SseEvent},
@@ -88,6 +88,16 @@ pub struct OpenAiCompatibleConfig {
     pub max_context_tokens: Option<u64>,
     /// Known output limit.
     pub max_output_tokens: Option<u64>,
+    /// Static non-secret request headers.
+    pub headers: BTreeMap<String, String>,
+    /// Secret request headers resolved from credential references.
+    pub header_credentials: BTreeMap<String, Secret>,
+    /// Extra request-body fields validated not to collide with engine fields.
+    pub extra_body: BTreeMap<String, Value>,
+    /// Catalog-facing to on-wire model identifier mappings.
+    pub model_ids: BTreeMap<String, String>,
+    /// Optional absolute request path containing one `{model}` segment.
+    pub path_template: Option<String>,
 }
 
 /// `OpenAI` Chat Completions / Responses adapter.
@@ -131,6 +141,12 @@ impl OpenAiCompatibleProvider {
         require_network(self.config.network_policy)?;
         let reasoning_endpoint = !self.config.supported_reasoning_efforts.is_empty();
         let material = self.config.auth.material().await?;
+        let wire_model = self
+            .config
+            .model_ids
+            .get(&request.model)
+            .map_or(request.model.as_str(), String::as_str);
+        let endpoint = self.endpoint_for_model(wire_model)?;
         let mut body = match self.config.wire_mode {
             OpenAiWireMode::ChatCompletions => build_chat_request(
                 &request,
@@ -139,6 +155,14 @@ impl OpenAiCompatibleProvider {
             ),
             OpenAiWireMode::Responses => build_responses_request(&request, reasoning_endpoint),
         };
+        let object = body.as_object_mut().ok_or_else(|| {
+            ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "OpenAI-compatible request body was not an object",
+            )
+        })?;
+        object.insert("model".to_owned(), Value::String(wire_model.to_owned()));
+        object.extend(self.config.extra_body.clone());
         apply_auth_request_shape(&mut body, &material);
         if let Some(session_id) = material.openai_subscription_session_id() {
             if self.config.wire_mode != OpenAiWireMode::Responses {
@@ -150,11 +174,12 @@ impl OpenAiCompatibleProvider {
             apply_subscription_request_shape(&mut body, session_id)?;
         }
         let mut headers = HeaderMap::new();
+        self.apply_configured_headers(&mut headers)?;
         material.apply_openai(&mut headers)?;
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         let response = self
             .client
-            .post(self.config.endpoint.clone())
+            .post(endpoint)
             .headers(headers)
             .json(&body)
             .send()
@@ -200,6 +225,47 @@ impl OpenAiCompatibleProvider {
             }
         };
         Ok(Box::pin(stream))
+    }
+
+    fn endpoint_for_model(&self, model: &str) -> Result<Url, ProviderError> {
+        let Some(template) = &self.config.path_template else {
+            return Ok(self.config.endpoint.clone());
+        };
+        let mut endpoint = self.config.endpoint.clone();
+        let mut segments = endpoint.path_segments_mut().map_err(|()| {
+            ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                "configured endpoint cannot accept a path template",
+            )
+        })?;
+        segments.clear();
+        for segment in template.trim_start_matches('/').split('/') {
+            segments.push(if segment == "{model}" { model } else { segment });
+        }
+        drop(segments);
+        Ok(endpoint)
+    }
+
+    fn apply_configured_headers(&self, headers: &mut HeaderMap) -> Result<(), ProviderError> {
+        for (name, value) in &self.config.headers {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::InvalidRequest,
+                    "configured provider header name is invalid",
+                )
+            })?;
+            crate::auth::insert_header(headers, name, value)?;
+        }
+        for (name, secret) in &self.config.header_credentials {
+            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                ProviderError::new(
+                    ProviderErrorKind::InvalidRequest,
+                    "configured credential header name is invalid",
+                )
+            })?;
+            crate::auth::insert_sensitive(headers, name, secret.expose_secret())?;
+        }
+        Ok(())
     }
 
     fn validate_request_capabilities(
@@ -266,6 +332,7 @@ impl OpenAiCompatibleProvider {
         let endpoint = discovery_endpoint(&self.config.endpoint, subscription)?;
         let optional_loopback_catalog = is_loopback(&endpoint) && !subscription;
         let mut headers = HeaderMap::new();
+        self.apply_configured_headers(&mut headers)?;
         material.apply_openai(&mut headers)?;
         if subscription {
             headers.insert(
@@ -1566,7 +1633,7 @@ pub(crate) fn replay_sse_frames(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use rw_types::{Block, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta};
     use serde_json::json;
@@ -2277,6 +2344,11 @@ mod tests {
             supports_vision: false,
             max_context_tokens: None,
             max_output_tokens: None,
+            headers: BTreeMap::new(),
+            header_credentials: BTreeMap::new(),
+            extra_body: BTreeMap::new(),
+            model_ids: BTreeMap::new(),
+            path_template: None,
         })
         .unwrap_or_else(|error| panic!("fixture provider must build: {error}"));
         let request = ProviderRequest {

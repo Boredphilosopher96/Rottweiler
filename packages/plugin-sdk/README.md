@@ -1,7 +1,7 @@
 # `@rottweiler/plugin`
 
-Official zero-runtime-dependency TypeScript SDK for Rottweiler's frozen
-newline-delimited JSON-RPC 2.0 plugin protocol 1.
+Official zero-runtime-dependency TypeScript SDK for Rottweiler's stable
+newline-delimited JSON-RPC 2.0 plugin protocol 2, with unchanged protocol-1 compatibility.
 
 Use `definePlugin` to declare the complete capability manifest and handlers,
 then call `runPlugin(plugin)` from the executable entry point. The SDK rejects
@@ -13,6 +13,15 @@ Provider handlers return an `AsyncIterable<ProviderEvent>`. Events cross the
 wire incrementally, and the handler signal aborts when the host drops or
 cancels that request. Provider streams are bounded but have no whole-call
 five-second deadline.
+
+Protocol-2 providers can declare `capabilities: ["models"]` and implement the
+matching `providerModels` handler. Its bounded catalog supplies selectable model
+ids, capabilities, limits, and optional integral pricing to the host.
+
+Authenticated protocol-2 providers declare `"credential-references"` on their
+provider entry and call `context.providerHttp.request`. The host resolves and
+attaches the credential, enforces `allowed_domains`, and streams the response;
+the plugin receives the reference and response bytes, never the credential value.
 
 Pushes are JSON-RPC requests and must be listed exactly in `capabilities.push`
 before `context.push` will emit them. Every handler receives an `AbortSignal`;

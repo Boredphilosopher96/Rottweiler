@@ -13,6 +13,10 @@ import {
   type PluginPushMethod,
   type ProviderCompleteParams,
   type ProviderEvent,
+  type ProviderModelsParams,
+  type ProviderModelsResponse,
+  type ProviderHttpRequest,
+  type ProviderHttpResponse,
   type ProviderStream,
   type RpcId,
   type ToolCallParams,
@@ -45,6 +49,10 @@ export interface PushApi {
 
 export interface HandlerContext {
   readonly push: PushApi
+  /** Host-owned authenticated HTTP. Credential values never enter this process. */
+  readonly providerHttp: {
+    request(credentialReference: string, request: ProviderHttpRequest): Promise<ProviderHttpResponse>
+  }
   /** Aborts on host shutdown, SIGINT/SIGTERM, provider cancellation, or a bounded non-provider handler timeout. */
   readonly signal: AbortSignal
   /** Writes only a bounded label to stderr. Never pass prompts, tool args, or credentials. */
@@ -65,6 +73,10 @@ export type ProviderHandler = (
   params: ProviderCompleteParams,
   context: HandlerContext,
 ) => ProviderStream | Promise<ProviderStream>
+export type ProviderModelsHandler = (
+  params: ProviderModelsParams,
+  context: HandlerContext,
+) => ProviderModelsResponse | Promise<ProviderModelsResponse>
 
 export interface PluginHandlers {
   readonly tools?: Readonly<Record<string, ToolHandler>>
@@ -72,6 +84,7 @@ export interface PluginHandlers {
   readonly hooks?: Partial<Readonly<Record<HookName, HookHandler>>>
   readonly events?: Readonly<Record<string, EventHandler>>
   readonly providers?: Readonly<Record<string, ProviderHandler>>
+  readonly providerModels?: Readonly<Record<string, ProviderModelsHandler>>
   readonly shutdown?: (signal: AbortSignal) => void | Promise<void>
 }
 
@@ -95,6 +108,71 @@ export interface RunOptions {
 
 const own = (value: object, key: string): boolean => Object.prototype.hasOwnProperty.call(value, key)
 const byteLength = (value: string): number => new TextEncoder().encode(value).byteLength
+
+class BoundedByteQueue implements AsyncIterable<Uint8Array> {
+  readonly #items: Uint8Array[] = []
+  readonly #readers: Array<(result: IteratorResult<Uint8Array>) => void> = []
+  readonly #writers: Array<() => void> = []
+  #done = false
+  #error: Error | undefined
+
+  constructor(private readonly capacity = 64, private readonly onCancel?: () => void) {}
+
+  async push(item: Uint8Array): Promise<void> {
+    while (!this.#done && this.#items.length >= this.capacity) {
+      await new Promise<void>((resolve) => this.#writers.push(resolve))
+    }
+    if (this.#done) return
+    const reader = this.#readers.shift()
+    if (reader !== undefined) reader({ done: false, value: item })
+    else this.#items.push(item)
+  }
+
+  finish(): void {
+    if (this.#done) return
+    this.#done = true
+    for (const reader of this.#readers.splice(0)) reader({ done: true, value: undefined })
+    for (const writer of this.#writers.splice(0)) writer()
+  }
+
+  fail(error: Error): void {
+    this.#error = error
+    this.finish()
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+    try {
+      while (true) {
+        if (this.#items.length > 0) {
+          const item = this.#items.shift()
+          this.#writers.shift()?.()
+          if (item !== undefined) yield item
+          continue
+        }
+        if (this.#done) {
+          if (this.#error !== undefined) throw this.#error
+          return
+        }
+        const next = await new Promise<IteratorResult<Uint8Array>>((resolve) => this.#readers.push(resolve))
+        if (next.done) {
+          if (this.#error !== undefined) throw this.#error
+          return
+        }
+        yield next.value
+      }
+    } finally {
+      if (!this.#done) this.onCancel?.()
+    }
+  }
+}
+
+interface PendingProviderHttp {
+  readonly body: BoundedByteQueue
+  readonly resolve: (response: ProviderHttpResponse) => void
+  readonly reject: (error: Error) => void
+  sawHead: boolean
+  sawFinished: boolean
+}
 
 function requireText(value: string, label: string, max: number): void {
   if (byteLength(value) === 0 || byteLength(value) > max || /[\p{Cc}]/u.test(value)) {
@@ -157,7 +235,9 @@ function validateDefinition(definition: PluginDefinition): void {
   requireKeys(manifest.capabilities, "capabilities", [
     "tools", "commands", "hooks", "providers", "event_subscriptions", "push",
   ])
-  if (manifest.protocol !== PLUGIN_PROTOCOL_VERSION) throw new Error("plugin manifest protocol must be 1")
+  if (manifest.protocol !== 1 && manifest.protocol !== PLUGIN_PROTOCOL_VERSION) {
+    throw new Error("plugin manifest protocol must be 1 or 2")
+  }
   requireCanonicalName(manifest.name, "plugin", "plugin name")
   requireText(manifest.version, "plugin version", PROTOCOL_LIMITS.maxVersionBytes)
   if (byteLength(JSON.stringify(manifest)) > PROTOCOL_LIMITS.maxManifestBytes) {
@@ -228,11 +308,37 @@ function validateDefinition(definition: PluginDefinition): void {
     for (const allowed of allowedTools) requireCanonicalName(allowed, "tool", "command allowed tool")
   }
   for (const provider of manifest.capabilities.providers ?? []) {
-    requireKeys(provider, "provider", ["alias-prefix"])
+    requireKeys(provider, "provider", ["alias-prefix", "capabilities", "credential-references"])
     const prefix = provider["alias-prefix"]
     if (byteLength(prefix) < 2 || byteLength(prefix) > PROTOCOL_LIMITS.maxNameBytes || !/^[a-z0-9_.-]+\/$/.test(prefix)) {
       throw new Error("provider alias-prefix must be a bounded canonical prefix ending in /")
     }
+    const capabilities = provider.capabilities ?? []
+    if (capabilities.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind) throw new Error("too many provider capabilities")
+    requireUnique(capabilities, "provider")
+    for (const capability of capabilities) requireCanonicalName(capability, "command", "provider capability")
+    const credentialReferences = provider["credential-references"] ?? []
+    if (credentialReferences.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind) {
+      throw new Error("too many provider credential references")
+    }
+    requireUnique(credentialReferences, "provider credential reference")
+    for (const reference of credentialReferences) {
+      requireCanonicalName(reference, "command", "provider credential reference")
+    }
+    if (manifest.protocol === 1 && (capabilities.length > 0 || credentialReferences.length > 0)) {
+      throw new Error("protocol 1 providers cannot declare protocol 2 capabilities or credentials")
+    }
+  }
+  const declaredModelProviders = (manifest.capabilities.providers ?? [])
+    .filter((provider) => provider.capabilities?.includes("models") === true)
+    .map((provider) => provider["alias-prefix"])
+  const implementedModelProviders = Object.keys(handlers.providerModels ?? {})
+  requireUnique(implementedModelProviders, "provider models handler")
+  for (const prefix of implementedModelProviders) {
+    if (!declaredModelProviders.includes(prefix)) throw new Error(`provider models handler ${prefix} exceeds the manifest`)
+  }
+  for (const prefix of declaredModelProviders) {
+    if (!implementedModelProviders.includes(prefix)) throw new Error(`provider models capability ${prefix} has no handler`)
   }
   const validToolCapabilities = new Set(["reads-fs", "writes-fs", "network", "exec"])
   for (const tool of manifest.capabilities.tools ?? []) {
@@ -268,6 +374,63 @@ function lockDefinition(definition: PluginDefinition): void {
   Object.freeze(definition)
 }
 
+function validateProviderModelsResponse(response: ProviderModelsResponse): void {
+  if (response === null || typeof response !== "object" || Array.isArray(response)) {
+    throw new Error("provider model catalog must be an object")
+  }
+  requireKeys(response, "provider model catalog", ["models"])
+  if (!Array.isArray(response.models) || response.models.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind) {
+    throw new Error("provider model catalog exceeds the entry limit")
+  }
+  const ids = new Set<string>()
+  for (const model of response.models) {
+    requireKeys(model, "provider model", [
+      "id", "display_name", "capabilities", "max_context_tokens", "max_output_tokens", "pricing",
+    ])
+    requireText(model.id, "provider model id", PROTOCOL_LIMITS.maxNameBytes)
+    if (ids.has(model.id)) throw new Error("provider model ids must be unique")
+    ids.add(model.id)
+    if (model.display_name !== undefined) {
+      requireText(model.display_name, "provider model display name", PROTOCOL_LIMITS.maxNameBytes)
+    }
+    if (model.capabilities === null || typeof model.capabilities !== "object" || Array.isArray(model.capabilities)) {
+      throw new Error("provider model capabilities must be an object")
+    }
+    requireKeys(model.capabilities, "provider model capabilities", [
+      "tool_calling", "vision", "thinking", "cache_breakpoints",
+    ])
+    if (
+      typeof model.capabilities.tool_calling !== "boolean"
+      || typeof model.capabilities.vision !== "boolean"
+      || typeof model.capabilities.thinking !== "boolean"
+      || !["none", "explicit", "automatic"].includes(model.capabilities.cache_breakpoints)
+    ) throw new Error("provider model capabilities are invalid")
+    for (const limit of [model.max_context_tokens, model.max_output_tokens]) {
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > PROTOCOL_LIMITS.maxModelTokens)) {
+        throw new Error("provider model token limit is invalid")
+      }
+    }
+    if (model.pricing !== undefined) {
+      requireKeys(model.pricing, "provider model pricing", [
+        "input_per_million_micros_usd", "output_per_million_micros_usd",
+        "cache_read_per_million_micros_usd", "cache_write_per_million_micros_usd",
+        "reasoning_per_million_micros_usd",
+      ])
+      for (const price of [
+        model.pricing.input_per_million_micros_usd,
+        model.pricing.output_per_million_micros_usd,
+        model.pricing.cache_read_per_million_micros_usd,
+        model.pricing.cache_write_per_million_micros_usd,
+        model.pricing.reasoning_per_million_micros_usd,
+      ]) {
+        if (price !== undefined && (!Number.isSafeInteger(price) || price < 0 || price > PROTOCOL_LIMITS.maxPriceMicrosUsd)) {
+          throw new Error("provider model price is invalid")
+        }
+      }
+    }
+  }
+}
+
 function defaultTransport(signal?: AbortSignal): ServerTransport {
   return {
     input: readableStreamBytes(Bun.stdin.stream(), signal),
@@ -288,10 +451,12 @@ export class PluginServer {
   readonly #pushCapabilities: ReadonlySet<PluginPushMethod>
   readonly #handlerTimeoutMs: number
   #nextPushId = 1
+  #nextProviderHttpId = 1
   #initialized = false
   #shuttingDown = false
   readonly #providerCalls = new Map<RpcId, AbortController>()
   readonly #providerTasks = new Set<Promise<void>>()
+  readonly #providerHttp = new Map<RpcId, PendingProviderHttp>()
 
   constructor(
     private readonly definition: PluginDefinition,
@@ -357,6 +522,7 @@ export class PluginServer {
       return
     }
     if (candidate.jsonrpc === "2.0" && typeof candidate.method !== "string" && id !== undefined) {
+      this.#handleProviderHttpResponse(id, candidate)
       return
     }
     if (candidate.jsonrpc !== "2.0" || typeof candidate.method !== "string") {
@@ -364,6 +530,15 @@ export class PluginServer {
       return
     }
     const isNotification = !own(candidate, "id")
+    if (candidate.method === RPC_METHODS.providerHttpEvent && isNotification) {
+      try {
+        await this.#handleProviderHttpEvent(candidate.params)
+      } catch {
+        this.#debug("notification provider/http_event failed")
+        this.#lifetime.abort()
+      }
+      return
+    }
     if (candidate.method === RPC_METHODS.providerCancel && isNotification) {
       try {
         this.#cancelProvider(candidate.params)
@@ -397,6 +572,12 @@ export class PluginServer {
     if (this.#shuttingDown) return
     this.#shuttingDown = true
     this.#lifetime.abort()
+    for (const pending of this.#providerHttp.values()) {
+      const error = new SafeRpcError(-32800, "plugin shutdown cancelled provider HTTP")
+      pending.body.fail(error)
+      pending.reject(error)
+    }
+    this.#providerHttp.clear()
     const handler = this.definition.handlers.shutdown
     if (handler === undefined) {
       await Promise.allSettled(this.#providerTasks)
@@ -420,18 +601,42 @@ export class PluginServer {
     if (method === RPC_METHODS.initialize) {
       if (this.#initialized) throw new SafeRpcError(-32600, "plugin is already initialized")
       const params = object(rawParams)
-      requireRpcKeys(params, "initialize params", ["host", "protocol", "min_protocol", "max_frame_bytes"])
+      requireRpcKeys(params, "initialize params", ["host", "protocol", "min_protocol", "max_frame_bytes", "capabilities"])
+      const selectedProtocol = this.definition.manifest.protocol
+      const hostCapabilities = params.capabilities
+      const needsProviderModels = this.definition.manifest.capabilities.providers?.some(
+        (provider) => provider.capabilities?.includes("models") === true,
+      ) === true
+      const needsProviderHttp = this.definition.manifest.capabilities.providers?.some(
+        (provider) => (provider["credential-references"]?.length ?? 0) > 0,
+      ) === true
       if (
         params.host !== "rottweiler"
-        || params.protocol !== PLUGIN_PROTOCOL_VERSION
+        || typeof params.protocol !== "number"
+        || !Number.isSafeInteger(params.protocol)
         || typeof params.min_protocol !== "number"
         || !Number.isSafeInteger(params.min_protocol)
         || params.min_protocol < 1
-        || params.min_protocol > PLUGIN_PROTOCOL_VERSION
+        || params.min_protocol > selectedProtocol
+        || params.protocol < selectedProtocol
+        || params.protocol > PLUGIN_PROTOCOL_VERSION
         || typeof params.max_frame_bytes !== "number"
         || !Number.isSafeInteger(params.max_frame_bytes)
         || params.max_frame_bytes < 1
         || params.max_frame_bytes > PROTOCOL_LIMITS.maxLineBytes
+        || (hostCapabilities !== undefined && (
+          !Array.isArray(hostCapabilities)
+          || hostCapabilities.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind
+          || hostCapabilities.some((capability) => typeof capability !== "string")
+        ))
+        || (selectedProtocol === 2 && needsProviderModels && (
+          !Array.isArray(hostCapabilities)
+          || !hostCapabilities.includes("provider-models")
+        ))
+        || (selectedProtocol === 2 && needsProviderHttp && (
+          !Array.isArray(hostCapabilities)
+          || !hostCapabilities.includes("provider-http")
+        ))
       ) {
         throw new SafeRpcError(-32001, "unsupported plugin protocol")
       }
@@ -472,7 +677,28 @@ export class PluginServer {
       await this.#runHandler((context) => handler(params, context))
       return null
     }
+    if (method === RPC_METHODS.providerModels) {
+      const params = this.#providerModelsParams(rawParams)
+      const handler = this.definition.handlers.providerModels?.[params.alias_prefix]
+      if (handler === undefined) throw new SafeRpcError(-32601, "provider models are not declared")
+      const response = await this.#runHandler(
+        (context) => handler(params, context),
+        params.alias_prefix,
+      )
+      validateProviderModelsResponse(response)
+      return response as unknown as JsonValue
+    }
     throw new SafeRpcError(-32601, "method not found")
+  }
+
+  #providerModelsParams(rawParams: unknown): ProviderModelsParams {
+    const params = object(rawParams, "provider/models params")
+    requireRpcKeys(params, "provider/models params", ["alias_prefix"])
+    const aliasPrefix = string(params.alias_prefix, "provider alias prefix")
+    if (!/^[a-z0-9_.-]+\/$/.test(aliasPrefix) || byteLength(aliasPrefix) > PROTOCOL_LIMITS.maxNameBytes) {
+      throw new SafeRpcError(-32602, "invalid provider alias prefix")
+    }
+    return { alias_prefix: aliasPrefix }
   }
 
   async #handleProvider(id: RpcId, rawParams: unknown): Promise<void> {
@@ -499,7 +725,7 @@ export class PluginServer {
     this.#providerCalls.set(id, call)
     let sawFinished = false
     try {
-      const events = await handler(params, this.#context(call.signal))
+      const events = await handler(params, this.#context(call.signal, params.alias))
       if (events === null || typeof events !== "object" || !(Symbol.asyncIterator in events)) {
         throw new SafeRpcError(-32603, "provider must return an async event stream")
       }
@@ -609,9 +835,171 @@ export class PluginServer {
     return this.#writer.write({ jsonrpc: "2.0", id, method, params })
   }
 
-  #context(signal: AbortSignal): HandlerContext {
+  async #providerHttpRequest(
+    alias: string | undefined,
+    credentialReference: string,
+    request: ProviderHttpRequest,
+    signal: AbortSignal,
+  ): Promise<ProviderHttpResponse> {
+    if (alias === undefined) throw new SafeRpcError(-32003, "provider HTTP is provider-scoped")
+    requireText(credentialReference, "credential reference", PROTOCOL_LIMITS.maxNameBytes)
+    requireText(request.url, "provider HTTP URL", PROTOCOL_LIMITS.maxHookPayloadBytes)
+    requireText(request.credential_header, "provider HTTP credential header", PROTOCOL_LIMITS.maxNameBytes)
+    if (request.credential_prefix !== undefined && byteLength(request.credential_prefix) > PROTOCOL_LIMITS.maxNameBytes) {
+      throw new SafeRpcError(-32602, "provider HTTP credential prefix is invalid")
+    }
+    if (!(["GET", "POST", "DELETE"] as const).includes(request.method)) {
+      throw new SafeRpcError(-32602, "provider HTTP method is invalid")
+    }
+    const headers = request.headers ?? []
+    if (headers.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind) {
+      throw new SafeRpcError(-32602, "provider HTTP headers exceed the entry limit")
+    }
+    for (const header of headers) {
+      requireText(header.name, "provider HTTP header name", PROTOCOL_LIMITS.maxNameBytes)
+      if (byteLength(header.value) > PROTOCOL_LIMITS.maxRpcMessageBytes) {
+        throw new SafeRpcError(-32602, "provider HTTP header value is invalid")
+      }
+    }
+    const body = request.body ?? new Uint8Array()
+    if (body.byteLength > PROTOCOL_LIMITS.maxLineBytes) {
+      throw new SafeRpcError(-32602, "provider HTTP request body exceeds the limit")
+    }
+    if (signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
+    const id = `plugin-http-${this.#nextProviderHttpId}`
+    this.#nextProviderHttpId += 1
+    let resolveResponse!: (response: ProviderHttpResponse) => void
+    let rejectResponse!: (error: Error) => void
+    const response = new Promise<ProviderHttpResponse>((resolve, reject) => {
+      resolveResponse = resolve
+      rejectResponse = reject
+    })
+    const cancel = () => {
+      const pending = this.#providerHttp.get(id)
+      if (pending === undefined) return
+      this.#providerHttp.delete(id)
+      pending.body.fail(new SafeRpcError(-32800, "provider HTTP request cancelled"))
+      pending.reject(new SafeRpcError(-32800, "provider HTTP request cancelled"))
+      void this.#writer.write({
+        jsonrpc: "2.0",
+        method: RPC_METHODS.providerHttpCancel,
+        params: { request_id: id },
+      }).catch(() => this.#debug("notification provider/http_cancel failed"))
+    }
+    const queue = new BoundedByteQueue(64, cancel)
+    this.#providerHttp.set(id, {
+      body: queue,
+      resolve: resolveResponse,
+      reject: rejectResponse,
+      sawHead: false,
+      sawFinished: false,
+    })
+    signal.addEventListener("abort", cancel, { once: true })
+    try {
+      await this.#writer.write({
+        jsonrpc: "2.0",
+        id,
+        method: RPC_METHODS.providerHttp,
+        params: {
+          alias,
+          credential_reference: credentialReference,
+          request: {
+            method: request.method,
+            url: request.url,
+            headers: headers as unknown as JsonValue,
+            body_base64: Buffer.from(body).toString("base64"),
+            credential_header: request.credential_header,
+            credential_prefix: request.credential_prefix ?? "",
+          },
+        },
+      })
+      return await response
+    } catch (error) {
+      cancel()
+      throw error
+    }
+  }
+
+  async #handleProviderHttpEvent(raw: unknown): Promise<void> {
+    const params = object(raw, "provider/http_event params")
+    requireRpcKeys(params, "provider/http_event params", ["request_id", "event"])
+    const requestId = params.request_id
+    if (typeof requestId !== "string" && typeof requestId !== "number") {
+      throw new SafeRpcError(-32602, "provider HTTP request id is invalid")
+    }
+    const pending = this.#providerHttp.get(requestId)
+    if (pending === undefined) return
+    const event = object(params.event, "provider HTTP event")
+    const type = string(event.type, "provider HTTP event type")
+    if (type === "head") {
+      requireRpcKeys(event, "provider HTTP head", ["type", "status", "headers"])
+      if (pending.sawHead || !Number.isSafeInteger(event.status) || (event.status as number) < 100 || (event.status as number) > 599) {
+        throw new SafeRpcError(-32603, "provider HTTP response head is invalid")
+      }
+      if (!Array.isArray(event.headers)) throw new SafeRpcError(-32603, "provider HTTP response headers are invalid")
+      const headers = event.headers.map((rawHeader) => {
+        if (!Array.isArray(rawHeader) || rawHeader.length !== 2 || rawHeader.some((entry) => typeof entry !== "string")) {
+          throw new SafeRpcError(-32603, "provider HTTP response header is invalid")
+        }
+        return { name: rawHeader[0] as string, value: rawHeader[1] as string }
+      })
+      pending.sawHead = true
+      pending.resolve({ status: event.status as number, headers, body: pending.body })
+      return
+    }
+    if (type === "body") {
+      requireRpcKeys(event, "provider HTTP body", ["type", "data_base64"])
+      if (!pending.sawHead || pending.sawFinished || typeof event.data_base64 !== "string") {
+        throw new SafeRpcError(-32603, "provider HTTP body event is invalid")
+      }
+      await pending.body.push(new Uint8Array(Buffer.from(event.data_base64, "base64")))
+      return
+    }
+    if (type === "finished") {
+      requireRpcKeys(event, "provider HTTP finished event", ["type"])
+      if (!pending.sawHead || pending.sawFinished) {
+        throw new SafeRpcError(-32603, "provider HTTP finished event is invalid")
+      }
+      pending.sawFinished = true
+      pending.body.finish()
+      return
+    }
+    throw new SafeRpcError(-32603, "provider HTTP event type is invalid")
+  }
+
+  #handleProviderHttpResponse(id: RpcId, message: Record<string, unknown>): void {
+    const pending = this.#providerHttp.get(id)
+    if (pending === undefined) return
+    this.#providerHttp.delete(id)
+    if (own(message, "error")) {
+      let safeData: JsonValue | undefined
+      if (message.error !== null && typeof message.error === "object" && !Array.isArray(message.error)) {
+        const data = (message.error as Record<string, unknown>).data
+        if (data !== null && typeof data === "object" && !Array.isArray(data)) {
+          const code = (data as Record<string, unknown>).code
+          if (typeof code === "string") safeData = { code }
+        }
+      }
+      const error = new SafeRpcError(-32020, "host-mediated provider HTTP failed", safeData)
+      pending.body.fail(error)
+      pending.reject(error)
+      return
+    }
+    if (!pending.sawHead || !pending.sawFinished || message.result !== null) {
+      const error = new SafeRpcError(-32603, "host-mediated provider HTTP ended incorrectly")
+      pending.body.fail(error)
+      pending.reject(error)
+    }
+  }
+
+  #context(signal: AbortSignal, providerAlias?: string): HandlerContext {
     return {
       signal,
+      providerHttp: {
+        request: (credentialReference, request) => this.#providerHttpRequest(
+          providerAlias, credentialReference, request, signal,
+        ),
+      },
       push: {
         injectMessage: (sessionId, content) => {
           requireText(sessionId, "session id", PROTOCOL_LIMITS.maxNameBytes)
@@ -638,7 +1026,10 @@ export class PluginServer {
     }
   }
 
-  async #runHandler<T>(invoke: (context: HandlerContext) => T | Promise<T>): Promise<T> {
+  async #runHandler<T>(
+    invoke: (context: HandlerContext) => T | Promise<T>,
+    providerAlias?: string,
+  ): Promise<T> {
     if (this.#lifetime.signal.aborted) throw new SafeRpcError(-32800, "plugin request cancelled")
     const call = new AbortController()
     let timedOut = false
@@ -660,7 +1051,7 @@ export class PluginServer {
     }, this.#handlerTimeoutMs)
     try {
       return await Promise.race([
-        Promise.resolve().then(() => invoke(this.#context(call.signal))),
+        Promise.resolve().then(() => invoke(this.#context(call.signal, providerAlias))),
         cancelled,
       ])
     } finally {

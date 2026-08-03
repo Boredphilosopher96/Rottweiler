@@ -1,9 +1,24 @@
-# Rottweiler plugin protocol 1
+# Rottweiler plugin protocol 2
 
-Status: **frozen**. The Rust host launches and passes the tool/hook, event/push, and provider
-conformance fixtures; an adversarial plugin-originated undeclared push is killed and reaped. The
-schema and fixture beside this file are the language-neutral source of truth; Rust and TypeScript
-tests consume them.
+Status: **stable**. Protocol 1 remains frozen and supported unchanged. The protocol-2 schema and
+fixture beside this file are the current language-neutral source of truth; Rust and TypeScript
+tests consume both protocol generations.
+
+## Version negotiation and compatibility
+
+The host sends `initialize` with `protocol` (the selected/highest mutually supported version),
+`min_protocol` (its lowest supported version), and an optional bounded string `capabilities` list.
+The selected version in the plugin's approved manifest must fall in that inclusive range.
+Protocol 2 requires `provider-models` for declared model discovery and `provider-http` for any
+declared credential reference. Unknown host capability strings are ignored, so later additive
+facilities remain negotiable without protocol 3.
+
+The engine accepts protocol 2 and N-1 (protocol 1). Protocol-1 manifests and wire behavior remain
+unchanged and receive the conservative provider defaults documented below. A protocol version is
+deprecated for at least one stable release before removal; removal may occur only when it is older
+than N-1 and must be announced in release notes. Additive optional methods and capability strings
+may be introduced within protocol 2. Breaking wire-shape, framing, or existing-method semantic
+changes require protocol 3.
 
 Transport is newline-terminated JSON-RPC 2.0 over stdin/stdout. Each JSON value is at most
 4 MiB excluding the newline. Empty or unterminated lines, invalid UTF-8/JSON, unknown response
@@ -25,11 +40,35 @@ approved declaration. Hooks declare `fail-open` or `fail-closed` and default to 
 deadline. Events are notifications. Pushes are requests and require an explicit declaration.
 
 Canonical methods are `initialize`, `tool/call`, `command/execute`, `hook/invoke`,
-`provider/complete`, `provider/event`, `provider/cancel`, `event/publish`,
-`session/inject_message`, `session/set_status`, `ui/notify`, `shutdown`, and `exit`. Exact examples
-live in `fixtures/wire/protocol-1.json`.
+`provider/complete`, `provider/models`, `provider/event`, `provider/cancel`, `event/publish`,
+`provider/http`, `provider/http_event`, `provider/http_cancel`, `session/inject_message`,
+`session/set_status`, `ui/notify`, `shutdown`, and `exit`. Exact examples
+live in `fixtures/wire/protocol-1.json` and `fixtures/wire/protocol-2.json`.
 
 `tool/call` returns `{ "content": string, "data": JSON, "truncated"?: boolean }`.
+Protocol-2 provider declarations opt into catalog RPC with
+`"capabilities": ["models"]`; this declaration is part of the approved manifest fingerprint.
+Other bounded canonical capability strings are retained in that fingerprint but confer no host
+authority unless the host recognizes and negotiates them.
+`provider/models` receives `{ "alias_prefix": string }` and returns `{ "models": [...] }`.
+Each model contains a bounded provider-local `id`, optional `display_name`, required
+`capabilities` (`tool_calling`, `vision`, `thinking`, and `cache_breakpoints`, whose value is
+`none`, `explicit`, or `automatic`), optional `max_context_tokens` / `max_output_tokens`, and
+optional integral micro-US-dollar per-million-token `pricing`. Catalog data flows only from the
+plugin to the host. It never exposes host credentials or bypasses the approved alias prefix.
+
+Protocol-1 providers do not receive `provider/models` and retain `tool_calling: true`, all other
+feature flags false, no cache breakpoints, no token limits, and unpriced API accounting.
+Protocol-2 provider declarations may also list bounded `credential-references`. The list is part
+of the approved manifest fingerprint, and the host refuses an alias/reference pair absent from
+that exact provider declaration. `context.providerHttp.request` sends only the reference plus a
+credential-free HTTP request. The host resolves and registers the secret, attaches it to the
+declared header, and owns the guarded socket. Responses arrive as correlated `head`, bounded
+base64 `body`, and `finished` events; dropping the body or aborting the provider sends
+`provider/http_cancel`. Neither the secret nor an authenticated request representation is ever
+serialized to the plugin. The same `allowed_domains`, public-address rail, process-wide network
+deny guard, response bounds, and backpressure used by guarded provider HTTP apply here.
+
 `provider/complete` receives Rottweiler's provider-neutral request (`model`, `turns`, `tools`,
 tagged `tool_choice`, `max_output_tokens`, nullable `temperature`, `thinking`, optional
 `cache_hint`). Its original JSON-RPC ID is the stream correlation ID. The plugin emits each tagged
@@ -52,3 +91,7 @@ private, local, link-local, and loopback destinations remain denied by the polic
 
 Limits: manifest 256 KiB; 256 entries per capability kind; names 128 bytes; version 64 bytes;
 descriptions 16 KiB; schemas 64 KiB and depth 32; hook replacements/injected messages 256 KiB.
+Catalogs contain at most 256 models. Model ids/display names are at most 128 bytes. Declared token
+limits are clamped to 1..16,777,216 and prices to 0..1,000,000,000,000 micro-USD per million
+tokens by the Rust boundary; the SDK rejects values outside those ranges. A malformed catalog
+fails discovery for that provider only and does not terminate startup or the session.

@@ -250,3 +250,65 @@ The extension registry is a distribution layer, not a trust root. Each release c
 **Rationale.** The user explicitly reprioritized the previously post-v1 WASM tier and registry. A component-only hook ABI captures the intended low-latency benefit without creating a second extension system or granting ambient machine authority. Independent publisher-key trust prevents a compromised catalog from substituting code, while exact artifact and manifest binding makes updates reviewable.
 
 **Revisit when.** Component-model interfaces for tools/providers can carry streaming, cancellation, permission, and redaction semantics without host imports that weaken this boundary; add those capabilities to the same manifest and dispatcher rather than introducing a parallel host.
+
+---
+
+## ADR-022: Plugin-provider authentication is host-mediated, never credential-passing
+
+**Status:** accepted 2026-08-02.
+
+**Decision.** A plugin provider never receives a credential. It asks the host over its provider RPC to perform the authenticated request, naming a credential reference; the host resolves that reference and sends the request through the guarded provider HTTP path.
+
+**Rationale.** Plugin processes run behind a supervised egress proxy configured from their `allowed_domains` policy and injected through `HTTP_PROXY`/`HTTPS_PROXY`. That proxy cannot add an `Authorization` header to HTTPS traffic: CONNECT reads only a bounded TLS ClientHello to validate SNI, then tunnels encrypted bytes without terminating TLS. Making it authenticate on the plugin's behalf would therefore require a plugin-trusted MITM CA, widening the attack surface substantially for a weaker boundary. The plugin environment is deliberately presentation-only as well: its allowlist rejects names containing `KEY`, `TOKEN`, `SECRET`, or `PASSWORD`.
+
+**Consequences (accepted).** Plugin-provider traffic joins the same guarded HTTP path as built-in providers, so per-provider proxying, retry/backoff, and secret redaction apply uniformly.
+
+Because the host now owns the socket, this decision *enables* recording actual request/response wire frames. **That is not implemented.** Plugin adapters remain pinned to `WireMode::NormalizedReplay` (`crates/rw-runtime/src/extension_runtime.rs:1510`, `crates/rw-ext/src/plugin_runtime.rs:1983`): capturing raw HTTP bytes alone would leave the replay provider unable to interpret an arbitrary plugin-specific wire dialect, so wire-fidelity replay needs a replay-through-plugin design that has not been done.
+
+Consequently the "deterministic replay is sacred" tenet holds for plugin providers only at **normalized-event fidelity**, not wire fidelity. This is a known, accepted limitation of the current implementation, not a property this ADR delivers.
+
+**Revisit when.** Never for raw credential delivery. Revisit only the shape of the narrowly scoped host request/signing RPC if a provider's documented authentication scheme cannot be represented without exposing a reusable secret.
+
+---
+
+## ADR-023: Declarative extension discovery is fail-soft; fail-closed scopes to the artifact
+
+**Status:** accepted 2026-08-02.
+
+**Decision.** A malformed, unreadable, or unsafe declarative artifact is skipped and reported as a diagnostic; it never prevents engine startup. “Fail closed” means that artifact does not load, not that the program does not start.
+
+**Rationale.** Discovery is input handling, not a startup dependency. Propagating a per-artifact error from active-root discovery through session engine construction made one bad file or symlink in `~/.agents/skills/` able to prevent `rw` launching in every repository. Refusing that artifact preserves the safety boundary without turning user-editable configuration into a global denial-of-service switch.
+
+**Decision (untrusted roots).** Failure to fully inventory an untrusted project root degrades that root as a unit: it remains inert, emits a diagnostic, and cannot be granted trust. Any partial inventory is discarded and produces no approvable fingerprint. Third-party repository content must not be able to abort the binary before the user has even received a trust prompt.
+
+**Consequences (accepted).** Diagnostics must identify the refused artifact/root without evaluating its content. User-scope artifacts remain available when an untrusted project root is inert. Trust assessment represents an incomplete root as untrustable and rejects a grant, rather than treating an incomplete inventory as an empty or partially approved fingerprint.
+
+**Revisit when.** Never for process-wide failure on an individual artifact. Revisit inventory bounds or diagnostic presentation only if they prevent safe inspection of legitimate large roots; any replacement must still prevent partial inventories from becoming trustable fingerprints.
+
+---
+
+## ADR-024: Configurable gateways use typed fields; adapter kinds and wire modes remain closed
+
+**Status:** accepted 2026-08-02.
+
+**Decision.** Provider configuration exposes typed gateway extension points: static custom headers and credential-referenced header values, authentication scheme and placement, extra query parameters, extra body fields, and catalog-to-wire model-id mappings. These cover mainstream gateways without Rust changes. `AdapterKind` and `WireMode` remain closed core enums.
+
+**Rationale.** Header/auth placement, parameters, bodies, and model naming are configuration concerns. A wire dialect is not: it determines parsing, error semantics, streaming, recording, and replay. An arbitrary config string for a novel dialect would turn a correctness and replay-determinism boundary into unvalidated data. A genuinely novel wire format belongs behind the plugin-provider protocol, where it can be explicitly versioned and constrained.
+
+**Constraints.** `[providers]` is user-scope-only and ignored from project configuration even after the project is trusted; these gateway fields inherit that boundary. Values that authenticate are credential references, never inline secrets.
+
+**Revisit when.** Open either enum only when a new dialect has a complete, versioned parser plus recorded-wire replay fixtures, cancellation/error semantics, and an evidence-backed reason it cannot be expressed by the plugin-provider protocol or existing typed gateway fields.
+
+---
+
+## ADR-025: Providers remain on the trusted native RPC tier
+
+**Status:** accepted 2026-08-02; narrows ADR-021's future-provider revisit condition without changing its WASM hook or registry decisions.
+
+**Decision.** The WASM component tier continues to reject provider, tool, command, event-subscription, and push capabilities. Third-party providers remain trusted native RPC processes until a component interface can preserve the required streaming and permission contracts.
+
+**Rationale.** The component tier is intentionally capability-scoped and signature-verified, but its current hook ABI is a bounded request/response string/JSON interface. It cannot express a provider's incremental stream, consumer cancellation, bounded backpressure, host-mediated credential operation, wire-frame recording/redaction, and per-request permission contract without introducing host imports that weaken the isolation it exists to provide.
+
+**Consequences (accepted).** “Any provider” currently entails a native-process supply-chain surface rather than the component tier's tighter capability boundary. The signed extension registry already protects signed WASM hook-component distribution; it does not make a native RPC provider a component or remove the native-process trust decision.
+
+**Revisit when.** The component model supplies a versioned provider capability with authenticated host calls that do not disclose credentials, incremental streaming with bounded backpressure and cancellation, recordable/redactable wire framing, and capability permissions that remain enforceable at each host boundary. Move providers through the existing manifest and dispatcher only after a conformance suite proves those contracts.

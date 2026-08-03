@@ -42,10 +42,10 @@ pub mod executable_config {
 /// Intentional session-runtime surface consumed by headless frontends.
 pub mod session {
     pub use crate::session_runtime::{
-        HostedProviderMode, RunAction, RunOptions, discover_model_catalog, extension_user_roots,
-        initialize_private_storage_root, load_inherited_accounting_boundary_bounded,
-        locate_wasm_host_executable, new_session_id, register_credential_environment, run,
-        select_interactive_session,
+        HostedProviderMode, RunAction, RunOptions, discover_model_catalog,
+        discover_runtime_extensions, extension_user_roots, initialize_private_storage_root,
+        load_inherited_accounting_boundary_bounded, locate_wasm_host_executable, new_session_id,
+        register_credential_environment, run, select_interactive_session,
     };
 }
 

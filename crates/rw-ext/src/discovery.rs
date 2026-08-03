@@ -6,6 +6,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -90,6 +91,72 @@ pub enum ArtifactKind {
     Agent,
     Workflow,
     Mode,
+}
+
+/// One extension source or incomplete inert inventory refused during discovery.
+///
+/// Diagnostics are presentation-neutral and bounded so the runtime can safely
+/// forward them to logs, doctor, and engine clients.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExtensionDiagnostic {
+    path: PathBuf,
+    scope: ArtifactScope,
+    location: ArtifactLocation,
+    kind: ArtifactKind,
+    message: String,
+    artifact_name: Option<String>,
+}
+
+/// An untrusted project whose extension inventory was discarded as incomplete.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UninventoriedProjectRoot {
+    root: PathBuf,
+    offending_path: PathBuf,
+    message: String,
+}
+
+impl UninventoriedProjectRoot {
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    #[must_use]
+    pub fn offending_path(&self) -> &Path {
+        &self.offending_path
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl ExtensionDiagnostic {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub const fn scope(&self) -> ArtifactScope {
+        self.scope
+    }
+
+    #[must_use]
+    pub const fn location(&self) -> ArtifactLocation {
+        self.location
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ArtifactKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 /// An untrusted project artifact visible to the folder-trust inventory.
@@ -532,6 +599,8 @@ pub struct ExtensionCatalog {
     modes: BTreeMap<String, ModeDefinition>,
     shell_hooks: Vec<DiscoveredShellHook>,
     inert_project_artifacts: Vec<InertProjectArtifact>,
+    uninventoried_project_roots: Vec<UninventoriedProjectRoot>,
+    diagnostics: Vec<ExtensionDiagnostic>,
 }
 
 impl ExtensionCatalog {
@@ -540,10 +609,12 @@ impl ExtensionCatalog {
     /// user `.rottweiler`. An untrusted project is inventoried but skipped for
     /// active resolution.
     ///
-    /// # Errors
-    ///
-    /// Returns a path-specific error for malformed or unsafe active sources.
-    pub fn discover(config: &ExtensionDiscoveryConfig) -> Result<Self, ExtensionDiscoveryError> {
+    /// Malformed, unsafe, or unreadable sources are skipped and reported
+    /// through [`Self::diagnostics`]. An incomplete untrusted-project inventory
+    /// is discarded as a unit and recorded in
+    /// [`Self::uninventoried_project_roots`].
+    #[must_use]
+    pub fn discover(config: &ExtensionDiscoveryConfig) -> Self {
         let user_sources = [
             (ArtifactLocation::Agents, config.user_home.join(".agents")),
             (
@@ -570,16 +641,14 @@ impl ExtensionCatalog {
             ];
             if trusted {
                 for (location, root) in project_sources {
-                    catalog.discover_active_root(ArtifactScope::Project, location, &root)?;
+                    catalog.discover_active_root(ArtifactScope::Project, location, &root);
                 }
             } else {
-                for (_, root) in project_sources {
-                    catalog.inventory_inert_project_root(&root)?;
-                }
+                catalog.inventory_inert_project(project_root, &project_sources);
             }
         }
         for (location, root) in user_sources {
-            catalog.discover_active_root(ArtifactScope::User, location, &root)?;
+            catalog.discover_active_root(ArtifactScope::User, location, &root);
         }
         catalog.shell_hooks.sort_by(|left, right| {
             left.registration()
@@ -587,7 +656,10 @@ impl ExtensionCatalog {
                 .cmp(&right.registration().priority())
                 .then_with(|| left.id().cmp(right.id()))
         });
-        Ok(catalog)
+        catalog
+            .diagnostics
+            .sort_by(|left, right| left.path.cmp(&right.path));
+        catalog
     }
 
     #[must_use]
@@ -661,112 +733,359 @@ impl ExtensionCatalog {
         &self.inert_project_artifacts
     }
 
+    /// Untrusted project roots whose partial inventories were discarded.
+    #[must_use]
+    pub fn uninventoried_project_roots(&self) -> &[UninventoriedProjectRoot] {
+        &self.uninventoried_project_roots
+    }
+
+    /// Refused artifacts and incomplete inventories in stable path order.
+    #[must_use]
+    pub fn diagnostics(&self) -> &[ExtensionDiagnostic] {
+        &self.diagnostics
+    }
+
     fn discover_active_root(
         &mut self,
         scope: ArtifactScope,
         location: ArtifactLocation,
         root: &Path,
-    ) -> Result<(), ExtensionDiscoveryError> {
-        for path in regular_children_with_extension(&root.join("commands"), "md")? {
-            let command = discover_command(scope, location, root, &path)?;
-            self.commands.entry(command.name.clone()).or_insert(command);
-        }
-        for path in skill_manifests(&root.join("skills"))? {
-            let skill = discover_skill(scope, location, root, &path)?;
-            self.skills.entry(skill.name.clone()).or_insert(skill);
-        }
-        for path in regular_children_with_extension(&root.join("agents"), "md")? {
-            let agent = discover_agent(scope, location, root, &path)?;
-            self.agents.entry(agent.name.clone()).or_insert(agent);
-        }
-        for path in regular_children_with_extension(&root.join("workflows"), "toml")? {
-            let workflow = crate::workflow::discover_workflow(scope, location, root, &path)?;
-            self.workflows
-                .entry(workflow.name().to_owned())
-                .or_insert(workflow);
-        }
-        for path in regular_children_with_extension(&root.join("modes"), "toml")? {
-            let origin = ArtifactOrigin::new(scope, location, path.clone());
-            let mode = crate::mode::parse_mode_file(root, &path, origin)?;
-            self.modes.entry(mode.id().0.clone()).or_insert(mode);
-        }
-        let hooks_path = root.join("hooks.toml");
-        if hooks_path.exists() {
-            for hook in shell_hook::discover_file(scope, location, &hooks_path)? {
-                if self
-                    .shell_hooks
-                    .iter()
-                    .all(|existing| existing.id() != hook.id())
-                {
-                    self.shell_hooks.push(hook);
+    ) {
+        self.discover_commands(scope, location, root);
+        self.discover_skills(scope, location, root);
+        self.discover_agents(scope, location, root);
+        self.discover_workflows(scope, location, root);
+        self.discover_modes(scope, location, root);
+        self.discover_hooks(scope, location, root);
+    }
+
+    fn discover_commands(&mut self, scope: ArtifactScope, location: ArtifactLocation, root: &Path) {
+        let commands = regular_children_with_extension(&root.join("commands"), "md");
+        self.record_scan_diagnostics(scope, location, ArtifactKind::Command, commands.diagnostics);
+        for path in commands.paths {
+            match discover_command(scope, location, root, &path) {
+                Ok(command) => {
+                    let name = command.name.clone();
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        self.commands.entry(name.clone())
+                    {
+                        mark_lower_precedence_fallback(
+                            &mut self.diagnostics,
+                            ArtifactKind::Command,
+                            &name,
+                            &path,
+                        );
+                        entry.insert(command);
+                    }
+                }
+                Err(error) => {
+                    self.record_diagnostic(scope, location, ArtifactKind::Command, path, &error);
                 }
             }
         }
-        Ok(())
     }
 
-    fn inventory_inert_project_root(&mut self, root: &Path) -> Result<(), ExtensionDiscoveryError> {
-        for path in regular_children_with_extension(&root.join("commands"), "md")? {
-            let contents = read_bounded_utf8(&path, MAX_MARKDOWN_BYTES)?;
-            self.inert_project_artifacts.push(InertProjectArtifact {
+    fn discover_skills(&mut self, scope: ArtifactScope, location: ArtifactLocation, root: &Path) {
+        let skills = skill_manifests(&root.join("skills"));
+        self.record_scan_diagnostics(scope, location, ArtifactKind::Skill, skills.diagnostics);
+        for path in skills.paths {
+            match discover_skill(scope, location, root, &path) {
+                Ok(skill) => {
+                    let name = skill.name.clone();
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        self.skills.entry(name.clone())
+                    {
+                        mark_lower_precedence_fallback(
+                            &mut self.diagnostics,
+                            ArtifactKind::Skill,
+                            &name,
+                            &path,
+                        );
+                        entry.insert(skill);
+                    }
+                }
+                Err(error) => {
+                    self.record_diagnostic(scope, location, ArtifactKind::Skill, path, &error);
+                }
+            }
+        }
+    }
+
+    fn discover_agents(&mut self, scope: ArtifactScope, location: ArtifactLocation, root: &Path) {
+        let agents = regular_children_with_extension(&root.join("agents"), "md");
+        self.record_scan_diagnostics(scope, location, ArtifactKind::Agent, agents.diagnostics);
+        for path in agents.paths {
+            match discover_agent(scope, location, root, &path) {
+                Ok(agent) => {
+                    let name = agent.name.clone();
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        self.agents.entry(name.clone())
+                    {
+                        mark_lower_precedence_fallback(
+                            &mut self.diagnostics,
+                            ArtifactKind::Agent,
+                            &name,
+                            &path,
+                        );
+                        entry.insert(agent);
+                    }
+                }
+                Err(error) => {
+                    self.record_diagnostic(scope, location, ArtifactKind::Agent, path, &error);
+                }
+            }
+        }
+    }
+
+    fn discover_workflows(
+        &mut self,
+        scope: ArtifactScope,
+        location: ArtifactLocation,
+        root: &Path,
+    ) {
+        let workflows = regular_children_with_extension(&root.join("workflows"), "toml");
+        self.record_scan_diagnostics(
+            scope,
+            location,
+            ArtifactKind::Workflow,
+            workflows.diagnostics,
+        );
+        for path in workflows.paths {
+            match crate::workflow::discover_workflow(scope, location, root, &path) {
+                Ok(workflow) => {
+                    let name = workflow.name().to_owned();
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        self.workflows.entry(name.clone())
+                    {
+                        mark_lower_precedence_fallback(
+                            &mut self.diagnostics,
+                            ArtifactKind::Workflow,
+                            &name,
+                            &path,
+                        );
+                        entry.insert(workflow);
+                    }
+                }
+                Err(error) => {
+                    self.record_diagnostic(scope, location, ArtifactKind::Workflow, path, &error);
+                }
+            }
+        }
+    }
+
+    fn discover_modes(&mut self, scope: ArtifactScope, location: ArtifactLocation, root: &Path) {
+        let modes = regular_children_with_extension(&root.join("modes"), "toml");
+        self.record_scan_diagnostics(scope, location, ArtifactKind::Mode, modes.diagnostics);
+        for path in modes.paths {
+            let origin = ArtifactOrigin::new(scope, location, path.clone());
+            match crate::mode::parse_mode_file(root, &path, origin) {
+                Ok(mode) => {
+                    let name = mode.id().0.clone();
+                    if let std::collections::btree_map::Entry::Vacant(entry) =
+                        self.modes.entry(name.clone())
+                    {
+                        mark_lower_precedence_fallback(
+                            &mut self.diagnostics,
+                            ArtifactKind::Mode,
+                            &name,
+                            &path,
+                        );
+                        entry.insert(mode);
+                    }
+                }
+                Err(error) => {
+                    self.record_diagnostic(scope, location, ArtifactKind::Mode, path, &error);
+                }
+            }
+        }
+    }
+
+    fn discover_hooks(&mut self, scope: ArtifactScope, location: ArtifactLocation, root: &Path) {
+        let hooks_path = root.join("hooks.toml");
+        match fs::symlink_metadata(&hooks_path) {
+            Ok(_) => match shell_hook::discover_file(scope, location, &hooks_path) {
+                Ok(hooks) => {
+                    for hook in hooks {
+                        if self
+                            .shell_hooks
+                            .iter()
+                            .all(|existing| existing.id() != hook.id())
+                        {
+                            self.shell_hooks.push(hook);
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.record_diagnostic(scope, location, ArtifactKind::Hook, hooks_path, &error);
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => self.record_diagnostic(
+                scope,
+                location,
+                ArtifactKind::Hook,
+                hooks_path.clone(),
+                &ExtensionDiscoveryError::Io {
+                    path: hooks_path,
+                    source,
+                },
+            ),
+        }
+    }
+
+    fn record_scan_diagnostics(
+        &mut self,
+        scope: ArtifactScope,
+        location: ArtifactLocation,
+        kind: ArtifactKind,
+        diagnostics: Vec<ScanDiagnostic>,
+    ) {
+        for diagnostic in diagnostics {
+            self.record_diagnostic(scope, location, kind, diagnostic.path, &diagnostic.error);
+        }
+    }
+
+    fn record_diagnostic(
+        &mut self,
+        scope: ArtifactScope,
+        location: ArtifactLocation,
+        kind: ArtifactKind,
+        path: PathBuf,
+        error: &ExtensionDiscoveryError,
+    ) {
+        self.diagnostics.push(ExtensionDiagnostic {
+            artifact_name: diagnostic_artifact_name(kind, &path),
+            path,
+            scope,
+            location,
+            kind,
+            message: sanitize_diagnostic_message(&error.to_string()),
+        });
+    }
+
+    fn inventory_inert_project(
+        &mut self,
+        project_root: &Path,
+        sources: &[(ArtifactLocation, PathBuf); 2],
+    ) {
+        let mut artifacts = Vec::new();
+        for (location, root) in sources {
+            if let Err(error) = Self::inventory_inert_project_root(root, &mut artifacts) {
+                let offending_path = discovery_error_path(&error).to_owned();
+                let kind = inventory_artifact_kind(root, &offending_path);
+                self.record_diagnostic(
+                    ArtifactScope::Project,
+                    *location,
+                    kind,
+                    offending_path.clone(),
+                    &error,
+                );
+                self.uninventoried_project_roots
+                    .push(UninventoriedProjectRoot {
+                        root: project_root.to_owned(),
+                        offending_path,
+                        message: sanitize_diagnostic_message(&error.to_string()),
+                    });
+                return;
+            }
+        }
+        self.inert_project_artifacts.extend(artifacts);
+    }
+
+    fn inventory_inert_project_root(
+        root: &Path,
+        artifacts: &mut Vec<InertProjectArtifact>,
+    ) -> Result<(), ExtensionDiscoveryError> {
+        match fs::symlink_metadata(root) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(ExtensionDiscoveryError::UnsafeEntry {
+                    path: root.to_owned(),
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(ExtensionDiscoveryError::Io {
+                    path: root.to_owned(),
+                    source,
+                });
+            }
+        }
+        for path in strict_regular_children_with_extension(&root.join("commands"), "md")? {
+            let contains_shell_interpolation = match read_bounded_utf8(&path, MAX_MARKDOWN_BYTES) {
+                Ok(contents) => contents.contains("!`"),
+                Err(
+                    ExtensionDiscoveryError::TooLarge { .. }
+                    | ExtensionDiscoveryError::NotUtf8 { .. },
+                ) => true,
+                Err(error) => return Err(error),
+            };
+            artifacts.push(InertProjectArtifact {
                 kind: ArtifactKind::Command,
-                name: file_stem(&path)?,
+                name: inert_file_stem(&path),
                 path,
-                contains_shell_interpolation: contents.contains("!`"),
-                executes_command: contents.contains("!`"),
+                contains_shell_interpolation,
+                executes_command: contains_shell_interpolation,
             });
         }
-        for path in skill_manifests(&root.join("skills"))? {
-            self.inert_project_artifacts.push(InertProjectArtifact {
+        for path in strict_skill_manifests(&root.join("skills"))? {
+            artifacts.push(InertProjectArtifact {
                 kind: ArtifactKind::Skill,
-                name: path
-                    .parent()
-                    .and_then(Path::file_name)
-                    .and_then(|name| name.to_str())
-                    .ok_or_else(|| ExtensionDiscoveryError::InvalidPath { path: path.clone() })?
-                    .to_owned(),
+                name: path.parent().and_then(Path::file_name).map_or_else(
+                    || path.to_string_lossy().into_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                ),
                 path,
                 contains_shell_interpolation: false,
                 executes_command: false,
             });
         }
-        for path in regular_children_with_extension(&root.join("agents"), "md")? {
-            self.inert_project_artifacts.push(InertProjectArtifact {
+        for path in strict_regular_children_with_extension(&root.join("agents"), "md")? {
+            artifacts.push(InertProjectArtifact {
                 kind: ArtifactKind::Agent,
-                name: file_stem(&path)?,
+                name: inert_file_stem(&path),
                 path,
                 contains_shell_interpolation: false,
                 executes_command: false,
             });
         }
-        for path in regular_children_with_extension(&root.join("workflows"), "toml")? {
-            self.inert_project_artifacts.push(InertProjectArtifact {
+        for path in strict_regular_children_with_extension(&root.join("workflows"), "toml")? {
+            artifacts.push(InertProjectArtifact {
                 kind: ArtifactKind::Workflow,
-                name: file_stem(&path)?,
+                name: inert_file_stem(&path),
                 path,
                 contains_shell_interpolation: false,
                 executes_command: true,
             });
         }
-        for path in regular_children_with_extension(&root.join("modes"), "toml")? {
-            self.inert_project_artifacts.push(InertProjectArtifact {
+        for path in strict_regular_children_with_extension(&root.join("modes"), "toml")? {
+            artifacts.push(InertProjectArtifact {
                 kind: ArtifactKind::Mode,
-                name: file_stem(&path)?,
+                name: inert_file_stem(&path),
                 path,
                 contains_shell_interpolation: false,
                 executes_command: false,
             });
         }
         let hooks_path = root.join("hooks.toml");
-        if hooks_path.exists() {
-            ensure_regular_file(&hooks_path)?;
-            self.inert_project_artifacts.push(InertProjectArtifact {
-                kind: ArtifactKind::Hook,
-                name: "hooks".to_owned(),
-                path: hooks_path,
-                contains_shell_interpolation: false,
-                executes_command: true,
-            });
+        match fs::symlink_metadata(&hooks_path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                artifacts.push(InertProjectArtifact {
+                    kind: ArtifactKind::Hook,
+                    name: "hooks".to_owned(),
+                    path: hooks_path,
+                    contains_shell_interpolation: false,
+                    executes_command: true,
+                });
+            }
+            Ok(_) => return Err(ExtensionDiscoveryError::UnsafeEntry { path: hooks_path }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(ExtensionDiscoveryError::Io {
+                    path: hooks_path,
+                    source,
+                });
+            }
         }
         Ok(())
     }
@@ -823,6 +1142,41 @@ pub enum ExtensionDiscoveryError {
     InvalidWorkflow { path: PathBuf, message: String },
     #[error("invalid mode definition `{path}`: {message}")]
     InvalidMode { path: PathBuf, message: String },
+}
+
+fn discovery_error_path(error: &ExtensionDiscoveryError) -> &Path {
+    match error {
+        ExtensionDiscoveryError::Io { path, .. }
+        | ExtensionDiscoveryError::UnsafeEntry { path }
+        | ExtensionDiscoveryError::TooLarge { path, .. }
+        | ExtensionDiscoveryError::NotUtf8 { path }
+        | ExtensionDiscoveryError::InvalidPath { path }
+        | ExtensionDiscoveryError::MissingFrontmatter { path }
+        | ExtensionDiscoveryError::UnterminatedFrontmatter { path }
+        | ExtensionDiscoveryError::InvalidFrontmatter { path, .. }
+        | ExtensionDiscoveryError::MissingField { path, .. }
+        | ExtensionDiscoveryError::InvalidName { path, .. }
+        | ExtensionDiscoveryError::ChangedAfterDiscovery { path }
+        | ExtensionDiscoveryError::UnterminatedShellInterpolation { path }
+        | ExtensionDiscoveryError::InvalidResourcePath { path }
+        | ExtensionDiscoveryError::InvalidHooksToml { path, .. }
+        | ExtensionDiscoveryError::InvalidHook { path, .. }
+        | ExtensionDiscoveryError::InvalidAgent { path, .. }
+        | ExtensionDiscoveryError::InvalidWorkflow { path, .. }
+        | ExtensionDiscoveryError::InvalidMode { path, .. } => path,
+    }
+}
+
+fn inventory_artifact_kind(root: &Path, path: &Path) -> ArtifactKind {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    match relative.components().next() {
+        Some(Component::Normal(name)) if name == "skills" => ArtifactKind::Skill,
+        Some(Component::Normal(name)) if name == "agents" => ArtifactKind::Agent,
+        Some(Component::Normal(name)) if name == "workflows" => ArtifactKind::Workflow,
+        Some(Component::Normal(name)) if name == "modes" => ArtifactKind::Mode,
+        Some(Component::Normal(name)) if name == "hooks.toml" => ArtifactKind::Hook,
+        _ => ArtifactKind::Command,
+    }
 }
 
 #[derive(Debug)]
@@ -1344,74 +1698,270 @@ fn validate_artifact_name(path: &Path, name: &str) -> Result<(), ExtensionDiscov
     }
 }
 
-fn regular_children_with_extension(
-    directory: &Path,
-    extension: &str,
-) -> Result<Vec<PathBuf>, ExtensionDiscoveryError> {
-    if !directory.exists() {
-        return Ok(Vec::new());
-    }
-    ensure_directory(directory)?;
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(directory).map_err(|source| ExtensionDiscoveryError::Io {
-        path: directory.to_owned(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| ExtensionDiscoveryError::Io {
-            path: directory.to_owned(),
-            source,
-        })?;
-        let path = entry.path();
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|source| ExtensionDiscoveryError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        if metadata.file_type().is_symlink() {
-            return Err(ExtensionDiscoveryError::UnsafeEntry { path });
+fn diagnostic_artifact_name(kind: ArtifactKind, path: &Path) -> Option<String> {
+    match kind {
+        ArtifactKind::Skill | ArtifactKind::Agent => read_bounded_utf8(path, MAX_MARKDOWN_BYTES)
+            .ok()
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    line.strip_prefix("name:")
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                })
+            })
+            .or_else(|| {
+                (kind == ArtifactKind::Skill)
+                    .then(|| path.parent()?.file_name()?.to_str().map(str::to_owned))
+                    .flatten()
+            }),
+        ArtifactKind::Command | ArtifactKind::Workflow | ArtifactKind::Mode => {
+            path.file_stem()?.to_str().map(str::to_owned)
         }
-        if metadata.is_file() && path.extension().is_some_and(|value| value == extension) {
-            paths.push(path);
-        }
+        ArtifactKind::Hook => None,
     }
-    paths.sort();
-    Ok(paths)
 }
 
-fn skill_manifests(directory: &Path) -> Result<Vec<PathBuf>, ExtensionDiscoveryError> {
-    if !directory.exists() {
-        return Ok(Vec::new());
+fn sanitize_diagnostic_message(message: &str) -> String {
+    const MAX_DIAGNOSTIC_CHARS: usize = 1_024;
+    message
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_DIAGNOSTIC_CHARS)
+        .collect()
+}
+
+fn mark_lower_precedence_fallback(
+    diagnostics: &mut [ExtensionDiagnostic],
+    kind: ArtifactKind,
+    name: &str,
+    selected_path: &Path,
+) {
+    for diagnostic in diagnostics.iter_mut().filter(|diagnostic| {
+        diagnostic.kind == kind && diagnostic.artifact_name.as_deref() == Some(name)
+    }) {
+        let _ = write!(
+            diagnostic.message,
+            "; lower-precedence valid artifact `{name}` selected from `{}`",
+            selected_path.display()
+        );
+        diagnostic.message = sanitize_diagnostic_message(&diagnostic.message);
     }
-    ensure_directory(directory)?;
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(directory).map_err(|source| ExtensionDiscoveryError::Io {
-        path: directory.to_owned(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| ExtensionDiscoveryError::Io {
-            path: directory.to_owned(),
-            source,
-        })?;
-        let path = entry.path();
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|source| ExtensionDiscoveryError::Io {
-                path: path.clone(),
-                source,
-            })?;
-        if metadata.file_type().is_symlink() {
-            return Err(ExtensionDiscoveryError::UnsafeEntry { path });
+}
+
+#[derive(Debug)]
+struct ScanDiagnostic {
+    path: PathBuf,
+    error: ExtensionDiscoveryError,
+}
+
+#[derive(Debug, Default)]
+struct ScanResult {
+    paths: Vec<PathBuf>,
+    diagnostics: Vec<ScanDiagnostic>,
+}
+
+fn regular_children_with_extension(directory: &Path, extension: &str) -> ScanResult {
+    let mut result = ScanResult::default();
+    let metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return result,
+        Err(source) => {
+            result.diagnostics.push(ScanDiagnostic {
+                path: directory.to_owned(),
+                error: ExtensionDiscoveryError::Io {
+                    path: directory.to_owned(),
+                    source,
+                },
+            });
+            return result;
         }
-        if !metadata.is_dir() {
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        result.diagnostics.push(ScanDiagnostic {
+            path: directory.to_owned(),
+            error: ExtensionDiscoveryError::UnsafeEntry {
+                path: directory.to_owned(),
+            },
+        });
+        return result;
+    }
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(source) => {
+            result.diagnostics.push(ScanDiagnostic {
+                path: directory.to_owned(),
+                error: ExtensionDiscoveryError::Io {
+                    path: directory.to_owned(),
+                    source,
+                },
+            });
+            return result;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(source) => {
+                result.diagnostics.push(ScanDiagnostic {
+                    path: directory.to_owned(),
+                    error: ExtensionDiscoveryError::Io {
+                        path: directory.to_owned(),
+                        source,
+                    },
+                });
+                continue;
+            }
+        };
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                result.diagnostics.push(ScanDiagnostic {
+                    path: path.clone(),
+                    error: ExtensionDiscoveryError::Io {
+                        path: path.clone(),
+                        source,
+                    },
+                });
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            result.diagnostics.push(ScanDiagnostic {
+                path: path.clone(),
+                error: ExtensionDiscoveryError::UnsafeEntry { path },
+            });
+        } else if metadata.is_file() {
+            if path.extension().is_some_and(|value| value == extension) {
+                result.paths.push(path);
+            }
+        } else if path.extension().is_some_and(|value| value == extension) {
+            result.diagnostics.push(ScanDiagnostic {
+                path: path.clone(),
+                error: ExtensionDiscoveryError::UnsafeEntry { path },
+            });
+        }
+    }
+    result.paths.sort();
+    result
+}
+
+fn skill_manifests(directory: &Path) -> ScanResult {
+    let mut result = ScanResult::default();
+    let metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return result,
+        Err(source) => {
+            result.diagnostics.push(ScanDiagnostic {
+                path: directory.to_owned(),
+                error: ExtensionDiscoveryError::Io {
+                    path: directory.to_owned(),
+                    source,
+                },
+            });
+            return result;
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        result.diagnostics.push(ScanDiagnostic {
+            path: directory.to_owned(),
+            error: ExtensionDiscoveryError::UnsafeEntry {
+                path: directory.to_owned(),
+            },
+        });
+        return result;
+    }
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(source) => {
+            result.diagnostics.push(ScanDiagnostic {
+                path: directory.to_owned(),
+                error: ExtensionDiscoveryError::Io {
+                    path: directory.to_owned(),
+                    source,
+                },
+            });
+            return result;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(source) => {
+                result.diagnostics.push(ScanDiagnostic {
+                    path: directory.to_owned(),
+                    error: ExtensionDiscoveryError::Io {
+                        path: directory.to_owned(),
+                        source,
+                    },
+                });
+                continue;
+            }
+        };
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                result.diagnostics.push(ScanDiagnostic {
+                    path: path.clone(),
+                    error: ExtensionDiscoveryError::Io {
+                        path: path.clone(),
+                        source,
+                    },
+                });
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            result.diagnostics.push(ScanDiagnostic {
+                path: path.clone(),
+                error: ExtensionDiscoveryError::UnsafeEntry { path },
+            });
             continue;
         }
         let manifest = path.join("SKILL.md");
-        if manifest.exists() {
-            ensure_regular_file(&manifest)?;
-            paths.push(manifest);
+        match fs::symlink_metadata(&manifest) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                result.paths.push(manifest);
+            }
+            Ok(_) => result.diagnostics.push(ScanDiagnostic {
+                path: manifest.clone(),
+                error: ExtensionDiscoveryError::UnsafeEntry { path: manifest },
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => result.diagnostics.push(ScanDiagnostic {
+                path: manifest.clone(),
+                error: ExtensionDiscoveryError::Io {
+                    path: manifest,
+                    source,
+                },
+            }),
         }
     }
-    paths.sort();
-    Ok(paths)
+    result.paths.sort();
+    result
+}
+
+fn strict_regular_children_with_extension(
+    directory: &Path,
+    extension: &str,
+) -> Result<Vec<PathBuf>, ExtensionDiscoveryError> {
+    let result = regular_children_with_extension(directory, extension);
+    if let Some(diagnostic) = result.diagnostics.into_iter().next() {
+        Err(diagnostic.error)
+    } else {
+        Ok(result.paths)
+    }
+}
+
+fn strict_skill_manifests(directory: &Path) -> Result<Vec<PathBuf>, ExtensionDiscoveryError> {
+    let result = skill_manifests(directory);
+    if let Some(diagnostic) = result.diagnostics.into_iter().next() {
+        Err(diagnostic.error)
+    } else {
+        Ok(result.paths)
+    }
 }
 
 fn collect_resource_paths(
@@ -1639,6 +2189,13 @@ fn file_stem(path: &Path) -> Result<String, ExtensionDiscoveryError> {
         })
 }
 
+fn inert_file_stem(path: &Path) -> String {
+    path.file_stem().map_or_else(
+        || path.to_string_lossy().into_owned(),
+        |stem| stem.to_string_lossy().into_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -1649,9 +2206,9 @@ mod tests {
 
     use super::{
         ArtifactKind, ArtifactLocation, ArtifactScope, ExtensionCatalog, ExtensionDiscoveryConfig,
-        ExtensionDiscoveryError, TemplatePart,
+        ExtensionDiscoveryError, MAX_MARKDOWN_BYTES, TemplatePart,
     };
-    use crate::{HookEvent, HookFailurePolicy};
+    use crate::{DiscoveredSkill, HookEvent, HookFailurePolicy, InertProjectArtifact};
 
     fn write(path: &Path, contents: &str) {
         fs::create_dir_all(path.parent().expect("fixture parent")).expect("create fixture parent");
@@ -1703,8 +2260,7 @@ mod tests {
 
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
-        )
-        .expect("discover");
+        );
 
         let shared = catalog.command("shared").expect("shared");
         assert_eq!(shared.description(), "project agents");
@@ -1755,8 +2311,7 @@ mod tests {
 
         let trusted = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
-        )
-        .expect("trusted discovery");
+        );
         assert_eq!(
             trusted
                 .skill("shared-skill")
@@ -1765,8 +2320,7 @@ mod tests {
             "project"
         );
 
-        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("untrusted discovery");
+        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         assert_eq!(
             untrusted
                 .skill("shared-skill")
@@ -1802,8 +2356,7 @@ mod tests {
 
         let trusted = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
-        )
-        .expect("trusted catalog");
+        );
         assert_eq!(
             trusted.agent("review").expect("agent").description(),
             "project open"
@@ -1817,8 +2370,7 @@ mod tests {
             ArtifactScope::Project
         );
 
-        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("untrusted catalog");
+        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         assert_eq!(
             untrusted
                 .agent("review")
@@ -1857,8 +2409,7 @@ mod tests {
         );
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let replacement = fixture.path().join("replacement");
         write(
             &replacement.join("audit.md"),
@@ -1898,8 +2449,7 @@ mod tests {
             "---\ndescription: safe user command\n---\nuser body",
         );
 
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("untrusted source is only inventoried");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
 
         assert_eq!(
             catalog
@@ -1919,6 +2469,30 @@ mod tests {
     }
 
     #[test]
+    fn malformed_binary_and_oversized_untrusted_commands_remain_in_trust_inventory() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let binary = project.join(".agents/commands/binary.md");
+        fs::create_dir_all(binary.parent().expect("parent")).expect("commands");
+        fs::write(&binary, [0xff, 0xfe]).expect("binary command");
+        write(
+            &project.join(".agents/commands/oversized.md"),
+            &"x".repeat(usize::try_from(MAX_MARKDOWN_BYTES + 1).expect("fixture size")),
+        );
+
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+
+        assert_eq!(catalog.inert_project_artifacts().len(), 2);
+        assert!(
+            catalog
+                .inert_project_artifacts()
+                .iter()
+                .all(InertProjectArtifact::executes_command)
+        );
+    }
+
+    #[test]
     fn command_frontmatter_and_template_operations_remain_lazy() {
         let fixture = TempDir::new().expect("fixture");
         let project = fixture.path().join("project");
@@ -1934,8 +2508,7 @@ mod tests {
              ---\n\
              Review $ARGUMENTS, first=$1 second=$2. !`git status` Include @src/main.rs.",
         );
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("discover");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let command = catalog.command("/review").expect("review command");
         assert_eq!(command.model(), Some("fast"));
         assert_eq!(command.allowed_tools(), ["Read", "Bash(git status)"]);
@@ -1975,8 +2548,7 @@ mod tests {
             &home.join(".agents/commands/both.md"),
             "---\ndescription: both\nargs: OLD\nargument-hint: NEW\n---\n$ARGUMENTS",
         );
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("discover");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         assert_eq!(
             catalog.command("old").expect("old").argument_hint(),
             Some("FILE")
@@ -2012,8 +2584,7 @@ mod tests {
         write(&root.join("scripts/check.sh"), "#!/bin/sh\nexit 0\n");
         write(&root.join("references/policy.md"), "policy");
 
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("discover");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let skill = catalog.skill("release").expect("skill");
         assert_eq!(skill.description(), "Prepare a release");
         assert_eq!(skill.allowed_tools(), ["Read", "Bash(cargo test)"]);
@@ -2055,8 +2626,7 @@ mod tests {
         let outside = fixture.path().join("outside");
         write(&outside.join("policy.md"), "swapped policy");
 
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("discover");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let resource = catalog
             .skill("release")
             .expect("skill")
@@ -2072,6 +2642,426 @@ mod tests {
         assert!(resource.load().is_err());
     }
 
+    fn assert_single_diagnostic(
+        catalog: &ExtensionCatalog,
+        kind: ArtifactKind,
+        path: &Path,
+        message: &str,
+    ) {
+        assert_eq!(catalog.diagnostics().len(), 1);
+        let diagnostic = &catalog.diagnostics()[0];
+        assert_eq!(diagnostic.kind(), kind);
+        assert_eq!(diagnostic.path(), path);
+        assert!(
+            diagnostic.message().contains(message),
+            "unexpected diagnostic: {}",
+            diagnostic.message()
+        );
+    }
+
+    #[test]
+    fn missing_frontmatter_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/skills/bad/SKILL.md");
+        write(&path, "name: bad\ndescription: bad");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Skill, &path, "must start");
+    }
+
+    #[test]
+    fn unterminated_frontmatter_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/skills/bad/SKILL.md");
+        write(&path, "---\nname: bad\ndescription: bad");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Skill, &path, "unterminated");
+    }
+
+    #[test]
+    fn invalid_frontmatter_isolated_to_one_artifact() {
+        let cases = [
+            "---\n name: bad\ndescription: bad\n---\nbody",
+            "---\nname bad\ndescription: bad\n---\nbody",
+            "---\nName: bad\ndescription: bad\n---\nbody",
+            "---\nname: bad\ndescription: first\ndescription: duplicate\n---\nbody",
+            "---\nname: bad\ndescription: bad\nallowed-tools:\n  -\n---\nbody",
+        ];
+        for contents in cases {
+            let fixture = TempDir::new().expect("fixture");
+            let project = fixture.path().join("project");
+            let home = fixture.path().join("home");
+            let path = home.join(".agents/skills/bad/SKILL.md");
+            write(&path, contents);
+            let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+            assert_single_diagnostic(&catalog, ArtifactKind::Skill, &path, "invalid frontmatter");
+        }
+    }
+
+    #[test]
+    fn missing_field_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/skills/bad/SKILL.md");
+        write(&path, "---\nname: bad\n---\nbody");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Skill, &path, "description");
+    }
+
+    #[test]
+    fn invalid_name_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/skills/bad/SKILL.md");
+        write(
+            &path,
+            "---\nname: Not Portable\ndescription: bad\n---\nbody",
+        );
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(
+            &catalog,
+            ArtifactKind::Skill,
+            &path,
+            "invalid extension name",
+        );
+    }
+
+    #[test]
+    fn invalid_agent_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/agents/bad.md");
+        write(
+            &path,
+            "---\nname: other\ndescription: bad\nmodel: fast\npermission-mode: discuss\n---\nbody",
+        );
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Agent, &path, "invalid agent");
+    }
+
+    #[test]
+    fn invalid_workflow_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/workflows/bad.toml");
+        write(&path, "description = \"bad\"");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Workflow, &path, "invalid workflow");
+    }
+
+    #[test]
+    fn invalid_mode_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/modes/bad.toml");
+        write(
+            &path,
+            "id = \"other\"\ndescription = \"bad\"\nprompt = \"bad\"",
+        );
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Mode, &path, "invalid mode");
+    }
+
+    #[test]
+    fn invalid_hooks_toml_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/hooks.toml");
+        write(&path, "[[hook]");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Hook, &path, "invalid hooks TOML");
+    }
+
+    #[test]
+    fn invalid_hook_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/hooks.toml");
+        write(
+            &path,
+            "[[hook]]\nevent = \"not-real\"\nmatcher = \"*\"\nrun = \"true\"",
+        );
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Hook, &path, "invalid hook #1");
+    }
+
+    #[test]
+    fn too_large_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/skills/bad/SKILL.md");
+        write(
+            &path,
+            &"x".repeat(usize::try_from(MAX_MARKDOWN_BYTES + 1).expect("fixture size")),
+        );
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Skill, &path, "exceeds");
+    }
+
+    #[test]
+    fn not_utf8_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/skills/bad/SKILL.md");
+        fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        fs::write(&path, [0xff, 0xfe]).expect("fixture");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Skill, &path, "not UTF-8");
+    }
+
+    #[test]
+    fn invalid_path_isolated_to_one_artifact() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/commands/nonportable.md");
+        let mut catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        catalog.record_diagnostic(
+            ArtifactScope::User,
+            ArtifactLocation::Agents,
+            ArtifactKind::Command,
+            path.clone(),
+            &ExtensionDiscoveryError::InvalidPath { path: path.clone() },
+        );
+        assert_single_diagnostic(&catalog, ArtifactKind::Command, &path, "portable UTF-8");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn non_utf8_discovered_path_isolated_to_one_artifact() {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt as _};
+
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home
+            .join(".agents/commands")
+            .join(OsString::from_vec(b"bad\xff.md".to_vec()));
+        write(&path, "---\ndescription: bad\n---\nbody");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Command, &path, "portable UTF-8");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn io_error_isolated_to_one_artifact() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let path = home.join(".agents/skills/bad/SKILL.md");
+        write(&path, "---\nname: bad\ndescription: bad\n---\nbody");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o0)).expect("deny reads");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Skill, &path, "failed to inspect");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_entry_isolated_to_one_artifact() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let target = fixture.path().join("target.md");
+        write(&target, "---\ndescription: target\n---\nbody");
+        let path = home.join(".agents/commands/bad.md");
+        fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+        symlink(&target, &path).expect("symlink");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_single_diagnostic(&catalog, ArtifactKind::Command, &path, "not a regular file");
+    }
+
+    #[test]
+    fn malformed_skill_keeps_both_valid_siblings() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let skills = home.join(".agents/skills");
+        write(
+            &skills.join("alpha/SKILL.md"),
+            "---\nname: alpha\ndescription: alpha\n---\nbody",
+        );
+        write(&skills.join("broken/SKILL.md"), "broken");
+        write(
+            &skills.join("zeta/SKILL.md"),
+            "---\nname: zeta\ndescription: zeta\n---\nbody",
+        );
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_eq!(
+            catalog
+                .skills()
+                .map(DiscoveredSkill::name)
+                .collect::<Vec<_>>(),
+            ["alpha", "zeta"]
+        );
+        assert_eq!(catalog.diagnostics().len(), 1);
+    }
+
+    #[test]
+    fn malformed_skill_does_not_suppress_other_artifact_kinds() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let root = home.join(".agents");
+        write(&root.join("skills/bad/SKILL.md"), "broken");
+        write(
+            &root.join("commands/check.md"),
+            "---\ndescription: check\n---\nbody",
+        );
+        write(
+            &root.join("agents/review.md"),
+            "---\nname: review\ndescription: review\nmodel: fast\npermission-mode: discuss\n---\nbody",
+        );
+        write(
+            &root.join("workflows/delivery.toml"),
+            "description = \"delivery\"\n[[step]]\nid = \"review\"\nagent = \"review\"",
+        );
+        write(
+            &root.join("modes/audit.toml"),
+            "id = \"audit\"\ndescription = \"audit\"\npermission = \"discuss\"\nprompt = \"audit\"",
+        );
+        write(
+            &root.join("hooks.toml"),
+            "[[hook]]\nevent = \"turn_end\"\nmatcher = \"*\"\nrun = \"true\"",
+        );
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert!(catalog.command("check").is_some());
+        assert!(catalog.agent("review").is_some());
+        assert!(catalog.workflow("delivery").is_some());
+        assert!(catalog.mode("audit").is_some());
+        assert_eq!(catalog.shell_hooks().len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_in_skills_and_commands_keep_valid_siblings() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let root = home.join(".agents");
+        write(
+            &root.join("skills/good/SKILL.md"),
+            "---\nname: good\ndescription: good\n---\nbody",
+        );
+        write(
+            &root.join("commands/good.md"),
+            "---\ndescription: good\n---\nbody",
+        );
+        let outside_skill = fixture.path().join("outside-skill");
+        write(
+            &outside_skill.join("SKILL.md"),
+            "---\nname: linked\ndescription: linked\n---\nbody",
+        );
+        let outside_command = fixture.path().join("outside-command.md");
+        write(&outside_command, "---\ndescription: linked\n---\nbody");
+        symlink(&outside_skill, root.join("skills/linked")).expect("skill symlink");
+        symlink(&outside_command, root.join("commands/linked.md")).expect("command symlink");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert!(catalog.skill("good").is_some());
+        assert!(catalog.command("good").is_some());
+        assert!(catalog.skill("linked").is_none());
+        assert!(catalog.command("linked").is_none());
+        assert_eq!(catalog.diagnostics().len(), 2);
+    }
+
+    #[test]
+    fn malformed_user_and_project_artifacts_do_not_cross_suppress_scopes() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        write(&project.join(".agents/skills/project-bad/SKILL.md"), "bad");
+        write(
+            &project.join(".agents/commands/project-good.md"),
+            "---\ndescription: project\n---\nbody",
+        );
+        write(&home.join(".agents/skills/user-bad/SKILL.md"), "bad");
+        write(
+            &home.join(".agents/commands/user-good.md"),
+            "---\ndescription: user\n---\nbody",
+        );
+        let catalog = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
+        );
+        assert!(catalog.command("project-good").is_some());
+        assert!(catalog.command("user-good").is_some());
+        assert_eq!(catalog.diagnostics().len(), 2);
+        assert!(
+            catalog
+                .diagnostics()
+                .iter()
+                .any(|item| item.scope() == ArtifactScope::Project)
+        );
+        assert!(
+            catalog
+                .diagnostics()
+                .iter()
+                .any(|item| item.scope() == ArtifactScope::User)
+        );
+    }
+
+    #[test]
+    fn diagnostics_are_sorted_and_carry_exact_paths() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let zeta = home.join(".agents/skills/zeta/SKILL.md");
+        let alpha = home.join(".agents/skills/alpha/SKILL.md");
+        write(&zeta, "bad");
+        write(&alpha, "bad");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(project, home));
+        assert_eq!(
+            catalog
+                .diagnostics()
+                .iter()
+                .map(|item| item.path().to_owned())
+                .collect::<Vec<_>>(),
+            [alpha, zeta]
+        );
+    }
+
+    #[test]
+    fn lower_precedence_valid_skill_wins_after_malformed_shadow() {
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let malformed = project.join(".agents/skills/project/SKILL.md");
+        let fallback = home.join(".agents/skills/user/SKILL.md");
+        write(&malformed, "---\nname: shared\n---\nbody");
+        write(
+            &fallback,
+            "---\nname: shared\ndescription: fallback\n---\nbody",
+        );
+        let catalog = ExtensionCatalog::discover(
+            &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
+        );
+        assert_eq!(
+            catalog.skill("shared").expect("fallback").origin().path(),
+            fallback
+        );
+        assert!(
+            catalog.diagnostics()[0]
+                .message()
+                .contains("lower-precedence valid artifact `shared` selected")
+        );
+    }
+
     #[test]
     fn changed_markdown_fails_closed_before_lazy_load() {
         let fixture = TempDir::new().expect("fixture");
@@ -2079,8 +3069,7 @@ mod tests {
         let home = fixture.path().join("home");
         let path = home.join(".agents/commands/check.md");
         write(&path, "---\ndescription: check\n---\noriginal");
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("discover");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         fs::write(&path, "---\ndescription: check\n---\nchanged").expect("mutate");
 
         assert!(matches!(
@@ -2098,21 +3087,16 @@ mod tests {
             &home.join(".agents/commands/missing.md"),
             "---\nmodel: fast\n---\nbody",
         );
-        assert!(matches!(
-            ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home)),
-            Err(ExtensionDiscoveryError::MissingField {
-                field: "description",
-                ..
-            })
-        ));
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
+        assert!(catalog.command("missing").is_none());
+        assert!(catalog.diagnostics()[0].message().contains("description"));
 
         fs::remove_file(home.join(".agents/commands/missing.md")).expect("remove malformed");
         write(
             &home.join(".agents/commands/shell.md"),
             "---\ndescription: shell\n---\n!`unterminated",
         );
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("metadata discovery is lazy");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         assert!(matches!(
             catalog.command("shell").expect("shell").load_template(),
             Err(ExtensionDiscoveryError::UnterminatedShellInterpolation { .. })
@@ -2145,8 +3129,7 @@ mod tests {
             ),
         );
 
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("discover hooks");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         let hooks = catalog.shell_hooks();
         assert_eq!(hooks.len(), 2);
         assert_eq!(hooks[0].id(), "shell.user.agents.2");
@@ -2200,8 +3183,7 @@ mod tests {
 
         let trusted = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
-        )
-        .expect("trusted hooks");
+        );
         assert_eq!(
             trusted
                 .shell_hook("shared")
@@ -2211,8 +3193,7 @@ mod tests {
             "project-command"
         );
 
-        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("untrusted project hooks stay unparsed");
+        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         assert_eq!(
             untrusted
                 .shell_hook("shared")
@@ -2249,8 +3230,7 @@ mod tests {
             &path,
             "[[hook]]\nid = \"check\"\nevent = \"turn_end\"\nmatcher = \"*\"\nrun = \"original\"\n",
         );
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("discover");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         fs::write(
             &path,
             "[[hook]]\nid = \"check\"\nevent = \"turn_end\"\nmatcher = \"*\"\nrun = \"changed\"\n",
@@ -2273,19 +3253,25 @@ mod tests {
             &path,
             "[[hook]]\nevent = \"not_real\"\nmatcher = \"*\"\nrun = \"echo ok\"\n",
         );
-        assert!(matches!(
-            ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home)),
-            Err(ExtensionDiscoveryError::InvalidHook { index: 1, .. })
-        ));
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
+        assert!(catalog.shell_hooks().is_empty());
+        assert!(
+            catalog.diagnostics()[0]
+                .message()
+                .contains("invalid hook #1")
+        );
 
         write(
             &path,
             "[[hook]]\nevent = \"post_tool\"\nmatcher = \"*\"\nrun = \"first\\nsecond\"\n",
         );
-        assert!(matches!(
-            ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home)),
-            Err(ExtensionDiscoveryError::InvalidHook { index: 1, .. })
-        ));
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
+        assert!(catalog.shell_hooks().is_empty());
+        assert!(
+            catalog.diagnostics()[0]
+                .message()
+                .contains("invalid hook #1")
+        );
     }
 
     #[test]
@@ -2303,8 +3289,7 @@ mod tests {
         write(&project_mode, &mode("project"));
         write(&user_mode, &mode("user"));
 
-        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("untrusted discovery");
+        let untrusted = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         assert_eq!(
             untrusted
                 .mode("audit")
@@ -2318,8 +3303,7 @@ mod tests {
 
         let trusted = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
-        )
-        .expect("trusted discovery");
+        );
         assert_eq!(
             trusted.mode("audit").expect("project mode").description(),
             "project"
@@ -2338,11 +3322,118 @@ mod tests {
             &home.join(".agents/modes/plan.toml"),
             "id = \"plan\"\ndescription = \"Unsafe plan\"\npermission = \"execute\"\nprompt = \"Mutate freely\"\n",
         );
-        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home))
-            .expect("mode discovery");
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
         assert_eq!(
             crate::compose_mode_registry(&catalog),
             Err(crate::ModeRegistryError::Duplicate("plan".to_owned()))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_command_symlink_discards_inventory_and_reports_exact_path() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let outside = fixture.path().join("outside.md");
+        write(&outside, "outside");
+        let offending = project.join(".agents/commands/foo.md");
+        fs::create_dir_all(offending.parent().expect("commands")).expect("commands");
+        symlink(&outside, &offending).expect("symlink");
+
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
+
+        assert!(catalog.commands().next().is_none());
+        assert!(catalog.inert_project_artifacts().is_empty());
+        assert_eq!(catalog.uninventoried_project_roots().len(), 1);
+        assert_eq!(
+            catalog.uninventoried_project_roots()[0].offending_path(),
+            offending
+        );
+        assert!(
+            catalog
+                .diagnostics()
+                .iter()
+                .any(|item| { item.path() == offending && item.scope() == ArtifactScope::Project })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn untrusted_skill_symlink_discards_inventory_without_partial_fingerprint_input() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        write(
+            &project.join(".agents/commands/valid.md"),
+            "---\ndescription: valid\n---\nbody",
+        );
+        let outside = fixture.path().join("outside-skill");
+        fs::create_dir_all(&outside).expect("outside skill");
+        let offending = project.join(".agents/skills/evil");
+        fs::create_dir_all(offending.parent().expect("skills")).expect("skills");
+        symlink(&outside, &offending).expect("symlink");
+
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
+
+        assert!(catalog.inert_project_artifacts().is_empty());
+        assert_eq!(catalog.uninventoried_project_roots().len(), 1);
+        assert!(
+            catalog
+                .diagnostics()
+                .iter()
+                .any(|item| { item.path() == offending && item.kind() == ArtifactKind::Skill })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_untrusted_inventory_directory_is_diagnostic_not_startup_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let offending = project.join(".agents/commands");
+        fs::create_dir_all(&offending).expect("commands");
+        fs::set_permissions(&offending, fs::Permissions::from_mode(0o000)).expect("deny reads");
+
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
+        fs::set_permissions(&offending, fs::Permissions::from_mode(0o700)).expect("restore reads");
+
+        assert!(catalog.inert_project_artifacts().is_empty());
+        assert_eq!(catalog.uninventoried_project_roots().len(), 1);
+        assert!(
+            catalog
+                .diagnostics()
+                .iter()
+                .any(|item| item.path() == offending)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_untrusted_command_body_is_diagnostic_not_startup_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = TempDir::new().expect("fixture");
+        let project = fixture.path().join("project");
+        let home = fixture.path().join("home");
+        let offending = project.join(".agents/commands/foo.md");
+        write(&offending, "body");
+        fs::set_permissions(&offending, fs::Permissions::from_mode(0o000)).expect("deny reads");
+
+        let catalog = ExtensionCatalog::discover(&ExtensionDiscoveryConfig::new(&project, &home));
+        fs::set_permissions(&offending, fs::Permissions::from_mode(0o600)).expect("restore reads");
+
+        assert!(catalog.inert_project_artifacts().is_empty());
+        assert_eq!(catalog.uninventoried_project_roots().len(), 1);
+        assert!(catalog.diagnostics().iter().any(|item| {
+            item.path() == offending && item.message().contains("failed to inspect")
+        }));
     }
 }

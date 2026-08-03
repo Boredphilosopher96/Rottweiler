@@ -20,9 +20,9 @@ use thiserror::Error;
 use crate::{HookDirective, HookError, HookEvent, HookHandler, HookInvocation};
 
 pub const JSON_RPC_VERSION: &str = "2.0";
-pub const PROTOCOL_VERSION: u32 = 1;
-pub const MIN_PROTOCOL_VERSION: u32 = PROTOCOL_VERSION;
-pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 1] = [PROTOCOL_VERSION];
+pub const PROTOCOL_VERSION: u32 = 2;
+pub const MIN_PROTOCOL_VERSION: u32 = 1;
+pub const SUPPORTED_PROTOCOL_VERSIONS: [u32; 2] = [1, PROTOCOL_VERSION];
 pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 pub const MAX_CAPABILITIES_PER_KIND: usize = 256;
@@ -38,8 +38,12 @@ pub const METHOD_TOOL_CALL: &str = "tool/call";
 pub const METHOD_COMMAND_EXECUTE: &str = "command/execute";
 pub const METHOD_HOOK_INVOKE: &str = "hook/invoke";
 pub const METHOD_PROVIDER_COMPLETE: &str = "provider/complete";
+pub const METHOD_PROVIDER_MODELS: &str = "provider/models";
 pub const METHOD_PROVIDER_EVENT: &str = "provider/event";
 pub const METHOD_PROVIDER_CANCEL: &str = "provider/cancel";
+pub const METHOD_PROVIDER_HTTP: &str = "provider/http";
+pub const METHOD_PROVIDER_HTTP_EVENT: &str = "provider/http_event";
+pub const METHOD_PROVIDER_HTTP_CANCEL: &str = "provider/http_cancel";
 pub const METHOD_EVENT_PUBLISH: &str = "event/publish";
 pub const METHOD_SESSION_INJECT_MESSAGE: &str = "session/inject_message";
 pub const METHOD_SESSION_SET_STATUS: &str = "session/set_status";
@@ -418,6 +422,17 @@ impl From<HookEvent> for PluginHook {
 pub struct PluginProviderCapability {
     #[serde(rename = "alias-prefix")]
     pub alias_prefix: String,
+    /// Approval-fingerprinted protocol capabilities for this provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// Configured credential references this provider may name in host HTTP calls.
+    /// Values, unlike these identifiers, never cross the plugin boundary.
+    #[serde(
+        default,
+        rename = "credential-references",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub credential_references: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -500,6 +515,16 @@ impl PluginManifest {
         validate_name(&self.name, NameKind::Plugin, "name")?;
         validate_text(&self.version, 1, MAX_VERSION_BYTES, "version")?;
         self.capabilities.validate()?;
+        if self.protocol == MIN_PROTOCOL_VERSION
+            && self.capabilities.providers.iter().any(|provider| {
+                !provider.capabilities.is_empty() || !provider.credential_references.is_empty()
+            })
+        {
+            return Err(ManifestError::InvalidField {
+                field: "providers",
+                reason: "protocol 1 cannot declare protocol 2 provider capabilities or credentials",
+            });
+        }
         let bytes = serde_json::to_vec(self).map_err(|error| ManifestError::Malformed {
             message: error.to_string(),
         })?;
@@ -612,6 +637,21 @@ impl PluginCapabilities {
         let mut prefixes = BTreeSet::new();
         for provider in &self.providers {
             validate_provider_prefix(&provider.alias_prefix)?;
+            validate_count("provider capabilities", provider.capabilities.len())?;
+            validate_unique_named(
+                "provider capability",
+                provider.capabilities.iter().map(String::as_str),
+                NameKind::Command,
+            )?;
+            validate_count(
+                "provider credential references",
+                provider.credential_references.len(),
+            )?;
+            validate_unique_named(
+                "provider credential reference",
+                provider.credential_references.iter().map(String::as_str),
+                NameKind::Command,
+            )?;
             if !prefixes.insert(provider.alias_prefix.as_str()) {
                 return Err(ManifestError::Duplicate {
                     kind: "provider prefix",
@@ -803,6 +843,22 @@ fn normalize_capability_arrays(value: &mut Value) {
                         .and_then(Value::as_array_mut)
                     {
                         tools.sort_by_key(Value::to_string);
+                    }
+                }
+            }
+            if key == "providers" {
+                for provider in values.iter_mut() {
+                    if let Some(provider_capabilities) = provider
+                        .get_mut("capabilities")
+                        .and_then(Value::as_array_mut)
+                    {
+                        provider_capabilities.sort_by_key(Value::to_string);
+                    }
+                    if let Some(credential_references) = provider
+                        .get_mut("credential-references")
+                        .and_then(Value::as_array_mut)
+                    {
+                        credential_references.sort_by_key(Value::to_string);
                     }
                 }
             }
@@ -1420,6 +1476,7 @@ pub enum CapabilityKind {
     Command,
     Hook,
     Provider,
+    ProviderCredential,
     Event,
     Push,
 }
@@ -1545,6 +1602,30 @@ impl CapabilityEnforcer {
                 .providers
                 .iter()
                 .any(|provider| alias.starts_with(&provider.alias_prefix)),
+        )
+    }
+
+    /// Verifies that a credential reference was approval-fingerprinted for the
+    /// declared provider prefix serving `alias`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a terminal capability violation for an undeclared alias/reference pair.
+    pub fn check_provider_credential(
+        &self,
+        alias: &str,
+        credential_reference: &str,
+    ) -> Result<(), CapabilityEnforcementError> {
+        self.check(
+            CapabilityKind::ProviderCredential,
+            credential_reference,
+            self.capabilities.providers.iter().any(|provider| {
+                alias.starts_with(&provider.alias_prefix)
+                    && provider
+                        .credential_references
+                        .iter()
+                        .any(|declared| declared == credential_reference)
+            }),
         )
     }
 
@@ -1842,6 +1923,8 @@ mod tests {
                 })],
                 providers: vec![PluginProviderCapability {
                     alias_prefix: "custom/".to_owned(),
+                    capabilities: vec!["models".to_owned()],
+                    credential_references: vec!["provider-token".to_owned()],
                 }],
                 event_subscriptions: vec!["ToolCallFinished".to_owned()],
                 push: vec![PluginPush::UiNotify],
@@ -1861,6 +1944,31 @@ mod tests {
             first.fingerprint().expect("fingerprint"),
             second.fingerprint().expect("fingerprint")
         );
+    }
+
+    #[test]
+    fn credential_reference_access_is_fingerprinted_and_enforced_per_provider() {
+        let first = manifest();
+        let mut widened = first.clone();
+        widened.capabilities.providers[0]
+            .credential_references
+            .push("second-token".to_owned());
+        assert_ne!(
+            first.fingerprint().expect("first fingerprint"),
+            widened.fingerprint().expect("widened fingerprint")
+        );
+
+        let process = Arc::new(ProcessState::default());
+        let enforcer = CapabilityEnforcer::new(&first, process.clone());
+        enforcer
+            .check_provider_credential("custom/model", "provider-token")
+            .expect("declared credential");
+        assert!(
+            enforcer
+                .check_provider_credential("custom/model", "second-token")
+                .is_err()
+        );
+        assert!(process.killed.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1902,7 +2010,7 @@ mod tests {
             "../../../packages/plugin-sdk/fixtures/wire/protocol-1.json"
         ))
         .expect("protocol fixture JSON");
-        assert_eq!(fixture["protocol"], PROTOCOL_VERSION);
+        assert_eq!(fixture["protocol"], MIN_PROTOCOL_VERSION);
         assert_eq!(fixture["limits"]["max_frame_bytes"], MAX_FRAME_BYTES);
         assert_eq!(fixture["limits"]["max_manifest_bytes"], MAX_MANIFEST_BYTES);
         assert_eq!(fixture["limits"]["max_version_bytes"], MAX_VERSION_BYTES);
@@ -1914,6 +2022,27 @@ mod tests {
         assert_eq!(fixture["methods"]["providerEvent"], METHOD_PROVIDER_EVENT);
         assert_eq!(fixture["methods"]["providerCancel"], METHOD_PROVIDER_CANCEL);
         assert_eq!(fixture["methods"]["notify"], METHOD_UI_NOTIFY);
+        let protocol_two: Value = serde_json::from_str(include_str!(
+            "../../../packages/plugin-sdk/fixtures/wire/protocol-2.json"
+        ))
+        .expect("protocol 2 fixture JSON");
+        assert_eq!(protocol_two["protocol"], PROTOCOL_VERSION);
+        assert_eq!(
+            protocol_two["methods"]["providerModels"],
+            METHOD_PROVIDER_MODELS
+        );
+        assert_eq!(
+            protocol_two["methods"]["providerHttp"],
+            METHOD_PROVIDER_HTTP
+        );
+        assert_eq!(
+            protocol_two["methods"]["providerHttpEvent"],
+            METHOD_PROVIDER_HTTP_EVENT
+        );
+        assert_eq!(
+            protocol_two["methods"]["providerHttpCancel"],
+            METHOD_PROVIDER_HTTP_CANCEL
+        );
     }
 
     #[test]

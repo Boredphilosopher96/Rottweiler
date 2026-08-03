@@ -183,6 +183,7 @@ pub(crate) async fn collect(options: DoctorOptions) -> DoctorReport {
         .details
         .insert("warnings".to_owned(), warning_count.to_string());
     checks.push(config_check);
+    append_extension_checks(&mut checks, &credentials_path);
 
     if effective.config.providers.len() > MAX_DOCTOR_PROVIDERS {
         checks.push(check(
@@ -207,6 +208,79 @@ pub(crate) async fn collect(options: DoctorOptions) -> DoctorReport {
     let inventory = inventory_credentials(&credentials_path, references);
     append_provider_checks(&mut checks, &plans, &inventory, options.network, timeout_ms).await;
     finish_report(options.network, checks)
+}
+
+fn append_extension_checks(checks: &mut Vec<DoctorCheck>, credentials_path: &Path) {
+    let Some(storage_root) = credentials_path.parent() else {
+        checks.push(check(
+            "extensions",
+            CheckStatus::Fail,
+            "extension_discovery_unavailable",
+            "extension discovery could not locate the configuration root",
+        ));
+        return;
+    };
+    let Ok(workspace) = std::env::current_dir() else {
+        checks.push(check(
+            "extensions",
+            CheckStatus::Fail,
+            "extension_discovery_unavailable",
+            "extension discovery could not locate the current workspace",
+        ));
+        return;
+    };
+    let (user_home, user_rottweiler_root) =
+        rw_runtime::session::extension_user_roots(credentials_path);
+    let catalog = match rw_runtime::session::discover_runtime_extensions(
+        &[workspace],
+        &storage_root.join("trust.json"),
+        &user_home,
+        &user_rottweiler_root,
+        false,
+    ) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            checks.push(check(
+                "extensions",
+                CheckStatus::Fail,
+                "extension_discovery_failed",
+                format!("extension trust inventory could not complete: {error}"),
+            ));
+            return;
+        }
+    };
+    if catalog.diagnostics().is_empty() {
+        checks.push(check(
+            "extensions",
+            CheckStatus::Pass,
+            "extensions_valid",
+            "declarative extension discovery found no refused artifacts",
+        ));
+        return;
+    }
+    for (index, diagnostic) in catalog.diagnostics().iter().enumerate() {
+        let mut item = check(
+            format!("extensions.{}", index.saturating_add(1)),
+            CheckStatus::Warning,
+            "extension_skipped",
+            format!(
+                "{} was skipped: {}",
+                diagnostic.path().display(),
+                diagnostic.message()
+            ),
+        );
+        item.details
+            .insert("path".to_owned(), diagnostic.path().display().to_string());
+        item.details
+            .insert("scope".to_owned(), format!("{:?}", diagnostic.scope()));
+        item.details.insert(
+            "location".to_owned(),
+            format!("{:?}", diagnostic.location()),
+        );
+        item.details
+            .insert("kind".to_owned(), format!("{:?}", diagnostic.kind()));
+        checks.push(item);
+    }
 }
 
 fn finish_report(network: bool, checks: Vec<DoctorCheck>) -> DoctorReport {

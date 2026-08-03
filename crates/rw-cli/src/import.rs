@@ -1719,8 +1719,7 @@ mod tests {
         let catalog = rw_ext::ExtensionCatalog::discover(
             &rw_ext::ExtensionDiscoveryConfig::new(&apply.target_root, user.path())
                 .with_project_trusted(true),
-        )
-        .expect("imported extensions must be consumable");
+        );
         assert!(catalog.command("test").is_some());
         assert_eq!(catalog.shell_hooks().len(), 1);
         let executable = rw_runtime::executable_config::discover_executable_configs(
@@ -1837,8 +1836,7 @@ mod tests {
         let catalog = rw_ext::ExtensionCatalog::discover(
             &rw_ext::ExtensionDiscoveryConfig::new(target.path(), user.path())
                 .with_project_trusted(true),
-        )
-        .expect("discover imported commands");
+        );
         assert!(catalog.command("test").is_some());
         assert!(catalog.command("release-check").is_some());
     }

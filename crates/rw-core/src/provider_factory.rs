@@ -36,7 +36,10 @@ use rw_types::{
     Cost, ModelAlias, ModelAliasDescriptor, ModelCacheBehavior, ModelCapabilities,
     ModelCatalogSnapshot, ModelDescriptor, ProviderAuthKind, ProviderDescriptor,
     ProviderNextAction,
-    config::{BudgetConfig, CompactionConfig, Config, ProviderConfig},
+    config::{
+        BudgetConfig, CompactionConfig, Config, ProviderAuthScheme, ProviderConfig,
+        ProviderModelPricingConfig,
+    },
 };
 use thiserror::Error;
 use url::{Host, Url};
@@ -148,7 +151,31 @@ pub struct ResolvedModel {
     catalog_model: Option<String>,
     capabilities: Capabilities,
     pricing: Option<ModelPricing>,
+    pricing_source: Option<ModelPricingSource>,
     accounting: UsageAccounting,
+}
+
+/// Authority that supplied a model's effective token rates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelPricingSource {
+    /// Explicit user-scoped provider configuration.
+    UserConfig,
+    /// Authenticated metadata returned by the provider.
+    ProviderDiscovered,
+    /// Local models.dev enrichment snapshot.
+    ModelsDev,
+}
+
+impl ModelPricingSource {
+    /// Stable diagnostic label used by configuration and runtime inspection.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UserConfig => "user_config",
+            Self::ProviderDiscovered => "provider_discovered",
+            Self::ModelsDev => "models_dev",
+        }
+    }
 }
 
 impl ResolvedModel {
@@ -182,10 +209,16 @@ impl ResolvedModel {
         &self.capabilities
     }
 
-    /// Catalog pricing/capability record, when one was available.
+    /// Effective pricing record after applying configured source precedence.
     #[must_use]
     pub const fn pricing(&self) -> Option<&ModelPricing> {
         self.pricing.as_ref()
+    }
+
+    /// Source of the effective pricing record, when pricing is available.
+    #[must_use]
+    pub const fn pricing_source(&self) -> Option<ModelPricingSource> {
+        self.pricing_source
     }
 
     /// Accounting unit for usage reported by this provider route.
@@ -284,21 +317,14 @@ impl ProviderRuntime {
         let provider = self.providers.get(candidate).ok_or_else(|| {
             ProviderFactoryError::new(candidate, "model candidate is not configured")
         })?;
-        if let Some(metadata) = provider
+        let discovered = provider
             .model_metadata()
             .await
-            .map_err(|error| ProviderFactoryError::new(candidate, error.to_string()))?
-        {
-            return Ok(metadata);
-        }
+            .map_err(|error| ProviderFactoryError::new(candidate, error.to_string()))?;
         let model = self.models.get(candidate).ok_or_else(|| {
             ProviderFactoryError::new(candidate, "model metadata is inconsistent")
         })?;
-        Ok(ProviderModelMetadata {
-            capabilities: model.capabilities.clone(),
-            pricing: model.pricing.clone(),
-            accounting: model.accounting,
-        })
+        Ok(effective_model_metadata(model, discovered))
     }
 
     /// Known-secret redactor for [`rw_providers::Recorder`].
@@ -484,49 +510,20 @@ impl ProviderRuntime {
             .get(candidate)
             .or_else(|| dynamic_providers.get(candidate))
             .and_then(|provider| provider.cached_model_metadata());
-        if let Some(metadata) = cached_metadata.as_ref() {
-            return cost_from_model_metadata(metadata, usage);
-        }
-        if model.catalog_model.is_none() {
+        if cached_metadata.is_some() {
             return cost_from_model_metadata(
-                &ProviderModelMetadata {
-                    capabilities: model.capabilities.clone(),
-                    pricing: model.pricing.clone(),
-                    accounting: model.accounting,
-                },
+                &effective_model_metadata(model, cached_metadata),
                 usage,
             );
         }
-        match model.accounting {
-            UsageAccounting::ApiDollars => model
-                .catalog_model
-                .as_deref()
-                .and_then(|canonical| self.pricing_table.cost(canonical, usage).ok().flatten())
-                .map_or_else(
-                    || Cost::Unavailable {
-                        reason: "authoritative API pricing is unavailable".to_owned(),
-                    },
-                    |cost| Cost::Monetary {
-                        amount_micros: cost.total_micros_usd,
-                        currency: "USD".to_owned(),
-                    },
-                ),
-            UsageAccounting::AiCredits {
-                micros_usd_per_credit,
-            } => model.pricing.as_ref().map_or_else(
-                || Cost::Unavailable {
-                    reason: "authoritative AI-credit pricing is unavailable".to_owned(),
-                },
-                |pricing| ai_credit_cost(pricing, usage, micros_usd_per_credit),
-            ),
-            UsageAccounting::SubscriptionQuota => Cost::SubscriptionQuota {
-                used: Some(total_usage_tokens(usage).to_string()),
-                unit: Some("tokens".to_owned()),
+        cost_from_model_metadata(
+            &ProviderModelMetadata {
+                capabilities: model.capabilities.clone(),
+                pricing: model.pricing.clone(),
+                accounting: model.accounting,
             },
-            UsageAccounting::UnpricedApi => Cost::Unavailable {
-                reason: "authoritative API pricing is unavailable".to_owned(),
-            },
-        }
+            usage,
+        )
     }
 
     /// Dispatches through an alias after applying its configured thinking dial.
@@ -911,7 +908,7 @@ impl ProviderRuntime {
                 model,
                 Arc::clone(provider),
                 discovered,
-            );
+            )?;
             return Ok(());
         }
         let connections = self
@@ -992,7 +989,7 @@ impl ProviderRuntime {
         model: &str,
         inner: Arc<dyn Provider>,
         discovered: rw_providers::DiscoveredModel,
-    ) {
+    ) -> Result<(), ProviderFactoryError> {
         let fallback = inner.capabilities();
         let mut capabilities = discovered.capabilities.unwrap_or(fallback.clone());
         capabilities.max_context_tokens = capabilities
@@ -1011,7 +1008,31 @@ impl ProviderRuntime {
         } else {
             Vec::new()
         };
-        let pricing = discovered.pricing;
+        let configured_pricing = declared_pricing(&self.config, provider_name, model);
+        let metadata_accounting = inner
+            .cached_model_metadata()
+            .map_or(UsageAccounting::UnpricedApi, |value| value.accounting);
+        if configured_pricing.is_some()
+            && matches!(
+                metadata_accounting,
+                UsageAccounting::SubscriptionQuota | UsageAccounting::AiCredits { .. }
+            )
+        {
+            return Err(ProviderFactoryError::new(
+                provider_name,
+                "extension uses subscription or credit accounting and cannot declare API pricing",
+            ));
+        }
+        let (_, catalog_pricing) = find_pricing(&self.pricing_table, provider_name, model, None);
+        let (pricing, pricing_source) =
+            effective_pricing(configured_pricing, discovered.pricing, catalog_pricing);
+        let accounting = match metadata_accounting {
+            UsageAccounting::SubscriptionQuota | UsageAccounting::AiCredits { .. } => {
+                metadata_accounting
+            }
+            _ if pricing.is_some() => UsageAccounting::ApiDollars,
+            _ => UsageAccounting::UnpricedApi,
+        };
         let bounded: Arc<dyn Provider> = Arc::new(ModelBoundProvider {
             inner,
             name: candidate.to_owned(),
@@ -1035,14 +1056,12 @@ impl ProviderRuntime {
                     model: model.to_owned(),
                     catalog_model: None,
                     capabilities,
-                    accounting: if pricing.is_some() {
-                        UsageAccounting::ApiDollars
-                    } else {
-                        UsageAccounting::UnpricedApi
-                    },
+                    accounting,
                     pricing,
+                    pricing_source,
                 },
             );
+        Ok(())
     }
 
     fn bind_discovered_model(
@@ -1087,12 +1106,7 @@ impl ProviderRuntime {
         };
         let inner = construct_adapter(
             candidate,
-            connection.kind,
-            connection.endpoint.clone(),
-            Arc::clone(&connection.auth),
-            connection.copilot_runtime.clone(),
-            connection.proxy.clone(),
-            connection.proxy_authentication.clone(),
+            connection,
             self.network_policy,
             &capabilities,
             &supported_thinking,
@@ -1106,14 +1120,17 @@ impl ProviderRuntime {
             supported_thinking,
             defer_capabilities,
         });
+        let (pricing, pricing_source) = effective_pricing(
+            declared_pricing(&self.config, provider_name, model),
+            discovered.pricing,
+            catalog_pricing,
+        );
         let accounting = match connection.kind {
             AdapterKind::OpenAiSubscription => UsageAccounting::SubscriptionQuota,
             AdapterKind::GitHubCopilot => UsageAccounting::AiCredits {
                 micros_usd_per_credit: 10_000,
             },
-            _ if discovered.pricing.is_some() || catalog_pricing.is_some() => {
-                UsageAccounting::ApiDollars
-            }
+            _ if pricing.is_some() => UsageAccounting::ApiDollars,
             _ => UsageAccounting::UnpricedApi,
         };
         self.dynamic_providers
@@ -1131,7 +1148,8 @@ impl ProviderRuntime {
                     model: model.to_owned(),
                     catalog_model: None,
                     capabilities,
-                    pricing: discovered.pricing.or(catalog_pricing),
+                    pricing,
+                    pricing_source,
                     accounting,
                 },
             );
@@ -1495,6 +1513,12 @@ where
             config.network.proxy_password_credential.as_deref(),
         )?;
         for (name, provider) in &config.providers {
+            provider
+                .validate_gateway_options()
+                .map_err(|error| ProviderFactoryError::new(name, error))?;
+            provider
+                .validate_pricing()
+                .map_err(|error| ProviderFactoryError::new(name, error))?;
             validate_proxy_auth_fields(
                 name,
                 provider.proxy.as_deref(),
@@ -1590,6 +1614,12 @@ where
                 } else {
                     None
                 };
+                let header_credentials = self.resolve_header_credentials(
+                    provider_name,
+                    provider_config,
+                    &redactor,
+                    &warnings,
+                )?;
                 Ok(ProviderConnection {
                     kind,
                     endpoint,
@@ -1597,6 +1627,11 @@ where
                     copilot_runtime,
                     proxy: proxy.map(|value| value.url),
                     proxy_authentication,
+                    headers: provider_config.headers.clone(),
+                    header_credentials,
+                    extra_body: provider_config.extra_body.clone(),
+                    model_ids: provider_config.model_ids.clone(),
+                    path_template: provider_config.path_template.clone(),
                 })
             })();
             match resolved {
@@ -1617,10 +1652,32 @@ where
                 let capabilities = metadata
                     .as_ref()
                     .map_or_else(|| inner.capabilities(), |value| value.capabilities.clone());
-                let pricing = metadata.as_ref().and_then(|value| value.pricing.clone());
-                let accounting = metadata
+                let configured_pricing = declared_pricing(config, provider_name, model);
+                let discovered_pricing = metadata.as_ref().and_then(|value| value.pricing.clone());
+                let (_, catalog_pricing) = find_pricing(&self.pricing, provider_name, model, None);
+                let discovered_accounting = metadata
                     .as_ref()
                     .map_or(UsageAccounting::UnpricedApi, |value| value.accounting);
+                if configured_pricing.is_some()
+                    && matches!(
+                        discovered_accounting,
+                        UsageAccounting::SubscriptionQuota | UsageAccounting::AiCredits { .. }
+                    )
+                {
+                    return Err(ProviderFactoryError::new(
+                        provider_name,
+                        "extension uses subscription or credit accounting and cannot declare API pricing",
+                    ));
+                }
+                let (pricing, pricing_source) =
+                    effective_pricing(configured_pricing, discovered_pricing, catalog_pricing);
+                let accounting = match discovered_accounting {
+                    UsageAccounting::SubscriptionQuota | UsageAccounting::AiCredits { .. } => {
+                        discovered_accounting
+                    }
+                    _ if pricing.is_some() => UsageAccounting::ApiDollars,
+                    _ => UsageAccounting::UnpricedApi,
+                };
                 let supported_thinking = if capabilities.thinking {
                     vec![
                         ThinkingLevel::Low,
@@ -1652,6 +1709,7 @@ where
                         catalog_model: None,
                         capabilities,
                         pricing,
+                        pricing_source,
                         accounting,
                     },
                 );
@@ -1664,7 +1722,7 @@ where
                 continue;
             };
             let kind = connection.kind;
-            let (catalog_model, pricing) = if kind == AdapterKind::GitHubCopilot {
+            let (catalog_model, catalog_pricing) = if kind == AdapterKind::GitHubCopilot {
                 (None, None)
             } else {
                 find_pricing(
@@ -1682,14 +1740,14 @@ where
                     ThinkingLevel::High,
                 ]
             } else {
-                pricing
+                catalog_pricing
                     .as_ref()
                     .map_or_else(Vec::new, |value| value.reasoning_efforts.clone())
             };
             let capability_pricing = if kind == AdapterKind::GitHubCopilot {
                 find_pricing(&self.pricing, provider_name, model, Some("github-copilot")).1
             } else {
-                pricing.clone()
+                catalog_pricing.clone()
             };
             let capabilities = match kind {
                 AdapterKind::OpenAiSubscription => {
@@ -1698,7 +1756,7 @@ where
                 AdapterKind::GitHubCopilot => {
                     github_copilot_capabilities(capability_pricing.as_ref())
                 }
-                _ => model_capabilities(kind, pricing.as_ref()),
+                _ => model_capabilities(kind, catalog_pricing.as_ref()),
             };
             // A configured route remains usable when its provider does not
             // expose model discovery and no cached metadata describes the
@@ -1708,6 +1766,11 @@ where
             let defer_capabilities = kind == AdapterKind::GitHubCopilot
                 || (!matches!(kind, AdapterKind::OpenAiSubscription)
                     && capability_pricing.is_none());
+            let (pricing, pricing_source) = effective_pricing(
+                declared_pricing(config, provider_name, model),
+                None,
+                catalog_pricing,
+            );
             let accounting = match kind {
                 AdapterKind::OpenAiSubscription => UsageAccounting::SubscriptionQuota,
                 AdapterKind::GitHubCopilot => UsageAccounting::AiCredits {
@@ -1718,12 +1781,7 @@ where
             };
             let inner = match construct_adapter(
                 candidate,
-                kind,
-                connection.endpoint.clone(),
-                Arc::clone(&connection.auth),
-                connection.copilot_runtime.clone(),
-                connection.proxy.clone(),
-                connection.proxy_authentication.clone(),
+                connection,
                 self.network_policy,
                 &capabilities,
                 &supported_thinking,
@@ -1766,6 +1824,14 @@ where
                         None
                     } else {
                         pricing
+                    },
+                    pricing_source: if matches!(
+                        kind,
+                        AdapterKind::OpenAiSubscription | AdapterKind::GitHubCopilot
+                    ) {
+                        None
+                    } else {
+                        pricing_source
                     },
                     accounting,
                 },
@@ -1822,12 +1888,7 @@ where
                 };
                 construct_adapter(
                     &candidate,
-                    connection.kind,
-                    connection.endpoint.clone(),
-                    Arc::clone(&connection.auth),
-                    connection.copilot_runtime.clone(),
-                    connection.proxy.clone(),
-                    connection.proxy_authentication.clone(),
+                    connection,
                     self.network_policy,
                     &capabilities,
                     &[],
@@ -2009,6 +2070,21 @@ where
             || provider.oauth_access_token_credential.is_some()
             || provider.oauth_refresh_token_credential.is_some()
             || !provider.oauth_scopes.is_empty();
+        if matches!(provider.auth_scheme, Some(ProviderAuthScheme::None)) {
+            if explicit_api || oauth_configured {
+                return Err(ProviderFactoryError::new(
+                    provider_name,
+                    "auth_scheme none cannot be combined with a primary API or OAuth credential",
+                ));
+            }
+            if is_loopback(endpoint) || !provider.header_credentials.is_empty() {
+                return Ok(Arc::new(StaticAuth::new(AuthMaterial::None)));
+            }
+            return Err(ProviderFactoryError::new(
+                provider_name,
+                "unauthenticated providers require an explicit loopback endpoint",
+            ));
+        }
         if explicit_api && oauth_configured {
             return Err(ProviderFactoryError::new(
                 provider_name,
@@ -2016,6 +2092,15 @@ where
             ));
         }
         if oauth_configured {
+            if matches!(
+                provider.auth_scheme,
+                Some(ProviderAuthScheme::Header { .. })
+            ) {
+                return Err(ProviderFactoryError::new(
+                    provider_name,
+                    "OAuth authentication cannot use a custom primary credential header",
+                ));
+            }
             return self.resolve_oauth(
                 provider_name,
                 provider,
@@ -2037,15 +2122,50 @@ where
             let secret = resolved.secret().expose_secret().clone();
             let secret = ProviderSecret::new(secret);
             redactor.register_secret(&secret);
-            return Ok(Arc::new(StaticAuth::new(AuthMaterial::ApiKey(secret))));
+            let material = match &provider.auth_scheme {
+                Some(ProviderAuthScheme::Bearer) => AuthMaterial::Bearer(secret),
+                Some(ProviderAuthScheme::Header { name, value_prefix }) => AuthMaterial::Header {
+                    name: name.clone(),
+                    value_prefix: value_prefix.clone(),
+                    secret,
+                },
+                Some(ProviderAuthScheme::None) => unreachable!("handled above"),
+                None => AuthMaterial::ApiKey(secret),
+            };
+            return Ok(Arc::new(StaticAuth::new(material)));
         }
-        if provider.base_url.is_some() && is_loopback(endpoint) {
+        if (provider.base_url.is_some() && is_loopback(endpoint))
+            || !provider.header_credentials.is_empty()
+        {
             return Ok(Arc::new(StaticAuth::new(AuthMaterial::None)));
         }
         Err(ProviderFactoryError::new(
             provider_name,
             "unauthenticated providers require an explicit loopback endpoint",
         ))
+    }
+
+    fn resolve_header_credentials(
+        &self,
+        provider_name: &str,
+        provider: &ProviderConfig,
+        redactor: &FixtureRedactor,
+        warnings: &RuntimeWarnings,
+    ) -> Result<BTreeMap<String, ProviderSecret>, ProviderFactoryError> {
+        provider
+            .header_credentials
+            .iter()
+            .map(|(name, credential)| {
+                let resolved = self.resolve_required(
+                    provider_name,
+                    &CredentialReference::new(credential.clone()),
+                )?;
+                warnings.extend(resolved.warnings().iter().map(ToString::to_string));
+                let secret = ProviderSecret::new(resolved.secret().expose_secret().clone());
+                redactor.register_secret(&secret);
+                Ok((name.clone(), secret))
+            })
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2488,6 +2608,11 @@ struct ProviderConnection {
     copilot_runtime: Option<Arc<GitHubCopilotRuntime>>,
     proxy: Option<Url>,
     proxy_authentication: Option<ProxyAuthentication>,
+    headers: BTreeMap<String, String>,
+    header_credentials: BTreeMap<String, ProviderSecret>,
+    extra_body: BTreeMap<String, serde_json::Value>,
+    model_ids: BTreeMap<String, String>,
+    path_template: Option<String>,
 }
 
 struct ActivatedProvider {
@@ -2767,11 +2892,21 @@ fn validate_extension_providers(
                 "extension alias prefixes must be bounded canonical names ending in '/'",
             ));
         }
-        if built_in.keys().any(|name| prefix == &format!("{name}/")) {
-            return Err(ProviderFactoryError::new(
-                "extensions",
-                format!("extension alias prefix {prefix:?} collides with a configured provider"),
-            ));
+        if let Some(config) = built_in
+            .iter()
+            .find_map(|(name, config)| (prefix == &format!("{name}/")).then_some(config))
+        {
+            let mut pricing_only = config.clone();
+            pricing_only.kind.clear();
+            pricing_only.pricing.clear();
+            if config.kind != "extension" || pricing_only != ProviderConfig::default() {
+                return Err(ProviderFactoryError::new(
+                    "extensions",
+                    format!(
+                        "extension alias prefix {prefix:?} collides with a configured provider; pricing-only extension configuration requires kind = \"extension\""
+                    ),
+                ));
+            }
         }
         if let Some(existing) = providers
             .keys()
@@ -2843,7 +2978,14 @@ fn resolve_endpoint(
             "subscription provider endpoint is fixed and cannot be overridden",
         ));
     }
-    parse_remote_or_loopback_endpoint(provider, value)
+    let mut endpoint = parse_remote_or_loopback_endpoint(provider, value)?;
+    if !config.extra_query.is_empty() {
+        let mut query = endpoint.query_pairs_mut();
+        for (name, value) in &config.extra_query {
+            query.append_pair(name, value);
+        }
+    }
+    Ok(endpoint)
 }
 
 fn parse_remote_or_loopback_endpoint(
@@ -2938,6 +3080,53 @@ fn find_pricing(
         return (Some(local), Some(pricing.clone()));
     }
     (None, None)
+}
+
+fn declared_pricing(config: &Config, provider: &str, model: &str) -> Option<ModelPricing> {
+    let pricing = config.providers.get(provider)?.pricing.get(model)?;
+    configured_model_pricing(model, pricing)
+}
+
+fn configured_model_pricing(
+    model: &str,
+    pricing: &ProviderModelPricingConfig,
+) -> Option<ModelPricing> {
+    let rate = |value: &serde_json::Number| {
+        // Configuration validation bounds every rate before composition.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        value
+            .as_f64()
+            .map(|rate| (rate * 1_000_000.0).round() as u64)
+    };
+    Some(ModelPricing {
+        display_name: model.to_owned(),
+        max_context_tokens: None,
+        max_output_tokens: None,
+        supports_tools: false,
+        supports_thinking: false,
+        reasoning_efforts: Vec::new(),
+        input_per_million_micros_usd: rate(pricing.input_per_million.as_ref()?)?,
+        output_per_million_micros_usd: rate(pricing.output_per_million.as_ref()?)?,
+        cache_read_per_million_micros_usd: pricing.cache_read_per_million.as_ref().and_then(rate),
+        cache_write_per_million_micros_usd: pricing.cache_write_per_million.as_ref().and_then(rate),
+        reasoning_per_million_micros_usd: None,
+    })
+}
+
+fn effective_pricing(
+    configured: Option<ModelPricing>,
+    discovered: Option<ModelPricing>,
+    catalog: Option<ModelPricing>,
+) -> (Option<ModelPricing>, Option<ModelPricingSource>) {
+    if let Some(pricing) = configured {
+        return (Some(pricing), Some(ModelPricingSource::UserConfig));
+    }
+    if let Some(pricing) = discovered {
+        return (Some(pricing), Some(ModelPricingSource::ProviderDiscovered));
+    }
+    catalog.map_or((None, None), |pricing| {
+        (Some(pricing), Some(ModelPricingSource::ModelsDev))
+    })
 }
 
 fn discovery_candidate(provider: &str) -> String {
@@ -3450,6 +3639,47 @@ fn nominal_cost_micros(pricing: &ModelPricing, usage: rw_providers::TokenUsage) 
     })
 }
 
+fn effective_model_metadata(
+    model: &ResolvedModel,
+    discovered: Option<ProviderModelMetadata>,
+) -> ProviderModelMetadata {
+    let capabilities = discovered.as_ref().map_or_else(
+        || model.capabilities.clone(),
+        |value| value.capabilities.clone(),
+    );
+    if model.accounting == UsageAccounting::SubscriptionQuota {
+        return ProviderModelMetadata {
+            capabilities,
+            pricing: None,
+            accounting: model.accounting,
+        };
+    }
+    if matches!(model.accounting, UsageAccounting::AiCredits { .. }) {
+        return ProviderModelMetadata {
+            capabilities,
+            pricing: discovered
+                .and_then(|value| value.pricing)
+                .or_else(|| model.pricing.clone()),
+            accounting: model.accounting,
+        };
+    }
+    let discovered_pricing = discovered.and_then(|value| value.pricing);
+    let pricing = if model.pricing_source == Some(ModelPricingSource::UserConfig) {
+        model.pricing.clone()
+    } else {
+        discovered_pricing.or_else(|| model.pricing.clone())
+    };
+    ProviderModelMetadata {
+        capabilities,
+        accounting: if pricing.is_some() {
+            UsageAccounting::ApiDollars
+        } else {
+            UsageAccounting::UnpricedApi
+        },
+        pricing,
+    }
+}
+
 /// Converts provider-neutral model metadata and normalized usage into a typed cost.
 #[must_use]
 pub fn cost_from_model_metadata(
@@ -3503,24 +3733,20 @@ fn total_usage_tokens(usage: rw_providers::TokenUsage) -> u64 {
 #[allow(clippy::too_many_arguments)]
 fn construct_adapter(
     candidate: &str,
-    kind: AdapterKind,
-    endpoint: Url,
-    auth: Arc<dyn AuthProvider>,
-    copilot_runtime: Option<Arc<GitHubCopilotRuntime>>,
-    proxy: Option<Url>,
-    proxy_authentication: Option<ProxyAuthentication>,
+    connection: &ProviderConnection,
     network_policy: NetworkPolicy,
     capabilities: &Capabilities,
     supported_thinking: &[ThinkingLevel],
     defer_capabilities: bool,
 ) -> Result<Arc<dyn Provider>, ProviderFactoryError> {
+    let kind = connection.kind;
     let result: Result<Arc<dyn Provider>, ProviderError> = match kind {
         AdapterKind::Anthropic => AnthropicProvider::new(AnthropicConfig {
             name: candidate.to_owned(),
-            endpoint,
-            auth,
-            proxy,
-            proxy_authentication,
+            endpoint: connection.endpoint.clone(),
+            auth: Arc::clone(&connection.auth),
+            proxy: connection.proxy.clone(),
+            proxy_authentication: connection.proxy_authentication.clone(),
             network_policy,
             thinking_strategy: supported_thinking
                 .iter()
@@ -3530,7 +3756,9 @@ fn construct_adapter(
             max_output_tokens: capabilities.max_output_tokens,
         })
         .map(|provider| Arc::new(provider) as Arc<dyn Provider>),
-        AdapterKind::GitHubCopilot => copilot_runtime
+        AdapterKind::GitHubCopilot => connection
+            .copilot_runtime
+            .clone()
             .ok_or_else(|| {
                 ProviderError::new(
                     ProviderErrorKind::InvalidRequest,
@@ -3564,10 +3792,10 @@ fn construct_adapter(
             };
             OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
                 name: candidate.to_owned(),
-                endpoint,
-                auth,
-                proxy,
-                proxy_authentication,
+                endpoint: connection.endpoint.clone(),
+                auth: Arc::clone(&connection.auth),
+                proxy: connection.proxy.clone(),
+                proxy_authentication: connection.proxy_authentication.clone(),
                 network_policy,
                 wire_mode,
                 chat_request_profile: if matches!(kind, AdapterKind::OpenAiCompatibleChat) {
@@ -3585,6 +3813,11 @@ fn construct_adapter(
                 supports_vision: capabilities.vision || defer_capabilities,
                 max_context_tokens: capabilities.max_context_tokens,
                 max_output_tokens: capabilities.max_output_tokens,
+                headers: connection.headers.clone(),
+                header_credentials: connection.header_credentials.clone(),
+                extra_body: connection.extra_body.clone(),
+                model_ids: connection.model_ids.clone(),
+                path_template: connection.path_template.clone(),
             })
             .map(|provider| Arc::new(provider) as Arc<dyn Provider>)
         }

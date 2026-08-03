@@ -96,8 +96,8 @@ pub use permission::{
     PermissionOutcome, PermissionRequest,
 };
 pub use provider_factory::{
-    ProviderFactory, ProviderFactoryError, ProviderModelCatalogSource, ProviderNativeWebSearcher,
-    ProviderRuntime, ResolvedModel, cost_from_model_metadata,
+    ModelPricingSource, ProviderFactory, ProviderFactoryError, ProviderModelCatalogSource,
+    ProviderNativeWebSearcher, ProviderRuntime, ResolvedModel, cost_from_model_metadata,
 };
 pub use rw_providers::{
     ProviderModelMetadata, TokenUsage as ModelTokenUsage, UsageAccounting as ModelAccounting,

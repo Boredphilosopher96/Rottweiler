@@ -214,6 +214,45 @@ pub enum ThinkingLevel {
     High,
 }
 
+/// Presentation of a provider's primary credential on HTTP requests.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderAuthScheme {
+    /// Send the credential as `Authorization: Bearer <credential>`.
+    #[default]
+    Bearer,
+    /// Send the credential in a provider-specific header.
+    Header {
+        /// HTTP header name, such as `api-key` or `x-api-key`.
+        name: String,
+        /// Optional text prepended to the credential value.
+        #[serde(default)]
+        value_prefix: String,
+    },
+    /// Do not send a primary credential.
+    None,
+}
+
+/// User-declared dollar rates for one provider-local model identifier.
+///
+/// Pricing resolution is record-based and deterministic: an explicit user
+/// entry wins over provider-discovered metadata, which wins over models.dev.
+/// Lower-priority records are not mixed field-by-field into a winning record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderModelPricingConfig {
+    /// ISO 4217 billing currency. Dollar accounting currently accepts `USD`.
+    pub currency: Option<String>,
+    /// Input dollars per million tokens.
+    pub input_per_million: Option<serde_json::Number>,
+    /// Output dollars per million tokens.
+    pub output_per_million: Option<serde_json::Number>,
+    /// Prompt-cache read dollars per million tokens. Missing inherits input.
+    pub cache_read_per_million: Option<serde_json::Number>,
+    /// Prompt-cache write dollars per million tokens. Missing inherits input.
+    pub cache_write_per_million: Option<serde_json::Number>,
+}
+
 /// Connection settings for one locally named provider adapter.
 ///
 /// This type contains only credential references. Secret values are resolved
@@ -225,6 +264,29 @@ pub struct ProviderConfig {
     pub kind: String,
     /// Optional API endpoint override, including any required path prefix.
     pub base_url: Option<String>,
+    /// Optional endpoint path whose `{model}` segment is replaced per request.
+    pub path_template: Option<String>,
+    /// Static non-secret request headers. Secrets must use `header_credentials`.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// Request header to credential-store identifier mappings. Values are never inline secrets.
+    #[serde(default)]
+    pub header_credentials: BTreeMap<String, String>,
+    /// Optional override for presenting the primary API credential.
+    pub auth_scheme: Option<ProviderAuthScheme>,
+    /// Non-secret query parameters appended to the configured endpoint.
+    #[serde(default)]
+    pub extra_query: BTreeMap<String, String>,
+    /// Additional request-body fields that cannot replace engine-controlled fields.
+    #[serde(default)]
+    pub extra_body: BTreeMap<String, serde_json::Value>,
+    /// Catalog-facing model identifier to on-wire model identifier mappings.
+    #[serde(default)]
+    pub model_ids: BTreeMap<String, String>,
+    /// Per-model API pricing declared by the user. Explicit config wins over
+    /// provider-discovered metadata, which wins over models.dev enrichment.
+    #[serde(default)]
+    pub pricing: BTreeMap<String, ProviderModelPricingConfig>,
     /// Optional provider-specific outbound proxy override.
     pub proxy: Option<String>,
     /// Optional username for HTTP Basic proxy authentication.
@@ -250,6 +312,256 @@ pub struct ProviderConfig {
     pub oauth_access_token_credential: Option<String>,
     /// Optional credential-store identifier for the long-lived refresh token.
     pub oauth_refresh_token_credential: Option<String>,
+}
+
+impl ProviderConfig {
+    /// Validates gateway request customizations without resolving credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sanitized explanation when a header, template, model mapping,
+    /// or extra body field is unsafe or ambiguous.
+    pub fn validate_gateway_options(&self) -> Result<(), String> {
+        const FIXED_TRANSPORT_KINDS: [&str; 4] = [
+            "openai_codex",
+            "openai_subscription",
+            "github_copilot",
+            "anthropic",
+        ];
+        let has_gateway_override = self.path_template.is_some()
+            || !self.headers.is_empty()
+            || !self.header_credentials.is_empty()
+            || self.auth_scheme.is_some()
+            || !self.extra_query.is_empty()
+            || !self.extra_body.is_empty()
+            || !self.model_ids.is_empty();
+        if has_gateway_override && FIXED_TRANSPORT_KINDS.contains(&self.kind.as_str()) {
+            return Err(format!(
+                "provider kind {:?} has a fixed transport and cannot use gateway request overrides",
+                self.kind
+            ));
+        }
+
+        if let Some(template) = &self.path_template {
+            let valid = template.starts_with('/')
+                && !template.contains(['?', '#'])
+                && template
+                    .split('/')
+                    .filter(|segment| *segment == "{model}")
+                    .count()
+                    == 1
+                && !template
+                    .split('/')
+                    .any(|segment| segment.contains("{model}") && segment != "{model}");
+            if !valid {
+                return Err(
+                    "path_template must be an absolute path containing exactly one {model} segment"
+                        .to_owned(),
+                );
+            }
+        }
+
+        let mut names = BTreeMap::<String, &'static str>::new();
+        for (name, value) in &self.headers {
+            validate_provider_header(name, value, "headers")?;
+            insert_unique_header(&mut names, name, "headers")?;
+        }
+        for (name, credential) in &self.header_credentials {
+            validate_provider_header(name, credential, "header_credentials")?;
+            if credential.trim().is_empty() {
+                return Err(format!(
+                    "header credential reference for {name:?} must not be empty"
+                ));
+            }
+            insert_unique_header(&mut names, name, "header_credentials")?;
+        }
+        if let Some(ProviderAuthScheme::Header { name, value_prefix }) = &self.auth_scheme {
+            validate_provider_header(name, value_prefix, "auth_scheme")?;
+            insert_unique_header(&mut names, name, "auth_scheme")?;
+        }
+        let auth_header = match &self.auth_scheme {
+            None | Some(ProviderAuthScheme::Bearer) => Some("authorization"),
+            Some(ProviderAuthScheme::Header { name, .. }) => Some(name.as_str()),
+            Some(ProviderAuthScheme::None) => None,
+        };
+        if let Some(auth_header) = auth_header
+            && names.contains_key(&auth_header.to_ascii_lowercase())
+            && !matches!(self.auth_scheme, Some(ProviderAuthScheme::Header { .. }))
+        {
+            return Err(format!(
+                "request header {auth_header:?} conflicts with the primary auth scheme"
+            ));
+        }
+
+        for key in self.extra_body.keys() {
+            let lower = key.to_ascii_lowercase();
+            if matches!(
+                lower.as_str(),
+                "model"
+                    | "messages"
+                    | "input"
+                    | "tools"
+                    | "tool_choice"
+                    | "stream"
+                    | "stream_options"
+                    | "max_tokens"
+                    | "max_completion_tokens"
+                    | "max_output_tokens"
+                    | "temperature"
+            ) || lower == "reasoning"
+                || lower.starts_with("reasoning_")
+            {
+                return Err(format!(
+                    "extra_body field {key:?} is engine-controlled and cannot be overridden"
+                ));
+            }
+        }
+        for (catalog, wire) in &self.model_ids {
+            if catalog.trim().is_empty() || wire.trim().is_empty() {
+                return Err("model_ids keys and values must not be empty".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates user-declared API pricing without converting it to runtime units.
+    ///
+    /// # Errors
+    ///
+    /// Returns a clear explanation for incomplete records, unsupported
+    /// accounting kinds, currencies other than USD, or unsafe rates.
+    pub fn validate_pricing(&self) -> Result<(), String> {
+        const MAX_USD_PER_MILLION: f64 = 1_000_000.0;
+        if self.pricing.is_empty() {
+            return Ok(());
+        }
+        if matches!(
+            self.kind.as_str(),
+            "openai_codex" | "openai_subscription" | "github_copilot"
+        ) {
+            return Err(format!(
+                "provider kind {:?} uses subscription or credit accounting and cannot declare API pricing",
+                self.kind
+            ));
+        }
+        for (model, pricing) in &self.pricing {
+            if model.trim().is_empty() {
+                return Err("pricing model identifiers must not be empty".to_owned());
+            }
+            if pricing.currency.as_deref() != Some("USD") {
+                return Err(format!(
+                    "pricing for model {model:?} must declare currency = \"USD\""
+                ));
+            }
+            for (field, rate, required) in [
+                (
+                    "input_per_million",
+                    pricing.input_per_million.as_ref(),
+                    true,
+                ),
+                (
+                    "output_per_million",
+                    pricing.output_per_million.as_ref(),
+                    true,
+                ),
+                (
+                    "cache_read_per_million",
+                    pricing.cache_read_per_million.as_ref(),
+                    false,
+                ),
+                (
+                    "cache_write_per_million",
+                    pricing.cache_write_per_million.as_ref(),
+                    false,
+                ),
+            ] {
+                let Some(rate) = rate else {
+                    if required {
+                        return Err(format!("pricing for model {model:?} requires {field}"));
+                    }
+                    continue;
+                };
+                let Some(rate) = rate.as_f64() else {
+                    return Err(format!(
+                        "pricing rate {field} for model {model:?} must be a finite number"
+                    ));
+                };
+                if !rate.is_finite() || !(0.0..=MAX_USD_PER_MILLION).contains(&rate) {
+                    return Err(format!(
+                        "pricing rate {field} for model {model:?} must be finite and between 0 and {MAX_USD_PER_MILLION} USD per million tokens"
+                    ));
+                }
+                if rate > 0.0 && rate < 0.000_001 {
+                    return Err(format!(
+                        "pricing rate {field} for model {model:?} is below the supported precision of 0.000001 USD per million tokens"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn insert_unique_header(
+    names: &mut BTreeMap<String, &'static str>,
+    name: &str,
+    source: &'static str,
+) -> Result<(), String> {
+    if let Some(existing) = names.insert(name.to_ascii_lowercase(), source) {
+        return Err(format!(
+            "request header {name:?} is configured by both {existing} and {source}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_provider_header(name: &str, value: &str, source: &str) -> Result<(), String> {
+    let lower = name.to_ascii_lowercase();
+    let reserved = matches!(
+        lower.as_str(),
+        "host"
+            | "connection"
+            | "transfer-encoding"
+            | "upgrade"
+            | "keep-alive"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+    );
+    if name.is_empty()
+        || !name.is_ascii()
+        || !name.bytes().all(is_http_token_byte)
+        || reserved
+        || value
+            .chars()
+            .any(|character| matches!(character, '\0' | '\r' | '\n'))
+    {
+        return Err(format!(
+            "provider {source} header {name:?} has an invalid or reserved name/value"
+        ));
+    }
+    Ok(())
+}
+
+fn is_http_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 /// Global outbound network settings.

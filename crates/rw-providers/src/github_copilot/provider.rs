@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -473,6 +473,11 @@ fn build_delegate(
                 supports_vision: model.supports_vision,
                 max_context_tokens: Some(model.max_context_tokens),
                 max_output_tokens: Some(model.max_output_tokens),
+                headers: BTreeMap::new(),
+                header_credentials: BTreeMap::new(),
+                extra_body: BTreeMap::new(),
+                model_ids: BTreeMap::new(),
+                path_template: None,
             })?)
         }
     };

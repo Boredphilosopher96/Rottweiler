@@ -1058,8 +1058,7 @@ needs = ["impl", "tests"]
         .expect("workflow");
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let mut agents = compose_agent_registry(&catalog).expect("agents");
         agents
             .resolve_tool_names(std::iter::empty())
@@ -1158,8 +1157,7 @@ needs = ["impl", "tests"]
         std::fs::create_dir_all(&home).expect("home");
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let mut agents = compose_agent_registry(&catalog).expect("agents");
         agents
             .resolve_tool_names(std::iter::empty())
@@ -1263,8 +1261,7 @@ needs = ["impl", "tests"]
         .expect("workflow");
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let mut agents = compose_agent_registry(&catalog).expect("agents");
         agents
             .resolve_tool_names(std::iter::empty())
@@ -1366,8 +1363,7 @@ needs = ["impl", "tests"]
         .expect("workflow");
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let mut agents = compose_agent_registry(&catalog).expect("agents");
         agents
             .resolve_tool_names(std::iter::empty())

@@ -26,9 +26,9 @@ pub use command::{
 pub use discovery::{
     AgentPermissionMode, ArtifactKind, ArtifactLocation, ArtifactOrigin, ArtifactScope,
     CLAUDE_FRONTMATTER_MIGRATION, CommandTemplate, DiscoveredAgent, DiscoveredCommand,
-    DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog, ExtensionDiscoveryConfig,
-    ExtensionDiscoveryError, InertProjectArtifact, LoadedSkillResource, SkillResource,
-    TemplatePart,
+    DiscoveredShellHook, DiscoveredSkill, ExtensionCatalog, ExtensionDiagnostic,
+    ExtensionDiscoveryConfig, ExtensionDiscoveryError, InertProjectArtifact, LoadedSkillResource,
+    SkillResource, TemplatePart, UninventoriedProjectRoot,
 };
 pub use hook::{
     HookDirective, HookDispatchResult, HookDispatchStatus, HookDispatcher, HookEffect, HookError,

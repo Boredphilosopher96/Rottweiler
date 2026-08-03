@@ -1,14 +1,17 @@
 //! Host integration helpers for MCP runtime control and RPC plugin approval.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use futures_util::StreamExt as _;
 use miette::{IntoDiagnostic, Result, miette};
 use rw_core::{
     HostError, HostMcpService, LoopbackMcpAuthority, McpApprovalReview, McpEnvironmentEntry,
@@ -19,9 +22,10 @@ use rw_core::{
 use rw_ext::{
     ApprovalRequirement, ApprovalStore, ApprovalStoreError, CapabilityEnforcer, HookHandler,
     HookRegistration, METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY,
-    PluginBoundaryRedactor, PluginEventRouter, PluginHost, PluginManifest, PluginRpcClient,
-    PluginRpcError, PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter,
-    RpcToolAdapter, plugin_launch_approval_requirement,
+    PluginBoundaryRedactor, PluginEventRouter, PluginHost, PluginHttpStreamResponse,
+    PluginManifest, PluginProviderHttpHandler, PluginRpcClient, PluginRpcError, PushHandler,
+    RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter, RpcToolAdapter,
+    plugin_launch_approval_requirement,
 };
 use rw_ext::{
     CommandDescriptor, CommandExecutionError, CommandHandler, CommandInvocation, CommandRegistry,
@@ -33,7 +37,10 @@ use rw_mcp::{
 };
 use rw_store::config::ConfigLoader;
 use rw_store::credentials::{CredentialManager, CredentialReference};
-use rw_tools::{SandboxedProtocolLauncher, Tool, UpstreamProxy};
+use rw_tools::{
+    CancellationToken, EgressPolicy, SandboxedProtocolLauncher, SupervisedEgressProxy, Tool,
+    UpstreamProxy,
+};
 use rw_types::{Block, Role, Turn, TurnMeta};
 use serde::{Deserialize, Serialize};
 
@@ -1110,6 +1117,206 @@ impl Drop for PrivateMcpScratch {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginHttpParams {
+    alias: String,
+    credential_reference: String,
+    request: PluginHttpRequest,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginHttpRequest {
+    method: PluginHttpMethod,
+    url: String,
+    #[serde(default)]
+    headers: Vec<PluginHttpHeader>,
+    body_base64: String,
+    credential_header: String,
+    #[serde(default)]
+    credential_prefix: String,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "UPPERCASE")]
+enum PluginHttpMethod {
+    Get,
+    Post,
+    Delete,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PluginHttpHeader {
+    name: String,
+    value: String,
+}
+
+struct RuntimePluginProviderHttp {
+    credentials: Arc<CredentialManager>,
+    registrar: Arc<dyn rw_providers::KnownSecretRegistrar>,
+    proxy: SupervisedEgressProxy,
+    allowed_domains: BTreeSet<String>,
+}
+
+impl RuntimePluginProviderHttp {
+    fn new(
+        credentials_path: &Path,
+        allowed_domains: &[String],
+        registrar: Arc<dyn rw_providers::KnownSecretRegistrar>,
+    ) -> Result<Self> {
+        let proxy = SupervisedEgressProxy::start(EgressPolicy::new(allowed_domains))
+            .map_err(|error| miette!(error.to_string()))?;
+        Ok(Self {
+            credentials: Arc::new(CredentialManager::system(credentials_path)),
+            registrar,
+            proxy,
+            allowed_domains: allowed_domains.iter().cloned().collect(),
+        })
+    }
+
+    fn domain_allowed(&self, url: &url::Url) -> bool {
+        plugin_http_domain_allowed(&self.allowed_domains, url)
+    }
+}
+
+fn plugin_http_domain_allowed(allowed_domains: &BTreeSet<String>, url: &url::Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        allowed_domains.iter().any(|allowed| {
+            host == *allowed
+                || host
+                    .strip_suffix(allowed)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        })
+    })
+}
+
+#[async_trait]
+impl PluginProviderHttpHandler for RuntimePluginProviderHttp {
+    async fn request(
+        &self,
+        params: serde_json::Value,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<PluginHttpStreamResponse, PluginRpcError> {
+        let params: PluginHttpParams = serde_json::from_value(params).map_err(|_| {
+            plugin_http_error("invalid_request", "provider HTTP request is invalid")
+        })?;
+        let _ = params.alias;
+        let url = url::Url::parse(&params.request.url)
+            .map_err(|_| plugin_http_error("invalid_request", "provider HTTP URL is invalid"))?;
+        if !self.domain_allowed(&url) {
+            return Err(plugin_http_error(
+                "domain_denied",
+                "provider HTTP URL is outside the plugin allowed_domains policy",
+            ));
+        }
+        let body = BASE64_STANDARD
+            .decode(params.request.body_base64.as_bytes())
+            .map_err(|_| plugin_http_error("invalid_request", "provider HTTP body is invalid"))?;
+        let mut headers = params
+            .request
+            .headers
+            .into_iter()
+            .map(|header| (header.name, header.value))
+            .collect::<Vec<_>>();
+        if headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(&params.request.credential_header))
+        {
+            return Err(plugin_http_error(
+                "invalid_request",
+                "provider HTTP credential header cannot also be plugin-supplied",
+            ));
+        }
+        let resolved = self
+            .credentials
+            .resolve(&CredentialReference::new(&params.credential_reference))
+            .map_err(|_| {
+                plugin_http_error(
+                    "authentication",
+                    "provider HTTP credential reference could not be resolved",
+                )
+            })?;
+        let secret = rw_providers::Secret::new(resolved.secret().expose_secret().clone());
+        self.registrar.register(&secret);
+        headers.push((
+            params.request.credential_header,
+            format!(
+                "{}{}",
+                params.request.credential_prefix,
+                secret.expose_secret()
+            ),
+        ));
+        let method = match params.request.method {
+            PluginHttpMethod::Get => rw_providers::GuardedHttpMethod::Get,
+            PluginHttpMethod::Post => rw_providers::GuardedHttpMethod::Post,
+            PluginHttpMethod::Delete => rw_providers::GuardedHttpMethod::Delete,
+        };
+        let guarded = rw_providers::GuardedHttpRequest {
+            method,
+            url,
+            headers,
+            body,
+            proxy: url::Url::parse(&self.proxy.url()).ok(),
+            proxy_authentication: None,
+            dns_pin: None,
+            allow_private_destinations: false,
+            response_deadline: Duration::from_mins(5),
+            frame_deadline: Duration::from_secs(30),
+            max_frame_bytes: 256 * 1024,
+            max_body_bytes: 64 * 1024 * 1024,
+        };
+        let response = tokio::select! {
+            () = cancellation.cancelled() => {
+                return Err(plugin_http_error("cancelled", "provider HTTP request was cancelled"));
+            }
+            response = rw_providers::guarded_http_request(guarded) => response,
+        }
+        .map_err(|error| plugin_http_guard_error(&error))?;
+        Ok(PluginHttpStreamResponse {
+            status: response.status,
+            headers: response.headers,
+            body: Box::pin(
+                response
+                    .body
+                    .map(|chunk| chunk.map_err(|error| plugin_http_guard_error(&error))),
+            ),
+        })
+    }
+}
+
+fn plugin_http_guard_error(error: &rw_providers::GuardedHttpFetchError) -> PluginRpcError {
+    let code = match &error {
+        rw_providers::GuardedHttpFetchError::Provider(error) => match error.kind {
+            rw_providers::ProviderErrorKind::Authentication => "provider_http_authentication",
+            rw_providers::ProviderErrorKind::RateLimited => "provider_http_rate_limited",
+            rw_providers::ProviderErrorKind::Timeout => "provider_http_timeout",
+            rw_providers::ProviderErrorKind::Server => "provider_http_server",
+            rw_providers::ProviderErrorKind::Network => "provider_http_network",
+            rw_providers::ProviderErrorKind::NetworkDisabled => "provider_http_network_disabled",
+            rw_providers::ProviderErrorKind::Cancelled => "provider_http_cancelled",
+            rw_providers::ProviderErrorKind::InvalidRequest
+            | rw_providers::ProviderErrorKind::ContextOverflow
+            | rw_providers::ProviderErrorKind::Protocol
+            | rw_providers::ProviderErrorKind::ReplayMiss
+            | rw_providers::ProviderErrorKind::Unsupported => "provider_http_invalid_request",
+        },
+        rw_providers::GuardedHttpFetchError::Deadline => "provider_http_timeout",
+        rw_providers::GuardedHttpFetchError::SizeLimit { .. }
+        | rw_providers::GuardedHttpFetchError::FrameLimit { .. } => "provider_http_protocol",
+    };
+    plugin_http_error(code, &error.to_string())
+}
+
+fn plugin_http_error(code: &str, message: &str) -> PluginRpcError {
+    PluginRpcError {
+        code: code.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
 pub(crate) struct PluginSessionRuntime {
     hosts: Vec<PluginHost>,
     push_handlers: Vec<(String, Arc<SessionPluginPushHandler>)>,
@@ -1131,7 +1338,7 @@ impl PluginSessionRuntime {
         private_root: &Path,
         workspace_roots: &[PathBuf],
         helper: &Path,
-        redactor: Arc<dyn PluginBoundaryRedactor>,
+        redactor: Arc<SharedPluginRedactor>,
     ) -> Result<Self> {
         let store = PrivatePluginApprovalStore::open(private_root)?;
         let scratch = PrivateMcpScratch::create()?;
@@ -1150,7 +1357,14 @@ impl PluginSessionRuntime {
         };
         for config in configs.iter().filter(|config| config.enabled) {
             runtime
-                .start_plugin(config, workspace_roots, &launcher, &store, redactor.clone())
+                .start_plugin(
+                    config,
+                    workspace_roots,
+                    &launcher,
+                    &store,
+                    private_root,
+                    redactor.clone(),
+                )
                 .await?;
         }
         Ok(runtime)
@@ -1162,7 +1376,8 @@ impl PluginSessionRuntime {
         workspace_roots: &[PathBuf],
         launcher: &crate::plugin_process::SandboxedPluginLauncher,
         store: &PrivatePluginApprovalStore,
-        redactor: Arc<dyn PluginBoundaryRedactor>,
+        private_root: &Path,
+        redactor: Arc<SharedPluginRedactor>,
     ) -> Result<()> {
         let manifest = config.load_manifest()?;
         let process = config.process_config()?;
@@ -1187,7 +1402,20 @@ impl PluginSessionRuntime {
             }
         }
         let push_handler = Arc::new(SessionPluginPushHandler::default());
-        let host = PluginHost::launch_approved(
+        let registrar: Arc<dyn rw_providers::KnownSecretRegistrar> = redactor.clone();
+        let provider_http: Arc<dyn PluginProviderHttpHandler> =
+            Arc::new(RuntimePluginProviderHttp::new(
+                &private_root.join("credentials.toml"),
+                process
+                    .allowed_domains()
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                registrar,
+            )?);
+        let boundary_redactor: Arc<dyn PluginBoundaryRedactor> = redactor;
+        let host = PluginHost::launch_approved_with_http(
             launcher,
             store,
             &process,
@@ -1195,14 +1423,16 @@ impl PluginSessionRuntime {
             workspace_roots,
             manifest.clone(),
             push_handler.clone(),
-            redactor,
+            provider_http,
+            boundary_redactor,
         )
         .await
         .map_err(|error| miette!("plugin {:?} failed to launch: {error}", config.name))?;
         self.register_plugin(config, &manifest, host, push_handler)
+            .await
     }
 
-    fn register_plugin(
+    async fn register_plugin(
         &mut self,
         config: &crate::extension_config::DiscoveredPlugin,
         manifest: &PluginManifest,
@@ -1244,7 +1474,8 @@ impl PluginSessionRuntime {
                 }),
             ));
         }
-        self.register_providers(config, manifest, &client, &enforcer);
+        self.register_providers(config, manifest, &client, &enforcer)
+            .await;
         if !manifest.capabilities.event_subscriptions.is_empty() {
             self.event_routers.push((
                 manifest
@@ -1261,7 +1492,7 @@ impl PluginSessionRuntime {
         Ok(())
     }
 
-    fn register_providers(
+    async fn register_providers(
         &mut self,
         config: &crate::extension_config::DiscoveredPlugin,
         manifest: &PluginManifest,
@@ -1278,16 +1509,31 @@ impl PluginSessionRuntime {
                 max_output_tokens: None,
                 wire_mode: rw_providers::WireMode::NormalizedReplay,
             };
-            self.providers.push((
-                declaration.alias_prefix.clone(),
-                Arc::new(RpcProviderAdapter::new(
-                    format!("plugin:{}", config.name),
-                    &declaration.alias_prefix,
-                    capabilities,
-                    client.clone(),
-                    enforcer.clone(),
-                )),
-            ));
+            let mut adapter = RpcProviderAdapter::new(
+                format!("plugin:{}", config.name),
+                &declaration.alias_prefix,
+                capabilities,
+                client.clone(),
+                enforcer.clone(),
+            );
+            if manifest.protocol >= 2
+                && declaration
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == "models")
+            {
+                adapter = adapter.with_model_catalog();
+                if let Err(error) = rw_providers::Provider::discover_models(&adapter).await {
+                    tracing::warn!(
+                        plugin = %config.name,
+                        provider = %declaration.alias_prefix,
+                        %error,
+                        "plugin provider model catalog is unavailable"
+                    );
+                }
+            }
+            self.providers
+                .push((declaration.alias_prefix.clone(), Arc::new(adapter)));
         }
     }
 
@@ -1453,6 +1699,7 @@ impl CommandHandler<SessionCommandContext, SessionCommandOutput> for PluginSessi
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct SharedPluginRedactor(std::sync::RwLock<rw_providers::FixtureRedactor>);
 impl SharedPluginRedactor {
     pub(crate) fn new(redactor: rw_providers::FixtureRedactor) -> Self {
@@ -1475,6 +1722,28 @@ impl PluginBoundaryRedactor for SharedPluginRedactor {
             &mut value,
         );
         value
+    }
+
+    fn redact_bytes(&self, value: &[u8]) -> Vec<u8> {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .redact_bytes(value)
+    }
+
+    fn maximum_secret_bytes(&self) -> usize {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .maximum_registered_secret_bytes()
+    }
+}
+impl rw_providers::KnownSecretRegistrar for SharedPluginRedactor {
+    fn register(&self, secret: &rw_providers::Secret) {
+        self.0
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .register_secret(secret);
     }
 }
 fn redact_plugin_value(redactor: &rw_providers::FixtureRedactor, value: &mut serde_json::Value) {
@@ -2149,6 +2418,89 @@ mod tests {
         ) -> std::result::Result<Arc<dyn McpClient>, McpError> {
             Err(McpError::Policy("offline fixture".to_owned()))
         }
+    }
+
+    #[test]
+    fn plugin_http_domain_policy_matches_exact_and_subdomain_allowlist_semantics() {
+        let allowed = BTreeSet::from(["example.com".to_owned()]);
+        assert!(plugin_http_domain_allowed(
+            &allowed,
+            &url::Url::parse("https://example.com/v1").expect("exact URL")
+        ));
+        assert!(plugin_http_domain_allowed(
+            &allowed,
+            &url::Url::parse("https://api.example.com/v1").expect("subdomain URL")
+        ));
+        assert!(!plugin_http_domain_allowed(
+            &allowed,
+            &url::Url::parse("https://example.com.attacker.test/v1").expect("outside URL")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_http_registers_secret_and_respects_process_network_denial() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = tempfile::tempdir().expect("credential root");
+        let credentials_path = root.path().join("credentials.toml");
+        fs::write(
+            &credentials_path,
+            "version = 1\n[credentials]\nfixture-token = \"host-only-secret\"\n",
+        )
+        .expect("credential fixture");
+        fs::set_permissions(&credentials_path, fs::Permissions::from_mode(0o600))
+            .expect("private credential mode");
+        let redactor = rw_providers::FixtureRedactor::default();
+        let handler = RuntimePluginProviderHttp::new(
+            &credentials_path,
+            &["example.com".to_owned()],
+            Arc::new(redactor.clone()),
+        )
+        .expect("HTTP handler");
+        let outside = handler
+            .request(
+                json!({
+                    "alias":"fixture/model",
+                    "credential_reference":"fixture-token",
+                    "request":{
+                        "method":"POST",
+                        "url":"https://attacker.test/v1/complete",
+                        "headers":[],
+                        "body_base64":"e30=",
+                        "credential_header":"authorization",
+                        "credential_prefix":"Bearer "
+                    }
+                }),
+                &CancellationToken::default(),
+            )
+            .await;
+        assert!(matches!(outside, Err(PluginRpcError { code, .. }) if code == "domain_denied"));
+        assert_eq!(redactor.registered_secret_count(), 0);
+        let _deny = rw_providers::deny_outbound_network_for_process();
+        let result = handler
+            .request(
+                json!({
+                    "alias":"fixture/model",
+                    "credential_reference":"fixture-token",
+                    "request":{
+                        "method":"POST",
+                        "url":"https://example.com/v1/complete",
+                        "headers":[],
+                        "body_base64":"e30=",
+                        "credential_header":"authorization",
+                        "credential_prefix":"Bearer "
+                    }
+                }),
+                &CancellationToken::default(),
+            )
+            .await;
+        let Err(error) = result else {
+            panic!("network denial must fail before opening a socket");
+        };
+        assert_eq!(error.code, "provider_http_network_disabled");
+        assert_eq!(redactor.registered_secret_count(), 1);
+        assert!(!error.message.contains("host-only-secret"));
     }
 
     #[cfg(unix)]
