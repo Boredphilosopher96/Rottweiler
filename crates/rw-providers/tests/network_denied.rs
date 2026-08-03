@@ -44,6 +44,11 @@ async fn reasoning_only_openai_model_rejects_off_before_opening_a_socket() {
         supports_vision: false,
         max_context_tokens: None,
         max_output_tokens: None,
+        headers: BTreeMap::new(),
+        header_credentials: BTreeMap::new(),
+        extra_body: BTreeMap::new(),
+        model_ids: BTreeMap::new(),
+        path_template: None,
     })
     .unwrap_or_else(|error| panic!("reasoning-only adapter must construct: {error}"));
 
@@ -133,6 +138,11 @@ async fn network_denied_prevents_both_live_adapters_from_opening_a_socket() {
         supports_vision: false,
         max_context_tokens: None,
         max_output_tokens: None,
+        headers: BTreeMap::new(),
+        header_credentials: BTreeMap::new(),
+        extra_body: BTreeMap::new(),
+        model_ids: BTreeMap::new(),
+        path_template: None,
     })
     .unwrap_or_else(|error| panic!("OpenAI adapter must construct: {error}"));
 

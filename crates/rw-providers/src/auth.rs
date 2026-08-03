@@ -89,6 +89,15 @@ pub enum AuthMaterial {
     ApiKey(Secret),
     /// OAuth or API bearer token.
     Bearer(Secret),
+    /// Provider-specific primary credential header.
+    Header {
+        /// Validated HTTP header name.
+        name: String,
+        /// Non-secret prefix prepended to the credential.
+        value_prefix: String,
+        /// Credential value.
+        secret: Secret,
+    },
     /// `ChatGPT` subscription bearer plus required Codex backend identity headers.
     OpenAiSubscription {
         /// OAuth access token.
@@ -134,7 +143,11 @@ impl AuthMaterial {
     pub(crate) fn openai_subscription_session_id(&self) -> Option<&str> {
         match self {
             Self::OpenAiSubscription { session_id, .. } => Some(session_id),
-            Self::ApiKey(_) | Self::Bearer(_) | Self::GitHubCopilot { .. } | Self::None => None,
+            Self::ApiKey(_)
+            | Self::Bearer(_)
+            | Self::Header { .. }
+            | Self::GitHubCopilot { .. }
+            | Self::None => None,
         }
     }
 
@@ -146,6 +159,19 @@ impl AuthMaterial {
                     AUTHORIZATION,
                     &format!("Bearer {}", secret.expose()),
                 )?;
+            }
+            Self::Header {
+                name,
+                value_prefix,
+                secret,
+            } => {
+                let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    ProviderError::new(
+                        ProviderErrorKind::InvalidRequest,
+                        "configured primary credential header name is invalid",
+                    )
+                })?;
+                insert_sensitive(headers, name, &format!("{value_prefix}{}", secret.expose()))?;
             }
             Self::OpenAiSubscription {
                 access_token,
@@ -195,6 +221,19 @@ impl AuthMaterial {
                     AUTHORIZATION,
                     &format!("Bearer {}", secret.expose()),
                 )?;
+            }
+            Self::Header {
+                name,
+                value_prefix,
+                secret,
+            } => {
+                let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    ProviderError::new(
+                        ProviderErrorKind::InvalidRequest,
+                        "configured primary credential header name is invalid",
+                    )
+                })?;
+                insert_sensitive(headers, name, &format!("{value_prefix}{}", secret.expose()))?;
             }
             Self::OpenAiSubscription { .. } => {
                 return Err(ProviderError::new(
@@ -264,7 +303,7 @@ fn apply_github_copilot(
     Ok(())
 }
 
-fn insert_header(
+pub(crate) fn insert_header(
     headers: &mut HeaderMap,
     name: HeaderName,
     value: &str,
@@ -279,7 +318,7 @@ fn insert_header(
     Ok(())
 }
 
-fn insert_sensitive(
+pub(crate) fn insert_sensitive(
     headers: &mut HeaderMap,
     name: HeaderName,
     value: &str,

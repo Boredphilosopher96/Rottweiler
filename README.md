@@ -23,6 +23,9 @@ advertised until the repository's protected release gates have passed.
 - **Provider-independent sessions.** Configure model aliases and fallback
   chains across Anthropic, OpenAI-compatible APIs, ChatGPT subscription access,
   GitHub Copilot subscription access, and local OpenAI-compatible endpoints.
+  Typed gateway controls cover static and credential-backed headers, primary
+  auth header scheme, query/body additions, path templates, model-id remapping,
+  and user-declared pricing while keeping wire dialects closed.
 - **Deliberate execution modes.** Discuss, plan, and execute modes are built in;
   trusted declarative modes can add project-specific behavior and tool limits.
 - **Durable work.** Event-sourced sessions support resume, fork, rewind,
@@ -32,7 +35,9 @@ advertised until the repository's protected release gates have passed.
   subagents use the same permission and audit boundaries.
 - **Extensible without embedding JavaScript.** Declarative commands, skills,
   agents, modes, workflows, RPC plugins, and capability-scoped WASM hooks extend
-  the engine through documented protocols.
+  the engine through documented protocols. Protocol-2 provider plugins publish
+  bounded model catalogs and use host-mediated authenticated HTTP: the plugin
+  names an approved credential reference but never receives the raw secret.
 - **Visible resource use.** Context, token usage, cache behavior, API cost or
   provider credits, compaction, and tool activity remain inspectable.
 
@@ -108,6 +113,24 @@ rw config check
 rw auth set-key anthropic
 rw models list --refresh
 ```
+
+For an OpenAI-compatible gateway, use `openai_compatible` or
+`openai_compatible_responses`. User-scoped provider configuration supports
+`headers`, credential-referenced `header_credentials`, bearer/custom-header/no
+primary auth, `extra_query`, `extra_body`, a `{model}` `path_template`, and
+`model_ids` remapping. This is enough to configure OpenRouter- and Azure
+OpenAI-shaped routes without Rust changes. It is still a typed gateway surface,
+not an arbitrary wire dialect: `base_url` cannot contain a query string (use
+`extra_query`), primary auth cannot be placed in a query parameter, reserved or
+duplicate-auth headers are rejected, and subscription/Copilot transports cannot
+be overridden. `[providers]` is ignored in project config even when trusted.
+
+Per-model `[providers.<name>.pricing.<model>]` records can declare USD API
+rates. Precedence is whole-record: user config, then authenticated
+provider-discovered pricing, then models.dev; fields are not blended between
+sources. `rw config check` renders declared records as `source = user_config`.
+ChatGPT subscription and Copilot keep quota/AI-credit accounting, and reject
+dollar-pricing declarations rather than appearing as `$0` API routes.
 
 For a configured browser or device-flow provider, use `rw auth login
 <provider>`. ChatGPT and GitHub Copilot subscription credentials are isolated
@@ -209,6 +232,13 @@ bun run build
 Read [Extensibility](docs/04-EXTENSIBILITY.md) before granting capabilities or
 shipping an extension. The generated TypeScript SDK, wire schemas, and session
 event envelope are maintained in `packages/plugin-sdk/` and `protocol/`.
+
+Invalid, unreadable, or unsafe declarative artifacts are skipped with diagnostics
+in tracing, `rw doctor`, and engine startup notifications; an artifact failure
+does not prevent startup. “Fail closed” means the affected artifact does not
+load. If an untrusted project root cannot be inventoried completely, its partial
+inventory is discarded, it has no trust fingerprint, and `rw trust grant`
+refuses it.
 
 ## Platform support
 

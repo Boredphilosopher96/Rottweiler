@@ -1,5 +1,10 @@
 # 02 — Architecture
 
+This document records the intended architecture and the boundaries present in
+the source; it is not independent evidence that every diagrammed subsystem or
+acceptance behavior is complete. Current provider/plugin limitations are called
+out in [04 — Extensibility](04-EXTENSIBILITY.md) and the roadmap.
+
 ## Big picture
 
 Headless engine + thin clients. The engine owns all agent logic and speaks an event protocol; the TUI, the headless CLI, and the SDK are peers consuming that protocol. This is the single most load-bearing decision (ADR-002): it forces every capability to be expressible as events/commands, which is also what makes extensibility, replay, and testing tractable.
@@ -241,8 +246,20 @@ resolve(alias) → [candidate models] → adapter → provider
   the choice to their documented wire shape before any socket is opened.
 - `Caps` declares: tool calling, vision, thinking, cache breakpoints, max context. The engine adapts behavior from caps (e.g., no parallel tool hints for models that can't).
 - Retry/failover middleware wraps any provider. Pricing table is data (`models.toml`, refreshable), keyed by canonical model id.
-- **Record/replay middleware** wraps every provider: `--record` writes request/response fixtures; the replay provider serves them back for tests. This is a provider like any other, which is why nothing can bypass it.
+- **Record/replay middleware** wraps every provider: `--record` writes fixtures and the replay provider serves them back for tests. Built-in adapters retain and reparse their supported wire frames. RPC provider plugins use `WireMode::NormalizedReplay`, so their fixtures replay normalized provider events rather than an arbitrary plugin-specific wire dialect.
 - Provider endpoint, proxy, and credential-reference settings are user-scoped security-sensitive configuration. Project files may select user-defined provider/model candidates, but cannot define or redirect a provider connection.
+- The configurable adapter and wire-mode enums remain closed: Anthropic, OpenAI
+  Chat/Responses, ChatGPT subscription, GitHub Copilot, and OpenAI-compatible
+  Chat/Responses. Compatible adapters expose typed gateway controls for static
+  and credential-backed headers, primary auth header scheme, extra query/body
+  fields, a `{model}` path template, and model-id remapping. They do not make an
+  unknown streaming/error wire dialect a configuration string.
+- RPC protocol 2 adds bounded `provider/models` discovery and host-mediated
+  `provider/http` authentication. Model capabilities, context/output limits,
+  and optional pricing flow into the live catalog and accounting path. The
+  plugin names an approval-fingerprinted credential reference; the host alone
+  resolves, registers, and applies the secret. Protocol-1 providers retain the
+  conservative fixed capabilities and unpriced accounting defined by protocol 1.
 
 ### Context engine (`rw-context`)
 
@@ -290,7 +307,9 @@ security-sensitive sections are rejected before merging, so they never become
 effective even transiently.
 
 **Provider and network contract.** `[providers.<name>]` holds an adapter kind,
-optional endpoint, API-key environment/credential references, and an optional
+optional endpoint/path template, API-key environment/credential references,
+static and credential-backed headers, primary auth presentation, extra query/body
+fields, model-id mappings, per-model USD pricing, and an optional
 provider-specific proxy. `[models].aliases` remains the provider-blind ordered
 `provider/model` routing table; `[models].thinking` maps aliases to
 `off|low|medium|high`. Proxy authentication is configured as a non-secret
@@ -300,6 +319,12 @@ file (mode 0600 on Unix) and is never rendered. Production does not link or call
 an operating-system credential-store backend, including during provider authentication.
 The global `[network]` form uses the same fields. Provider definitions and all
 proxy/authentication fields are user-scoped and ignored in project config.
+Gateway `base_url` values cannot contain credentials, query, or fragment;
+`extra_query` is the only typed query addition, and primary credentials cannot
+be placed in the query. `Host`, hop-by-hop, invalid, duplicate, and conflicting
+primary-auth headers are rejected. Engine-controlled body fields cannot be
+replaced. Anthropic, ChatGPT subscription, and Copilot fixed transports reject
+gateway request overrides.
 An API key uses `api_key_credential` when configured, otherwise the stable
 `providers.<name>.api_key` identifier; `api_key_env` remains the
 highest-precedence source. The exact built-in `anthropic` and `openai` adapters
@@ -367,6 +392,14 @@ Provider-neutral request invariants are not capabilities and never wait for
 discovery: exact model binding and tool-choice consistency (`required` needs at
 least one tool; `named` must match an exposed tool) fail before the lazy catalog
 can open `/models`. Only model-dependent feature checks are deferred.
+
+Pricing resolution is whole-record rather than field-by-field: explicit user
+configuration wins over authenticated provider-discovered metadata, which wins
+over models.dev enrichment. The resolved model retains that source. `rw config
+check` prints user-declared pricing records with `source = user_config`; live
+provider/models.dev selection occurs at provider composition. ChatGPT and
+Copilot routes discard dollar-pricing records and retain `SubscriptionQuota` and
+`AiCredits`, respectively.
 
 `rw-core::ProviderFactory` is the only production composition root for those
 pieces. It resolves provider > global > environment proxy precedence and proxy

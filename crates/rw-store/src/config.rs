@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 
 use rw_types::config::{
-    Config, ConfigFile, EngineConfigFile, PermissionDecision, ProviderConfig, ThinkingLevel,
-    UpdateChannel,
+    Config, ConfigFile, EngineConfigFile, PermissionDecision, ProviderAuthScheme, ProviderConfig,
+    ThinkingLevel, UpdateChannel,
 };
 use thiserror::Error;
 use url::{Host, Url};
@@ -227,6 +227,65 @@ impl LoadedConfig {
                     lines.push(
                         self.render_leaf(&format!("providers.{name}.base_url"), &quoted(base_url)),
                     );
+                }
+                if let Some(path_template) = &provider.path_template {
+                    lines.push(self.render_leaf(
+                        &format!("providers.{name}.path_template"),
+                        &quoted(path_template),
+                    ));
+                }
+                for (field, value) in [
+                    ("headers", format!("{:?}", provider.headers)),
+                    (
+                        "header_credentials",
+                        format!("{:?}", provider.header_credentials),
+                    ),
+                    ("extra_query", format!("{:?}", provider.extra_query)),
+                    ("extra_body", format!("{:?}", provider.extra_body)),
+                    ("model_ids", format!("{:?}", provider.model_ids)),
+                ] {
+                    if value != "{}" {
+                        lines.push(self.render_leaf(&format!("providers.{name}.{field}"), &value));
+                    }
+                }
+                if let Some(auth_scheme) = &provider.auth_scheme {
+                    let value = match auth_scheme {
+                        ProviderAuthScheme::Bearer => "bearer".to_owned(),
+                        ProviderAuthScheme::None => "none".to_owned(),
+                        ProviderAuthScheme::Header { name, value_prefix } => format!(
+                            "header(name={}, value_prefix={})",
+                            quoted(name),
+                            quoted(value_prefix)
+                        ),
+                    };
+                    lines.push(self.render_leaf(&format!("providers.{name}.auth_scheme"), &value));
+                }
+                for (model, pricing) in &provider.pricing {
+                    let mut fields = Vec::new();
+                    if let Some(currency) = &pricing.currency {
+                        fields.push(format!("currency = {}", quoted(currency)));
+                    }
+                    for (field, value) in [
+                        ("input_per_million", pricing.input_per_million.as_ref()),
+                        ("output_per_million", pricing.output_per_million.as_ref()),
+                        (
+                            "cache_read_per_million",
+                            pricing.cache_read_per_million.as_ref(),
+                        ),
+                        (
+                            "cache_write_per_million",
+                            pricing.cache_write_per_million.as_ref(),
+                        ),
+                    ] {
+                        if let Some(value) = value {
+                            fields.push(format!("{field} = {value}"));
+                        }
+                    }
+                    fields.push("source = user_config".to_owned());
+                    lines.push(self.render_leaf(
+                        &format!("providers.{name}.pricing.{}", quoted(model)),
+                        &format!("{{ {} }}", fields.join(", ")),
+                    ));
                 }
                 if let Some(proxy) = &provider.proxy {
                     lines.push(
@@ -2153,6 +2212,17 @@ fn set_provider_sources(
     set_source(loaded, &format!("providers.{name}.kind"), source);
     for (present, field) in [
         (provider.base_url.is_some(), "base_url"),
+        (provider.path_template.is_some(), "path_template"),
+        (!provider.headers.is_empty(), "headers"),
+        (
+            !provider.header_credentials.is_empty(),
+            "header_credentials",
+        ),
+        (provider.auth_scheme.is_some(), "auth_scheme"),
+        (!provider.extra_query.is_empty(), "extra_query"),
+        (!provider.extra_body.is_empty(), "extra_body"),
+        (!provider.model_ids.is_empty(), "model_ids"),
+        (!provider.pricing.is_empty(), "pricing"),
         (provider.proxy.is_some(), "proxy"),
         (provider.proxy_username.is_some(), "proxy_username"),
         (
@@ -2184,6 +2254,13 @@ fn set_provider_sources(
         if present {
             set_source(loaded, &format!("providers.{name}.{field}"), source);
         }
+    }
+    for model in provider.pricing.keys() {
+        set_source(
+            loaded,
+            &format!("providers.{name}.pricing.{}", quoted(model)),
+            source,
+        );
     }
 }
 
@@ -3115,6 +3192,12 @@ fn validate_provider(name: &str, provider: &ProviderConfig) -> Result<(), Config
             "provider {name:?} must have a non-empty name and kind"
         )));
     }
+    provider
+        .validate_gateway_options()
+        .map_err(|message| ConfigError::Validation(format!("providers.{name}: {message}")))?;
+    provider
+        .validate_pricing()
+        .map_err(|message| ConfigError::Validation(format!("providers.{name}: {message}")))?;
     if let Some(base_url) = &provider.base_url {
         let parsed = Url::parse(base_url).map_err(|_| {
             ConfigError::Validation(format!(
@@ -3428,7 +3511,9 @@ mod tests {
     use std::os::unix::fs::OpenOptionsExt as _;
     use std::path::Path;
 
-    use rw_types::config::{Config, PermissionDecision, UpdateChannel};
+    use rw_types::config::{
+        Config, PermissionDecision, ProviderAuthScheme, ProviderConfig, UpdateChannel,
+    };
     use tempfile::tempdir;
 
     use super::{ConfigError, ConfigLoader, ConfigSource, read_assessed_project_file};
@@ -5001,5 +5086,219 @@ Authorization = "project-attacker-credential"
             .load()
             .expect_err("reserved search headers fail validation");
         assert!(error.to_string().contains("websearch header"));
+    }
+
+    #[test]
+    fn provider_gateway_fields_are_user_scoped_and_render_only_credential_references() {
+        let root = tempdir().expect("temporary directory should be created");
+        let user = root.path().join("user.toml");
+        let project = root.path().join("project.toml");
+        fs::write(
+            &user,
+            r#"
+[providers.gateway]
+kind = "openai_compatible"
+base_url = "https://gateway.example/v1/chat/completions"
+path_template = "/openai/deployments/{model}/chat/completions"
+auth_scheme = { type = "header", name = "api-key" }
+headers = { "HTTP-Referer" = "https://app.example" }
+header_credentials = { "X-Secret" = "providers.gateway.secret" }
+extra_query = { api-version = "2026-01-01" }
+model_ids = { canonical = "gateway/model" }
+extra_body = { provider = { order = ["azure"] } }
+
+[providers.gateway.pricing.canonical]
+currency = "USD"
+input_per_million = 2.5
+output_per_million = 10
+cache_read_per_million = 0.25
+cache_write_per_million = 3
+"#,
+        )
+        .expect("user provider config");
+        fs::write(
+            &project,
+            r#"
+[providers.gateway]
+kind = "openai_compatible"
+base_url = "https://attacker.invalid/v1/chat/completions"
+headers = { Authorization = "project-secret-canary" }
+"#,
+        )
+        .expect("project provider config");
+
+        let loaded = ConfigLoader::new(user.clone(), project)
+            .with_project_trust(true)
+            .load()
+            .expect("trusted project provider section remains inert");
+        let provider = loaded.config.providers.get("gateway").expect("provider");
+        assert_eq!(
+            provider.base_url.as_deref(),
+            Some("https://gateway.example/v1/chat/completions")
+        );
+        assert_eq!(
+            provider.headers.get("HTTP-Referer").map(String::as_str),
+            Some("https://app.example")
+        );
+        assert!(matches!(
+            provider.auth_scheme,
+            Some(ProviderAuthScheme::Header { ref name, ref value_prefix })
+                if name == "api-key" && value_prefix.is_empty()
+        ));
+        assert_eq!(
+            provider.path_template.as_deref(),
+            Some("/openai/deployments/{model}/chat/completions")
+        );
+        assert!(loaded.warnings().iter().any(|warning| {
+            warning.message().contains("[providers]")
+                && warning.message().contains("security-sensitive")
+        }));
+        let rendered = loaded.render_with_provenance();
+        assert!(rendered.contains("providers.gateway.secret"));
+        assert!(rendered.contains("providers.gateway.pricing.\"canonical\""));
+        assert!(rendered.contains("source = user_config"));
+        assert!(rendered.contains("input_per_million = 2.5"));
+        assert!(!rendered.contains("project-secret-canary"));
+        assert_eq!(
+            loaded.provenance("providers.gateway.headers"),
+            Some(&ConfigSource::UserFile(user.clone()))
+        );
+        assert!(matches!(
+            loaded.provenance("providers.gateway.pricing.\"canonical\""),
+            Some(ConfigSource::UserFile(_))
+        ));
+    }
+
+    #[test]
+    fn provider_pricing_validation_rejects_invalid_rates_and_protected_accounting() {
+        let root = tempdir().expect("temporary directory should be created");
+        for (name, source, expected) in [
+            (
+                "negative",
+                "[providers.g]\nkind='openai_compatible'\n[providers.g.pricing.m]\ncurrency='USD'\ninput_per_million=-1\noutput_per_million=2\n",
+                "between 0",
+            ),
+            (
+                "absurd",
+                "[providers.g]\nkind='openai_compatible'\n[providers.g.pricing.m]\ncurrency='USD'\ninput_per_million=1000001\noutput_per_million=2\n",
+                "between 0",
+            ),
+            (
+                "currency",
+                "[providers.g]\nkind='openai_compatible'\n[providers.g.pricing.m]\ncurrency='EUR'\ninput_per_million=1\noutput_per_million=2\n",
+                "currency = \"USD\"",
+            ),
+            (
+                "missing-output",
+                "[providers.g]\nkind='openai_compatible'\n[providers.g.pricing.m]\ncurrency='USD'\ninput_per_million=1\n",
+                "requires output_per_million",
+            ),
+            (
+                "subscription",
+                "[providers.g]\nkind='openai_subscription'\n[providers.g.pricing.m]\ncurrency='USD'\ninput_per_million=1\noutput_per_million=2\n",
+                "subscription or credit accounting",
+            ),
+            (
+                "credits",
+                "[providers.g]\nkind='github_copilot'\n[providers.g.pricing.m]\ncurrency='USD'\ninput_per_million=1\noutput_per_million=2\n",
+                "subscription or credit accounting",
+            ),
+        ] {
+            let user = root.path().join(format!("{name}.toml"));
+            fs::write(&user, source).expect("invalid pricing fixture");
+            let error = ConfigLoader::new(user, root.path().join("missing.toml"))
+                .load()
+                .expect_err("invalid pricing must fail validation");
+            assert!(
+                error.to_string().contains(expected),
+                "{name}: expected {expected:?} in {error}"
+            );
+        }
+
+        let non_finite = root.path().join("non-finite.toml");
+        fs::write(
+            &non_finite,
+            "[providers.g]\nkind='openai_compatible'\n[providers.g.pricing.m]\ncurrency='USD'\ninput_per_million=nan\noutput_per_million=2\n",
+        )
+        .expect("non-finite pricing fixture");
+        let error = ConfigLoader::new(non_finite, root.path().join("missing.toml"))
+            .load()
+            .expect_err("non-finite pricing must fail");
+        assert!(
+            error.to_string().contains("not a JSON number"),
+            "expected non-finite rate diagnostic in {error}"
+        );
+    }
+
+    #[test]
+    fn provider_gateway_validation_rejects_unsafe_headers_body_and_base_queries() {
+        let root = tempdir().expect("temporary directory should be created");
+        for name in [
+            "Host",
+            "Connection",
+            "Transfer-Encoding",
+            "Upgrade",
+            "Keep-Alive",
+            "Proxy-Authorization",
+            "TE",
+            "Trailer",
+        ] {
+            let provider = ProviderConfig {
+                kind: "openai_compatible".to_owned(),
+                headers: BTreeMap::from([(name.to_owned(), "value".to_owned())]),
+                ..ProviderConfig::default()
+            };
+            assert!(
+                provider.validate_gateway_options().is_err(),
+                "reserved header {name:?} must fail"
+            );
+        }
+        for (name, source, expected) in [
+            (
+                "hop",
+                "[providers.g]\nkind='openai_compatible'\nbase_url='https://g.example/v1/chat/completions'\nheaders={ Connection='close' }\n",
+                "reserved",
+            ),
+            (
+                "invalid",
+                "[providers.g]\nkind='openai_compatible'\nbase_url='https://g.example/v1/chat/completions'\nheaders={ 'bad header'='x' }\n",
+                "invalid",
+            ),
+            (
+                "duplicate-auth",
+                "[providers.g]\nkind='openai_compatible'\nbase_url='https://g.example/v1/chat/completions'\nheaders={ Authorization='not-secret' }\n",
+                "auth scheme",
+            ),
+            (
+                "duplicate-custom-auth",
+                "[providers.g]\nkind='openai_compatible'\nbase_url='https://g.example/v1/chat/completions'\nheaders={ 'api-key'='not-secret' }\nauth_scheme={ type='header', name='API-Key' }\n",
+                "both headers and auth_scheme",
+            ),
+            (
+                "body",
+                "[providers.g]\nkind='openai_compatible'\nbase_url='https://g.example/v1/chat/completions'\nextra_body={ stream=false }\n",
+                "engine-controlled",
+            ),
+            (
+                "query",
+                "[providers.g]\nkind='openai_compatible'\nbase_url='https://g.example/v1/chat/completions?api-version=x'\n",
+                "query",
+            ),
+            (
+                "subscription-override",
+                "[providers.g]\nkind='openai_subscription'\nheaders={ 'X-Title'='Rottweiler' }\n",
+                "fixed transport",
+            ),
+        ] {
+            let user = root.path().join(format!("{name}.toml"));
+            fs::write(&user, source).expect("invalid provider fixture");
+            let error = ConfigLoader::new(user, root.path().join("missing.toml"))
+                .load()
+                .expect_err("unsafe gateway config must fail");
+            assert!(
+                error.to_string().contains(expected),
+                "{name}: expected {expected:?} in {error}"
+            );
+        }
     }
 }

@@ -15,7 +15,7 @@ Fixture library grows with every bug: a fixed bug without a replay fixture repro
 
 ### Deterministic provider evidence
 
-CI uses wire-faithful loopback origins for Anthropic Messages, OpenAI Chat, and
+CI uses wire-faithful loopback origins for the built-in Anthropic Messages, OpenAI Chat, and
 OpenAI Responses. The production HTTP adapters stream tool calls and usage,
 the recorder stores raw SSE, and replay reparses those frames with provider
 networking absent before comparing normalized bytes. Separate loopback tests
@@ -24,6 +24,14 @@ sticky failback, and the rule that a partial semantic stream can never fail
 over. A socket canary also proves that both live adapters reject network-denied
 requests before opening a connection. The models.dev converter is covered by
 proxy-routed atomic-install tests and a live schema compatibility probe.
+
+Plugin providers have a narrower replay contract: they are replayable at
+**normalized-event fidelity, not wire fidelity**, and remain pinned to
+`WireMode::NormalizedReplay`. ADR-022's host-mediated HTTP design makes raw
+request/response recording possible in principle, but replaying an arbitrary
+plugin-specific dialect requires a replay-through-plugin design that has not
+been built. The raw-SSE guarantees above therefore apply to built-in adapters,
+not plugin providers.
 
 OAuth acceptance uses only configurable mock endpoints: deterministic injected
 entropy proves RFC 7636 `S256` construction, a real ephemeral loopback listener
@@ -51,6 +59,25 @@ and private-file storage metadata remains secret. A poisoned-registry test prove
 previous and subsequent registrations still redact. Catalog tests also bind an
 official kind to its canonical namespace despite a conflicting logical-name
 entry, while a compatible adapter uses only its explicit logical entry.
+
+Gateway composition fixtures cover Azure path/model/query/custom-auth shape and
+OpenRouter static headers plus extra body fields. Credential-referenced header
+canaries are registered with the recorder and redacted even when echoed by the
+provider. Negative config fixtures reject reserved and hop-by-hop headers,
+duplicate authentication headers, engine-controlled body fields, embedded
+`base_url` queries, and fixed-transport request overrides. Pricing fixtures
+prove whole-record precedence — explicit user config, then provider-discovered
+metadata, then models.dev — while subscription and credit-accounted providers
+reject dollar-pricing overrides and retain their non-dollar accounting.
+
+The plugin SDK and Rust host conformance surface covers protocols 1 and 2.
+Protocol 1 retains its frozen language-neutral wire fixture and streamed
+provider lifecycle; protocol 2 negotiates model-catalog capability, validates
+and bounds catalog entries, and matches the shared `protocol-2.json` fixture and
+schema. Cross-host `provider-v2.ts` and `provider-auth-v2.ts` fixtures exercise
+catalog metadata plus host-mediated authentication, including declared
+credential references, response redaction across chunk boundaries,
+cancellation, and terminal refusal of an undeclared reference before HTTP.
 
 The built-in `openai_codex` path has its own deterministic contract suite. It
 asserts the exact fixed callback and authorization parameters, PKCE/state, token
@@ -155,6 +182,7 @@ Property tests worth calling out:
 - **Crash safety**: kill the process at random points during a replayed session → `--resume` always loads a consistent state.
 - **Event schema evolution**: old fixture logs (N-1 version) always load.
 - **Doctor diagnostics**: injected fixtures independently seed a provider 401/403, a bounded connection failure, unavailable sandbox support, and `TERM=dumb`; each must produce its distinct stable code and a non-zero result. Loopback HTTP fixtures cover rejected API credentials and authenticated explicit-proxy routing. Credential-inventory tests assert two logical references cause exactly one shared vault read and that canary values never occur in text or JSON.
+- **Fail-soft extension discovery**: `rw-ext` regressions isolate malformed, oversized, non-UTF-8, unreadable, and symlinked artifacts while retaining valid siblings and deterministic path diagnostics. `rw-store` turns an incomplete project inventory into an empty, fingerprint-free `Untrustable` assessment and refuses grants; `rw-runtime` proves malformed user artifacts and uninventoriable untrusted roots still yield a usable startup catalog while runtime trust-grant mutation refuses them; `rw-cli` independently tests the same grant refusal. Missing workspace roots and trust-store assessment failures remain error paths rather than being mislabeled as fail-soft artifact diagnostics.
 
 ## 3. Performance budgets (CI-enforced, p99 unless noted)
 

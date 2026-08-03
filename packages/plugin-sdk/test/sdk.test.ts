@@ -121,8 +121,12 @@ describe("wire protocol", () => {
       commandExecute: "command/execute",
       hookInvoke: "hook/invoke",
       providerComplete: "provider/complete",
+      providerModels: "provider/models",
       providerEvent: "provider/event",
       providerCancel: "provider/cancel",
+      providerHttp: "provider/http",
+      providerHttpEvent: "provider/http_event",
+      providerHttpCancel: "provider/http_cancel",
       eventPublish: "event/publish",
       injectMessage: "session/inject_message",
       setStatus: "session/set_status",
@@ -135,8 +139,15 @@ describe("wire protocol", () => {
   test("matches the language-neutral protocol 1 wire fixture", async () => {
     const fixture = JSON.parse(
       await readFile(join(import.meta.dir, "../fixtures/wire/protocol-1.json"), "utf8"),
-    ) as { methods: typeof RPC_METHODS }
-    expect(fixture.methods).toEqual(RPC_METHODS)
+    ) as { methods: Readonly<Record<string, string>> }
+    const {
+      providerModels: _providerModels,
+      providerHttp: _providerHttp,
+      providerHttpEvent: _providerHttpEvent,
+      providerHttpCancel: _providerHttpCancel,
+      ...protocol1Methods
+    } = RPC_METHODS
+    expect(fixture.methods).toEqual(protocol1Methods)
   })
 
   test("shared fixture matches the frozen schema constants and manifest contract", async () => {
@@ -162,6 +173,29 @@ describe("wire protocol", () => {
       manifest: fixture.initialize_response.result,
       handlers: { events: { TurnFinished: () => undefined } },
     })).not.toThrow()
+  })
+
+  test("protocol 2 fixture and schema publish the negotiated model catalog contract", async () => {
+    const fixture = JSON.parse(
+      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-2.json"), "utf8"),
+    ) as {
+      protocol: number
+      methods: Readonly<Record<string, string>>
+      provider_models_response: { result: { models: readonly [{ id: string }] } }
+    }
+    const schema = JSON.parse(
+      await readFile(join(import.meta.dir, "../fixtures/wire/protocol-2.schema.json"), "utf8"),
+    ) as { properties: { protocol: { const: number } }; $defs: Record<string, unknown> }
+    expect(fixture.protocol).toBe(schema.properties.protocol.const)
+    expect(fixture.methods).toEqual(RPC_METHODS)
+    expect(fixture.methods.providerModels).toBe("provider/models")
+    expect(fixture.provider_models_response.result.models[0]?.id).toBe("vision-thinking")
+    expect(schema.$defs).toMatchObject({
+      provider_declaration: expect.any(Object),
+      model_capabilities: expect.any(Object),
+      pricing: expect.any(Object),
+      provider_models_result: expect.any(Object),
+    })
   })
 
   test("initializes and dispatches every declared request kind", async () => {
@@ -362,13 +396,70 @@ describe("wire protocol", () => {
     })
   })
 
-  test("rejects calls before initialize and incompatible protocol", async () => {
+  test("rejects calls before initialize and an unsupported version range", async () => {
     const { server, messages } = harness()
     await request(server, 1, RPC_METHODS.toolCall, {})
-    await request(server, 2, RPC_METHODS.initialize, { ...initializeParams, protocol: 2 })
+    await request(server, 2, RPC_METHODS.initialize, { ...initializeParams, protocol: 3, min_protocol: 3 })
     expect(messages).toEqual([
       { jsonrpc: "2.0", id: 1, error: { code: -32002, message: "plugin is not initialized" } },
       { jsonrpc: "2.0", id: 2, error: { code: -32001, message: "unsupported plugin protocol" } },
+    ])
+  })
+
+  test("negotiates protocol 2 and publishes a bounded provider catalog", async () => {
+    const definition = definePlugin({
+      manifest: {
+        name: "catalog-provider", version: "1", protocol: 2,
+        capabilities: {
+          providers: [{ "alias-prefix": "catalog/", capabilities: ["models"] }],
+        },
+      },
+      handlers: {
+        providers: {
+          "catalog/": async function* () { yield { type: "finished", reason: "stop" } },
+        },
+        providerModels: {
+          "catalog/": () => ({ models: [{
+            id: "capable", display_name: "Capable",
+            capabilities: {
+              tool_calling: true, vision: true, thinking: true, cache_breakpoints: "explicit",
+            },
+            max_context_tokens: 200_000, max_output_tokens: 16_000,
+            pricing: {
+              input_per_million_micros_usd: 3_000_000,
+              output_per_million_micros_usd: 15_000_000,
+            },
+          }] }),
+        },
+      },
+    })
+    const { server, messages } = harness(definition)
+    await request(server, 1, RPC_METHODS.initialize, {
+      ...initializeParams, protocol: 2, capabilities: ["provider-models", "future-host-capability"],
+    })
+    await request(server, 2, RPC_METHODS.providerModels, { alias_prefix: "catalog/" })
+    expect(messages[0]).toMatchObject({ id: 1, result: { protocol: 2 } })
+    expect(messages[1]).toMatchObject({
+      id: 2,
+      result: { models: [{ id: "capable", capabilities: { vision: true }, max_context_tokens: 200_000 }] },
+    })
+  })
+
+  test("protocol 2 refuses initialization without its negotiated catalog capability", async () => {
+    const definition = definePlugin({
+      manifest: {
+        name: "catalog-provider", version: "1", protocol: 2,
+        capabilities: { providers: [{ "alias-prefix": "catalog/", capabilities: ["models"] }] },
+      },
+      handlers: {
+        providers: { "catalog/": async function* () { yield { type: "finished", reason: "stop" } } },
+        providerModels: { "catalog/": () => ({ models: [] }) },
+      },
+    })
+    const { server, messages } = harness(definition)
+    await request(server, 1, RPC_METHODS.initialize, { ...initializeParams, protocol: 2 })
+    expect(messages).toEqual([
+      { jsonrpc: "2.0", id: 1, error: { code: -32001, message: "unsupported plugin protocol" } },
     ])
   })
 

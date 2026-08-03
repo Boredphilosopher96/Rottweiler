@@ -1,4 +1,5 @@
-export const PLUGIN_PROTOCOL_VERSION = 1 as const
+export const PLUGIN_PROTOCOL_VERSION = 2 as const
+export const MIN_PLUGIN_PROTOCOL_VERSION = 1 as const
 
 export const RPC_METHODS = Object.freeze({
   initialize: "initialize",
@@ -6,8 +7,12 @@ export const RPC_METHODS = Object.freeze({
   commandExecute: "command/execute",
   hookInvoke: "hook/invoke",
   providerComplete: "provider/complete",
+  providerModels: "provider/models",
   providerEvent: "provider/event",
   providerCancel: "provider/cancel",
+  providerHttp: "provider/http",
+  providerHttpEvent: "provider/http_event",
+  providerHttpCancel: "provider/http_cancel",
   eventPublish: "event/publish",
   injectMessage: "session/inject_message",
   setStatus: "session/set_status",
@@ -27,6 +32,8 @@ export const PROTOCOL_LIMITS = {
   maxSchemaDepth: 32,
   maxRpcMessageBytes: 16 * 1024,
   maxHookPayloadBytes: 256 * 1024,
+  maxModelTokens: 16 * 1024 * 1024,
+  maxPriceMicrosUsd: 1_000_000_000_000,
   defaultHandlerTimeoutMs: 5_000,
 } as const
 
@@ -70,6 +77,10 @@ export interface HookDeclaration {
 
 export interface ProviderDeclaration {
   readonly "alias-prefix": string
+  /** Approval-fingerprinted provider RPC capabilities. Protocol 2 defines `models`. */
+  readonly capabilities?: readonly string[]
+  /** Approval-fingerprinted credential references. Values remain host-only. */
+  readonly "credential-references"?: readonly string[]
 }
 
 export type PluginPushMethod =
@@ -89,7 +100,7 @@ export interface PluginCapabilities {
 export interface PluginManifest {
   readonly name: string
   readonly version: string
-  readonly protocol: typeof PLUGIN_PROTOCOL_VERSION
+  readonly protocol: 1 | typeof PLUGIN_PROTOCOL_VERSION
   readonly capabilities: PluginCapabilities
 }
 
@@ -98,6 +109,41 @@ export interface InitializeParams {
   readonly protocol: number
   readonly min_protocol: number
   readonly max_frame_bytes: number
+  readonly capabilities?: readonly string[]
+}
+
+export interface ProviderModelsParams {
+  readonly alias_prefix: string
+}
+
+export type ProviderCacheBreakpoints = "none" | "explicit" | "automatic"
+
+export interface ProviderModelCapabilities {
+  readonly tool_calling: boolean
+  readonly vision: boolean
+  readonly thinking: boolean
+  readonly cache_breakpoints: ProviderCacheBreakpoints
+}
+
+export interface ProviderModelPricing {
+  readonly input_per_million_micros_usd: number
+  readonly output_per_million_micros_usd: number
+  readonly cache_read_per_million_micros_usd?: number
+  readonly cache_write_per_million_micros_usd?: number
+  readonly reasoning_per_million_micros_usd?: number
+}
+
+export interface ProviderModel {
+  readonly id: string
+  readonly display_name?: string
+  readonly capabilities: ProviderModelCapabilities
+  readonly max_context_tokens?: number
+  readonly max_output_tokens?: number
+  readonly pricing?: ProviderModelPricing
+}
+
+export interface ProviderModelsResponse {
+  readonly models: readonly ProviderModel[]
 }
 
 export interface ToolCallParams {
@@ -178,6 +224,26 @@ export interface ProviderEventParams {
 
 export interface ProviderCancelParams {
   readonly request_id: RpcId
+}
+
+export interface ProviderHttpHeader {
+  readonly name: string
+  readonly value: string
+}
+
+export interface ProviderHttpRequest {
+  readonly method: "GET" | "POST" | "DELETE"
+  readonly url: string
+  readonly headers?: readonly ProviderHttpHeader[]
+  readonly body?: Uint8Array
+  readonly credential_header: string
+  readonly credential_prefix?: string
+}
+
+export interface ProviderHttpResponse {
+  readonly status: number
+  readonly headers: readonly ProviderHttpHeader[]
+  readonly body: AsyncIterable<Uint8Array>
 }
 
 export interface ProviderUsage {

@@ -255,6 +255,62 @@ impl FixtureRedactor {
         self.redact(value)
     }
 
+    /// Redacts exact registered credential bytes before a transport chunk is
+    /// encoded for an untrusted boundary. Callers retain cross-chunk overlap.
+    #[must_use]
+    pub fn redact_bytes(&self, value: &[u8]) -> Vec<u8> {
+        let redact_with = |secrets: &[String]| {
+            let mut rendered = value.to_vec();
+            for secret in secrets {
+                rendered = replace_bytes(&rendered, secret.as_bytes(), b"[REDACTED]");
+            }
+            String::from_utf8(rendered.clone())
+                .map(|text| redact_strict_key_formats(&text).into_bytes())
+                .unwrap_or(rendered)
+        };
+        match self.secrets.read() {
+            Ok(secrets) => redact_with(&secrets),
+            Err(poisoned) => redact_with(&poisoned.into_inner()),
+        }
+    }
+
+    /// Redacts the safely-emittable prefix of a streaming buffer while
+    /// retaining enough original bytes to detect credentials split across the
+    /// next transport chunk.
+    #[must_use]
+    pub fn redact_streaming_prefix(&self, value: &[u8], retain: usize) -> (Vec<u8>, Vec<u8>) {
+        let initial_boundary = value.len().saturating_sub(retain);
+        let extend_boundary = |secrets: &[String]| {
+            let mut boundary = initial_boundary;
+            loop {
+                let extended = secrets.iter().fold(boundary, |extended, secret| {
+                    if secret.is_empty() || secret.len() > value.len() {
+                        return extended;
+                    }
+                    value
+                        .windows(secret.len())
+                        .enumerate()
+                        .filter(|(start, window)| *start < extended && *window == secret.as_bytes())
+                        .map(|(start, _)| start + secret.len())
+                        .max()
+                        .map_or(extended, |end| extended.max(end))
+                });
+                if extended == boundary {
+                    return boundary;
+                }
+                boundary = extended.min(value.len());
+            }
+        };
+        let boundary = match self.secrets.read() {
+            Ok(secrets) => extend_boundary(&secrets),
+            Err(poisoned) => extend_boundary(&poisoned.into_inner()),
+        };
+        (
+            self.redact_bytes(&value[..boundary]),
+            value[boundary..].to_vec(),
+        )
+    }
+
     fn redact(&self, value: &str) -> String {
         let redact_with = |secrets: &[String]| {
             let rendered = secrets.iter().fold(value.to_owned(), |rendered, secret| {
@@ -280,6 +336,25 @@ impl FixtureRedactor {
             secrets.push(secret);
         }
     }
+}
+
+fn replace_bytes(input: &[u8], needle: &[u8], replacement: &[u8]) -> Vec<u8> {
+    if needle.is_empty() {
+        return input.to_vec();
+    }
+    let mut output = Vec::with_capacity(input.len());
+    let mut offset = 0;
+    while let Some(relative) = input[offset..]
+        .windows(needle.len())
+        .position(|window| window == needle)
+    {
+        let found = offset + relative;
+        output.extend_from_slice(&input[offset..found]);
+        output.extend_from_slice(replacement);
+        offset = found + needle.len();
+    }
+    output.extend_from_slice(&input[offset..]);
+    output
 }
 
 /// Redacts credential formats with stable vendor-defined markers. Entropy
@@ -538,6 +613,10 @@ impl Provider for Recorder {
 
     fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
         self.inner.cached_model_metadata()
+    }
+
+    fn cached_model_metadata_for(&self, model: &str) -> Option<ProviderModelMetadata> {
+        self.inner.cached_model_metadata_for(model)
     }
 
     async fn discover_models(
@@ -1641,6 +1720,14 @@ mod tests {
         assert!(!debug.contains(FIRST));
         assert!(!debug.contains(SECOND));
         assert_eq!(redactor.registered_secret_count(), 2);
+    }
+
+    #[test]
+    fn byte_redaction_removes_registered_credentials_before_wire_encoding() {
+        let redactor = FixtureRedactor::default();
+        redactor.register_secret(&crate::Secret::new("binary-secret-canary"));
+        let redacted = redactor.redact_bytes(b"prefix binary-secret-canary suffix");
+        assert_eq!(redacted, b"prefix [REDACTED] suffix");
     }
 
     #[test]

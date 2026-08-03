@@ -4,15 +4,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use futures_util::{Stream, StreamExt as _};
 use rw_providers::{
-    BoxEventStream, Capabilities, Provider, ProviderError, ProviderErrorKind, ProviderEvent,
-    ProviderRequest,
+    BoxEventStream, CacheBreakpointSupport, Capabilities, DiscoveredModel,
+    DiscoveredProviderCatalog, ModelPricing, Provider, ProviderError, ProviderErrorKind,
+    ProviderEvent, ProviderModelMetadata, ProviderRequest, UsageAccounting, WireMode,
 };
 use rw_tools::{
     CancellationToken, CapabilityManifest, MutationScope, Tool, ToolContext, ToolDescriptor,
@@ -31,7 +33,8 @@ use crate::plugin::{
     ApprovalRequirement, ApprovalStore, CapabilityEnforcer, ExecutableIdentity, FrameDecoder,
     MAX_FRAME_BYTES, MAX_HOOK_PAYLOAD_BYTES, MAX_NAME_BYTES, MAX_RPC_MESSAGE_BYTES,
     METHOD_COMMAND_EXECUTE, METHOD_EVENT_PUBLISH, METHOD_EXIT, METHOD_INITIALIZE,
-    METHOD_PROVIDER_CANCEL, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT,
+    METHOD_PROVIDER_CANCEL, METHOD_PROVIDER_COMPLETE, METHOD_PROVIDER_EVENT, METHOD_PROVIDER_HTTP,
+    METHOD_PROVIDER_HTTP_CANCEL, METHOD_PROVIDER_HTTP_EVENT, METHOD_PROVIDER_MODELS,
     METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_SHUTDOWN, METHOD_TOOL_CALL,
     METHOD_UI_NOTIFY, PluginApprovalError, PluginCapabilities, PluginManifest, PluginProcessConfig,
     PluginProcessError, PluginProviderEventStream, PluginRpcClient, PluginRpcError, RpcFailure,
@@ -111,6 +114,27 @@ pub struct LaunchedPluginProcess {
 /// Mandatory host boundary for removing known secrets before any value reaches a plugin.
 pub trait PluginBoundaryRedactor: Send + Sync {
     fn redact(&self, value: Value) -> Value;
+
+    /// Redacts known credential bytes before an HTTP response chunk is encoded
+    /// onto the plugin wire.
+    fn redact_bytes(&self, value: &[u8]) -> Vec<u8> {
+        value.to_vec()
+    }
+
+    /// Redacts the safely-emittable prefix while returning the original tail
+    /// needed to detect a credential completed by the next transport chunk.
+    fn redact_streaming_prefix(&self, value: &[u8], retain: usize) -> (Vec<u8>, Vec<u8>) {
+        if retain == 0 {
+            (self.redact_bytes(value), Vec::new())
+        } else {
+            (Vec::new(), value.to_vec())
+        }
+    }
+
+    /// Longest registered credential, used to retain an exact cross-chunk overlap.
+    fn maximum_secret_bytes(&self) -> usize {
+        0
+    }
 }
 
 /// Test-only identity boundary. Production composition must inject the shared redactor.
@@ -121,6 +145,50 @@ pub(crate) struct NoopPluginBoundaryRedactor;
 impl PluginBoundaryRedactor for NoopPluginBoundaryRedactor {
     fn redact(&self, value: Value) -> Value {
         value
+    }
+
+    fn redact_bytes(&self, value: &[u8]) -> Vec<u8> {
+        value.to_vec()
+    }
+
+    fn maximum_secret_bytes(&self) -> usize {
+        0
+    }
+}
+
+pub type PluginHttpByteStream =
+    Pin<Box<dyn Stream<Item = Result<Vec<u8>, PluginRpcError>> + Send + 'static>>;
+
+/// Host-owned response to one authenticated plugin-provider HTTP request.
+pub struct PluginHttpStreamResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: PluginHttpByteStream,
+}
+
+/// Trusted host boundary that resolves credentials and owns the provider socket.
+#[async_trait]
+pub trait PluginProviderHttpHandler: Send + Sync {
+    async fn request(
+        &self,
+        params: Value,
+        cancellation: &CancellationToken,
+    ) -> Result<PluginHttpStreamResponse, PluginRpcError>;
+}
+
+pub struct DenyPluginProviderHttpHandler;
+
+#[async_trait]
+impl PluginProviderHttpHandler for DenyPluginProviderHttpHandler {
+    async fn request(
+        &self,
+        _params: Value,
+        _cancellation: &CancellationToken,
+    ) -> Result<PluginHttpStreamResponse, PluginRpcError> {
+        Err(rpc_error(
+            "provider_http_unavailable",
+            "host-mediated provider HTTP is unavailable on this host surface",
+        ))
     }
 }
 
@@ -282,11 +350,14 @@ struct PendingProviderStream {
 }
 
 type PendingProviderStreams = Arc<StdMutex<BTreeMap<RpcId, PendingProviderStream>>>;
+type ActiveProviderHttp = Arc<StdMutex<BTreeMap<RpcId, CancellationToken>>>;
 
 struct ReaderState {
     writer: mpsc::Sender<RpcFrame>,
     pending: Pending,
     provider_streams: PendingProviderStreams,
+    provider_http: Arc<dyn PluginProviderHttpHandler>,
+    active_provider_http: ActiveProviderHttp,
     abandoned: Arc<Mutex<BTreeSet<RpcId>>>,
     enforcer: Arc<CapabilityEnforcer>,
     push_handler: Arc<dyn PushHandler>,
@@ -315,6 +386,7 @@ impl JsonRpcPluginClient {
         launched: LaunchedPluginProcess,
         enforcer: Arc<CapabilityEnforcer>,
         push_handler: Arc<dyn PushHandler>,
+        provider_http: Arc<dyn PluginProviderHttpHandler>,
         redactor: Arc<dyn PluginBoundaryRedactor>,
         timeout: Duration,
     ) -> Arc<Self> {
@@ -322,6 +394,7 @@ impl JsonRpcPluginClient {
         let pending = Arc::new(Mutex::new(BTreeMap::new()));
         let provider_streams = Arc::new(StdMutex::new(BTreeMap::new()));
         let abandoned = Arc::new(Mutex::new(BTreeSet::new()));
+        let active_provider_http = Arc::new(StdMutex::new(BTreeMap::new()));
         let client = Arc::new(Self {
             writer,
             pending: Arc::clone(&pending),
@@ -352,6 +425,8 @@ impl JsonRpcPluginClient {
                 writer: client.writer.clone(),
                 pending,
                 provider_streams,
+                provider_http,
+                active_provider_http,
                 abandoned,
                 enforcer,
                 push_handler,
@@ -732,6 +807,7 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
             Ok(count) => count,
         };
         let Ok(frames) = decoder.push(&buffer[..count]) else {
+            cancel_active_provider_http(&state.active_provider_http);
             terminate_and_reap(state.process.as_ref()).await;
             fail_pending(
                 &state.pending,
@@ -753,6 +829,7 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
         for frame in frames {
             let continue_reading = process_incoming_frame(frame, &state).await;
             if !continue_reading {
+                cancel_active_provider_http(&state.active_provider_http);
                 terminate_and_reap(state.process.as_ref()).await;
                 fail_pending(
                     &state.pending,
@@ -773,6 +850,7 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
             }
         }
     }
+    cancel_active_provider_http(&state.active_provider_http);
     fail_pending(
         &state.pending,
         rpc_error("connection_closed", "plugin RPC connection closed"),
@@ -783,6 +861,14 @@ async fn reader_loop(mut stdout: PluginStdout, state: ReaderState) {
         &rpc_error("connection_closed", "plugin RPC connection closed"),
     );
     terminate_and_reap(state.process.as_ref()).await;
+}
+
+fn cancel_active_provider_http(active: &ActiveProviderHttp) {
+    if let Ok(mut active) = active.lock() {
+        for (_, cancellation) in std::mem::take(&mut *active) {
+            cancellation.cancel();
+        }
+    }
 }
 
 async fn terminate_and_reap(process: &dyn SupervisedPluginProcess) {
@@ -834,6 +920,19 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
                 let _ = state.process.kill_tree();
                 return false;
             };
+            let safe_code = failure
+                .error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("code"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            let safe_code = if safe_code.is_empty() {
+                failure.error.code.to_string()
+            } else {
+                safe_code
+            };
             let provider = state
                 .provider_streams
                 .lock()
@@ -843,14 +942,14 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
                 let _ = provider
                     .sender
                     .try_send(ProviderStreamMessage::Failed(PluginRpcError {
-                        code: failure.error.code.to_string(),
+                        code: safe_code.clone(),
                         message: failure.error.message,
                     }));
                 return true;
             }
             if let Some(sender) = state.pending.lock().await.remove(&id) {
                 let _ = sender.send(Err(PluginRpcError {
-                    code: failure.error.code.to_string(),
+                    code: safe_code,
                     message: failure.error.message,
                 }));
                 true
@@ -862,6 +961,9 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
             }
         }
         RpcFrame::Request(request) => {
+            if request.method == METHOD_PROVIDER_HTTP {
+                return start_provider_http_request(request, state);
+            }
             let response = handle_push_request(
                 &state.enforcer,
                 state.push_handler.as_ref(),
@@ -891,6 +993,12 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
                 && !state.enforcer.violated()
         }
         RpcFrame::Notification(notification) => {
+            if notification.method == METHOD_PROVIDER_HTTP_CANCEL {
+                return cancel_provider_http_request(
+                    &state.active_provider_http,
+                    notification.params.unwrap_or(Value::Null),
+                );
+            }
             if notification.method == METHOD_PROVIDER_EVENT {
                 return handle_provider_event(
                     &state.provider_streams,
@@ -911,6 +1019,215 @@ async fn process_incoming_frame(frame: RpcFrame, state: &ReaderState) -> bool {
             !state.enforcer.violated()
         }
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderHttpCapabilityParams {
+    alias: String,
+    credential_reference: String,
+    request: Value,
+}
+
+fn start_provider_http_request(request: RpcRequest, state: &ReaderState) -> bool {
+    let params = request.params.unwrap_or(Value::Null);
+    let Ok(capability) = serde_json::from_value::<ProviderHttpCapabilityParams>(params.clone())
+    else {
+        return false;
+    };
+    if state
+        .enforcer
+        .check_provider_credential(&capability.alias, &capability.credential_reference)
+        .is_err()
+    {
+        return false;
+    }
+    let _ = capability.request;
+    let cancellation = CancellationToken::default();
+    let inserted = state.active_provider_http.lock().is_ok_and(|mut active| {
+        if active.len() >= WRITER_QUEUE_CAPACITY || active.contains_key(&request.id) {
+            false
+        } else {
+            active.insert(request.id.clone(), cancellation.clone());
+            true
+        }
+    });
+    if !inserted {
+        return false;
+    }
+    let handler = Arc::clone(&state.provider_http);
+    let writer = state.writer.clone();
+    let active = Arc::clone(&state.active_provider_http);
+    let redactor = Arc::clone(&state.redactor);
+    tokio::spawn(async move {
+        stream_provider_http_response(
+            request.id,
+            params,
+            cancellation,
+            handler,
+            writer,
+            active,
+            redactor,
+        )
+        .await;
+    });
+    true
+}
+
+fn cancel_provider_http_request(active: &ActiveProviderHttp, params: Value) -> bool {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Cancel {
+        request_id: RpcId,
+    }
+    let Ok(cancel) = serde_json::from_value::<Cancel>(params) else {
+        return false;
+    };
+    let Ok(active) = active.lock() else {
+        return false;
+    };
+    if let Some(token) = active.get(&cancel.request_id) {
+        token.cancel();
+    }
+    true
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stream_provider_http_response(
+    id: RpcId,
+    params: Value,
+    cancellation: CancellationToken,
+    handler: Arc<dyn PluginProviderHttpHandler>,
+    writer: mpsc::Sender<RpcFrame>,
+    active: ActiveProviderHttp,
+    redactor: Arc<dyn PluginBoundaryRedactor>,
+) {
+    let result = handler.request(params, &cancellation).await;
+    let result = match result {
+        Ok(mut response) => {
+            let head = json!({
+                "request_id": id,
+                "event": {
+                    "type": "head",
+                    "status": response.status,
+                    "headers": response.headers,
+                }
+            });
+            if send_provider_http_event(&writer, redactor.as_ref(), head)
+                .await
+                .is_err()
+            {
+                cancellation.cancel();
+                Err(rpc_error(
+                    "connection_closed",
+                    "plugin RPC connection closed",
+                ))
+            } else {
+                stream_provider_http_body(
+                    &id,
+                    &mut response.body,
+                    &cancellation,
+                    &writer,
+                    redactor.as_ref(),
+                )
+                .await
+            }
+        }
+        Err(error) => Err(error),
+    };
+    if let Ok(mut active) = active.lock() {
+        active.remove(&id);
+    }
+    let frame = match result {
+        Ok(()) => RpcFrame::Success(RpcSuccess {
+            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            id: Some(id),
+            result: Value::Null,
+        }),
+        Err(error) => RpcFrame::Failure(RpcFailure {
+            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            id: Some(id),
+            error: crate::plugin::RpcErrorObject {
+                code: -32020,
+                message: error.message,
+                data: Some(json!({"code":error.code})),
+            },
+        }),
+    };
+    let _ = writer.send(frame).await;
+}
+
+async fn stream_provider_http_body(
+    id: &RpcId,
+    body: &mut PluginHttpByteStream,
+    cancellation: &CancellationToken,
+    writer: &mpsc::Sender<RpcFrame>,
+    redactor: &dyn PluginBoundaryRedactor,
+) -> Result<(), PluginRpcError> {
+    let overlap = redactor.maximum_secret_bytes().saturating_sub(1);
+    let mut pending = Vec::new();
+    loop {
+        let next = tokio::select! {
+            () = cancellation.cancelled() => {
+                return Err(rpc_error("cancelled", "host-mediated provider HTTP was cancelled"));
+            }
+            next = body.next() => next,
+        };
+        let Some(chunk) = next else {
+            break;
+        };
+        pending.extend_from_slice(&chunk?);
+        if pending.len() <= overlap {
+            continue;
+        }
+        let (bytes, tail) = redactor.redact_streaming_prefix(&pending, overlap);
+        pending = tail;
+        if bytes.is_empty() {
+            continue;
+        }
+        send_provider_http_event(
+            writer,
+            redactor,
+            json!({
+                "request_id": id,
+                "event": {"type":"body","data_base64":BASE64_STANDARD.encode(bytes)},
+            }),
+        )
+        .await?;
+    }
+    if !pending.is_empty() {
+        let bytes = redactor.redact_bytes(&pending);
+        send_provider_http_event(
+            writer,
+            redactor,
+            json!({
+                "request_id": id,
+                "event": {"type":"body","data_base64":BASE64_STANDARD.encode(bytes)},
+            }),
+        )
+        .await?;
+    }
+    send_provider_http_event(
+        writer,
+        redactor,
+        json!({"request_id":id,"event":{"type":"finished"}}),
+    )
+    .await
+}
+
+async fn send_provider_http_event(
+    writer: &mpsc::Sender<RpcFrame>,
+    redactor: &dyn PluginBoundaryRedactor,
+    params: Value,
+) -> Result<(), PluginRpcError> {
+    writer
+        .send(RpcFrame::Notification(RpcNotification {
+            jsonrpc: crate::plugin::JSON_RPC_VERSION.to_owned(),
+            method: METHOD_PROVIDER_HTTP_EVENT.to_owned(),
+            params: Some(redactor.redact(params)),
+        }))
+        .await
+        .map_err(|_| rpc_error("connection_closed", "plugin RPC connection closed"))
 }
 
 #[derive(Deserialize)]
@@ -1131,13 +1448,13 @@ fn approved_plugin_profile(
 }
 
 impl PluginHost {
-    /// Launches only an exact approved executable/config/origin/manifest identity and completes
-    /// the protocol handshake before exposing adapters.
+    /// Launches an approved plugin on a host surface that does not provide
+    /// host-mediated provider HTTP.
     ///
     /// # Errors
     ///
-    /// Returns an error for missing approval, identity drift, invalid roots, launch failure,
-    /// handshake failure, or a manifest different from the approved snapshot.
+    /// Returns the same approval, launch, handshake, or manifest error as the
+    /// HTTP-capable launch boundary.
     #[allow(
         clippy::too_many_arguments,
         reason = "security-sensitive launch inputs remain explicit at the approval boundary"
@@ -1150,6 +1467,42 @@ impl PluginHost {
         approved_roots: &[PathBuf],
         expected_manifest: PluginManifest,
         push_handler: Arc<dyn PushHandler>,
+        redactor: Arc<dyn PluginBoundaryRedactor>,
+    ) -> Result<Self, PluginHostError> {
+        Self::launch_approved_with_http(
+            launcher,
+            store,
+            config,
+            origin,
+            approved_roots,
+            expected_manifest,
+            push_handler,
+            Arc::new(DenyPluginProviderHttpHandler),
+            redactor,
+        )
+        .await
+    }
+
+    /// Launches only an exact approved executable/config/origin/manifest identity and completes
+    /// the protocol handshake before exposing adapters.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for missing approval, identity drift, invalid roots, launch failure,
+    /// handshake failure, or a manifest different from the approved snapshot.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "security-sensitive launch inputs remain explicit at the approval boundary"
+    )]
+    pub async fn launch_approved_with_http(
+        launcher: &dyn PluginLauncher,
+        store: &dyn ApprovalStore,
+        config: &PluginProcessConfig,
+        origin: &str,
+        approved_roots: &[PathBuf],
+        expected_manifest: PluginManifest,
+        push_handler: Arc<dyn PushHandler>,
+        provider_http: Arc<dyn PluginProviderHttpHandler>,
         redactor: Arc<dyn PluginBoundaryRedactor>,
     ) -> Result<Self, PluginHostError> {
         let profile =
@@ -1170,20 +1523,20 @@ impl PluginHost {
             child,
             Arc::clone(&enforcer),
             push_handler,
+            provider_http,
             redactor,
             DEFAULT_REQUEST_TIMEOUT,
         );
-        let result = client
-            .request(
-                METHOD_INITIALIZE,
-                json!({
-                    "host": "rottweiler",
-                    "protocol": crate::plugin::PROTOCOL_VERSION,
-                    "min_protocol": crate::plugin::MIN_PROTOCOL_VERSION,
-                    "max_frame_bytes": MAX_FRAME_BYTES,
-                }),
-            )
-            .await;
+        let mut initialize = json!({
+            "host": "rottweiler",
+            "protocol": expected_manifest.protocol,
+            "min_protocol": crate::plugin::MIN_PROTOCOL_VERSION,
+            "max_frame_bytes": MAX_FRAME_BYTES,
+        });
+        if expected_manifest.protocol >= 2 {
+            initialize["capabilities"] = json!(["provider-models", "provider-http"]);
+        }
+        let result = client.request(METHOD_INITIALIZE, initialize).await;
         let initialized: PluginManifest = match result.and_then(|value| {
             serde_json::from_value(value)
                 .map_err(|error| rpc_error("invalid_manifest", &error.to_string()))
@@ -1292,20 +1645,35 @@ pub(crate) async fn probe_plugin_manifest(
         child,
         enforcer,
         Arc::new(DenyPushHandler),
+        Arc::new(DenyPluginProviderHttpHandler),
         redactor,
         DEFAULT_REQUEST_TIMEOUT,
     );
-    let value = client
+    let mut value = client
         .request(
             METHOD_INITIALIZE,
             json!({
                 "host": "rottweiler",
-                "protocol": crate::plugin::PROTOCOL_VERSION,
+                "protocol": crate::plugin::MIN_PROTOCOL_VERSION,
                 "min_protocol": crate::plugin::MIN_PROTOCOL_VERSION,
                 "max_frame_bytes": MAX_FRAME_BYTES,
             }),
         )
         .await;
+    if value.is_err() && crate::plugin::MIN_PROTOCOL_VERSION < crate::plugin::PROTOCOL_VERSION {
+        value = client
+            .request(
+                METHOD_INITIALIZE,
+                json!({
+                    "host": "rottweiler",
+                    "protocol": crate::plugin::PROTOCOL_VERSION,
+                    "min_protocol": crate::plugin::MIN_PROTOCOL_VERSION,
+                    "max_frame_bytes": MAX_FRAME_BYTES,
+                    "capabilities": ["provider-models", "provider-http"],
+                }),
+            )
+            .await;
+    }
     let manifest: PluginManifest = match value.and_then(|value| {
         serde_json::from_value(value)
             .map_err(|_| rpc_error("invalid_manifest", "plugin returned an invalid manifest"))
@@ -1472,7 +1840,68 @@ pub struct RpcProviderAdapter {
     capabilities: Capabilities,
     client: Arc<dyn PluginRpcClient>,
     enforcer: Arc<CapabilityEnforcer>,
+    model_catalog: bool,
+    catalog_cache: StdRwLock<RpcProviderCatalogCache>,
 }
+
+#[derive(Clone, Debug, Default)]
+struct RpcProviderCatalogCache {
+    catalog: Option<DiscoveredProviderCatalog>,
+    aggregate_capabilities: Option<Capabilities>,
+    single_model_metadata: Option<ProviderModelMetadata>,
+    metadata_by_model: BTreeMap<String, ProviderModelMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpcProviderModelsResponse {
+    models: Vec<RpcProviderModel>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpcProviderModel {
+    id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    capabilities: RpcProviderModelCapabilities,
+    #[serde(default)]
+    max_context_tokens: Option<u64>,
+    #[serde(default)]
+    max_output_tokens: Option<u64>,
+    #[serde(default)]
+    pricing: Option<RpcProviderModelPricing>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpcProviderModelCapabilities {
+    tool_calling: bool,
+    vision: bool,
+    thinking: bool,
+    cache_breakpoints: CacheBreakpointSupport,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RpcProviderModelPricing {
+    #[serde(rename = "input_per_million_micros_usd")]
+    input: u64,
+    #[serde(rename = "output_per_million_micros_usd")]
+    output: u64,
+    #[serde(default)]
+    #[serde(rename = "cache_read_per_million_micros_usd")]
+    cache_read: Option<u64>,
+    #[serde(default)]
+    #[serde(rename = "cache_write_per_million_micros_usd")]
+    cache_write: Option<u64>,
+    #[serde(default)]
+    #[serde(rename = "reasoning_per_million_micros_usd")]
+    reasoning: Option<u64>,
+}
+
+const MAX_PLUGIN_MODEL_TOKENS: u64 = 16 * 1024 * 1024;
+const MAX_PLUGIN_PRICE_MICROS_USD: u64 = 1_000_000_000_000;
 
 impl RpcProviderAdapter {
     #[must_use]
@@ -1489,8 +1918,170 @@ impl RpcProviderAdapter {
             capabilities,
             client,
             enforcer,
+            model_catalog: false,
+            catalog_cache: StdRwLock::new(RpcProviderCatalogCache::default()),
         }
     }
+
+    /// Enables protocol-2 model discovery for an approval-fingerprinted provider declaration.
+    #[must_use]
+    pub fn with_model_catalog(mut self) -> Self {
+        self.model_catalog = true;
+        self
+    }
+
+    fn cached_capabilities(&self) -> Option<Capabilities> {
+        self.catalog_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .aggregate_capabilities
+            .clone()
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "catalog validation keeps the complete untrusted wire boundary visible"
+    )]
+    fn parse_catalog(&self, value: Value) -> Result<RpcProviderCatalogCache, ProviderError> {
+        let response: RpcProviderModelsResponse = serde_json::from_value(value).map_err(|_| {
+            ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "plugin returned an invalid provider model catalog",
+            )
+        })?;
+        if response.models.len() > crate::plugin::MAX_CAPABILITIES_PER_KIND {
+            return Err(ProviderError::new(
+                ProviderErrorKind::Protocol,
+                "plugin provider model catalog exceeds the entry limit",
+            ));
+        }
+        let mut ids = BTreeSet::new();
+        let mut models = Vec::with_capacity(response.models.len());
+        let mut metadata = Vec::with_capacity(response.models.len());
+        let mut metadata_by_model = BTreeMap::new();
+        for model in response.models {
+            if model.id.is_empty()
+                || model.id.len() > MAX_NAME_BYTES
+                || model.id.chars().any(char::is_control)
+                || !ids.insert(model.id.clone())
+            {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Protocol,
+                    "plugin provider model id is invalid or duplicated",
+                ));
+            }
+            if model.display_name.as_ref().is_some_and(|name| {
+                name.is_empty() || name.len() > MAX_NAME_BYTES || name.chars().any(char::is_control)
+            }) {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::Protocol,
+                    "plugin provider model display name is invalid",
+                ));
+            }
+            let max_context_tokens = model
+                .max_context_tokens
+                .map(|limit| limit.clamp(1, MAX_PLUGIN_MODEL_TOKENS));
+            let max_output_tokens = model
+                .max_output_tokens
+                .map(|limit| limit.clamp(1, MAX_PLUGIN_MODEL_TOKENS));
+            let capabilities = Capabilities {
+                tool_calling: model.capabilities.tool_calling,
+                vision: model.capabilities.vision,
+                thinking: model.capabilities.thinking,
+                cache_breakpoints: model.capabilities.cache_breakpoints,
+                max_context_tokens,
+                max_output_tokens,
+                wire_mode: WireMode::NormalizedReplay,
+            };
+            let pricing = model.pricing.map(|pricing| ModelPricing {
+                display_name: model
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| model.id.clone()),
+                max_context_tokens,
+                max_output_tokens,
+                supports_tools: capabilities.tool_calling,
+                supports_thinking: capabilities.thinking,
+                reasoning_efforts: Vec::new(),
+                input_per_million_micros_usd: pricing.input.min(MAX_PLUGIN_PRICE_MICROS_USD),
+                output_per_million_micros_usd: pricing.output.min(MAX_PLUGIN_PRICE_MICROS_USD),
+                cache_read_per_million_micros_usd: pricing
+                    .cache_read
+                    .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
+                cache_write_per_million_micros_usd: pricing
+                    .cache_write
+                    .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
+                reasoning_per_million_micros_usd: pricing
+                    .reasoning
+                    .map(|price| price.min(MAX_PLUGIN_PRICE_MICROS_USD)),
+            });
+            let model_metadata = ProviderModelMetadata {
+                capabilities: capabilities.clone(),
+                accounting: if pricing.is_some() {
+                    UsageAccounting::ApiDollars
+                } else {
+                    UsageAccounting::UnpricedApi
+                },
+                pricing: pricing.clone(),
+            };
+            metadata_by_model.insert(model.id.clone(), model_metadata.clone());
+            metadata.push(model_metadata);
+            models.push(DiscoveredModel {
+                id: model.id,
+                display_name: model.display_name,
+                description: None,
+                capabilities: Some(capabilities),
+                pricing,
+            });
+        }
+        let aggregate_capabilities = aggregate_plugin_capabilities(&metadata, &self.capabilities);
+        Ok(RpcProviderCatalogCache {
+            catalog: Some(DiscoveredProviderCatalog {
+                provider: self.alias_prefix.trim_end_matches('/').to_owned(),
+                models,
+            }),
+            aggregate_capabilities: Some(aggregate_capabilities),
+            single_model_metadata: (metadata.len() == 1).then(|| metadata.remove(0)),
+            metadata_by_model,
+        })
+    }
+}
+
+fn aggregate_plugin_capabilities(
+    metadata: &[ProviderModelMetadata],
+    fallback: &Capabilities,
+) -> Capabilities {
+    let Some(first) = metadata.first() else {
+        return fallback.clone();
+    };
+    Capabilities {
+        tool_calling: metadata.iter().all(|entry| entry.capabilities.tool_calling),
+        vision: metadata.iter().all(|entry| entry.capabilities.vision),
+        thinking: metadata.iter().all(|entry| entry.capabilities.thinking),
+        cache_breakpoints: if metadata.iter().all(|entry| {
+            entry.capabilities.cache_breakpoints == first.capabilities.cache_breakpoints
+        }) {
+            first.capabilities.cache_breakpoints
+        } else {
+            CacheBreakpointSupport::None
+        },
+        max_context_tokens: common_plugin_limit(metadata, |entry| {
+            entry.capabilities.max_context_tokens
+        }),
+        max_output_tokens: common_plugin_limit(metadata, |entry| {
+            entry.capabilities.max_output_tokens
+        }),
+        wire_mode: WireMode::NormalizedReplay,
+    }
+}
+
+fn common_plugin_limit(
+    metadata: &[ProviderModelMetadata],
+    get: impl Fn(&ProviderModelMetadata) -> Option<u64>,
+) -> Option<u64> {
+    metadata.iter().try_fold(u64::MAX, |minimum, entry| {
+        get(entry).map(|limit| minimum.min(limit))
+    })
 }
 
 #[async_trait]
@@ -1499,7 +2090,55 @@ impl Provider for RpcProviderAdapter {
         &self.name
     }
     fn capabilities(&self) -> Capabilities {
-        self.capabilities.clone()
+        self.cached_capabilities()
+            .unwrap_or_else(|| self.capabilities.clone())
+    }
+    async fn model_metadata(&self) -> Result<Option<ProviderModelMetadata>, ProviderError> {
+        if let Some(metadata) = self.cached_model_metadata() {
+            return Ok(Some(metadata));
+        }
+        let _ = self.discover_models().await?;
+        Ok(self.cached_model_metadata())
+    }
+    fn cached_model_metadata(&self) -> Option<ProviderModelMetadata> {
+        self.catalog_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .single_model_metadata
+            .clone()
+    }
+    fn cached_model_metadata_for(&self, model: &str) -> Option<ProviderModelMetadata> {
+        self.catalog_cache
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .metadata_by_model
+            .get(model)
+            .cloned()
+    }
+    async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
+        if !self.model_catalog {
+            return Ok(None);
+        }
+        self.enforcer
+            .check_provider(&format!("{}catalog", self.alias_prefix))
+            .map_err(|error| {
+                ProviderError::new(ProviderErrorKind::Unsupported, error.to_string())
+            })?;
+        let value = self
+            .client
+            .request(
+                METHOD_PROVIDER_MODELS,
+                json!({"alias_prefix":self.alias_prefix}),
+            )
+            .await
+            .map_err(|error| ProviderError::new(ProviderErrorKind::Protocol, error.to_string()))?;
+        let cache = self.parse_catalog(value)?;
+        let catalog = cache.catalog.clone();
+        *self
+            .catalog_cache
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cache;
+        Ok(catalog)
     }
     async fn stream(&self, request: ProviderRequest) -> Result<BoxEventStream, ProviderError> {
         let alias = format!("{}{}", self.alias_prefix, request.model);
@@ -1510,11 +2149,9 @@ impl Provider for RpcProviderAdapter {
             .client
             .provider_stream(json!({"alias":alias,"request":request}))
             .await
-            .map_err(|error| ProviderError::new(ProviderErrorKind::Protocol, error.to_string()))?;
+            .map_err(|error| provider_rpc_error(&error))?;
         Ok(Box::pin(events.map(|event| {
-            let value = event.map_err(|error| {
-                ProviderError::new(ProviderErrorKind::Protocol, error.to_string())
-            })?;
+            let value = event.map_err(|error| provider_rpc_error(&error))?;
             serde_json::from_value(value).map_err(|_| {
                 ProviderError::new(
                     ProviderErrorKind::Protocol,
@@ -1523,6 +2160,23 @@ impl Provider for RpcProviderAdapter {
             })
         })))
     }
+}
+
+fn provider_rpc_error(error: &PluginRpcError) -> ProviderError {
+    let kind = match error.code.as_str() {
+        "provider_http_authentication" | "authentication" => ProviderErrorKind::Authentication,
+        "provider_http_rate_limited" => ProviderErrorKind::RateLimited,
+        "provider_http_timeout" => ProviderErrorKind::Timeout,
+        "provider_http_server" => ProviderErrorKind::Server,
+        "provider_http_network" => ProviderErrorKind::Network,
+        "provider_http_network_disabled" => ProviderErrorKind::NetworkDisabled,
+        "provider_http_cancelled" | "cancelled" => ProviderErrorKind::Cancelled,
+        "provider_http_invalid_request" | "invalid_request" | "domain_denied" => {
+            ProviderErrorKind::InvalidRequest
+        }
+        _ => ProviderErrorKind::Protocol,
+    };
+    ProviderError::new(kind, error.to_string())
 }
 
 pub struct PluginEventRouter {
@@ -1666,16 +2320,15 @@ mod tests {
 
     use super::*;
     use crate::plugin::{
-        ApprovalStoreError, CapabilityViolation, PROTOCOL_VERSION, PluginCommandCapability,
-        PluginHookDeclaration, PluginProviderCapability, PluginPush, PluginToolCapability,
-        PluginToolEffect,
+        ApprovalStoreError, CapabilityViolation, PluginCommandCapability, PluginHookDeclaration,
+        PluginProviderCapability, PluginPush, PluginToolCapability, PluginToolEffect,
     };
 
     fn manifest() -> PluginManifest {
         PluginManifest {
             name: "runtime-fixture".to_owned(),
             version: "1.0.0".to_owned(),
-            protocol: PROTOCOL_VERSION,
+            protocol: crate::plugin::MIN_PROTOCOL_VERSION,
             capabilities: PluginCapabilities {
                 tools: vec![PluginToolCapability {
                     name: "fixture_tool".to_owned(),
@@ -1694,11 +2347,185 @@ mod tests {
                 )],
                 providers: vec![PluginProviderCapability {
                     alias_prefix: "fixture/".to_owned(),
+                    capabilities: Vec::new(),
+                    credential_references: Vec::new(),
                 }],
                 event_subscriptions: vec!["TurnFinished".to_owned()],
                 push: vec![PluginPush::UiNotify],
             },
         }
+    }
+
+    struct CatalogClient(Value);
+
+    #[async_trait]
+    impl PluginRpcClient for CatalogClient {
+        async fn request(&self, method: &str, params: Value) -> Result<Value, PluginRpcError> {
+            assert_eq!(method, METHOD_PROVIDER_MODELS);
+            assert_eq!(params, json!({"alias_prefix":"fixture/"}));
+            Ok(self.0.clone())
+        }
+    }
+
+    fn catalog_adapter(value: Value) -> RpcProviderAdapter {
+        let mut approved = manifest();
+        approved.protocol = crate::plugin::PROTOCOL_VERSION;
+        approved.capabilities.providers[0].capabilities = vec!["models".to_owned()];
+        let process: Arc<dyn SupervisedPluginProcess> = Arc::new(FakeProcess::default());
+        let enforcer = Arc::new(CapabilityEnforcer::new(&approved, process));
+        RpcProviderAdapter::new(
+            "catalog-fixture",
+            "fixture/",
+            Capabilities {
+                tool_calling: true,
+                vision: false,
+                thinking: false,
+                cache_breakpoints: CacheBreakpointSupport::None,
+                max_context_tokens: None,
+                max_output_tokens: None,
+                wire_mode: WireMode::NormalizedReplay,
+            },
+            Arc::new(CatalogClient(value)),
+            enforcer,
+        )
+        .with_model_catalog()
+    }
+
+    #[tokio::test]
+    async fn protocol_two_provider_catalog_is_bounded_and_cached() {
+        let provider = catalog_adapter(json!({"models":[{
+            "id":"capable",
+            "display_name":"Capable",
+            "capabilities":{
+                "tool_calling":true,
+                "vision":true,
+                "thinking":true,
+                "cache_breakpoints":"explicit"
+            },
+            "max_context_tokens":u64::MAX,
+            "max_output_tokens":0,
+            "pricing":{
+                "input_per_million_micros_usd":u64::MAX,
+                "output_per_million_micros_usd":15_000_000
+            }
+        }]}));
+        let catalog = provider
+            .discover_models()
+            .await
+            .expect("valid bounded catalog")
+            .expect("protocol 2 catalog");
+        assert_eq!(catalog.provider, "fixture");
+        assert_eq!(catalog.models[0].id, "capable");
+        let capabilities = provider.capabilities();
+        assert!(capabilities.vision);
+        assert!(capabilities.thinking);
+        assert_eq!(
+            capabilities.cache_breakpoints,
+            CacheBreakpointSupport::Explicit
+        );
+        assert_eq!(
+            capabilities.max_context_tokens,
+            Some(MAX_PLUGIN_MODEL_TOKENS)
+        );
+        assert_eq!(capabilities.max_output_tokens, Some(1));
+        let metadata = provider
+            .cached_model_metadata()
+            .expect("single-model metadata cache");
+        assert_eq!(metadata.accounting, UsageAccounting::ApiDollars);
+        assert_eq!(
+            metadata
+                .pricing
+                .expect("catalog pricing")
+                .input_per_million_micros_usd,
+            MAX_PLUGIN_PRICE_MICROS_USD
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_two_catalog_caches_metadata_per_model() {
+        let provider = catalog_adapter(json!({"models":[{
+            "id":"text-only",
+            "capabilities":{
+                "tool_calling":false,"vision":false,"thinking":false,"cache_breakpoints":"none"
+            },
+            "pricing":{
+                "input_per_million_micros_usd":1_000_000,
+                "output_per_million_micros_usd":2_000_000
+            }
+        },{
+            "id":"vision-thinking",
+            "capabilities":{
+                "tool_calling":true,"vision":true,"thinking":true,"cache_breakpoints":"explicit"
+            },
+            "pricing":{
+                "input_per_million_micros_usd":3_000_000,
+                "output_per_million_micros_usd":4_000_000
+            }
+        }]}));
+        provider
+            .discover_models()
+            .await
+            .expect("valid multi-model catalog");
+
+        assert!(provider.cached_model_metadata().is_none());
+        let text = provider
+            .cached_model_metadata_for("text-only")
+            .expect("text model metadata");
+        assert!(!text.capabilities.tool_calling);
+        assert!(!text.capabilities.vision);
+        assert_eq!(
+            text.pricing
+                .expect("text pricing")
+                .input_per_million_micros_usd,
+            1_000_000
+        );
+        let vision = provider
+            .cached_model_metadata_for("vision-thinking")
+            .expect("vision model metadata");
+        assert!(vision.capabilities.tool_calling);
+        assert!(vision.capabilities.vision);
+        assert!(vision.capabilities.thinking);
+        assert_eq!(
+            vision
+                .pricing
+                .expect("vision pricing")
+                .input_per_million_micros_usd,
+            3_000_000
+        );
+        assert!(provider.cached_model_metadata_for("missing").is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_provider_catalog_degrades_only_that_adapter() {
+        let provider = catalog_adapter(json!({"models":[{
+            "id":"duplicate",
+            "capabilities":{
+                "tool_calling":true,"vision":false,"thinking":false,"cache_breakpoints":"none"
+            }
+        },{
+            "id":"duplicate",
+            "capabilities":{
+                "tool_calling":true,"vision":false,"thinking":false,"cache_breakpoints":"none"
+            }
+        }]}));
+        let error = provider
+            .discover_models()
+            .await
+            .expect_err("duplicate model ids must fail discovery");
+        assert_eq!(error.kind, ProviderErrorKind::Protocol);
+        assert!(provider.cached_model_metadata().is_none());
+        assert_eq!(
+            provider.capabilities(),
+            Capabilities {
+                tool_calling: true,
+                vision: false,
+                thinking: false,
+                cache_breakpoints: CacheBreakpointSupport::None,
+                max_context_tokens: None,
+                max_output_tokens: None,
+                wire_mode: WireMode::NormalizedReplay,
+            }
+        );
     }
 
     #[derive(Default)]
@@ -1803,6 +2630,144 @@ mod tests {
             visit(&mut value);
             value
         }
+    }
+
+    const HTTP_SECRET: &str = "PLUGIN_HTTP_SECRET_CANARY";
+
+    struct HttpSecretRedactor;
+
+    impl PluginBoundaryRedactor for HttpSecretRedactor {
+        fn redact(&self, mut value: Value) -> Value {
+            fn visit(value: &mut Value) {
+                match value {
+                    Value::String(text) => *text = text.replace(HTTP_SECRET, "[REDACTED]"),
+                    Value::Array(values) => values.iter_mut().for_each(visit),
+                    Value::Object(values) => values.values_mut().for_each(visit),
+                    Value::Null | Value::Bool(_) | Value::Number(_) => {}
+                }
+            }
+            visit(&mut value);
+            value
+        }
+
+        fn redact_bytes(&self, value: &[u8]) -> Vec<u8> {
+            String::from_utf8_lossy(value)
+                .replace(HTTP_SECRET, "[REDACTED]")
+                .into_bytes()
+        }
+
+        fn redact_streaming_prefix(&self, value: &[u8], retain: usize) -> (Vec<u8>, Vec<u8>) {
+            let redactor = rw_providers::FixtureRedactor::new([HTTP_SECRET.to_owned()]);
+            redactor.redact_streaming_prefix(value, retain)
+        }
+
+        fn maximum_secret_bytes(&self) -> usize {
+            HTTP_SECRET.len()
+        }
+    }
+
+    #[derive(Default)]
+    struct FixtureProviderHttp {
+        requests: StdMutex<Vec<Value>>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl PluginProviderHttpHandler for FixtureProviderHttp {
+        async fn request(
+            &self,
+            params: Value,
+            cancellation: &CancellationToken,
+        ) -> Result<PluginHttpStreamResponse, PluginRpcError> {
+            if cancellation.is_cancelled() {
+                return Err(rpc_error(
+                    "cancelled",
+                    "fixture provider HTTP was cancelled",
+                ));
+            }
+            self.requests.lock().expect("request lock").push(params);
+            let is_cancellation_fixture = self
+                .requests
+                .lock()
+                .expect("request lock")
+                .last()
+                .and_then(|params| params.pointer("/request/url"))
+                .and_then(Value::as_str)
+                .is_some_and(|url| url.ends_with("/cancelled"));
+            if is_cancellation_fixture {
+                let cancellation = cancellation.clone();
+                let cancelled = Arc::clone(&self.cancelled);
+                tokio::spawn(async move {
+                    cancellation.cancelled().await;
+                    cancelled.store(true, Ordering::Release);
+                });
+                return Ok(PluginHttpStreamResponse {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: Box::pin(futures_util::stream::pending()),
+                });
+            }
+            let wire = format!(
+                "{{\"type\":\"message_start\",\"model\":\"tool-model\"}}\n\
+                 {{\"type\":\"tool_call_start\",\"id\":\"call-1\",\"name\":\"lookup\"}}\n\
+                 {{\"type\":\"tool_call_arguments_delta\",\"id\":\"call-1\",\"json_fragment\":\"{{\\\"city\\\":\\\"Chicago\\\"}}\"}}\n\
+                 {{\"type\":\"tool_call_end\",\"id\":\"call-1\",\"arguments\":{{\"city\":\"Chicago\"}}}}\n\
+                 {{\"type\":\"text_delta\",\"text\":\"{HTTP_SECRET}\"}}\n\
+                 {{\"type\":\"finished\",\"reason\":\"tool_calls\"}}\n"
+            );
+            let split = wire.find(HTTP_SECRET).expect("secret marker") + 8;
+            let chunks = vec![
+                Ok(wire.as_bytes()[..split].to_vec()),
+                Ok(wire.as_bytes()[split..].to_vec()),
+            ];
+            Ok(PluginHttpStreamResponse {
+                status: 200,
+                headers: vec![("x-echo".to_owned(), HTTP_SECRET.to_owned())],
+                body: Box::pin(futures_util::stream::iter(chunks)),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_http_redaction_retains_overlap_after_an_earlier_match() {
+        let partial = 8;
+        let first = format!("prefix {HTTP_SECRET} {}", &HTTP_SECRET[..partial]);
+        let second = format!("{} suffix", &HTTP_SECRET[partial..]);
+        let mut body: PluginHttpByteStream = Box::pin(futures_util::stream::iter([
+            Ok(first.into_bytes()),
+            Ok(second.into_bytes()),
+        ]));
+        let (writer, mut receiver) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+
+        stream_provider_http_body(
+            &RpcId::String("stream-redaction".to_owned()),
+            &mut body,
+            &CancellationToken::default(),
+            &writer,
+            &HttpSecretRedactor,
+        )
+        .await
+        .expect("stream redaction");
+        drop(writer);
+
+        let mut rendered = Vec::new();
+        while let Some(frame) = receiver.recv().await {
+            let RpcFrame::Notification(notification) = frame else {
+                panic!("provider HTTP body must emit notifications");
+            };
+            let params = notification.params.expect("notification params");
+            if params.pointer("/event/type").and_then(Value::as_str) == Some("body") {
+                let encoded = params
+                    .pointer("/event/data_base64")
+                    .and_then(Value::as_str)
+                    .expect("encoded body");
+                rendered.extend(BASE64_STANDARD.decode(encoded).expect("valid body base64"));
+            }
+        }
+        assert_eq!(
+            String::from_utf8(rendered).expect("UTF-8 fixture"),
+            "prefix [REDACTED] [REDACTED] suffix"
+        );
     }
 
     #[async_trait]
@@ -2087,7 +3052,7 @@ mod tests {
         let manifest = PluginManifest {
             name: "workspace-root-code".to_owned(),
             version: "1.0.0".to_owned(),
-            protocol: crate::plugin::PROTOCOL_VERSION,
+            protocol: crate::plugin::MIN_PROTOCOL_VERSION,
             capabilities: PluginCapabilities::default(),
         };
         let store = MemoryApproval::default();
@@ -2232,6 +3197,7 @@ mod tests {
             },
             enforcer,
             Arc::new(DenyPushHandler),
+            Arc::new(DenyPluginProviderHttpHandler),
             Arc::new(NoopPluginBoundaryRedactor),
             Duration::from_millis(30),
         );
@@ -2244,6 +3210,47 @@ mod tests {
             .shutdown(Duration::from_millis(30))
             .await
             .expect("bounded kill/reap");
+        assert!(process.killed.load(Ordering::Acquire) >= 1);
+    }
+
+    #[tokio::test]
+    async fn reader_exit_cancels_and_drains_active_provider_http() {
+        let process = Arc::new(FakeProcess::default());
+        let (plugin_output, host_stdout) = tokio::io::duplex(1024);
+        drop(plugin_output);
+        let (writer, _receiver) = mpsc::channel(WRITER_QUEUE_CAPACITY);
+        let active_provider_http = Arc::new(StdMutex::new(BTreeMap::new()));
+        let cancellation = CancellationToken::default();
+        active_provider_http
+            .lock()
+            .expect("active HTTP lock")
+            .insert(
+                RpcId::String("active-http".to_owned()),
+                cancellation.clone(),
+            );
+        let enforcer = Arc::new(CapabilityEnforcer::new(&manifest(), process.clone()));
+        let state = ReaderState {
+            writer,
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
+            provider_streams: Arc::new(StdMutex::new(BTreeMap::new())),
+            provider_http: Arc::new(DenyPluginProviderHttpHandler),
+            active_provider_http: Arc::clone(&active_provider_http),
+            abandoned: Arc::new(Mutex::new(BTreeSet::new())),
+            enforcer,
+            push_handler: Arc::new(DenyPushHandler),
+            redactor: Arc::new(NoopPluginBoundaryRedactor),
+            process: process.clone(),
+        };
+
+        reader_loop(Box::pin(BufReader::new(host_stdout)), state).await;
+
+        assert!(cancellation.is_cancelled());
+        assert!(
+            active_provider_http
+                .lock()
+                .expect("active HTTP lock")
+                .is_empty()
+        );
         assert!(process.killed.load(Ordering::Acquire) >= 1);
     }
 
@@ -2314,6 +3321,7 @@ mod tests {
             },
             enforcer,
             pushes.clone(),
+            Arc::new(DenyPluginProviderHttpHandler),
             Arc::new(CanaryRedactor),
             Duration::from_secs(1),
         );
@@ -2372,6 +3380,23 @@ mod tests {
         root: &std::path::Path,
         push: Arc<dyn PushHandler>,
     ) -> PluginHost {
+        approved_fixture_host_with_http(
+            config,
+            root,
+            push,
+            Arc::new(DenyPluginProviderHttpHandler),
+            Arc::new(NoopPluginBoundaryRedactor),
+        )
+        .await
+    }
+
+    async fn approved_fixture_host_with_http(
+        config: &PluginProcessConfig,
+        root: &std::path::Path,
+        push: Arc<dyn PushHandler>,
+        provider_http: Arc<dyn PluginProviderHttpHandler>,
+        redactor: Arc<dyn PluginBoundaryRedactor>,
+    ) -> PluginHost {
         let manifest = probe_plugin_manifest(
             &TestDirectLauncher,
             config,
@@ -2383,7 +3408,7 @@ mod tests {
         let store = MemoryApproval::default();
         approve_plugin_launch(&store, &manifest, config, "conformance:typescript")
             .expect("approve fixture");
-        PluginHost::launch_approved(
+        PluginHost::launch_approved_with_http(
             &TestDirectLauncher,
             &store,
             config,
@@ -2391,7 +3416,8 @@ mod tests {
             &[root.to_path_buf()],
             manifest,
             push,
-            Arc::new(NoopPluginBoundaryRedactor),
+            provider_http,
+            redactor,
         )
         .await
         .expect("launch approved fixture")
@@ -2540,12 +3566,196 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn typescript_protocol_two_catalog_crosses_rust_host() {
+        let (sdk, provider_config) = sdk_fixture_config("provider-v2.ts");
+        let provider_config = provider_config
+            .with_allowed_domains(["example.com"])
+            .expect("provider domains");
+        let host = approved_fixture_host(&provider_config, &sdk, Arc::new(DenyPushHandler)).await;
+        assert_eq!(host.manifest().protocol, crate::plugin::PROTOCOL_VERSION);
+        let provider = RpcProviderAdapter::new(
+            "typescript-fixture-v2",
+            "fixture-v2/",
+            Capabilities {
+                tool_calling: true,
+                vision: false,
+                thinking: false,
+                cache_breakpoints: CacheBreakpointSupport::None,
+                max_context_tokens: None,
+                max_output_tokens: None,
+                wire_mode: WireMode::NormalizedReplay,
+            },
+            host.client(),
+            host.enforcer(),
+        )
+        .with_model_catalog();
+        let catalog = provider
+            .discover_models()
+            .await
+            .expect("catalog request")
+            .expect("protocol 2 catalog");
+        assert_eq!(catalog.provider, "fixture-v2");
+        assert_eq!(catalog.models[0].id, "vision-thinking");
+        let metadata = provider
+            .cached_model_metadata()
+            .expect("single model metadata");
+        assert!(metadata.capabilities.vision);
+        assert!(metadata.capabilities.thinking);
+        assert_eq!(metadata.accounting, UsageAccounting::ApiDollars);
+        assert_eq!(
+            metadata
+                .pricing
+                .expect("catalog pricing")
+                .input_per_million_micros_usd,
+            3_000_000
+        );
+        host.shutdown().await.expect("provider host shutdown");
+    }
+
+    #[tokio::test]
+    async fn protocol_two_provider_auth_streams_through_host_without_secret_delivery() {
+        let (sdk, config) = sdk_fixture_config("provider-auth-v2.ts");
+        let config = config
+            .with_allowed_domains(["api.example.test"])
+            .expect("provider domains");
+        let http = Arc::new(FixtureProviderHttp::default());
+        let host = approved_fixture_host_with_http(
+            &config,
+            &sdk,
+            Arc::new(DenyPushHandler),
+            http.clone(),
+            Arc::new(HttpSecretRedactor),
+        )
+        .await;
+        assert_eq!(
+            host.manifest().capabilities.providers[0].credential_references,
+            ["fixture-token"]
+        );
+        let provider = RpcProviderAdapter::new(
+            "typescript-auth-v2",
+            "auth-v2/",
+            Capabilities {
+                tool_calling: true,
+                vision: false,
+                thinking: false,
+                cache_breakpoints: CacheBreakpointSupport::None,
+                max_context_tokens: None,
+                max_output_tokens: None,
+                wire_mode: WireMode::NormalizedReplay,
+            },
+            host.client(),
+            host.enforcer(),
+        );
+        let events = provider
+            .stream(ProviderRequest {
+                model: "tool-model".to_owned(),
+                turns: Vec::new(),
+                tools: Vec::new(),
+                tool_choice: ToolChoice::Auto,
+                max_output_tokens: 64,
+                temperature: None,
+                thinking: ThinkingLevel::Off,
+                cache_hint: None,
+            })
+            .await
+            .expect("host-mediated provider stream")
+            .collect::<Vec<_>>()
+            .await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(ProviderEvent::ToolCallEnd { id, arguments })
+                if id == "call-1" && arguments["city"] == "Chicago"
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(ProviderEvent::TextDelta { text }) if text == "[REDACTED]"
+        )));
+        let serialized_requests =
+            serde_json::to_string(&*http.requests.lock().expect("request lock"))
+                .expect("serialized captured requests");
+        assert!(!serialized_requests.contains(HTTP_SECRET));
+        assert!(serialized_requests.contains("fixture-token"));
+        let cancelled = provider
+            .stream(ProviderRequest {
+                model: "cancelled".to_owned(),
+                turns: Vec::new(),
+                tools: Vec::new(),
+                tool_choice: ToolChoice::Auto,
+                max_output_tokens: 64,
+                temperature: None,
+                thinking: ThinkingLevel::Off,
+                cache_hint: None,
+            })
+            .await
+            .expect("cancelled HTTP provider admission");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        drop(cancelled);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !http.cancelled.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("host-mediated HTTP cancellation deadline");
+        host.shutdown().await.expect("auth provider host shutdown");
+    }
+
+    #[tokio::test]
+    async fn protocol_two_provider_refuses_undeclared_credential_reference_at_call_time() {
+        let (sdk, config) = sdk_fixture_config("provider-auth-v2.ts");
+        let config = config
+            .with_allowed_domains(["api.example.test"])
+            .expect("provider domains");
+        let http = Arc::new(FixtureProviderHttp::default());
+        let host = approved_fixture_host_with_http(
+            &config,
+            &sdk,
+            Arc::new(DenyPushHandler),
+            http.clone(),
+            Arc::new(HttpSecretRedactor),
+        )
+        .await;
+        let provider = RpcProviderAdapter::new(
+            "typescript-auth-v2",
+            "auth-v2/",
+            Capabilities {
+                tool_calling: true,
+                vision: false,
+                thinking: false,
+                cache_breakpoints: CacheBreakpointSupport::None,
+                max_context_tokens: None,
+                max_output_tokens: None,
+                wire_mode: WireMode::NormalizedReplay,
+            },
+            host.client(),
+            host.enforcer(),
+        );
+        let result = provider
+            .stream(ProviderRequest {
+                model: "undeclared".to_owned(),
+                turns: Vec::new(),
+                tools: Vec::new(),
+                tool_choice: ToolChoice::Auto,
+                max_output_tokens: 64,
+                temperature: None,
+                thinking: ThinkingLevel::Off,
+                cache_hint: None,
+            })
+            .await;
+        if let Ok(mut stream) = result {
+            assert!(stream.next().await.is_some_and(|item| item.is_err()));
+        }
+        assert!(host.enforcer().violated());
+        assert!(http.requests.lock().expect("request lock").is_empty());
+    }
+
+    #[tokio::test]
     async fn plugin_originated_undeclared_push_is_killed_and_reaped() {
         let (sdk, config) = sdk_fixture_config("undeclared-push.ts");
         let manifest = PluginManifest {
             name: "undeclared-push".to_owned(),
             version: "1.0.0".to_owned(),
-            protocol: crate::plugin::PROTOCOL_VERSION,
+            protocol: crate::plugin::MIN_PROTOCOL_VERSION,
             capabilities: PluginCapabilities::default(),
         };
         let store = MemoryApproval::default();

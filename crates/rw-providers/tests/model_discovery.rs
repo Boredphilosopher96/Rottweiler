@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AuthMaterial, CacheBreakpointSupport, NetworkPolicy,
@@ -113,6 +113,11 @@ fn openai_provider(endpoint: Url, auth: AuthMaterial) -> OpenAiCompatibleProvide
         supports_vision: true,
         max_context_tokens: None,
         max_output_tokens: None,
+        headers: BTreeMap::new(),
+        header_credentials: BTreeMap::new(),
+        extra_body: BTreeMap::new(),
+        model_ids: BTreeMap::new(),
+        path_template: None,
     })
     .unwrap_or_else(|error| panic!("OpenAI fixture provider must build: {error}"))
 }

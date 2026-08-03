@@ -402,8 +402,7 @@ mod tests {
         .expect("agent");
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let registry = compose_agent_registry(&catalog).expect("registry");
 
         assert_eq!(registry.definitions().len(), 3);
@@ -427,8 +426,7 @@ mod tests {
         .expect("agent");
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let registry = compose_agent_registry(&catalog).expect("registry");
 
         assert_eq!(registry.load("general").expect("general").model, None);
@@ -464,8 +462,7 @@ mod tests {
         write_agent("mcp:github/get_issue");
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let mut registry = compose_agent_registry(&catalog).expect("registry");
         registry
             .resolve_tool_names(std::iter::empty())
@@ -478,8 +475,7 @@ mod tests {
         write_agent("tool_search");
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(&project, &home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let mut registry = compose_agent_registry(&catalog).expect("registry");
         assert!(
             registry
@@ -489,10 +485,14 @@ mod tests {
         );
 
         write_agent("mcp:github/*");
-        let error = ExtensionCatalog::discover(
+        let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
-        )
-        .expect_err("MCP wildcards are not part of the declarative contract");
-        assert!(error.to_string().contains("exact mcp:<server>/<tool>"));
+        );
+        assert!(catalog.agent("mcp-reader").is_none());
+        assert!(
+            catalog.diagnostics()[0]
+                .message()
+                .contains("exact mcp:<server>/<tool>")
+        );
     }
 }

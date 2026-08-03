@@ -24,6 +24,27 @@ pub enum FolderTrustState {
     Changed,
     /// The canonical path and project-extension inventory hash match the ledger.
     Trusted,
+    /// The project-extension inventory could not be completed safely.
+    Untrustable,
+}
+
+/// Why a project root cannot currently participate in folder trust.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FolderTrustInventoryFailure {
+    path: PathBuf,
+    message: String,
+}
+
+impl FolderTrustInventoryFailure {
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 /// One project-local file that can influence executable agent behavior.
@@ -54,10 +75,11 @@ pub enum TrustInventoryChange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FolderTrustAssessment {
     workspace: PathBuf,
-    executable_hash: String,
+    executable_hash: Option<String>,
     inventory: Vec<TrustInventoryItem>,
     changes: Vec<TrustInventoryChange>,
     state: FolderTrustState,
+    inventory_failure: Option<FolderTrustInventoryFailure>,
 }
 
 impl FolderTrustAssessment {
@@ -67,8 +89,8 @@ impl FolderTrustAssessment {
     }
 
     #[must_use]
-    pub fn executable_hash(&self) -> &str {
-        &self.executable_hash
+    pub fn executable_hash(&self) -> Option<&str> {
+        self.executable_hash.as_deref()
     }
 
     #[must_use]
@@ -80,7 +102,9 @@ impl FolderTrustAssessment {
     /// whose activation requires an explicit trust decision.
     #[must_use]
     pub fn requires_confirmation(&self) -> bool {
-        !self.project_execution_enabled() && !self.inventory.is_empty()
+        self.inventory_failure.is_none()
+            && !self.project_execution_enabled()
+            && !self.inventory.is_empty()
     }
 
     #[must_use]
@@ -98,6 +122,12 @@ impl FolderTrustAssessment {
         matches!(self.state, FolderTrustState::Trusted)
     }
 
+    /// The precise inventory failure that prevents this root from being trusted.
+    #[must_use]
+    pub const fn inventory_failure(&self) -> Option<&FolderTrustInventoryFailure> {
+        self.inventory_failure.as_ref()
+    }
+
     /// Stable, path-relative inventory suitable for an interactive prompt.
     #[must_use]
     pub fn render_prompt(&self) -> String {
@@ -113,7 +143,16 @@ impl FolderTrustAssessment {
             workspace, self.state
         )];
         if self.inventory.is_empty() {
-            lines.push("  (none)".to_owned());
+            if let Some(failure) = &self.inventory_failure {
+                lines.push("  (unavailable; no fingerprint was produced)".to_owned());
+                lines.push(format!(
+                    "inventory failure: {}: {}",
+                    failure.path.display(),
+                    failure.message
+                ));
+            } else {
+                lines.push("  (none)".to_owned());
+            }
         } else {
             lines.extend(self.inventory.iter().map(|item| {
                 format!(
@@ -173,8 +212,48 @@ pub enum FolderTrustError {
     },
     #[error("workspace executable content changed while trust was being granted")]
     ChangedDuringGrant,
+    #[error(
+        "refusing to grant trust because project extension inventory is incomplete at {path}: {message}"
+    )]
+    Untrustable { path: PathBuf, message: String },
     #[error("trust ledger is locked by another writer: {0}")]
     LedgerLocked(PathBuf),
+}
+
+impl FolderTrustError {
+    fn is_inventory_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::Workspace { .. }
+                | Self::UnsafeEntry(_)
+                | Self::FileLimit { .. }
+                | Self::FileSize { .. }
+                | Self::TotalSize { .. }
+                | Self::NonUtf8Path(_)
+        )
+    }
+
+    fn inventory_failure_path(&self, workspace: &Path) -> PathBuf {
+        let path = match self {
+            Self::Workspace { path, .. }
+            | Self::FileSize { path, .. }
+            | Self::UnsafeEntry(path)
+            | Self::NonUtf8Path(path)
+            | Self::ReadLedger { path, .. }
+            | Self::ParseLedger { path, .. }
+            | Self::WriteLedger { path, .. }
+            | Self::LedgerLocked(path) => path.clone(),
+            Self::FileLimit { .. }
+            | Self::TotalSize { .. }
+            | Self::ChangedDuringGrant
+            | Self::Untrustable { .. } => workspace.to_owned(),
+        };
+        if path.is_absolute() {
+            path
+        } else {
+            workspace.join(path)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -219,15 +298,33 @@ impl FolderTrustStore {
     ///
     /// # Errors
     ///
-    /// Fails closed for unsafe extension entries, unbounded content, or an
-    /// unreadable/corrupt ledger.
+    /// Unsafe, unbounded, or unreadable project inventories produce an
+    /// untrustable assessment with no fingerprint. Errors are reserved for an
+    /// unavailable workspace identity or unreadable/corrupt trust ledger.
     pub fn assess(&self, workspace: &Path) -> Result<FolderTrustAssessment, FolderTrustError> {
         let workspace =
             fs::canonicalize(workspace).map_err(|source| FolderTrustError::Workspace {
                 path: workspace.to_owned(),
                 source,
             })?;
-        let inventory = executable_inventory(&workspace)?;
+        let inventory = match executable_inventory(&workspace) {
+            Ok(inventory) => inventory,
+            Err(error) if error.is_inventory_failure() => {
+                let failure = FolderTrustInventoryFailure {
+                    path: error.inventory_failure_path(&workspace),
+                    message: error.to_string(),
+                };
+                return Ok(FolderTrustAssessment {
+                    workspace,
+                    executable_hash: None,
+                    inventory: Vec::new(),
+                    changes: Vec::new(),
+                    state: FolderTrustState::Untrustable,
+                    inventory_failure: Some(failure),
+                });
+            }
+            Err(error) => return Err(error),
+        };
         let executable_hash = inventory_hash(&inventory);
         let ledger = self.read_ledger()?;
         let key = workspace_key(&workspace)?;
@@ -250,10 +347,11 @@ impl FolderTrustStore {
         };
         Ok(FolderTrustAssessment {
             workspace,
-            executable_hash,
+            executable_hash: Some(executable_hash),
             inventory,
             changes,
             state,
+            inventory_failure: None,
         })
     }
 
@@ -261,8 +359,8 @@ impl FolderTrustStore {
     ///
     /// # Errors
     ///
-    /// Fails if executable content changed since the prompt or the private
-    /// ledger cannot be safely replaced.
+    /// Fails if the assessment is untrustable, executable content changed
+    /// since the prompt, or the private ledger cannot be safely replaced.
     pub fn grant(&self, assessment: &FolderTrustAssessment) -> Result<(), FolderTrustError> {
         self.grant_all(std::slice::from_ref(assessment))
     }
@@ -274,9 +372,18 @@ impl FolderTrustStore {
     ///
     /// # Errors
     ///
-    /// Fails if any inventory changed or the private ledger cannot be locked,
-    /// read, or atomically replaced.
+    /// Fails if any assessment is untrustable, any inventory changed, or the
+    /// private ledger cannot be locked, read, or atomically replaced.
     pub fn grant_all(&self, assessments: &[FolderTrustAssessment]) -> Result<(), FolderTrustError> {
+        if let Some(failure) = assessments
+            .iter()
+            .find_map(FolderTrustAssessment::inventory_failure)
+        {
+            return Err(FolderTrustError::Untrustable {
+                path: failure.path.clone(),
+                message: failure.message.clone(),
+            });
+        }
         let _lock = self.acquire_write_lock()?;
         for assessment in assessments {
             let current = self.assess(&assessment.workspace)?;
@@ -292,7 +399,12 @@ impl FolderTrustStore {
             ledger.workspaces.insert(
                 key,
                 TrustedWorkspace {
-                    executable_hash: assessment.executable_hash.clone(),
+                    executable_hash: assessment.executable_hash.clone().ok_or_else(|| {
+                        FolderTrustError::Untrustable {
+                            path: assessment.workspace.clone(),
+                            message: "project extension inventory has no fingerprint".to_owned(),
+                        }
+                    })?,
                     inventory: assessment.inventory.clone(),
                 },
             );
@@ -910,22 +1022,45 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn symlinked_project_extension_fails_closed() {
+    fn symlinked_project_extension_is_untrustable_without_a_partial_fingerprint() {
         use std::os::unix::fs::symlink;
 
         let root = TempDir::new().expect("root");
         let workspace = root.path().join("repo");
         fs::create_dir_all(workspace.join(".agents/commands")).expect("commands");
+        fs::write(
+            workspace.join(".agents/commands/valid.md"),
+            "---\ndescription: valid\n---\nbody",
+        )
+        .expect("valid command");
         fs::write(root.path().join("outside"), "payload").expect("outside");
         symlink(
             root.path().join("outside"),
             workspace.join(".agents/commands/x.md"),
         )
         .expect("symlink");
-        let store = FolderTrustStore::new(root.path().join("user/trust.json"));
+        let ledger = root.path().join("user/trust.json");
+        let store = FolderTrustStore::new(ledger.clone());
+        let assessment = store.assess(&workspace).expect("untrustable assessment");
+        let canonical_offending = assessment.workspace().join(".agents/commands/x.md");
+
+        assert_eq!(assessment.state(), FolderTrustState::Untrustable);
+        assert!(!assessment.project_execution_enabled());
+        assert!(!assessment.requires_confirmation());
+        assert!(assessment.inventory().is_empty());
+        assert_eq!(assessment.executable_hash(), None);
+        let failure = assessment.inventory_failure().expect("inventory failure");
+        assert_eq!(failure.path(), canonical_offending);
+        assert!(
+            assessment
+                .render_prompt()
+                .contains("no fingerprint was produced")
+        );
         assert!(matches!(
-            store.assess(&workspace),
-            Err(FolderTrustError::UnsafeEntry(_))
+            store.grant(&assessment),
+            Err(FolderTrustError::Untrustable { path, .. })
+                if path == canonical_offending
         ));
+        assert!(!ledger.exists(), "refused grant must not create a ledger");
     }
 }

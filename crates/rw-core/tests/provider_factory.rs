@@ -12,7 +12,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
-use rw_core::{ModelAccounting, ModelDriver, ProviderFactory};
+use rw_core::{ModelAccounting, ModelDriver, ModelPricingSource, ProviderFactory};
 use rw_providers::{
     BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, DiscoveredModel,
     DiscoveredProviderCatalog, FinishReason, ModelPricing, NetworkPolicy, PricingTable, Provider,
@@ -26,7 +26,7 @@ use rw_store::credentials::{
 };
 use rw_types::{
     Block, Cost, ImageRef, Role, ToolCallId, ToolOutput, ToolOutputPart, Turn, TurnMeta,
-    config::ProviderConfig,
+    config::{ProviderAuthScheme, ProviderConfig, ProviderModelPricingConfig},
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -36,11 +36,13 @@ const OAUTH_CANARY: &str = "rw-oauth-secret-canary";
 const REFRESH_CANARY: &str = "rw-refresh-secret-canary";
 const ROTATED_CANARY: &str = "rw-rotated-refresh-canary";
 const REFRESHED_ACCESS_CANARY: &str = "rw-refreshed-access-canary";
+const HEADER_CANARY: &str = "rw-header-secret-canary";
 
 struct ExtensionFixtureProvider {
     private_name: String,
     capabilities: Capabilities,
     metadata: Option<ProviderModelMetadata>,
+    metadata_by_model: BTreeMap<String, ProviderModelMetadata>,
 }
 
 struct StartFailProvider;
@@ -124,6 +126,13 @@ impl Provider for ExtensionFixtureProvider {
         self.metadata.clone()
     }
 
+    fn cached_model_metadata_for(&self, model: &str) -> Option<ProviderModelMetadata> {
+        self.metadata_by_model
+            .get(model)
+            .cloned()
+            .or_else(|| self.metadata.clone())
+    }
+
     async fn discover_models(&self) -> Result<Option<DiscoveredProviderCatalog>, ProviderError> {
         Ok(Some(DiscoveredProviderCatalog {
             provider: "private-extension".to_owned(),
@@ -132,9 +141,12 @@ impl Provider for ExtensionFixtureProvider {
                     id: "model-a".to_owned(),
                     display_name: Some("Model A".to_owned()),
                     description: None,
-                    capabilities: Some(self.capabilities.clone()),
+                    capabilities: Some(
+                        self.cached_model_metadata_for("model-a")
+                            .map_or_else(|| self.capabilities.clone(), |value| value.capabilities),
+                    ),
                     pricing: self
-                        .metadata
+                        .cached_model_metadata_for("model-a")
                         .as_ref()
                         .and_then(|value| value.pricing.clone()),
                 },
@@ -142,8 +154,13 @@ impl Provider for ExtensionFixtureProvider {
                     id: "new-model".to_owned(),
                     display_name: Some("New Model".to_owned()),
                     description: None,
-                    capabilities: Some(self.capabilities.clone()),
-                    pricing: None,
+                    capabilities: Some(
+                        self.cached_model_metadata_for("new-model")
+                            .map_or_else(|| self.capabilities.clone(), |value| value.capabilities),
+                    ),
+                    pricing: self
+                        .cached_model_metadata_for("new-model")
+                        .and_then(|value| value.pricing),
                 },
             ],
         }))
@@ -542,6 +559,21 @@ fn pricing(models: impl IntoIterator<Item = (&'static str, bool)>) -> PricingTab
     }
 }
 
+fn declared_pricing(
+    input: f64,
+    output: f64,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
+) -> ProviderModelPricingConfig {
+    ProviderModelPricingConfig {
+        currency: Some("USD".to_owned()),
+        input_per_million: serde_json::Number::from_f64(input),
+        output_per_million: serde_json::Number::from_f64(output),
+        cache_read_per_million: cache_read.and_then(serde_json::Number::from_f64),
+        cache_write_per_million: cache_write.and_then(serde_json::Number::from_f64),
+    }
+}
+
 fn config(endpoint: &str, candidates: &[&str]) -> rw_types::config::Config {
     let mut config = rw_types::config::Config::default();
     "fast".clone_into(&mut config.models.default);
@@ -558,6 +590,55 @@ fn config(endpoint: &str, candidates: &[&str]) -> rw_types::config::Config {
         },
     );
     config
+}
+
+#[test]
+fn declared_gateway_pricing_accounts_for_all_reported_token_classes() {
+    let mut config = config(
+        "http://127.0.0.1:1/v1/chat/completions",
+        &["fixture/gateway-only-model"],
+    );
+    config
+        .providers
+        .get_mut("fixture")
+        .unwrap_or_else(|| panic!("fixture provider must exist"))
+        .pricing
+        .insert(
+            "gateway-only-model".to_owned(),
+            declared_pricing(2.0, 8.0, Some(0.5), Some(3.0)),
+        );
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Deny,
+        PricingTable::default(),
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("declared gateway pricing must compose: {error}"));
+    let resolved = runtime
+        .resolved_model("fixture/gateway-only-model")
+        .unwrap_or_else(|| panic!("gateway model must resolve"));
+    assert_eq!(
+        resolved.pricing_source(),
+        Some(ModelPricingSource::UserConfig)
+    );
+    assert_eq!(resolved.accounting(), UsageAccounting::ApiDollars);
+    assert_eq!(
+        runtime.accounting_for_alias(
+            "fast",
+            rw_providers::TokenUsage {
+                input_tokens: 1_000_000,
+                output_tokens: 500_000,
+                cache_read_tokens: 250_000,
+                cache_write_tokens: 100_000,
+                reasoning_tokens: 0,
+            },
+        ),
+        Cost::Monetary {
+            amount_micros: 6_425_000,
+            currency: "USD".to_owned(),
+        }
+    );
 }
 
 #[tokio::test]
@@ -883,6 +964,7 @@ fn extension_provider(
         private_name: private_name.to_owned(),
         capabilities: extension_capabilities(),
         metadata,
+        metadata_by_model: BTreeMap::new(),
     })
 }
 
@@ -1219,6 +1301,211 @@ async fn extension_metadata_is_preserved_and_unknown_pricing_stays_unpriced() {
     ));
 }
 
+#[tokio::test]
+async fn multi_model_extension_binds_each_models_cached_metadata() {
+    let metadata =
+        |display_name: &str, capabilities: Capabilities, input, output| ProviderModelMetadata {
+            pricing: Some(ModelPricing {
+                display_name: display_name.to_owned(),
+                max_context_tokens: capabilities.max_context_tokens,
+                max_output_tokens: capabilities.max_output_tokens,
+                supports_tools: capabilities.tool_calling,
+                supports_thinking: capabilities.thinking,
+                reasoning_efforts: Vec::new(),
+                input_per_million_micros_usd: input,
+                output_per_million_micros_usd: output,
+                cache_read_per_million_micros_usd: None,
+                cache_write_per_million_micros_usd: None,
+                reasoning_per_million_micros_usd: None,
+            }),
+            accounting: UsageAccounting::ApiDollars,
+            capabilities,
+        };
+    let text_capabilities = Capabilities {
+        tool_calling: false,
+        ..extension_capabilities()
+    };
+    let vision_capabilities = Capabilities {
+        vision: true,
+        thinking: true,
+        ..extension_capabilities()
+    };
+    let text_metadata = metadata("Text", text_capabilities.clone(), 1, 2);
+    let vision_metadata = metadata("Vision", vision_capabilities.clone(), 3, 4);
+    let provider: Arc<dyn Provider> = Arc::new(ExtensionFixtureProvider {
+        private_name: "private-multi-model".to_owned(),
+        capabilities: Capabilities {
+            tool_calling: false,
+            ..extension_capabilities()
+        },
+        metadata: None,
+        metadata_by_model: BTreeMap::from([
+            ("model-a".to_owned(), text_metadata.clone()),
+            ("new-model".to_owned(), vision_metadata.clone()),
+        ]),
+    });
+    let mut config = extension_config("custom/model-a");
+    config.models.aliases.insert(
+        "fast".to_owned(),
+        vec!["custom/model-a".to_owned(), "custom/new-model".to_owned()],
+    );
+    let runtime = extension_factory()
+        .with_extension_providers([("custom/", provider)])
+        .build(&config)
+        .unwrap_or_else(|error| panic!("multi-model extension must build: {error}"));
+
+    let text = runtime
+        .resolved_model("custom/model-a")
+        .unwrap_or_else(|| panic!("text model must resolve"));
+    assert_eq!(text.capabilities(), &text_capabilities);
+    assert_eq!(text.pricing(), text_metadata.pricing.as_ref());
+    let vision = runtime
+        .resolved_model("custom/new-model")
+        .unwrap_or_else(|| panic!("vision model must resolve"));
+    assert_eq!(vision.capabilities(), &vision_capabilities);
+    assert_eq!(vision.pricing(), vision_metadata.pricing.as_ref());
+    assert_eq!(
+        runtime
+            .model_metadata("custom/new-model")
+            .await
+            .unwrap_or_else(|error| panic!("vision metadata must resolve: {error}")),
+        vision_metadata
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn pricing_precedence_is_user_then_provider_then_models_dev() {
+    let mut table = pricing([("custom/model-a", false), ("fixture/model-a", false)]);
+    table
+        .models
+        .get_mut("custom/model-a")
+        .unwrap_or_else(|| panic!("catalog model must exist"))
+        .output_per_million_micros_usd = 10;
+    table
+        .models
+        .get_mut("fixture/model-a")
+        .unwrap_or_else(|| panic!("catalog model must exist"))
+        .output_per_million_micros_usd = 10;
+
+    let catalog_runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), TestCredentialStore::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Deny,
+        table.clone(),
+    )
+    .build(&config(
+        "http://127.0.0.1:1/v1/chat/completions",
+        &["fixture/model-a"],
+    ))
+    .unwrap_or_else(|error| panic!("catalog-priced route must build: {error}"));
+    let catalog_model = catalog_runtime
+        .resolved_model("fixture/model-a")
+        .unwrap_or_else(|| panic!("catalog model must resolve"));
+    assert_eq!(
+        catalog_model.pricing_source(),
+        Some(ModelPricingSource::ModelsDev)
+    );
+    assert_eq!(
+        catalog_model
+            .pricing()
+            .map(|pricing| pricing.output_per_million_micros_usd),
+        Some(10)
+    );
+
+    let discovered_pricing = ModelPricing {
+        output_per_million_micros_usd: 20,
+        ..table.models["custom/model-a"].clone()
+    };
+    let metadata = ProviderModelMetadata {
+        capabilities: extension_capabilities(),
+        pricing: Some(discovered_pricing),
+        accounting: UsageAccounting::ApiDollars,
+    };
+    let build_extension = |config: &rw_types::config::Config| {
+        ProviderFactory::with_backends(
+            manager(TestEnvironment::default(), TestCredentialStore::default()),
+            ProxyEnvironment::default(),
+            NetworkPolicy::Deny,
+            table.clone(),
+        )
+        .with_extension_providers([(
+            "custom/",
+            extension_provider("private-plugin", Some(metadata.clone())),
+        )])
+        .build(config)
+    };
+    let discovered_runtime = build_extension(&extension_config("custom/model-a"))
+        .unwrap_or_else(|error| panic!("discovered-priced extension must build: {error}"));
+    let discovered_model = discovered_runtime
+        .resolved_model("custom/model-a")
+        .unwrap_or_else(|| panic!("discovered model must resolve"));
+    assert_eq!(
+        discovered_model.pricing_source(),
+        Some(ModelPricingSource::ProviderDiscovered)
+    );
+    assert_eq!(
+        discovered_model
+            .pricing()
+            .map(|pricing| pricing.output_per_million_micros_usd),
+        Some(20)
+    );
+    assert_eq!(
+        discovered_runtime.accounting_for_alias(
+            "fast",
+            rw_providers::TokenUsage {
+                output_tokens: 1_000_000,
+                ..rw_providers::TokenUsage::default()
+            },
+        ),
+        Cost::Monetary {
+            amount_micros: 20,
+            currency: "USD".to_owned(),
+        }
+    );
+
+    let mut user_config = extension_config("custom/model-a");
+    user_config.providers.insert(
+        "custom".to_owned(),
+        ProviderConfig {
+            kind: "extension".to_owned(),
+            pricing: BTreeMap::from([(
+                "model-a".to_owned(),
+                declared_pricing(0.000_03, 0.000_03, None, None),
+            )]),
+            ..ProviderConfig::default()
+        },
+    );
+    let user_runtime = build_extension(&user_config)
+        .unwrap_or_else(|error| panic!("user-priced extension must build: {error}"));
+    let user_model = user_runtime
+        .resolved_model("custom/model-a")
+        .unwrap_or_else(|| panic!("user-priced model must resolve"));
+    assert_eq!(
+        user_model.pricing_source(),
+        Some(ModelPricingSource::UserConfig)
+    );
+    assert_eq!(
+        user_model
+            .pricing()
+            .map(|pricing| pricing.output_per_million_micros_usd),
+        Some(30)
+    );
+    assert_eq!(
+        user_runtime.accounting_for_alias(
+            "fast",
+            rw_providers::TokenUsage {
+                output_tokens: 1_000_000,
+                ..rw_providers::TokenUsage::default()
+            },
+        ),
+        Cost::Monetary {
+            amount_micros: 30,
+            currency: "USD".to_owned(),
+        }
+    );
+}
+
 #[test]
 fn extension_alias_prefixes_reject_collisions_overlap_and_unregistered_candidates() {
     let provider = || extension_provider("private-plugin", None);
@@ -1472,6 +1759,186 @@ async fn environment_api_key_wins_and_recorder_redacts_known_secret() {
         .collect::<String>();
     assert!(fixture_text.contains("[REDACTED]"));
     assert!(!fixture_text.contains(API_CANARY));
+}
+
+#[tokio::test]
+async fn azure_gateway_config_maps_model_path_query_and_primary_header() {
+    let server = spawn_server("/unused", vec![sse_response("azure-ok")]);
+    let credential_store = TestCredentialStore::default();
+    credential_store.insert("providers.azure.api_key", "azure-key-canary");
+    let mut config = config(&server.endpoint, &["fixture/canonical-model"]);
+    let provider = config
+        .providers
+        .get_mut("fixture")
+        .unwrap_or_else(|| panic!("fixture provider must exist"));
+    provider.path_template = Some("/openai/deployments/{model}/chat/completions".to_owned());
+    provider.extra_query =
+        BTreeMap::from([("api-version".to_owned(), "2026-01-01-preview".to_owned())]);
+    provider.api_key_credential = Some("providers.azure.api_key".to_owned());
+    provider.auth_scheme = Some(ProviderAuthScheme::Header {
+        name: "api-key".to_owned(),
+        value_prefix: String::new(),
+    });
+    provider.model_ids =
+        BTreeMap::from([("canonical-model".to_owned(), "deployment-west".to_owned())]);
+
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), credential_store),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        pricing([("fixture/canonical-model", false)]),
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("Azure-shaped config must compose: {error}"));
+    let events = runtime
+        .provider("fixture/canonical-model")
+        .unwrap_or_else(|| panic!("model-bound provider must exist"))
+        .stream(request("canonical-model"))
+        .await
+        .unwrap_or_else(|error| panic!("Azure-shaped request must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(Result::is_ok));
+    let captured = server
+        .task
+        .join()
+        .unwrap_or_else(|_| panic!("fixture server must join"));
+    let request = &captured[0];
+    assert!(request.starts_with(
+        "POST /openai/deployments/deployment-west/chat/completions?api-version=2026-01-01-preview HTTP/1.1"
+    ));
+    assert!(
+        request
+            .to_ascii_lowercase()
+            .contains("\r\napi-key: azure-key-canary\r\n")
+    );
+    let body = request
+        .split_once("\r\n\r\n")
+        .map_or_else(|| panic!("request must contain a body"), |(_, body)| body);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(body)
+            .unwrap_or_else(|error| panic!("request body must be JSON: {error}"))["model"],
+        json!("deployment-west")
+    );
+}
+
+#[tokio::test]
+async fn openrouter_gateway_config_applies_static_headers_and_extra_body() {
+    let server = spawn_server("/v1/chat/completions", vec![sse_response("router-ok")]);
+    let mut config = config(&server.endpoint, &["fixture/openai/gpt-route"]);
+    let provider = config
+        .providers
+        .get_mut("fixture")
+        .unwrap_or_else(|| panic!("fixture provider must exist"));
+    provider.api_key_env = Some("OPENROUTER_API_KEY".to_owned());
+    provider.headers = BTreeMap::from([
+        ("HTTP-Referer".to_owned(), "https://app.example".to_owned()),
+        ("X-Title".to_owned(), "Rottweiler".to_owned()),
+    ]);
+    provider.extra_body = BTreeMap::from([(
+        "provider".to_owned(),
+        json!({"order": ["azure", "openai"], "allow_fallbacks": false}),
+    )]);
+    let environment = TestEnvironment(BTreeMap::from([(
+        "OPENROUTER_API_KEY".to_owned(),
+        "router-key-canary".to_owned(),
+    )]));
+    let runtime = ProviderFactory::with_backends(
+        manager(environment, TestCredentialStore::default()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        PricingTable::default(),
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("OpenRouter-shaped config must compose: {error}"));
+    let events = runtime
+        .provider("fixture/openai/gpt-route")
+        .unwrap_or_else(|| panic!("model-bound provider must exist"))
+        .stream(request("openai/gpt-route"))
+        .await
+        .unwrap_or_else(|error| panic!("OpenRouter-shaped request must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(Result::is_ok));
+    let captured = server
+        .task
+        .join()
+        .unwrap_or_else(|_| panic!("fixture server must join"));
+    let request = &captured[0];
+    let lower = request.to_ascii_lowercase();
+    assert!(lower.contains("\r\nauthorization: bearer router-key-canary\r\n"));
+    assert!(lower.contains("\r\nhttp-referer: https://app.example\r\n"));
+    assert!(lower.contains("\r\nx-title: rottweiler\r\n"));
+    let body = request
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("request must contain a body"))
+        .1;
+    let body: serde_json::Value = serde_json::from_str(body)
+        .unwrap_or_else(|error| panic!("request body must be JSON: {error}"));
+    assert_eq!(body["model"], json!("openai/gpt-route"));
+    assert_eq!(body["provider"]["order"], json!(["azure", "openai"]));
+    assert_eq!(body["provider"]["allow_fallbacks"], json!(false));
+}
+
+#[tokio::test]
+async fn credential_header_is_registered_for_recording_redaction() {
+    let server = spawn_server("/v1/chat/completions", vec![sse_response(HEADER_CANARY)]);
+    let mut config = config(&server.endpoint, &["fixture/model-a"]);
+    let provider = config
+        .providers
+        .get_mut("fixture")
+        .unwrap_or_else(|| panic!("fixture provider must exist"));
+    provider.auth_scheme = Some(ProviderAuthScheme::None);
+    provider.header_credentials = BTreeMap::from([(
+        "X-Gateway-Key".to_owned(),
+        "providers.fixture.gateway_key".to_owned(),
+    )]);
+    let credential_store = TestCredentialStore::default();
+    credential_store.insert("providers.fixture.gateway_key", HEADER_CANARY);
+    let runtime = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), credential_store),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Allow,
+        pricing([("fixture/model-a", false)]),
+    )
+    .build(&config)
+    .unwrap_or_else(|error| panic!("header credential must compose: {error}"));
+    assert_eq!(runtime.fixture_redactor().registered_secret_count(), 1);
+    let directory = tempdir()
+        .unwrap_or_else(|error| panic!("temporary fixture directory must create: {error}"));
+    let recorder = Recorder::new(
+        runtime
+            .provider("fixture/model-a")
+            .unwrap_or_else(|| panic!("model-bound provider must exist")),
+        directory.path(),
+        runtime.fixture_redactor(),
+    );
+    let events = recorder
+        .stream(request("model-a"))
+        .await
+        .unwrap_or_else(|error| panic!("recorded stream must start: {error}"))
+        .collect::<Vec<_>>()
+        .await;
+    assert!(events.iter().all(Result::is_ok));
+    recorder
+        .flush()
+        .await
+        .unwrap_or_else(|error| panic!("fixture must flush: {error}"));
+    let captured = server
+        .task
+        .join()
+        .unwrap_or_else(|_| panic!("fixture server must join"));
+    assert!(captured[0].to_ascii_lowercase().contains(&format!(
+        "\r\nx-gateway-key: {}\r\n",
+        HEADER_CANARY.to_ascii_lowercase()
+    )));
+    let fixture_text = fs::read_dir(directory.path())
+        .unwrap_or_else(|error| panic!("fixture directory must read: {error}"))
+        .filter_map(Result::ok)
+        .map(|entry| fs::read_to_string(entry.path()).unwrap_or_default())
+        .collect::<String>();
+    assert!(fixture_text.contains("[REDACTED]"));
+    assert!(!fixture_text.contains(HEADER_CANARY));
 }
 
 #[tokio::test]
@@ -1939,6 +2406,20 @@ fn subscription_kind_has_independent_capabilities_and_no_dollar_pricing() {
     assert_eq!(model.catalog_model(), Some("openai/gpt-5.4-mini"));
     assert!(model.pricing().is_none());
     assert_eq!(model.accounting(), ModelAccounting::SubscriptionQuota);
+    assert_eq!(
+        runtime.accounting_for_alias(
+            "fast",
+            rw_providers::TokenUsage {
+                input_tokens: 40,
+                output_tokens: 2,
+                ..rw_providers::TokenUsage::default()
+            },
+        ),
+        Cost::SubscriptionQuota {
+            used: Some("42".to_owned()),
+            unit: Some("tokens".to_owned()),
+        }
+    );
     assert!(model.capabilities().tool_calling);
     assert!(model.capabilities().thinking);
     assert!(!model.capabilities().vision);
@@ -1952,6 +2433,31 @@ fn subscription_kind_has_independent_capabilities_and_no_dollar_pricing() {
     assert!(!debug.contains("subscription-access-canary"));
     assert!(!debug.contains("subscription-refresh-canary"));
     assert!(!debug.contains("acct-fixture"));
+
+    let mut overridden = subscription_config("gpt-5.4-mini");
+    overridden
+        .providers
+        .get_mut("fixture")
+        .unwrap_or_else(|| panic!("subscription provider must exist"))
+        .pricing
+        .insert(
+            "gpt-5.4-mini".to_owned(),
+            declared_pricing(1.0, 1.0, None, None),
+        );
+    let error = ProviderFactory::with_backends(
+        manager(TestEnvironment::default(), subscription_credential_store()),
+        ProxyEnvironment::default(),
+        NetworkPolicy::Deny,
+        pricing([("openai/gpt-5.4-mini", false)]),
+    )
+    .build(&overridden)
+    .err()
+    .unwrap_or_else(|| panic!("subscription pricing override must fail"));
+    assert!(
+        error
+            .to_string()
+            .contains("subscription or credit accounting")
+    );
 }
 
 #[test]

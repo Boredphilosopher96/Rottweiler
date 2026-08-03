@@ -708,8 +708,7 @@ needs = ["impl", "tests"]
         );
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
         let workflow = catalog.workflow("delivery").expect("workflow");
         let events = Arc::new(Mutex::new(Vec::new()));
         let executor = ReplayExecutor {
@@ -769,11 +768,11 @@ agent = "plan"
 needs = ["a"]
 "#,
         );
-        let error = ExtensionCatalog::discover(
+        let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
-        )
-        .expect_err("cycle rejected");
-        assert!(error.to_string().contains("cycle"));
+        );
+        assert!(catalog.workflow("delivery").is_none());
+        assert!(catalog.diagnostics()[0].message().contains("cycle"));
     }
 
     struct OversizedExecutor;
@@ -799,8 +798,7 @@ needs = ["a"]
         );
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
 
         let error = WorkflowRunner::new(&OversizedExecutor)
             .run(catalog.workflow("delivery").expect("workflow"))
@@ -859,8 +857,7 @@ if = "success:test"
         );
         let catalog = ExtensionCatalog::discover(
             &ExtensionDiscoveryConfig::new(project, home).with_project_trusted(true),
-        )
-        .expect("catalog");
+        );
 
         let report = WorkflowRunner::new(&ConditionalExecutor)
             .run(catalog.workflow("delivery").expect("workflow"))

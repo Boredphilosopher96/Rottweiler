@@ -2488,6 +2488,7 @@ fn run_trust_command(command: TrustCommand) -> Result<()> {
         }
         TrustCommand::Grant => {
             let assessment = store.assess(&workspace).into_diagnostic()?;
+            ensure_folder_trust_grantable(&assessment)?;
             if !assessment.requires_confirmation() {
                 if assessment.project_execution_enabled() {
                     println!(
@@ -2528,6 +2529,19 @@ fn run_trust_command(command: TrustCommand) -> Result<()> {
                 workspace.display()
             );
         }
+    }
+    Ok(())
+}
+
+fn ensure_folder_trust_grantable(
+    assessment: &rw_store::trust::FolderTrustAssessment,
+) -> Result<()> {
+    if let Some(failure) = assessment.inventory_failure() {
+        return Err(miette!(
+            "refusing to grant folder trust because the project extension inventory is incomplete at {}: {}",
+            failure.path().display(),
+            failure.message()
+        ));
     }
     Ok(())
 }
@@ -3768,12 +3782,35 @@ mod tests {
         Cli, Command, DeferredHostedEngine, DetachedServerReady, McpServerCommand, ModelsCommand,
         OutputFormat, PromptCommand, RuntimeDirectoryGuard, UpgradeChannel,
         append_execution_lease_restart_flag, create_guarded_server_runtime,
-        discover_local_workspace, resolve_tui_executable, scripted_provider_options,
-        sync_install_paths, valid_bootstrap_token, validate_cli_option_scope,
-        write_github_device_prompt, write_private_file_atomic,
+        discover_local_workspace, ensure_folder_trust_grantable, resolve_tui_executable,
+        scripted_provider_options, sync_install_paths, valid_bootstrap_token,
+        validate_cli_option_scope, write_github_device_prompt, write_private_file_atomic,
     };
     #[cfg(unix)]
     use super::{rustix_device_id, rustix_mode_bits};
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn trust_grant_path_refuses_uninventoriable_project() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("workspace");
+        let offending = workspace.join(".agents/commands/foo.md");
+        std::fs::create_dir_all(offending.parent().expect("commands")).expect("commands");
+        std::fs::write(root.path().join("outside.md"), "outside").expect("outside");
+        symlink(root.path().join("outside.md"), &offending).expect("symlink");
+        let ledger = root.path().join("private/trust.json");
+        let store = rw_store::trust::FolderTrustStore::new(ledger.clone());
+        let assessment = store.assess(&workspace).expect("assessment");
+        let offending = assessment.workspace().join(".agents/commands/foo.md");
+
+        let error = ensure_folder_trust_grantable(&assessment).expect_err("grant refusal");
+        assert!(error.to_string().contains("inventory is incomplete"));
+        assert!(error.to_string().contains(&offending.display().to_string()));
+        assert!(!ledger.exists());
+    }
 
     #[derive(Default)]
     struct ProviderMutationProbe {

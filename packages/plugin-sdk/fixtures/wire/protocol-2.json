@@ -1,0 +1,132 @@
+{
+  "protocol": 2,
+  "status": "stable",
+  "framing": "newline-delimited-json-rpc-2.0",
+  "limits": {
+    "max_frame_bytes": 4194304,
+    "max_manifest_bytes": 262144,
+    "max_capabilities_per_kind": 256,
+    "max_name_bytes": 128,
+    "max_version_bytes": 64,
+    "max_description_bytes": 16384,
+    "max_schema_bytes": 65536,
+    "max_schema_depth": 32,
+    "max_model_tokens": 16777216,
+    "max_price_micros_usd": 1000000000000
+  },
+  "methods": {
+    "initialize": "initialize",
+    "toolCall": "tool/call",
+    "commandExecute": "command/execute",
+    "hookInvoke": "hook/invoke",
+    "providerComplete": "provider/complete",
+    "providerModels": "provider/models",
+    "providerEvent": "provider/event",
+    "providerCancel": "provider/cancel",
+    "providerHttp": "provider/http",
+    "providerHttpEvent": "provider/http_event",
+    "providerHttpCancel": "provider/http_cancel",
+    "eventPublish": "event/publish",
+    "injectMessage": "session/inject_message",
+    "setStatus": "session/set_status",
+    "notify": "ui/notify",
+    "shutdown": "shutdown",
+    "exit": "exit"
+  },
+  "initialize_request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+      "host": "rottweiler",
+      "protocol": 2,
+      "min_protocol": 1,
+      "max_frame_bytes": 4194304,
+      "capabilities": ["provider-models", "provider-http"]
+    }
+  },
+  "initialize_response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "name": "wire-fixture-v2",
+      "version": "1.0.0",
+      "protocol": 2,
+      "capabilities": {
+        "providers": [{
+          "alias-prefix": "fixture-v2/",
+          "capabilities": ["models"],
+          "credential-references": ["fixture-token"]
+        }]
+      }
+    }
+  },
+  "provider_models_request": {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "method": "provider/models",
+    "params": { "alias_prefix": "fixture-v2/" }
+  },
+  "provider_models_response": {
+    "jsonrpc": "2.0",
+    "id": 2,
+    "result": {
+      "models": [{
+        "id": "vision-thinking",
+        "display_name": "Vision Thinking",
+        "capabilities": {
+          "tool_calling": true,
+          "vision": true,
+          "thinking": true,
+          "cache_breakpoints": "explicit"
+        },
+        "max_context_tokens": 200000,
+        "max_output_tokens": 16000,
+        "pricing": {
+          "input_per_million_micros_usd": 3000000,
+          "output_per_million_micros_usd": 15000000,
+          "cache_read_per_million_micros_usd": 300000,
+          "cache_write_per_million_micros_usd": 3750000
+        }
+      }]
+    }
+  },
+  "provider_http_request": {
+    "jsonrpc": "2.0",
+    "id": "plugin-http-1",
+    "method": "provider/http",
+    "params": {
+      "alias": "fixture-v2/vision-thinking",
+      "credential_reference": "fixture-token",
+      "request": {
+        "method": "POST",
+        "url": "https://api.example.test/v1/complete",
+        "headers": [{ "name": "content-type", "value": "application/json" }],
+        "body_base64": "e30=",
+        "credential_header": "authorization",
+        "credential_prefix": "Bearer "
+      }
+    }
+  },
+  "provider_http_head": {
+    "jsonrpc": "2.0",
+    "method": "provider/http_event",
+    "params": {
+      "request_id": "plugin-http-1",
+      "event": { "type": "head", "status": 200, "headers": [["content-type", "text/event-stream"]] }
+    }
+  },
+  "provider_http_body": {
+    "jsonrpc": "2.0",
+    "method": "provider/http_event",
+    "params": {
+      "request_id": "plugin-http-1",
+      "event": { "type": "body", "data_base64": "ZGF0YToge30K" }
+    }
+  },
+  "provider_http_finished": {
+    "jsonrpc": "2.0",
+    "method": "provider/http_event",
+    "params": { "request_id": "plugin-http-1", "event": { "type": "finished" } }
+  }
+}

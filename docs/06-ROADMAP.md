@@ -14,6 +14,16 @@ Workspace with all crates stubbed; **codegen spike first (ADR-013): schemars/typ
 
 ## M1 — Provider layer + record/replay (the testing spine)
 
+**Status:** the code contains the listed built-in provider, routing, recording,
+credential, proxy, and accounting surfaces, but this document does **not** mark
+M1 accepted. Its live-smoke, replay, failover, proxy, and billing acceptance
+evidence must be current CI/release evidence, not inferred from implementation.
+Typed gateway configuration and protocol-2 provider extensibility have shipped:
+compatible routes support header/auth/query/body/path/model-id controls and
+user pricing, while RPC providers can publish model metadata and use
+host-mediated authentication. The remaining provider replay limit is explicit:
+RPC plugins record/replay normalized events, not arbitrary plugin wire frames.
+
 Anthropic Messages + OpenAI Chat/Responses-compatible adapters (streaming, tool calls, usage; Gemini v1 routes through Google's official OpenAI-compatible endpoint as defined in 01 §4); router with aliases + fallback chains; auth (API keys + generic documented OAuth plus the reviewed ChatGPT and GitHub Copilot subscription profiles from ADR-017); one versioned owner-private credential file for all logical credential references, with no operating-system credential store calls; direct ChatGPT raw Responses transport; GitHub device flow, Copilot `/models` discovery, and direct Copilot Responses/Chat/Messages transports; **HTTP(S) proxy support — global `[network] proxy`, per-provider override, env-var fallback (01 §4)**; thinking/reasoning-effort dial mapped per adapter; pricing/subscription-quota/AI-credit accounting; **record/replay middleware** (including dynamic model discovery); retry/backoff.
 
 **AC:** live smoke test (recorded once) streams a tool-call turn from both API families through the IR; the separate ChatGPT-subscription smoke uses Rottweiler's credential vault and raw Codex endpoint, forces one named tool, redacts the whole OAuth/account bundle, and replays byte-identically with process networking denied; the GitHub Copilot smoke does the same through a Rottweiler-owned OAuth identity and a currently enabled discovered model; replay harness re-runs all reviewed fixtures byte-identically with network disabled; kill-one-provider test proves failover; proxy fixture: with a local proxy configured globally, all provider traffic routes through it; with a per-provider proxy, only that provider's traffic does (asserted by the proxy's access log); API cost and Copilot AI-credit calculations match hand calculations, while ChatGPT subscription usage is labeled quota/cost-unavailable rather than `$0` API cost.
@@ -58,9 +68,9 @@ Agent definitions; spawn_agent with parallelism/depth limits; nested progress in
 
 ## M8 — MCP + plugin host
 
-rmcp client (stdio + HTTP), deferred tool loading + `tool_search`, `/mcp` runtime controls, size-capped TOON-encoded responses; plugin host: handshake, capability approval, hook catalog, event subscriptions; `rw plugin scaffold/dev`; TypeScript SDK; Rottweiler-as-MCP-server.
+rmcp client (stdio + HTTP), deferred tool loading + `tool_search`, `/mcp` runtime controls, size-capped TOON-encoded responses; plugin host: protocol-1/2 negotiation, capability approval, hook catalog, event subscriptions, protocol-2 provider catalog/metadata and host-mediated authenticated HTTP; `rw plugin scaffold/dev`; TypeScript SDK; Rottweiler-as-MCP-server.
 
-**AC:** connect 5 real MCP servers simultaneously — context increase < 2k tokens until a tool is used (deferred-loading proof); scaffolded TS plugin implementing `pre_tool` deny + a custom tool passes the conformance suite; capability-violation test (plugin exceeds manifest) → killed; another agent drives Rottweiler over its MCP server interface. **The plugin protocol is labeled experimental until this milestone's conformance suite exists and three real plugins run against it; only then does `protocol: 1` freeze.**
+**AC:** connect 5 real MCP servers simultaneously — context increase < 2k tokens until a tool is used (deferred-loading proof); scaffolded TS plugin implementing `pre_tool` deny + a custom tool passes the conformance suite; capability-violation test (plugin exceeds manifest) → killed; another agent drives Rottweiler over its MCP server interface. **Protocol 2 is stable and protocol 1 remains frozen and supported; the checked-in schemas, wire fixtures, Rust host, and TypeScript SDK cover both generations.**
 
 ## M9 — Fork, review, replay, export
 
@@ -78,6 +88,12 @@ Background process manager; vim keybindings; `rw stats` (incl. cost attribution:
 
 ## Post-v1 (explicitly deferred)
 
-IDE integration · web client over `rw serve` · Windows-native sandbox · AWS Bedrock / Google Vertex adapters (v1 route: OpenAI-compatible gateway) · voice · team/shared-session features.
+IDE integration · web client over `rw serve` · Windows-native sandbox · native
+AWS Bedrock / Google Vertex adapters · voice · team/shared-session features.
+Typed custom headers and auth placement do not implement direct SigV4 request
+signing or GCP ADC/token acquisition. A translating OpenAI-compatible gateway is
+now a viable route when that gateway owns the native cloud authentication and
+exposes a supported Chat/Responses dialect; direct native endpoints still need
+dedicated signing/auth support.
 
 The WASM hook tier and signed extension-registry foundation moved forward under ADR-021: component hooks reuse the production dispatcher with no WASI/imports and bounded execution; signed, independently trusted release installation is the registry trust boundary. Broader component tools/providers remain future work.

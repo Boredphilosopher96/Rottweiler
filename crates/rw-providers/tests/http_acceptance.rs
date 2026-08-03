@@ -169,6 +169,11 @@ fn openai_provider_with_options(
             supports_vision: true,
             max_context_tokens: None,
             max_output_tokens: None,
+            headers: BTreeMap::new(),
+            header_credentials: BTreeMap::new(),
+            extra_body: BTreeMap::new(),
+            model_ids: BTreeMap::new(),
+            path_template: None,
         })
         .unwrap_or_else(|error| panic!("OpenAI fixture provider must build: {error}")),
     )
@@ -464,6 +469,11 @@ async fn authenticated_proxy_receives_basic_header_without_secret_leakage() {
         supports_vision: true,
         max_context_tokens: None,
         max_output_tokens: None,
+        headers: BTreeMap::new(),
+        header_credentials: BTreeMap::new(),
+        extra_body: BTreeMap::new(),
+        model_ids: BTreeMap::new(),
+        path_template: None,
     }) else {
         panic!("authentication without a proxy URL must fail closed");
     };
@@ -490,6 +500,11 @@ async fn openai_capabilities_reject_unsupported_requests_before_network() {
         supports_vision: false,
         max_context_tokens: Some(1_024),
         max_output_tokens: Some(256),
+        headers: BTreeMap::new(),
+        header_credentials: BTreeMap::new(),
+        extra_body: BTreeMap::new(),
+        model_ids: BTreeMap::new(),
+        path_template: None,
     })
     .unwrap_or_else(|error| panic!("limited fixture provider must build: {error}"));
     let capabilities = provider.capabilities();
