@@ -40,7 +40,7 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("needs: [test, security-tests]", smoke)
         self.assertNotIn("\n    if:", smoke)
         self.assertIn("timeout-minutes: 45", smoke)
-        self.assertIn("Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4", smoke)
+        self.assertIn("Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6", smoke)
         self.assertIn("ROTTWEILER_PERF_SMOKE: 1", smoke)
         self.assertIn("ROTTWEILER_PERF_SAMPLES: 100", smoke)
         self.assertIn("bun run test:perf", smoke)
@@ -252,7 +252,7 @@ class CiHardeningContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         sign_and_publish = workflow.split("  sign-and-publish:", 1)[1]
         attest_pin = (
-            "actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0"
+            "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2"
         )
 
         self.assertIn(
