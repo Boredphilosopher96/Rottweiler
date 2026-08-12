@@ -4,6 +4,7 @@ import { CodeRenderable, type TreeSitterClient } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 
 import { createSyntaxStyle, nordTheme } from "../src/theme"
+import { stabilizeTreeSitterClient } from "../src/tree-sitter-client"
 
 interface ControlledHighlighter {
   readonly client: TreeSitterClient
@@ -40,7 +41,7 @@ describe("OpenTUI highlighting lifecycle", () => {
       content: "const answer = 42",
       filetype: "typescript",
       syntaxStyle,
-      treeSitterClient: highlighter.client,
+      treeSitterClient: stabilizeTreeSitterClient(highlighter.client),
     })
     setup.renderer.root.add(code)
     await setup.renderOnce()
@@ -67,7 +68,7 @@ describe("OpenTUI highlighting lifecycle", () => {
       content: "const answer = 42",
       filetype: "typescript",
       syntaxStyle,
-      treeSitterClient: highlighter.client,
+      treeSitterClient: stabilizeTreeSitterClient(highlighter.client),
     })
     setup.renderer.root.add(code)
     await setup.renderOnce()

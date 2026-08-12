@@ -125,6 +125,7 @@ import {
   isSessionForkedEvent,
   type WireEngineEvent,
 } from "./transport"
+import { stabilizeTreeSitterClient } from "./tree-sitter-client"
 import {
   boundedUiText,
   contextPanelHasContent,
@@ -673,7 +674,9 @@ export class RottweilerApp extends BoxRenderable {
     this.#theme = theme
     this.#systemThemeMode = options.systemThemeMode ?? null
     this.#systemTheme = options.systemTheme ?? systemThemeFor(this.#systemThemeMode)
-    this.#treeSitterClient = options.treeSitterClient
+    this.#treeSitterClient = options.treeSitterClient === undefined
+      ? undefined
+      : stabilizeTreeSitterClient(options.treeSitterClient)
     this.#sessionId = this.#options.sessionId
     const initialState = options.initialState ?? createInitialState()
     this.#state =

@@ -3,14 +3,15 @@ import { createTestRenderer } from "@opentui/core/testing"
 import { writeFile } from "node:fs/promises"
 
 import { embeddedParserConfigurations, materializeTreeSitterRuntime } from "./tree-sitter-runtime"
+import { stabilizeTreeSitterClient } from "./tree-sitter-client"
 
 /** Compiled-executable acceptance used by release tests; not part of normal startup. */
 export async function runCompiledTreeSitterSmoke(reportPath: string): Promise<void> {
   const runtime = await materializeTreeSitterRuntime()
-  process.env.ROTTWEILER_TREE_SITTER_WASM_PATH = runtime.wasmPath
+  process.env.OTUI_ASSET_ROOT = runtime.root
   process.env.OTUI_TREE_SITTER_WORKER_PATH = runtime.workerPath
   addDefaultParsers(embeddedParserConfigurations(runtime.assetsPath))
-  const client = getTreeSitterClient()
+  const client = stabilizeTreeSitterClient(getTreeSitterClient())
   const setup = await createTestRenderer({ width: 64, height: 30, useThread: false })
   const syntax = SyntaxStyle.fromStyles({
     default: { fg: "#D8DEE9" },
@@ -90,7 +91,7 @@ export async function runCompiledTreeSitterSmoke(reportPath: string): Promise<vo
     syntax.destroy()
     await destroyTreeSitterClient()
     await runtime.cleanup()
-    delete process.env.ROTTWEILER_TREE_SITTER_WASM_PATH
+    delete process.env.OTUI_ASSET_ROOT
     delete process.env.OTUI_TREE_SITTER_WORKER_PATH
   }
 }
