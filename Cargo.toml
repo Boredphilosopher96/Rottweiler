@@ -72,7 +72,7 @@ nix = { version = "0.31.3", features = ["poll"] }
 portable-pty = "0.9.0"
 rpassword = "=7.5.4"
 regex = "1.12.2"
-rmcp = { version = "=3.1.0", default-features = false, features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client", "transport-streamable-http-server"] }
+rmcp = { version = "=3.1.2", default-features = false, features = ["client", "server", "transport-child-process", "transport-io", "transport-streamable-http-client", "transport-streamable-http-server"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 rustix = { version = "1.1.4", features = ["fs", "process", "termios"] }
 schemars = { version = "1.2.1", features = ["preserve_order"] }
