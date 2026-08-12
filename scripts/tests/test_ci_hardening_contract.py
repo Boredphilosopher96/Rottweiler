@@ -44,6 +44,9 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("ROTTWEILER_PERF_SMOKE: 1", smoke)
         self.assertIn("ROTTWEILER_PERF_SAMPLES: 100", smoke)
         self.assertIn("bun run test:perf", smoke)
+        tui_smoke = workflow_job(workflow, "tui-performance-smoke")
+        self.assertIn("ROTTWEILER_PERF_SMOKE: 1", tui_smoke)
+        self.assertIn("bun run test:perf", tui_smoke)
 
     def test_nightly_budgets_are_blocking_and_missing_runners_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
