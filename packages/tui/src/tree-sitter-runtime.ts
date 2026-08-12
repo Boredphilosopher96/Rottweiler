@@ -58,6 +58,19 @@ const COMPRESSED_ASSET_HEADER_BYTES = 8
 
 const embeddedAssets = [
   ["parser.worker.js", parserWorker],
+  // OpenTUI resolves its built-in parsers through the public OTUI_ASSET_ROOT
+  // layout before our larger parser catalog replaces those defaults.
+  ["@opentui/core/assets/javascript/highlights.scm", javascriptHighlights],
+  ["@opentui/core/assets/javascript/tree-sitter-javascript.wasm", javascriptWasm],
+  ["@opentui/core/assets/markdown/highlights.scm", markdownHighlights],
+  ["@opentui/core/assets/markdown/injections.scm", markdownInjections],
+  ["@opentui/core/assets/markdown/tree-sitter-markdown.wasm", markdownWasm],
+  ["@opentui/core/assets/markdown_inline/highlights.scm", markdownInlineHighlights],
+  ["@opentui/core/assets/markdown_inline/tree-sitter-markdown_inline.wasm", markdownInlineWasm],
+  ["@opentui/core/assets/typescript/highlights.scm", typescriptHighlights],
+  ["@opentui/core/assets/typescript/tree-sitter-typescript.wasm", typescriptWasm],
+  ["@opentui/core/assets/zig/highlights.scm", zigHighlights],
+  ["@opentui/core/assets/zig/tree-sitter-zig.wasm", zigWasm],
   ["assets/bash/highlights.scm", bashHighlights],
   ["assets/bash/tree-sitter-bash.wasm", bashWasm],
   ["assets/c/highlights.scm", cHighlights],
@@ -105,12 +118,12 @@ const embeddedAssets = [
   ["assets/zig/tree-sitter-zig.wasm", zigWasm],
   ["node_modules/web-tree-sitter/tree-sitter.js", webTreeSitterModule],
   ["node_modules/web-tree-sitter/tree-sitter.wasm", webTreeSitterWasm],
+  ["web-tree-sitter/tree-sitter.wasm", webTreeSitterWasm],
 ] as const
 
 export interface MaterializedTreeSitterRuntime {
   readonly root: string
   readonly workerPath: string
-  readonly wasmPath: string
   readonly assetsPath: string
   cleanup(): Promise<void>
   cleanupSync(): void
@@ -283,7 +296,6 @@ export async function materializeTreeSitterRuntime(): Promise<MaterializedTreeSi
   return {
     root,
     workerPath: join(root, "parser.worker.js"),
-    wasmPath: join(root, "node_modules/web-tree-sitter/tree-sitter.wasm"),
     assetsPath: join(root, "assets"),
     async cleanup() {
       if (cleaned) return

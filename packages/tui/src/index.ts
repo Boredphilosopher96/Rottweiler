@@ -1,5 +1,6 @@
 import { writeStartupSplash } from "./startup"
 import { enhancedKeyboardOptions } from "./keybindings"
+import { stabilizeTreeSitterClient } from "./tree-sitter-client"
 
 type RuntimeBootstrap =
   | {
@@ -56,7 +57,7 @@ async function main(): Promise<void> {
         await openTui.destroyTreeSitterClient()
         await treeSitterRuntime?.cleanup()
         treeSitterRuntime = null
-        delete process.env.ROTTWEILER_TREE_SITTER_WASM_PATH
+        delete process.env.OTUI_ASSET_ROOT
         delete process.env.OTUI_TREE_SITTER_WORKER_PATH
       })()
     },
@@ -136,15 +137,15 @@ async function main(): Promise<void> {
   try {
     const { embeddedParserConfigurations, materializeTreeSitterRuntime } = await import("./tree-sitter-runtime")
     treeSitterRuntime = await materializeTreeSitterRuntime()
-    const { assetsPath, wasmPath, workerPath } = treeSitterRuntime
-    process.env.ROTTWEILER_TREE_SITTER_WASM_PATH = wasmPath
+    const { assetsPath, root, workerPath } = treeSitterRuntime
+    process.env.OTUI_ASSET_ROOT = root
     process.env.OTUI_TREE_SITTER_WORKER_PATH = workerPath
     openTui.addDefaultParsers(embeddedParserConfigurations(assetsPath))
   } catch {
     // Markdown remains readable if a locked-down host cannot create the
     // ephemeral parser runtime. Never fail application startup for highlighting.
   }
-  const treeSitterClient = openTui.getTreeSitterClient()
+  const treeSitterClient = stabilizeTreeSitterClient(openTui.getTreeSitterClient())
   void treeSitterClient.initialize().catch(() => {
     // Markdown remains readable if a terminal cannot start a worker. OpenTUI
     // reports the parser failure; the application must stay usable.

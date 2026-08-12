@@ -9,7 +9,7 @@ import {
 } from "@opentui/core"
 
 declare global {
-  // Set immediately before importing the patched OpenTUI core. This removes
+  // Set immediately before importing OpenTUI core. This removes
   // dependency top-level await so Bun can emit startup bytecode while keeping
   // the platform-native library selected by the package's own matrix.
   // eslint-disable-next-line no-var
