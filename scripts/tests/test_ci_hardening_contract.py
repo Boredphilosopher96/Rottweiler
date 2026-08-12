@@ -287,6 +287,21 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertEqual(configuration.count("open-pull-requests-limit: 1"), 5)
         self.assertNotIn("version-update:semver-major", configuration)
 
+    def test_javascript_dependencies_do_not_use_version_specific_patches(
+        self,
+    ) -> None:
+        for package_name in ("tui", "plugin-sdk", "plugin-docs"):
+            package_root = ROOT / "packages" / package_name
+            manifest = (package_root / "package.json").read_text(encoding="utf-8")
+            self.assertNotIn("patchedDependencies", manifest)
+            lockfile = package_root / "bun.lock"
+            if lockfile.exists():
+                self.assertNotIn(
+                    "patchedDependencies", lockfile.read_text(encoding="utf-8")
+                )
+            patches = package_root / "patches"
+            self.assertEqual(list(patches.glob("*.patch")), [])
+
     def test_signed_release_is_serialized_and_downloads_only_unsigned_archives(
         self,
     ) -> None:
