@@ -17,6 +17,36 @@ def workflow_job(workflow: str, name: str) -> str:
 
 
 class CiHardeningContractTests(unittest.TestCase):
+    def test_external_actions_use_consistent_immutable_pins(self) -> None:
+        pins: dict[str, str] = {}
+        for workflow_path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            workflow = workflow_path.read_text(encoding="utf-8")
+            for line_number, line in enumerate(workflow.splitlines(), start=1):
+                uses = re.search(r"\buses:\s+(\S+)", line)
+                if uses is None or uses.group(1).startswith("./"):
+                    continue
+                reference = uses.group(1)
+                pin = re.fullmatch(r"([^@]+)@([0-9a-f]{40})", reference)
+                self.assertIsNotNone(
+                    pin,
+                    f"{workflow_path.name}:{line_number} must pin an external action to a full commit SHA",
+                )
+                self.assertIn(
+                    " # v",
+                    line,
+                    f"{workflow_path.name}:{line_number} must document the pinned action version",
+                )
+                if pin is None:
+                    continue
+                action, sha = pin.groups()
+                previous = pins.setdefault(action, sha)
+                self.assertEqual(
+                    previous,
+                    sha,
+                    f"{action} must use one reviewed SHA across all workflows",
+                )
+        self.assertTrue(pins)
+
     def assert_checkout_credentials_are_not_persisted(self, workflow: str) -> None:
         marker = "uses: actions/checkout@"
         checkouts = workflow.split(marker)[1:]
@@ -40,7 +70,7 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("needs: [test, security-tests]", smoke)
         self.assertNotIn("\n    if:", smoke)
         self.assertIn("timeout-minutes: 45", smoke)
-        self.assertIn("Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6", smoke)
+        self.assertIn("Swatinem/rust-cache@", smoke)
         self.assertIn("ROTTWEILER_PERF_SMOKE: 1", smoke)
         self.assertIn("ROTTWEILER_PERF_SAMPLES: 100", smoke)
         self.assertIn("bun run test:perf", smoke)
@@ -218,9 +248,7 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("--component rustfmt,clippy", workflow)
         self.assertNotIn("--in-place", workflow)
         self.assertEqual(
-            workflow.count(
-                "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6"
-            ),
+            workflow.count("oven-sh/setup-bun@"),
             2,
         )
         self.assertEqual(
@@ -251,16 +279,11 @@ class CiHardeningContractTests(unittest.TestCase):
     ) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         sign_and_publish = workflow.split("  sign-and-publish:", 1)[1]
-        attest_pin = (
-            "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2"
-        )
-
         self.assertIn(
             "concurrency:\n  group: signed-release\n  cancel-in-progress: false",
             workflow,
         )
-        self.assertEqual(workflow.count(attest_pin), 3)
-        self.assertNotIn("actions/attest@f6bf1532", workflow)
+        self.assertEqual(workflow.count("actions/attest@"), 3)
         self.assertEqual(sign_and_publish.count("name: release-darwin-arm64"), 1)
         self.assertEqual(sign_and_publish.count("name: release-linux-x86_64"), 1)
         self.assertNotIn("pattern: release-*", sign_and_publish)
