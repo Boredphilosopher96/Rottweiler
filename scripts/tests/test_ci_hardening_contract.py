@@ -81,6 +81,8 @@ class CiHardeningContractTests(unittest.TestCase):
     def test_nightly_budgets_are_blocking_and_missing_runners_fail_closed(self) -> None:
         workflow = (ROOT / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
         self.assert_checkout_credentials_are_not_persisted(workflow)
+        self.assertIn('cron: "17 5 * * 1"', workflow)
+        self.assertNotIn('cron: "17 5 * * *"', workflow)
         linux_release = workflow.split("  linux-release-budget:", 1)[1].split(
             "  macos-release-budget:", 1
         )[0]
@@ -267,12 +269,38 @@ class CiHardeningContractTests(unittest.TestCase):
         ):
             self.assertIn(boundary, workflow)
 
-    def test_dependabot_covers_every_ecosystem_without_hiding_major_upgrades(
+    def test_dependabot_is_weekly_grouped_and_does_not_hide_major_upgrades(
         self,
     ) -> None:
         configuration = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
         self.assertEqual(configuration.count("package-ecosystem:"), 5)
+        self.assertNotIn("interval: daily", configuration)
+        self.assertEqual(configuration.count("interval: weekly"), 2)
+        self.assertEqual(
+            configuration.count("multi-ecosystem-group: application-dependencies"),
+            4,
+        )
+        self.assertEqual(
+            configuration.count("multi-ecosystem-group: automation-dependencies"),
+            1,
+        )
+        self.assertEqual(configuration.count("open-pull-requests-limit: 1"), 5)
         self.assertNotIn("version-update:semver-major", configuration)
+
+    def test_javascript_dependencies_do_not_use_version_specific_patches(
+        self,
+    ) -> None:
+        for package_name in ("tui", "plugin-sdk", "plugin-docs"):
+            package_root = ROOT / "packages" / package_name
+            manifest = (package_root / "package.json").read_text(encoding="utf-8")
+            self.assertNotIn("patchedDependencies", manifest)
+            lockfile = package_root / "bun.lock"
+            if lockfile.exists():
+                self.assertNotIn(
+                    "patchedDependencies", lockfile.read_text(encoding="utf-8")
+                )
+            patches = package_root / "patches"
+            self.assertEqual(list(patches.glob("*.patch")), [])
 
     def test_signed_release_is_serialized_and_downloads_only_unsigned_archives(
         self,
