@@ -85,6 +85,12 @@ Plugin returns a manifest on `initialize`:
 
 Capabilities are permission-gated: the user approves a plugin's capability set on first load (recorded, re-prompted on change) — a plugin that suddenly wants `hooks: [pre_tool]` after an update is a supply-chain signal, not a silent upgrade.
 
+Provider alias-prefix syntax and its 128-byte wire limit are owned by the extension
+protocol. Rust manifest validation and core provider composition use the same
+validator, while the TypeScript SDK pins the matching limit through its protocol
+fixture and conformance tests; downstream composition must not impose a narrower
+private limit after a plugin has been accepted.
+
 ### Hook catalog
 
 Hooks are request/response (can modify/block); events are fire-and-forget. Hook timeout default 5s, configurable; on timeout the engine proceeds per hook's declared `fail-open`/`fail-closed` bit.

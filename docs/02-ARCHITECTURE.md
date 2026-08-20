@@ -229,6 +229,9 @@ policy overlays. Embedded built-ins pass through the same parser and registry as
 extension-provided modes (dogfooding). Any plan-overlay → Execute transition
 requires an approval event carrying the plan artifact. Durable custom-mode
 events pin a semantic fingerprint so replay cannot silently change their policy.
+The production runtime registry must therefore include every terminal tool named
+by a built-in mode contract, including `submit_plan`; a test-only registry is not
+evidence that a mode is usable in local or hosted production composition.
 
 ### Subagent orchestrator (`rw-core`)
 
@@ -438,6 +441,9 @@ Built on OpenTUI (per ADR-001), which supplies the retained component tree and t
 - **SSE client** with reconnect + event-sequence resync (events carry monotonic ids; on reconnect the TUI replays the gap from the engine).
 - Components: markdown/syntax-highlighted blocks, collapsible tool calls, diff accept/reject view, fuzzy pickers, question prompts, nested subagent progress, status line.
 - Types for commands/events are **generated from `protocol/`**, never hand-written — drift between Rust and TS is a build failure, not a runtime bug.
+- Reducer delivery semantics are a local, compiler-exhaustive map over the generated
+  `EngineEvent` discriminator union. Unknown wire discriminators remain an additive
+  compatibility path, but a generated event cannot silently fall through as unknown.
 
 ## Cross-cutting behaviors
 

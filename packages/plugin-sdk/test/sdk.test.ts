@@ -625,6 +625,23 @@ describe("bounded transport and manifests", () => {
       handlers: { providers: { fixture: async function* () { yield { type: "finished", reason: "stop" } } } },
     })).toThrow("ending in /")
 
+    const maximumPrefix = `${"a".repeat(PROTOCOL_LIMITS.maxNameBytes - 1)}/`
+    expect(() => definePlugin({
+      manifest: {
+        name: "provider", version: "1", protocol: 1,
+        capabilities: { providers: [{ "alias-prefix": maximumPrefix }] },
+      },
+      handlers: { providers: { [maximumPrefix]: async function* () { yield { type: "finished", reason: "stop" } } } },
+    })).not.toThrow()
+    const overlongPrefix = `${"a".repeat(PROTOCOL_LIMITS.maxNameBytes)}/`
+    expect(() => definePlugin({
+      manifest: {
+        name: "provider", version: "1", protocol: 1,
+        capabilities: { providers: [{ "alias-prefix": overlongPrefix }] },
+      },
+      handlers: { providers: { [overlongPrefix]: async function* () { yield { type: "finished", reason: "stop" } } } },
+    })).toThrow("ending in /")
+
     let schema: JsonValue = {}
     for (let depth = 0; depth < 33; depth += 1) schema = { nested: schema }
     expect(() => definePlugin({

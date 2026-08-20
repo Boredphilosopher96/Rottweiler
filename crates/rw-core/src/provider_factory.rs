@@ -9,6 +9,7 @@ use std::{
 
 use async_trait::async_trait;
 use futures_util::StreamExt as _;
+use rw_ext::validate_provider_alias_prefix;
 use rw_providers::{
     AnthropicConfig, AnthropicProvider, AnthropicThinkingStrategy, AuthMaterial, AuthProvider,
     BoxEventStream, CacheBreakpointSupport, Capabilities, FixtureRedactor,
@@ -2888,15 +2889,7 @@ fn validate_extension_providers(
 ) -> Result<BTreeMap<String, Arc<dyn Provider>>, ProviderFactoryError> {
     let mut providers = BTreeMap::<String, Arc<dyn Provider>>::new();
     for (prefix, provider) in registrations {
-        let canonical = prefix.len() >= 2
-            && prefix.len() <= 64
-            && prefix.ends_with('/')
-            && prefix[..prefix.len() - 1].bytes().all(|byte| {
-                byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || matches!(byte, b'-' | b'_' | b'.')
-            });
-        if !canonical {
+        if validate_provider_alias_prefix(prefix).is_err() {
             return Err(ProviderFactoryError::new(
                 "extensions",
                 "extension alias prefixes must be bounded canonical names ending in '/'",

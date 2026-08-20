@@ -7,6 +7,7 @@ import {
   type EngineEvent,
   type Turn,
 } from "../../../protocol/types"
+import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
 
 interface ContractFixture {
   turns: Turn[]
@@ -51,5 +52,12 @@ describe("generated Rust/TypeScript protocol contract", () => {
 
     const roundTripped: unknown = JSON.parse(JSON.stringify(fixture))
     expect(roundTripped).toEqual(fixture)
+  })
+
+  test("classifies every Rust-authored fixture event as generated protocol", () => {
+    for (const event of contractFixture.engine_events) {
+      const state = reduceRottweilerState(createInitialState(), engineEvent(event))
+      expect(state.protocol.unknownEvents).toBe(0)
+    }
   })
 })

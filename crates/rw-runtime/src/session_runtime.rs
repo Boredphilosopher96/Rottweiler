@@ -71,12 +71,12 @@ use rw_tools::{
     MultiEditTool, MutationScope, NetworkPolicy as SandboxNetworkPolicy, Position, QuestionAsker,
     ReadTool, RecordingCommandExecutor, ReferencesTool, RenameResult, RenameTool,
     ReplayCommandExecutor, SandboxPolicy, SandboxSupport, SandboxedLspSpawner,
-    SubagentProgressEvent, SupervisedEgressProxy, SymbolsTool, TodoTool, TokioCommandExecutor,
-    Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits, ToolOutputChunk, ToolOutputSink,
-    ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool, WebFetcher, WebSearchRequest,
-    WebSearchResponse, WebSearchTool, WebSearcher, WorkspaceSymbolIndex, WorkspaceUriMapper,
-    WorktreeIsolation, WorktreeLeaseRecord, WorktreeLimits, WriteTool,
-    discover_sandboxed_lsp_servers, probe_policy_egress,
+    SubagentProgressEvent, SubmitPlanTool, SupervisedEgressProxy, SymbolsTool, TodoTool,
+    TokioCommandExecutor, Tool, ToolContext, ToolDescriptor, ToolError, ToolLimits,
+    ToolOutputChunk, ToolOutputSink, ToolRegistry, ToolResult, UpstreamProxy, WebFetchTool,
+    WebFetcher, WebSearchRequest, WebSearchResponse, WebSearchTool, WebSearcher,
+    WorkspaceSymbolIndex, WorkspaceUriMapper, WorktreeIsolation, WorktreeLeaseRecord,
+    WorktreeLimits, WriteTool, discover_sandboxed_lsp_servers, probe_policy_egress,
 };
 use rw_types::{
     ApprovalBinding, ApprovalDecision, Block, Role, SessionId, ToolCapability, ToolOutput,
@@ -10886,6 +10886,7 @@ fn build_tools(input: BuildToolsInput<'_>) -> Result<BuiltTools> {
         Arc::new(WebFetchTool::new(Arc::clone(&web_fetcher), limits)),
         todo.clone(),
         Arc::new(AskUserTool::new(question_asker, limits)),
+        Arc::new(SubmitPlanTool),
         Arc::new(LazySymbolsTool::new(Arc::clone(&symbols), limits)),
         Arc::new(DiagnosticsTool::new(Arc::clone(&code_intelligence), limits)),
         Arc::new(DefinitionTool::new(Arc::clone(&code_intelligence), limits)),
@@ -17286,6 +17287,7 @@ mod tests {
             "definition",
             "references",
             "rename",
+            "submit_plan",
             "websearch",
         ] {
             assert!(built.registry.resolve(name).is_some(), "missing {name}");

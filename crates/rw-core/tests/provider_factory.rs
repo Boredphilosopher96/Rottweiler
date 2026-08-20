@@ -13,6 +13,7 @@ use std::{
 use async_trait::async_trait;
 use futures_util::StreamExt;
 use rw_core::{ModelAccounting, ModelDriver, ModelPricingSource, ProviderFactory};
+use rw_ext::MAX_PROVIDER_ALIAS_PREFIX_BYTES;
 use rw_providers::{
     BoxEventStream, CacheBreakpointSupport, CacheHint, Capabilities, DiscoveredModel,
     DiscoveredProviderCatalog, FinishReason, ModelPricing, NetworkPolicy, PricingTable, Provider,
@@ -1547,6 +1548,24 @@ fn extension_alias_prefixes_reject_collisions_overlap_and_unregistered_candidate
         .unwrap_or_else(|| panic!("non-canonical extension prefix must fail"));
     let diagnostic = format!("{invalid:?} {invalid}");
     assert!(!diagnostic.contains("private-plugin"));
+}
+
+#[test]
+fn extension_alias_prefix_uses_the_plugin_protocol_length_limit() {
+    let prefix = format!("{}/", "a".repeat(MAX_PROVIDER_ALIAS_PREFIX_BYTES - 1));
+    let candidate = format!("{prefix}model-a");
+    extension_factory()
+        .with_extension_providers([(prefix, extension_provider("private-plugin", None))])
+        .build(&extension_config(&candidate))
+        .unwrap_or_else(|error| panic!("protocol-valid extension prefix must compose: {error}"));
+
+    let too_long = format!("{}/", "a".repeat(MAX_PROVIDER_ALIAS_PREFIX_BYTES));
+    let error = extension_factory()
+        .with_extension_providers([(too_long.clone(), extension_provider("private-plugin", None))])
+        .build(&extension_config(&format!("{too_long}model-a")))
+        .err()
+        .unwrap_or_else(|| panic!("overlong extension prefix must fail"));
+    assert!(error.to_string().contains("bounded canonical"));
 }
 
 #[tokio::test]

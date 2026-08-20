@@ -885,6 +885,17 @@ describe("pure TUI state reducer", () => {
     })
   })
 
+  test("classifies model context clearing as a known durable event", () => {
+    const state = reduce(createInitialState(), {
+      type: "model_context_cleared",
+      meta: meta("1"),
+      strategy: "start_without_context",
+    })
+
+    expect(state.lastSequence).toBe("1")
+    expect(state.protocol).toMatchObject({ unknownEvents: 0, invalidEvents: 0 })
+  })
+
   test("keeps immutable transcript history stable while updating the streaming tail", () => {
     let state = createInitialState()
     state = reduce(state, { type: "turn_started", meta: meta("1"), turn_id: "7" })

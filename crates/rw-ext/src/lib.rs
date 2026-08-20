@@ -9,6 +9,7 @@ mod hook;
 mod mode;
 mod plugin;
 mod plugin_runtime;
+mod provider_prefix;
 mod registry;
 mod wasm;
 mod wasm_process;
@@ -41,6 +42,9 @@ pub use mode::{
 };
 pub use plugin::*;
 pub use plugin_runtime::*;
+pub use provider_prefix::{
+    MAX_PROVIDER_ALIAS_PREFIX_BYTES, ProviderAliasPrefixError, validate_provider_alias_prefix,
+};
 pub use registry::*;
 pub use wasm::*;
 pub use wasm_process::*;

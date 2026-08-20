@@ -758,19 +758,10 @@ fn validate_unique_named<'a>(
 }
 
 fn validate_provider_prefix(prefix: &str) -> Result<(), ManifestError> {
-    if prefix.len() < 2
-        || prefix.len() > MAX_NAME_BYTES
-        || !prefix.ends_with('/')
-        || !prefix[..prefix.len() - 1].bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
-        })
-    {
-        return Err(ManifestError::InvalidField {
-            field: "providers.alias-prefix",
-            reason: "must be a bounded canonical prefix ending in `/`",
-        });
-    }
-    Ok(())
+    crate::validate_provider_alias_prefix(prefix).map_err(|_| ManifestError::InvalidField {
+        field: "providers.alias-prefix",
+        reason: "must be a bounded canonical prefix ending in `/`",
+    })
 }
 
 fn validate_schema(schema: &Value) -> Result<(), ManifestError> {
@@ -2013,6 +2004,7 @@ mod tests {
         assert_eq!(fixture["protocol"], MIN_PROTOCOL_VERSION);
         assert_eq!(fixture["limits"]["max_frame_bytes"], MAX_FRAME_BYTES);
         assert_eq!(fixture["limits"]["max_manifest_bytes"], MAX_MANIFEST_BYTES);
+        assert_eq!(fixture["limits"]["max_name_bytes"], MAX_NAME_BYTES);
         assert_eq!(fixture["limits"]["max_version_bytes"], MAX_VERSION_BYTES);
         assert_eq!(fixture["methods"]["toolCall"], METHOD_TOOL_CALL);
         assert_eq!(

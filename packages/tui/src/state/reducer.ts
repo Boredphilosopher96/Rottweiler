@@ -127,122 +127,100 @@ function retainRecentTurns(
   }
   return next
 }
-const KNOWN_EVENT_TYPES = new Set<EngineEvent["type"]>([
-  "command_acknowledged",
-  "context_snapshot_ready",
-  "cost_snapshot_ready",
-  "session_review_ready",
-  "session_review_updated",
-  "prompt_dump_ready",
-  "session_replay_completed",
-  "session_forked",
-  "session_exported",
-  "sessions_listed",
-  "subagents_listed",
-  "subagent_replay_batch",
-  "subagent_replay_completed",
-  "sessions_search_ready",
-  "command_descriptors_listed",
-  "modes_listed",
-  "models_listed",
-  "settings_listed",
-  "mcp_servers_listed",
-  "runtime_services_listed",
-  "mcp_server_approval_reviewed",
-  "permissions_listed",
-  "provider_auth_started",
-  "provider_configured",
-  "provider_auth_finished",
-  "provider_activation_finished",
-  "workspace_files_found",
-  "workspace_file_preview_ready",
-  "workspace_status_ready",
-  "workspace_diff_ready",
-  "host_shutdown",
-  "session_created",
-  "workspace_roots_changed",
-  "driver_changed",
-  "message_queued",
-  "queued_message_removed",
-  "queued_messages_cleared",
-  "user_message_accepted",
-  "session_title_updated",
-  "plugin_message_injected",
-  "plugin_status_changed",
-  "ui_notification",
-  "conversation_turn_committed",
-  "conversation_rewound",
-  "turn_started",
-  "text_delta",
-  "thinking_delta",
-  "citation_delta",
-  "tool_call_started",
-  "tool_approval_needed",
-  "tool_diff_ready",
-  "tool_output_delta",
-  "tool_call_finished",
-  "question_asked",
-  "question_answered",
-  "turn_finished",
-  "context_usage_updated",
-  "budget_status_changed",
-  "compaction_started",
-  "compaction_attempt_started",
-  "compaction_text_delta",
-  "compaction_thinking_delta",
-  "compaction_attempt_finished",
-  "compaction_finished",
-  "compaction_failed",
-  "subagent_spawned",
-  "subagent_finished",
-  "subagent_progress",
-  "tool_output_pruned",
-  "mode_changed",
-  "permission_mode_changed",
-  "plan_submitted",
-  "plan_reviewed",
-  "model_changed",
-  "context_item_pinned",
-  "context_item_evicted",
-  "user_shell_state_changed",
-  "hook_failed",
-  "command_finished",
-  "guard_triggered",
-  "error",
-])
-const ACK_EVENT_TYPES = new Set<EngineEvent["type"]>([
-  "command_acknowledged",
-  "context_snapshot_ready",
-  "cost_snapshot_ready",
-  "session_review_ready",
-  "session_review_updated",
-  "prompt_dump_ready",
-  "session_replay_completed",
-  "session_forked",
-  "session_exported",
-  "sessions_listed",
-  "subagents_listed",
-  "subagent_replay_batch",
-  "subagent_replay_completed",
-  "sessions_search_ready",
-  "command_descriptors_listed",
-  "modes_listed",
-  "models_listed",
-  "settings_listed",
-  "mcp_servers_listed",
-  "runtime_services_listed",
-  "mcp_server_approval_reviewed",
-  "permissions_listed",
-  "provider_auth_started",
-  "provider_configured",
-  "provider_auth_finished",
-  "provider_activation_finished",
-  "workspace_files_found",
-  "workspace_file_preview_ready",
-  "workspace_status_ready",
-  "workspace_diff_ready",
-  "host_shutdown",
-])
+type EventScope = "connection" | "durable" | "transient"
+
+// Rust owns the generated event union. This local map owns only the TUI's delivery semantics,
+// and `Record` makes every generated variant an explicit compile-time decision.
+const EVENT_SCOPE = {
+  command_acknowledged: "connection",
+  context_snapshot_ready: "connection",
+  cost_snapshot_ready: "connection",
+  session_review_ready: "connection",
+  session_review_updated: "connection",
+  prompt_dump_ready: "connection",
+  session_replay_completed: "connection",
+  session_forked: "connection",
+  session_exported: "connection",
+  sessions_listed: "connection",
+  subagents_listed: "connection",
+  subagent_replay_batch: "connection",
+  subagent_replay_completed: "connection",
+  sessions_search_ready: "connection",
+  command_descriptors_listed: "connection",
+  modes_listed: "connection",
+  models_listed: "connection",
+  settings_listed: "connection",
+  mcp_servers_listed: "connection",
+  runtime_services_listed: "connection",
+  mcp_server_approval_reviewed: "connection",
+  permissions_listed: "connection",
+  provider_auth_started: "connection",
+  provider_configured: "connection",
+  provider_auth_finished: "connection",
+  provider_activation_finished: "connection",
+  workspace_files_found: "connection",
+  workspace_file_preview_ready: "connection",
+  workspace_status_ready: "connection",
+  workspace_diff_ready: "connection",
+  host_shutdown: "connection",
+  session_created: "durable",
+  workspace_roots_changed: "durable",
+  driver_changed: "durable",
+  message_queued: "durable",
+  queued_message_removed: "durable",
+  queued_messages_cleared: "durable",
+  user_message_accepted: "durable",
+  session_title_updated: "durable",
+  plugin_message_injected: "durable",
+  plugin_status_changed: "durable",
+  ui_notification: "durable",
+  conversation_turn_committed: "durable",
+  conversation_rewound: "durable",
+  turn_started: "durable",
+  text_delta: "durable",
+  thinking_delta: "durable",
+  citation_delta: "durable",
+  tool_call_started: "durable",
+  tool_approval_needed: "durable",
+  tool_diff_ready: "durable",
+  tool_output_delta: "durable",
+  tool_call_finished: "durable",
+  question_asked: "durable",
+  question_answered: "durable",
+  turn_finished: "durable",
+  context_usage_updated: "durable",
+  budget_status_changed: "durable",
+  compaction_started: "durable",
+  compaction_attempt_started: "transient",
+  compaction_text_delta: "transient",
+  compaction_thinking_delta: "transient",
+  compaction_attempt_finished: "durable",
+  compaction_finished: "durable",
+  compaction_failed: "durable",
+  subagent_spawned: "durable",
+  subagent_finished: "durable",
+  subagent_progress: "transient",
+  tool_output_pruned: "durable",
+  mode_changed: "durable",
+  permission_mode_changed: "durable",
+  plan_submitted: "durable",
+  plan_reviewed: "durable",
+  model_changed: "durable",
+  model_context_cleared: "durable",
+  context_item_pinned: "durable",
+  context_item_evicted: "durable",
+  user_shell_state_changed: "durable",
+  hook_failed: "durable",
+  command_finished: "durable",
+  guard_triggered: "durable",
+  error: "durable",
+} as const satisfies Record<EngineEvent["type"], EventScope>
+
+function knownEventScope(type: string): EventScope | null {
+  return Object.hasOwn(EVENT_SCOPE, type)
+    ? EVENT_SCOPE[type as EngineEvent["type"]]
+    : null
+}
 
 export function reduceRottweilerState(
   state: RottweilerState = createInitialState(),
@@ -305,26 +283,19 @@ export function reduceWireEvent(
   state: RottweilerState,
   event: WireEngineEvent,
 ): RottweilerState {
-  // Child progress is connection-scoped: it updates the retained projection
-  // without consuming or perturbing the parent's durable replay cursor.
-  if (
-    event.type === "subagent_progress" ||
-    event.type === "compaction_attempt_started" ||
-    event.type === "compaction_text_delta" ||
-    event.type === "compaction_thinking_delta"
-  ) {
+  const scope = knownEventScope(event.type)
+  // Transient progress updates retained projections without consuming the durable replay cursor.
+  if (scope === "transient") {
     return applyKnownEvent(state, event as EngineEvent, null)
   }
-  if (ACK_EVENT_TYPES.has(event.type as EngineEvent["type"])) {
-    return KNOWN_EVENT_TYPES.has(event.type as EngineEvent["type"])
-      ? applyKnownEvent(state, event as EngineEvent, null)
-      : recordUnknown(state, event.type)
+  if (scope === "connection") {
+    return applyKnownEvent(state, event as EngineEvent, null)
   }
 
   const sequenceText = durableSequenceId(event)
   const sequence = parseU64(sequenceText)
   if (sequence === null || sequenceText === null) {
-    return KNOWN_EVENT_TYPES.has(event.type as EngineEvent["type"])
+    return scope === "durable"
       ? recordInvalid(state)
       : recordUnknown(state, event.type)
   }
@@ -371,7 +342,7 @@ export function reduceWireEvent(
       }
     : withCursor
 
-  if (!KNOWN_EVENT_TYPES.has(event.type as EngineEvent["type"])) {
+  if (scope === null) {
     return recordUnknown(ready, event.type)
   }
   return applyKnownEvent(ready, event as EngineEvent, sequenceText)
