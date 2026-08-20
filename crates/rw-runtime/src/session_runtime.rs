@@ -98,6 +98,8 @@ const SESSION_METADATA_VERSION: u16 = 1;
 const MAX_SESSION_METADATA_BYTES: u64 = 8 * 1024 * 1024;
 const PROMPT_SHAPE_VERSION: u16 = 2;
 const CHECKPOINT_ROOTS_VERSION: u16 = 1;
+const REWIND_COORDINATOR_VERSION: u16 = 1;
+const MAX_REWIND_COORDINATOR_BYTES: u64 = 16 * 1024;
 const MAX_GLOBAL_REVIEW_FILES: usize = 1_024;
 const MAX_GLOBAL_REVIEW_DIFF_BYTES: usize = 2 * 1024 * 1024;
 const MAX_WORKSPACE_ROOTS: usize = 32;
@@ -792,6 +794,24 @@ struct CheckpointRootGeneration {
     committed: bool,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RewindCoordinatorState {
+    Preparing,
+    Committed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RewindCoordinatorDecision {
+    version: u16,
+    session_id: String,
+    operation_id: String,
+    target_turn: u64,
+    root_count: usize,
+    state: RewindCoordinatorState,
+}
+
 pub struct RunOptions {
     pub prompt: Option<String>,
     pub output_format: OutputFormat,
@@ -1411,9 +1431,10 @@ pub async fn run(options: RunOptions) -> Result<()> {
     .map_err(|error| miette!("checkpoint recovery failed: {error}"))?;
 
     let rewind_stores = Arc::clone(&checkpoint_stores);
+    let rewind_checkpoint_root = checkpoint_root.clone();
     let log = tokio::task::spawn_blocking(move || {
         let mut log = log;
-        recover_rewind_transactions(&rewind_stores, &mut log)?;
+        recover_rewind_transactions(&rewind_checkpoint_root, &rewind_stores, &mut log)?;
         Ok::<_, miette::Report>(log)
     })
     .await
@@ -1426,8 +1447,10 @@ pub async fn run(options: RunOptions) -> Result<()> {
         session_id.clone(),
     )?);
     durable_sink.reconcile_accounting(&recovered_events)?;
-    let checkpoint_coordinator =
-        Arc::new(DurableCheckpointCoordinator::from_stores(checkpoint_stores));
+    let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
+        checkpoint_root.clone(),
+        checkpoint_stores,
+    ));
 
     let prompt_dump_turn = match options.action {
         RunAction::Agent => None,
@@ -2338,10 +2361,8 @@ pub(crate) async fn compose_hosted_actor(
         (context, configured_model_alias)
     };
 
-    let checkpoint_stores = open_checkpoint_stores(
-        &checkpoint_root(&options.storage_root, &workspace, &session_id),
-        &workspace_roots,
-    )?;
+    let session_checkpoint_root = checkpoint_root(&options.storage_root, &workspace, &session_id);
+    let checkpoint_stores = open_checkpoint_stores(&session_checkpoint_root, &workspace_roots)?;
     let recovery_stores = Arc::clone(&checkpoint_stores);
     tokio::task::spawn_blocking(move || {
         for store in recovery_stores.iter() {
@@ -2353,9 +2374,10 @@ pub(crate) async fn compose_hosted_actor(
     .map_err(|error| miette!("checkpoint recovery worker failed: {error}"))?
     .map_err(|error| miette!("checkpoint recovery failed: {error}"))?;
     let rewind_stores = Arc::clone(&checkpoint_stores);
+    let rewind_checkpoint_root = session_checkpoint_root.clone();
     let log = tokio::task::spawn_blocking(move || {
         let mut log = log;
-        recover_rewind_transactions(&rewind_stores, &mut log)?;
+        recover_rewind_transactions(&rewind_checkpoint_root, &rewind_stores, &mut log)?;
         Ok::<_, miette::Report>(log)
     })
     .await
@@ -2374,8 +2396,10 @@ pub(crate) async fn compose_hosted_actor(
         session_id.clone(),
     )?);
     durable_sink.reconcile_accounting(&recovered_events)?;
-    let checkpoint_coordinator =
-        Arc::new(DurableCheckpointCoordinator::from_stores(checkpoint_stores));
+    let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
+        session_checkpoint_root,
+        checkpoint_stores,
+    ));
 
     let offline = matches!(
         options.provider_mode,
@@ -4075,6 +4099,70 @@ fn persist_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     result
 }
 
+fn rewind_coordinator_path(checkpoint_root: &Path) -> PathBuf {
+    checkpoint_root.join("rewind-coordinator.json")
+}
+
+fn persist_rewind_coordinator(
+    checkpoint_root: &Path,
+    decision: &RewindCoordinatorDecision,
+) -> Result<()> {
+    persist_private_json(&rewind_coordinator_path(checkpoint_root), decision)
+}
+
+fn load_rewind_coordinator(checkpoint_root: &Path) -> Result<Option<RewindCoordinatorDecision>> {
+    let path = rewind_coordinator_path(checkpoint_root);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => metadata,
+        Ok(_) => return Err(miette!("rewind coordinator has an unsafe file type")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(miette!(
+                "rewind coordinator could not be inspected: {error}"
+            ));
+        }
+    };
+    if metadata.len() > MAX_REWIND_COORDINATOR_BYTES {
+        return Err(miette!("rewind coordinator exceeds its size limit"));
+    }
+    let decision: RewindCoordinatorDecision = serde_json::from_slice(
+        &std::fs::read(path)
+            .map_err(|error| miette!("rewind coordinator could not load: {error}"))?,
+    )
+    .map_err(|error| miette!("rewind coordinator is corrupt: {error}"))?;
+    validate_rewind_coordinator(&decision)?;
+    Ok(Some(decision))
+}
+
+fn validate_rewind_coordinator(decision: &RewindCoordinatorDecision) -> Result<()> {
+    validate_session_id(&decision.session_id)?;
+    if decision.version != REWIND_COORDINATOR_VERSION
+        || decision.root_count == 0
+        || decision.root_count > MAX_WORKSPACE_ROOTS
+        || decision.operation_id.is_empty()
+        || decision.operation_id.len() > 128
+        || !decision
+            .operation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(miette!("rewind coordinator identity is invalid"));
+    }
+    Ok(())
+}
+
+fn remove_rewind_coordinator(checkpoint_root: &Path) -> Result<()> {
+    let path = rewind_coordinator_path(checkpoint_root);
+    match std::fs::remove_file(path) {
+        Ok(()) => std::fs::File::open(checkpoint_root)
+            .into_diagnostic()?
+            .sync_all()
+            .into_diagnostic(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(miette!("rewind coordinator could not be removed: {error}")),
+    }
+}
+
 fn project_approval_path(storage_root: &Path, workspace: &Path) -> PathBuf {
     let digest = blake3::hash(workspace.as_os_str().as_encoded_bytes())
         .to_hex()
@@ -5136,7 +5224,7 @@ impl RuntimeWorkspaceRootController {
             .map(Arc::new)
             .map_err(|error| AgentLoopError::InvalidConfiguration(error.to_string()))?;
         let workspace_controller = Arc::new(RuntimeWorkspaceRootController {
-            checkpoint_root: child_checkpoint_root,
+            checkpoint_root: child_checkpoint_root.clone(),
             storage_root: storage_root.to_path_buf(),
             question_asker: Arc::clone(&self.question_asker),
             offline: self.offline,
@@ -5184,7 +5272,10 @@ impl RuntimeWorkspaceRootController {
             event_sink: Arc::new(event_sink),
             event_clock: Arc::new(SystemEventClock),
             secret_redactor,
-            checkpoints: Arc::new(DurableCheckpointCoordinator::from_stores(stores)),
+            checkpoints: Arc::new(DurableCheckpointCoordinator::from_stores(
+                child_checkpoint_root,
+                stores,
+            )),
             folder_trust: Arc::new(RuntimeFolderTrustController::new(
                 self.trust_store_path.clone(),
                 roots,
@@ -5454,7 +5545,10 @@ impl rw_core::WorkspaceRootController for RuntimeWorkspaceRootController {
             commands: prepared.extensions.commands,
             modes: prepared.extensions.modes,
             permissions: prepared.permissions,
-            checkpoints: Arc::new(DurableCheckpointCoordinator::from_stores(stores)),
+            checkpoints: Arc::new(DurableCheckpointCoordinator::from_stores(
+                self.checkpoint_root.clone(),
+                stores,
+            )),
             folder_trust: Arc::new(RuntimeFolderTrustController::new(
                 self.trust_store_path.clone(),
                 prepared.roots,
@@ -5631,6 +5725,7 @@ struct ActiveCheckpoint {
 
 struct ActiveRewind {
     handles: Vec<RewindHandle>,
+    target_turn: u64,
     _workspace_guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
@@ -5865,29 +5960,41 @@ fn merge_root_reviews(
 }
 
 struct DurableCheckpointCoordinator {
+    checkpoint_root: PathBuf,
     stores: Arc<Vec<Arc<CheckpointStore>>>,
     workspace_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     active: Mutex<HashMap<String, ActiveCheckpoint>>,
     rewinds: Mutex<HashMap<String, ActiveRewind>>,
+    #[cfg(test)]
+    fail_after_committed_rewind_decision: AtomicBool,
 }
 
 impl DurableCheckpointCoordinator {
     #[cfg(test)]
-    fn new(store: Arc<CheckpointStore>) -> Self {
-        Self::from_stores(Arc::new(vec![store]))
+    fn new(checkpoint_root: PathBuf, store: Arc<CheckpointStore>) -> Self {
+        Self::from_stores(checkpoint_root, Arc::new(vec![store]))
     }
 
-    fn from_stores(stores: Arc<Vec<Arc<CheckpointStore>>>) -> Self {
+    fn from_stores(checkpoint_root: PathBuf, stores: Arc<Vec<Arc<CheckpointStore>>>) -> Self {
         let workspace_mutation_lock = stores.first().map_or_else(
             || Arc::new(tokio::sync::Mutex::new(())),
             |store| shared_workspace_mutation_lock(store.workspace_root()),
         );
         Self {
+            checkpoint_root,
             stores,
             workspace_mutation_lock,
             active: Mutex::new(HashMap::new()),
             rewinds: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            fail_after_committed_rewind_decision: AtomicBool::new(false),
         }
+    }
+
+    #[cfg(test)]
+    fn fail_after_committed_rewind_decision(&self) {
+        self.fail_after_committed_rewind_decision
+            .store(true, Ordering::SeqCst);
     }
 }
 
@@ -5987,17 +6094,75 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
     ) -> std::result::Result<RewindCheckpoint, AgentLoopError> {
         let workspace_guard = Arc::clone(&self.workspace_mutation_lock).lock_owned().await;
         let stores = Arc::clone(&self.stores);
+        let checkpoint_root = self.checkpoint_root.clone();
         let session_id = session_id.0.clone();
         let operation_id_owned = operation_id.to_owned();
+        #[cfg(test)]
+        let fail_after_committed_decision = self
+            .fail_after_committed_rewind_decision
+            .swap(false, Ordering::SeqCst);
+        #[cfg(not(test))]
+        let fail_after_committed_decision = false;
         let (handles, unrestorable_paths) = tokio::task::spawn_blocking(move || {
+            if load_rewind_coordinator(&checkpoint_root)
+                .map_err(|error| {
+                    AgentLoopError::Persistence(format!(
+                        "rewind coordinator could not be inspected: {error}"
+                    ))
+                })?
+                .is_some()
+            {
+                return Err(AgentLoopError::Persistence(
+                    "another rewind coordinator decision is pending".to_owned(),
+                ));
+            }
+            let mut decision = RewindCoordinatorDecision {
+                version: REWIND_COORDINATOR_VERSION,
+                session_id: session_id.clone(),
+                operation_id: operation_id_owned.clone(),
+                target_turn: to_turn,
+                root_count: stores.len(),
+                state: RewindCoordinatorState::Preparing,
+            };
+            validate_rewind_coordinator(&decision).map_err(|error| {
+                AgentLoopError::Persistence(format!("rewind coordinator is invalid: {error}"))
+            })?;
+            persist_rewind_coordinator(&checkpoint_root, &decision).map_err(|error| {
+                AgentLoopError::Persistence(format!(
+                    "rewind preparation decision could not persist: {error}"
+                ))
+            })?;
             let mut handles = Vec::with_capacity(stores.len());
             let mut unrestorable_paths = Vec::new();
             for store in stores.iter() {
-                handles.push(
-                    store
-                        .prepare_rewind(&session_id, to_turn, &operation_id_owned)
-                        .map_err(checkpoint_agent_error)?,
-                );
+                match store.prepare_rewind(&session_id, to_turn, &operation_id_owned) {
+                    Ok(handle) => handles.push(handle),
+                    Err(error) => {
+                        let preparation_error = checkpoint_agent_error(error);
+                        for (prepared_store, handle) in stores.iter().zip(&handles) {
+                            prepared_store
+                                .discard_prepared_rewind(handle, to_turn)
+                                .map_err(checkpoint_agent_error)?;
+                        }
+                        remove_rewind_coordinator(&checkpoint_root).map_err(|cleanup_error| {
+                            AgentLoopError::Persistence(format!(
+                                "{preparation_error}; rewind preparation cleanup failed: {cleanup_error}"
+                            ))
+                        })?;
+                        return Err(preparation_error);
+                    }
+                }
+            }
+            decision.state = RewindCoordinatorState::Committed;
+            persist_rewind_coordinator(&checkpoint_root, &decision).map_err(|error| {
+                AgentLoopError::Persistence(format!(
+                    "rewind commit decision could not persist: {error}"
+                ))
+            })?;
+            if fail_after_committed_decision {
+                return Err(AgentLoopError::Persistence(
+                    "injected crash after committed rewind decision".to_owned(),
+                ));
             }
             for (root_index, (store, handle)) in stores.iter().zip(&handles).enumerate() {
                 let commit = store.apply_rewind(handle).map_err(checkpoint_agent_error)?;
@@ -6019,6 +6184,7 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
                 operation_id.to_owned(),
                 ActiveRewind {
                     handles,
+                    target_turn: to_turn,
                     _workspace_guard: workspace_guard,
                 },
             );
@@ -6039,19 +6205,48 @@ impl MutationCheckpointCoordinator for DurableCheckpointCoordinator {
             .remove(&checkpoint.id)
             .ok_or_else(|| AgentLoopError::Persistence("unknown rewind checkpoint".to_owned()))?;
         let handles = rewind.handles;
+        let target_turn = rewind.target_turn;
         let stores = Arc::clone(&self.stores);
+        let checkpoint_root = self.checkpoint_root.clone();
+        let operation_id = checkpoint.id.clone();
         tokio::task::spawn_blocking(move || {
             if handles.len() != stores.len() {
-                return Err(rw_store::checkpoint::CheckpointError::CorruptRewindTransaction);
+                return Err(AgentLoopError::Persistence(
+                    "rewind root count differs from coordinator".to_owned(),
+                ));
+            }
+            let decision = load_rewind_coordinator(&checkpoint_root)
+                .map_err(checkpoint_agent_error)?
+                .ok_or_else(|| {
+                    AgentLoopError::Persistence(
+                        "committed rewind coordinator is missing".to_owned(),
+                    )
+                })?;
+            if decision.state != RewindCoordinatorState::Committed
+                || decision.operation_id != operation_id
+                || decision.target_turn != target_turn
+                || decision.root_count != stores.len()
+                || handles
+                    .iter()
+                    .any(|handle| handle.session_id != decision.session_id)
+            {
+                return Err(AgentLoopError::Persistence(
+                    "committed rewind coordinator identity differs".to_owned(),
+                ));
             }
             for (store, handle) in stores.iter().zip(&handles) {
-                store.acknowledge_rewind(handle)?;
+                store
+                    .acknowledge_rewind(handle)
+                    .map_err(checkpoint_agent_error)?;
             }
-            Ok::<_, rw_store::checkpoint::CheckpointError>(())
+            remove_rewind_coordinator(&checkpoint_root).map_err(|error| {
+                AgentLoopError::Persistence(format!(
+                    "rewind coordinator acknowledgement failed: {error}"
+                ))
+            })
         })
         .await
         .map_err(|error| AgentLoopError::Persistence(error.to_string()))?
-        .map_err(checkpoint_agent_error)
     }
 
     async fn session_review(
@@ -6115,6 +6310,7 @@ fn checkpoint_agent_error(error: impl std::fmt::Display) -> AgentLoopError {
 }
 
 fn recover_rewind_transactions(
+    checkpoint_root: &Path,
     checkpoints: &[Arc<CheckpointStore>],
     log: &mut SessionEventLog,
 ) -> Result<()> {
@@ -6128,93 +6324,81 @@ fn recover_rewind_transactions(
             _ => None,
         })
         .collect::<std::collections::HashSet<_>>();
-    let mut recovered = BTreeMap::<
-        String,
-        (
-            String,
-            u64,
-            Vec<UnrestorablePath>,
-            Vec<Option<RewindHandle>>,
-        ),
-    >::new();
-    for (root_index, store) in checkpoints.iter().enumerate() {
-        for commit in store
-            .recover_rewinds()
-            .map_err(|error| miette!("rewind recovery failed for root {root_index}: {error}"))?
-        {
-            let operation_id = commit.handle.operation_id.clone();
-            let entry = recovered.entry(operation_id.clone()).or_insert_with(|| {
-                (
-                    commit.handle.session_id.clone(),
-                    commit.target_turn,
-                    Vec::new(),
-                    vec![None; checkpoints.len()],
-                )
-            });
-            if entry.0 != commit.handle.session_id || entry.1 != commit.target_turn {
-                return Err(miette!(
-                    "rewind recovery identity differs between workspace roots"
-                ));
-            }
-            entry.2.extend(
-                commit
-                    .report
-                    .unrestorable
-                    .into_iter()
-                    .map(|(path, reason)| UnrestorablePath {
-                        path: checkpoint_display_path(root_index, &path),
-                        reason,
-                    }),
-            );
-            entry.3[root_index] = Some(commit.handle);
-        }
+    let Some(decision) = load_rewind_coordinator(checkpoint_root)? else {
+        return Ok(());
+    };
+    if decision.root_count != checkpoints.len() {
+        return Err(miette!(
+            "rewind coordinator root count differs from the workspace mapping"
+        ));
     }
-    for (operation_id, (session_id, target_turn, mut unrestorable_paths, mut handles)) in recovered
-    {
-        for (root_index, (store, handle)) in checkpoints.iter().zip(&mut handles).enumerate() {
-            if handle.is_none() {
-                let prepared = store
-                    .prepare_rewind(&session_id, target_turn, &operation_id)
-                    .map_err(|error| {
-                        miette!("rewind recovery could not stage root {root_index}: {error}")
-                    })?;
-                let commit = store.apply_rewind(&prepared).map_err(|error| {
-                    miette!("rewind recovery could not apply root {root_index}: {error}")
-                })?;
-                unrestorable_paths.extend(commit.report.unrestorable.into_iter().map(
-                    |(path, reason)| UnrestorablePath {
-                        path: checkpoint_display_path(root_index, &path),
-                        reason,
-                    },
-                ));
-                *handle = Some(prepared);
-            }
+    let handle = RewindHandle {
+        session_id: decision.session_id.clone(),
+        operation_id: decision.operation_id.clone(),
+    };
+    if decision.state == RewindCoordinatorState::Preparing {
+        if operations.contains(&decision.operation_id) {
+            return Err(miette!(
+                "uncommitted rewind coordinator conflicts with a durable rewind event"
+            ));
         }
-        if !operations.contains(&operation_id) {
-            log.append(EngineEvent::ConversationRewound {
-                meta: EventMeta {
-                    protocol_version: SESSION_EVENT_VERSION,
-                    session_id: SessionId(session_id.clone()),
-                    sequence_id: SequenceId(log.next_sequence()),
-                    emitted_at: SystemEventClock.emitted_at(),
-                    caused_by: None,
-                },
-                to_agent_turn: target_turn,
-                operation_id: operation_id.clone(),
-                unrestorable_paths,
-            })
-            .map_err(|error| miette!("recovered rewind event could not persist: {error}"))?;
-        }
-        for (root_index, (store, handle)) in checkpoints.iter().zip(handles).enumerate() {
+        for (root_index, store) in checkpoints.iter().enumerate() {
             store
-                .acknowledge_rewind(
-                    &handle.ok_or_else(|| miette!("rewind root {root_index} has no handle"))?,
-                )
+                .discard_prepared_rewind(&handle, decision.target_turn)
                 .map_err(|error| {
-                    miette!("recovered rewind root {root_index} could not acknowledge: {error}")
+                    miette!("prepared rewind cleanup failed for root {root_index}: {error}")
                 })?;
         }
+        remove_rewind_coordinator(checkpoint_root)?;
+        return Ok(());
     }
+
+    let mut unrestorable_paths = Vec::new();
+    for (root_index, store) in checkpoints.iter().enumerate() {
+        let prepared = store
+            .prepare_rewind(
+                &decision.session_id,
+                decision.target_turn,
+                &decision.operation_id,
+            )
+            .map_err(|error| {
+                miette!("rewind recovery could not stage root {root_index}: {error}")
+            })?;
+        let commit = store.apply_rewind(&prepared).map_err(|error| {
+            miette!("rewind recovery could not apply root {root_index}: {error}")
+        })?;
+        unrestorable_paths.extend(
+            commit
+                .report
+                .unrestorable
+                .into_iter()
+                .map(|(path, reason)| UnrestorablePath {
+                    path: checkpoint_display_path(root_index, &path),
+                    reason,
+                }),
+        );
+    }
+    if !operations.contains(&decision.operation_id) {
+        log.append(EngineEvent::ConversationRewound {
+            meta: EventMeta {
+                protocol_version: SESSION_EVENT_VERSION,
+                session_id: SessionId(decision.session_id.clone()),
+                sequence_id: SequenceId(log.next_sequence()),
+                emitted_at: SystemEventClock.emitted_at(),
+                caused_by: None,
+            },
+            to_agent_turn: decision.target_turn,
+            operation_id: decision.operation_id,
+            unrestorable_paths,
+        })
+        .map_err(|error| miette!("recovered rewind event could not persist: {error}"))?;
+    }
+    for (root_index, store) in checkpoints.iter().enumerate() {
+        store.acknowledge_rewind(&handle).map_err(|error| {
+            miette!("recovered rewind root {root_index} could not acknowledge: {error}")
+        })?;
+    }
+    remove_rewind_coordinator(checkpoint_root)?;
     Ok(())
 }
 
@@ -18489,14 +18673,11 @@ mod tests {
         std::fs::create_dir_all(&workspace).expect("workspace");
         std::fs::write(workspace.join("state.txt"), b"turn-0\n").expect("initial state");
         let session = SessionId("session-rewind".to_owned());
+        let coordinator_root = checkpoint_root(root.path(), &workspace, &session.0);
         let store = Arc::new(
-            CheckpointStore::open(
-                &checkpoint_root(root.path(), &workspace, &session.0),
-                &workspace,
-            )
-            .expect("checkpoint store"),
+            CheckpointStore::open(&coordinator_root, &workspace).expect("checkpoint store"),
         );
-        let coordinator = DurableCheckpointCoordinator::new(store);
+        let coordinator = DurableCheckpointCoordinator::new(coordinator_root, store);
         for turn in 1..=10_u64 {
             let checkpoint = coordinator
                 .begin(
@@ -18543,8 +18724,14 @@ mod tests {
         let second_store = Arc::new(
             CheckpointStore::open(&root.path().join("second"), &workspace).expect("second store"),
         );
-        let first = Arc::new(DurableCheckpointCoordinator::new(first_store));
-        let second = Arc::new(DurableCheckpointCoordinator::new(second_store));
+        let first = Arc::new(DurableCheckpointCoordinator::new(
+            root.path().join("first"),
+            first_store,
+        ));
+        let second = Arc::new(DurableCheckpointCoordinator::new(
+            root.path().join("second"),
+            second_store,
+        ));
         let first_checkpoint = first
             .begin(
                 &SessionId("parent".to_owned()),
@@ -18606,7 +18793,8 @@ mod tests {
             open_checkpoint_stores(&checkpoint_root, &[added.clone(), primary.clone()]).is_err(),
             "persisted root order must reject reorder/replacement"
         );
-        let coordinator = DurableCheckpointCoordinator::from_stores(stores);
+        let coordinator =
+            DurableCheckpointCoordinator::from_stores(checkpoint_root.clone(), stores);
 
         let known = coordinator
             .begin(
@@ -18714,6 +18902,133 @@ mod tests {
         assert_eq!(
             std::fs::read(&parent_sentinel).expect("parent final"),
             b"parent-before"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_multi_root_rewind_is_not_committed_by_restart_recovery() {
+        let root = tempdir().expect("root");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir_all(&first).expect("first workspace");
+        std::fs::create_dir_all(&second).expect("second workspace");
+        let first = std::fs::canonicalize(first).expect("canonical first");
+        let second = std::fs::canonicalize(second).expect("canonical second");
+        let session = SessionId("failed-multi-root-rewind".to_owned());
+        let checkpoint_root = checkpoint_root(root.path(), &first, &session.0);
+        let stores = open_checkpoint_stores(&checkpoint_root, &[first.clone(), second.clone()])
+            .expect("multi-root stores");
+
+        for (store, workspace) in stores.iter().zip([&first, &second]) {
+            std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
+            store
+                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")])
+                .expect("checkpoint");
+            std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
+        }
+
+        let second_manifest = checkpoint_root
+            .join("root-0001/checkpoints/manifests")
+            .join(&session.0)
+            .join("00000000000000000001.json");
+        let valid_manifest = std::fs::read(&second_manifest).expect("valid second manifest");
+        std::fs::write(&second_manifest, b"{}").expect("corrupt second manifest");
+
+        let coordinator =
+            DurableCheckpointCoordinator::from_stores(checkpoint_root.clone(), Arc::clone(&stores));
+        assert!(
+            coordinator
+                .prepare_apply_rewind(&session, 0, "failed-multi-root-operation")
+                .await
+                .is_err(),
+            "the second root must fail after the first root stages"
+        );
+        drop(coordinator);
+        std::fs::write(second_manifest, valid_manifest).expect("repair second manifest");
+
+        let event_root = root.path().join("event-store");
+        let mut log = SessionEventLog::open(&event_root, &session.0).expect("event log");
+        recover_rewind_transactions(&checkpoint_root, &stores, &mut log).expect("restart recovery");
+
+        assert_eq!(
+            std::fs::read(first.join("state.txt")).expect("first state"),
+            b"after"
+        );
+        assert_eq!(
+            std::fs::read(second.join("state.txt")).expect("second state"),
+            b"after"
+        );
+        assert!(
+            log.load::<EngineEvent>()
+                .expect("events")
+                .iter()
+                .all(|event| !matches!(event.event, EngineEvent::ConversationRewound { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_multi_root_rewind_is_completed_by_restart_recovery() {
+        let root = tempdir().expect("root");
+        let first = root.path().join("first");
+        let second = root.path().join("second");
+        std::fs::create_dir_all(&first).expect("first workspace");
+        std::fs::create_dir_all(&second).expect("second workspace");
+        let first = std::fs::canonicalize(first).expect("canonical first");
+        let second = std::fs::canonicalize(second).expect("canonical second");
+        let session = SessionId("committed-multi-root-rewind".to_owned());
+        let checkpoint_root = checkpoint_root(root.path(), &first, &session.0);
+        let stores = open_checkpoint_stores(&checkpoint_root, &[first.clone(), second.clone()])
+            .expect("multi-root stores");
+
+        for (store, workspace) in stores.iter().zip([&first, &second]) {
+            std::fs::write(workspace.join("state.txt"), b"before").expect("initial state");
+            store
+                .checkpoint_known(&session.0, 1, [PathBuf::from("state.txt")])
+                .expect("checkpoint");
+            std::fs::write(workspace.join("state.txt"), b"after").expect("mutated state");
+        }
+
+        let coordinator =
+            DurableCheckpointCoordinator::from_stores(checkpoint_root.clone(), Arc::clone(&stores));
+        coordinator.fail_after_committed_rewind_decision();
+        let failure = coordinator
+            .prepare_apply_rewind(&session, 0, "committed-multi-root-operation")
+            .await
+            .expect_err("injected crash after commit decision");
+        assert!(failure.to_string().contains("injected crash"));
+        assert_eq!(
+            std::fs::read(first.join("state.txt")).expect("first state"),
+            b"after"
+        );
+        assert_eq!(
+            std::fs::read(second.join("state.txt")).expect("second state"),
+            b"after"
+        );
+        drop(coordinator);
+
+        let event_root = root.path().join("event-store");
+        let mut log = SessionEventLog::open(&event_root, &session.0).expect("event log");
+        recover_rewind_transactions(&checkpoint_root, &stores, &mut log).expect("restart recovery");
+
+        assert_eq!(
+            std::fs::read(first.join("state.txt")).expect("first restored"),
+            b"before"
+        );
+        assert_eq!(
+            std::fs::read(second.join("state.txt")).expect("second restored"),
+            b"before"
+        );
+        let rewind_events = log
+            .load::<EngineEvent>()
+            .expect("events")
+            .into_iter()
+            .filter(|event| matches!(event.event, EngineEvent::ConversationRewound { .. }))
+            .count();
+        assert_eq!(rewind_events, 1);
+        assert!(
+            load_rewind_coordinator(&checkpoint_root)
+                .expect("coordinator state")
+                .is_none()
         );
     }
 
@@ -19497,13 +19812,13 @@ mod tests {
         let sink = Arc::new(
             DurableEventSink::new(log, storage.clone(), session.0.clone()).expect("durable sink"),
         );
-        let checkpoints = Arc::new(DurableCheckpointCoordinator::new(Arc::new(
-            CheckpointStore::open(
-                &checkpoint_root(&storage, &workspace, &session.0),
-                &workspace,
-            )
-            .expect("checkpoint store"),
-        )));
+        let coordinator_root = checkpoint_root(&storage, &workspace, &session.0);
+        let checkpoints = Arc::new(DurableCheckpointCoordinator::new(
+            coordinator_root.clone(),
+            Arc::new(
+                CheckpointStore::open(&coordinator_root, &workspace).expect("checkpoint store"),
+            ),
+        ));
         let actor = SessionActor::spawn(SessionActorConfig {
             session_id: session,
             workspace_root: workspace.clone(),

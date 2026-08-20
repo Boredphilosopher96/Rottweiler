@@ -541,6 +541,37 @@ impl CheckpointStore {
             .collect()
     }
 
+    /// Discards a staged rewind before any workspace step has been applied.
+    ///
+    /// Multi-root coordinators use this to roll back preparation when another
+    /// root cannot stage the same operation. Once application begins, only
+    /// idempotent completion is safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identity differs or workspace application has
+    /// already started.
+    pub fn discard_prepared_rewind(
+        &self,
+        handle: &RewindHandle,
+        target_turn: u64,
+    ) -> Result<(), CheckpointError> {
+        if !self.rewind_path(&handle.session_id).try_exists()? {
+            return Ok(());
+        }
+        let transaction = self.load_rewind_transaction(&handle.session_id)?;
+        if transaction.handle != *handle || transaction.target_turn != target_turn {
+            return Err(CheckpointError::RewindIdentityMismatch);
+        }
+        if transaction.phase != RewindPhase::Applying
+            || transaction.next_step != 0
+            || transaction.report != RewindReport::default()
+        {
+            return Err(CheckpointError::RewindCannotDiscard);
+        }
+        remove_durable(&self.rewind_path(&handle.session_id))
+    }
+
     /// Removes a workspace-commit marker after its conversation event is
     /// durably appended.
     ///
@@ -2250,6 +2281,9 @@ pub enum CheckpointError {
     /// A rewind must finish applying before it can be acknowledged.
     #[error("checkpoint rewind workspace is not committed")]
     RewindNotCommitted,
+    /// Prepared state may be removed only before the first workspace step.
+    #[error("checkpoint rewind cannot be discarded after workspace application begins")]
+    RewindCannotDiscard,
     /// A durable rewind transaction failed validation.
     #[error("checkpoint rewind transaction is corrupt")]
     CorruptRewindTransaction,

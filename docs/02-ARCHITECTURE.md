@@ -280,6 +280,12 @@ resolve(alias) → [candidate models] → adapter → provider
 - `checkpoints/` — content-addressed blobs (BLAKE3) + per-turn manifests of touched files. Rewind = restore manifest.
 - Config precedence: built-in defaults ← `~/.rottweiler/config.toml` ← `.rottweiler/config.toml` ← env ← CLI flags. **Exception**: security-sensitive keys (`[permissions]`, safe-list, `[network]`/proxy, telemetry opt-in, update channel) are ignored at project level with a warning (05 Layer 0). Schema in `rw-types`, `rw config check` validates and prints effective config with provenance per key.
 
+A rewind spanning multiple workspace roots has one session-level durable
+coordinator decision. Per-root transactions are prepared first; only a fsynced
+`committed` decision authorizes workspace application. Recovery discards a
+`preparing` operation without changing any root and idempotently completes a
+`committed` operation before appending its deduplicated conversation event.
+
 Forking is a conversation operation, not a working-tree clone. The child copies
 the exact durable event prefix and historical workspace-root generation, but it
 uses the current shared workspace under the same execution lease as its parent.
