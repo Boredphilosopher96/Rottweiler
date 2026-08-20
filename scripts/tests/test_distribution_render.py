@@ -138,6 +138,12 @@ class DistributionRenderTests(unittest.TestCase):
                 'env:        { "ROTTWEILER_PACKAGE_MANAGER" => "homebrew" }',
                 cask_text,
             )
+            self.assertIn('system_command "/usr/bin/xattr"', cask_text)
+            self.assertIn(
+                'args: ["-dr", "com.apple.quarantine", "#{staged_path}/rottweiler-#{version}-darwin-arm64"]',
+                cask_text,
+            )
+            self.assertIn("This pre-v1 CLI is not Apple-notarized", cask_text)
             self.assertNotIn("--HEAD", cask_text)
             self.assertIn("--proto '=https'", bootstrap_text)
             self.assertIn("--proto-redir '=https'", bootstrap_text)

@@ -195,6 +195,11 @@ HTTPS-only bootstrap is the secondary path and may install only an immutable
 tag archive whose exact URL, byte length, and SHA-256 were derived from that
 release. Homebrew updates use `brew upgrade`; the signed in-app updater remains
 for the official versioned installer and refuses package-managed layouts.
+Until Developer ID signing and Apple notarization are configured, the pre-v1
+Cask discloses that limitation and removes quarantine in a postflight only
+after Homebrew verifies the immutable archive's SHA-256. This transitional
+exception keeps the supported one-command Cask usable without weakening the
+archive identity check.
 
 **Rationale.** The process split provides crash isolation, headless reuse, and
 future clients; it does not justify making users install, launch, or close two
@@ -205,9 +210,11 @@ calling it a full installation would produce a broken interactive app. One
 byte-identical executable also cannot span macOS and Linux; one complete bundle
 per supported platform, selected automatically, is the honest one-app model.
 
-**Revisit when.** Cargo gains a secure standard for installing private runtime
-assets, or OpenTUI gains a stable Rust/C ABI that removes the helper process and
-native-library payload without weakening ADR-001's renderer requirement.
+**Revisit when.** Configure Developer ID signing and Apple notarization, then
+delete the quarantine-removal postflight. Also revisit if Cargo gains a secure
+standard for installing private runtime assets, or OpenTUI gains a stable
+Rust/C ABI that removes the helper process and native-library payload without
+weakening ADR-001's renderer requirement.
 
 ---
 

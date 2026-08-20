@@ -12,4 +12,17 @@ cask "rottweiler" do
   command_wrapper "rw",
                   executable: "#{staged_path}/rottweiler-#{version}-darwin-arm64/bin/rw",
                   env:        { "ROTTWEILER_PACKAGE_MANAGER" => "homebrew" }
+
+  # Pre-v1 archives are checksum-verified but not yet Apple-notarized. Remove
+  # quarantine before the first launch so Gatekeeper does not cache a rejected
+  # assessment for the extracted inode.
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-dr", "com.apple.quarantine", "#{staged_path}/rottweiler-#{version}-darwin-arm64"]
+  end
+
+  caveats <<~EOS
+    This pre-v1 CLI is not Apple-notarized. The Cask removes quarantine only
+    after Homebrew verifies the release archive's SHA-256 checksum.
+  EOS
 end

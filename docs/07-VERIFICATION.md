@@ -380,7 +380,10 @@ the input order and require byte-identical output; assert immutable tag URLs,
 lengths, SHA-256 values, private `libexec` helpers, the sole public `rw`
 wrapper, HTTPS-only redirects, supported-host selection, and rejection of bad
 names, duplicates, links, unsupported/missing platforms, length changes, and
-digest changes. The unadvertised development Formula still builds both locked
+digest changes. Until notarization is configured, the generated pre-v1 Cask
+must disclose and encode its post-verification quarantine-removal postflight;
+a clean Cask install must launch `rw --version` before publication is called
+usable. The unadvertised development Formula still builds both locked
 Rust and Bun components with the same private-helper/public-wrapper layout. Stable release
 CI syntax-checks all generated files, attests and publishes them with the
 archives, and verifies the Homebrew tap's resulting `main` commit. Release and
