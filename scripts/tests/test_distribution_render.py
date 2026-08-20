@@ -45,9 +45,11 @@ class DistributionRenderTests(unittest.TestCase):
         archives: list[tuple[str, Path]],
         *,
         formula: str = "rottweiler.rb",
+        cask: str = "rottweiler.cask.rb",
         bootstrap: str = "rottweiler-install.sh",
-    ) -> tuple[Path, Path, subprocess.CompletedProcess[bytes]]:
+    ) -> tuple[Path, Path, Path, subprocess.CompletedProcess[bytes]]:
         formula_path = root / formula
+        cask_path = root / cask
         bootstrap_path = root / bootstrap
         command = [
             sys.executable,
@@ -59,31 +61,44 @@ class DistributionRenderTests(unittest.TestCase):
         ]
         for release_platform, archive in archives:
             command.extend(["--archive", f"{release_platform}={archive}"])
-        command.extend(["--formula", str(formula_path), "--bootstrap", str(bootstrap_path)])
+        command.extend(
+            [
+                "--formula",
+                str(formula_path),
+                "--cask",
+                str(cask_path),
+                "--bootstrap",
+                str(bootstrap_path),
+            ]
+        )
         run = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        return formula_path, bootstrap_path, run
+        return formula_path, cask_path, bootstrap_path, run
 
     def test_render_is_deterministic_and_pins_every_exact_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archives = [(name, make_archive(root, name)) for name in PLATFORMS]
-            first_formula, first_bootstrap, first = self.render(root, archives)
+            first_formula, first_cask, first_bootstrap, first = self.render(root, archives)
             self.assertEqual(first.returncode, 0, first.stderr.decode())
             first_formula_bytes = first_formula.read_bytes()
+            first_cask_bytes = first_cask.read_bytes()
             first_bootstrap_bytes = first_bootstrap.read_bytes()
 
-            second_formula, second_bootstrap, second = self.render(
+            second_formula, second_cask, second_bootstrap, second = self.render(
                 root,
                 list(reversed(archives)),
                 formula="second.rb",
+                cask="second.cask.rb",
                 bootstrap="second-install.sh",
             )
             self.assertEqual(second.returncode, 0, second.stderr.decode())
             self.assertEqual(first_formula_bytes, second_formula.read_bytes())
+            self.assertEqual(first_cask_bytes, second_cask.read_bytes())
             self.assertEqual(first_bootstrap_bytes, second_bootstrap.read_bytes())
             self.assertEqual(first_bootstrap.stat().st_mode & 0o777, 0o755)
 
             formula_text = first_formula_bytes.decode()
+            cask_text = first_cask_bytes.decode()
             bootstrap_text = first_bootstrap_bytes.decode()
             for release_platform, archive in archives:
                 url = (
@@ -96,6 +111,9 @@ class DistributionRenderTests(unittest.TestCase):
                 self.assertIn(url, bootstrap_text)
                 self.assertIn(f"archive_length='{archive.stat().st_size}'", bootstrap_text)
                 self.assertIn(f"archive_sha256='{digest}'", bootstrap_text)
+                if release_platform == "darwin-arm64":
+                    self.assertIn(url, cask_text)
+                    self.assertIn(digest, cask_text)
 
             self.assertIn('libexec.install Dir["bin/*"]', formula_text)
             self.assertIn(
@@ -109,6 +127,18 @@ class DistributionRenderTests(unittest.TestCase):
             self.assertIn("preserve_rpath", formula_text)
             self.assertIn("managed by Homebrew", formula_text)
             self.assertIn("brew upgrade", formula_text)
+            self.assertIn('cask "rottweiler" do', cask_text)
+            self.assertIn('depends_on arch: :arm64', cask_text)
+            self.assertIn('command_wrapper "rw"', cask_text)
+            self.assertIn(
+                'executable: "#{staged_path}/rottweiler-#{version}-darwin-arm64/bin/rw"',
+                cask_text,
+            )
+            self.assertIn(
+                'env:        { "ROTTWEILER_PACKAGE_MANAGER" => "homebrew" }',
+                cask_text,
+            )
+            self.assertNotIn("--HEAD", cask_text)
             self.assertIn("--proto '=https'", bootstrap_text)
             self.assertIn("--proto-redir '=https'", bootstrap_text)
             self.assertIn("--tlsv1.2", bootstrap_text)
@@ -117,12 +147,13 @@ class DistributionRenderTests(unittest.TestCase):
             subprocess.run(["sh", "-n", str(first_bootstrap)], check=True)
             if subprocess.run(["sh", "-c", "command -v ruby"], check=False).returncode == 0:
                 subprocess.run(["ruby", "-c", str(first_formula)], check=True)
+                subprocess.run(["ruby", "-c", str(first_cask)], check=True)
 
     def test_bootstrap_verifies_then_invokes_bundled_installer_with_arguments(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             archives = [(name, make_archive(root, name)) for name in PLATFORMS]
-            _, bootstrap, rendered = self.render(root, archives)
+            _, _, bootstrap, rendered = self.render(root, archives)
             self.assertEqual(rendered.returncode, 0, rendered.stderr.decode())
             current = {
                 ("Darwin", "arm64"): archives[0][1],
@@ -190,10 +221,10 @@ class DistributionRenderTests(unittest.TestCase):
             good = make_archive(root, "linux-x86_64")
             wrong = root / "wrong.tar.gz"
             wrong.write_bytes(b"archive")
-            _, _, wrong_run = self.render(root, [("linux-x86_64", wrong)])
+            _, _, _, wrong_run = self.render(root, [("linux-x86_64", wrong)])
             self.assertNotEqual(wrong_run.returncode, 0)
 
-            _, _, duplicate = self.render(
+            _, _, _, duplicate = self.render(
                 root,
                 [("linux-x86_64", good), ("linux-x86_64", good)],
             )
@@ -201,13 +232,13 @@ class DistributionRenderTests(unittest.TestCase):
 
             link = root / f"rottweiler-{VERSION}-darwin-arm64.tar.gz"
             link.symlink_to(good)
-            _, _, linked = self.render(root, [("darwin-arm64", link)])
+            _, _, _, linked = self.render(root, [("darwin-arm64", link)])
             self.assertNotEqual(linked.returncode, 0)
 
-            _, _, unsupported = self.render(root, [("windows-x86_64", good)])
+            _, _, _, unsupported = self.render(root, [("windows-x86_64", good)])
             self.assertNotEqual(unsupported.returncode, 0)
 
-            _, _, missing_os = self.render(root, [("linux-x86_64", good)])
+            _, _, _, missing_os = self.render(root, [("linux-x86_64", good)])
             self.assertNotEqual(missing_os.returncode, 0)
 
     def test_head_formula_builds_both_components_but_exposes_only_rw(self) -> None:

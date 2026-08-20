@@ -348,7 +348,7 @@ repository-owned public signing inputs, measured baselines, protected
 configuration, and the current 14-day dogfood ledger before invoking the exact
 protected-performance graph. It produces no release, channel metadata,
 Homebrew change, or deployment.
-Release: signing and publication depend on the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, macOS/Linux eight-hour soak, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. V1 and later tags additionally require the pinned 20-task Terminal-Bench baseline with a paid dated OpenAI or Anthropic model, the 14-day dogfood ledger, and paid two-family `--record` plus offline replay canary; these explicitly named v1 qualification gates do not block a pre-v1 tag. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs required by the tag's release tier leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
+Release: signing and publication depend on the exact tag's global Rust/Bun/docs/supply-chain gates, dedicated native-Ubuntu sandbox/egress acceptance, WSL2 installation and doctor checks against the exact uploaded Linux release archive, WSL source sandbox checks and DrvFS refusal, reproducible build, provenance attestation, update-signature verification fixtures, and binary-size gates. Major-zero tags record the protected eight-hour soak, Terminal-Bench, 14-day dogfood ledger, and paid two-family replay as `not_claimed_for_pre_v1`; they do not allocate the self-hosted soak runners. V1 and later tags require measured macOS/Linux soak baselines, both exact-archive eight-hour soaks, the pinned 20-task Terminal-Bench baseline with a paid dated OpenAI or Anthropic model, the dogfood ledger, and paid two-family `--record` plus offline replay canary. The release archive is copied byte-for-byte from the Windows-mounted checkout onto the WSL Linux filesystem before extraction and installation. Missing credentials, variables, runners, evidence, or offline public-root inputs required by the tag's release tier leave the release blocked. Offline updater fixtures cover exact-byte metadata tampering, unsigned/wrong-threshold roles, old+new root thresholds, v1→v2→v3 plus persisted-v3→v4 after historical expiry, missing/skipped/root rollback, release metadata/clock rollback, expiry, stable/beta/platform binding, signed downgrade policy, artifact length/hash tampering, archive links/unexpected entries, unsafe/direct-copy layouts, WSL DrvFS, and atomic rollback state. No updater test contacts the public network. `cargo xtask sign-update release` consumes a pre-signed public root chain and release-role mode-0600 seed files only; the separate offline `rotate-root` mode is the only command accepting root private keys.
 
 The TUI keeps the complete durable transcript projection available to replay and
 export, but mounts only the newest 128 transcript cards in OpenTUI and recycles
@@ -373,14 +373,14 @@ signed or attested.
 
 The distribution renderer accepts single-link regular release archives only,
 requires both the macOS and Linux publication families, and deterministically
-emits a Homebrew formula plus bootstrap from their exact bytes. Tests reverse
+emits a Homebrew Formula, macOS Cask, and bootstrap from their exact bytes. Tests reverse
 the input order and require byte-identical output; assert immutable tag URLs,
 lengths, SHA-256 values, private `libexec` helpers, the sole public `rw`
 wrapper, HTTPS-only redirects, supported-host selection, and rejection of bad
 names, duplicates, links, unsupported/missing platforms, length changes, and
-digest changes. The pre-release `--HEAD` formula builds both locked Rust and Bun
-components and has the same private-helper/public-wrapper layout. Stable release
-CI syntax-checks both generated files, attests and publishes them with the
+digest changes. The unadvertised development Formula still builds both locked
+Rust and Bun components with the same private-helper/public-wrapper layout. Stable release
+CI syntax-checks all generated files, attests and publishes them with the
 archives, and verifies the Homebrew tap's resulting `main` commit. Release and
 soak acceptance must invoke only the installed public `rw` with no TUI path
 override, then assert the complete supervisor process tree exits on default

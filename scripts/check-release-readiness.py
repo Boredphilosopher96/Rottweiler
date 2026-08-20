@@ -8,11 +8,17 @@ import base64
 import binascii
 import json
 from pathlib import Path
+import re
+import tomllib
 from typing import Any
 
 
 EXPECTED_PLATFORMS = ("darwin-arm64", "linux-x86_64")
 EXPECTED_SUITES = ("core", "soak")
+VERSION_PATTERN = re.compile(
+    r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    r"(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?"
+)
 EXPECTED_UPDATE_FILES = (
     "root-chain.json",
     "stable.spec.json",
@@ -35,7 +41,7 @@ def load_json(path: Path, blockers: list[str]) -> dict[str, Any] | None:
     return value
 
 
-def validate_baseline(path: Path, blockers: list[str]) -> None:
+def validate_baseline(path: Path, release_major: int, blockers: list[str]) -> None:
     baseline = load_json(path, blockers)
     if baseline is None:
         return
@@ -49,7 +55,8 @@ def validate_baseline(path: Path, blockers: list[str]) -> None:
         if not isinstance(suites, dict):
             blockers.append(f"{platform} has no performance suites")
             continue
-        for suite in EXPECTED_SUITES:
+        required_suites = EXPECTED_SUITES if release_major >= 1 else ("core",)
+        for suite in required_suites:
             suite_value = suites.get(suite)
             if not isinstance(suite_value, dict):
                 blockers.append(f"{platform}/{suite} baseline is missing")
@@ -113,7 +120,9 @@ def validate_root_chain(path: Path, blockers: list[str]) -> None:
             blockers.append(f"{path.as_posix()} root {index} is malformed: {error}")
 
 
-def validate_channel_specs(update_root: Path, blockers: list[str]) -> None:
+def validate_channel_specs(
+    update_root: Path, release_version: str, blockers: list[str]
+) -> None:
     versions: dict[str, int] = {}
     for channel in ("stable", "beta"):
         path = update_root / f"{channel}.spec.json"
@@ -137,31 +146,66 @@ def validate_channel_specs(update_root: Path, blockers: list[str]) -> None:
             blockers.append(
                 f"{path.as_posix()} must target exactly {', '.join(EXPECTED_PLATFORMS)}"
             )
+        for platform, target in targets.items():
+            if not isinstance(target, dict) or target.get("version") != release_version:
+                blockers.append(
+                    f"{path.as_posix()} target {platform} does not match release version {release_version}"
+                )
     if len(versions) == 2 and versions["stable"] != versions["beta"]:
         blockers.append("stable and beta specs must share one metadata version")
 
 
-def inspect(repository: Path) -> dict[str, Any]:
+def inspect(repository: Path, release_version: str) -> dict[str, Any]:
     blockers: list[str] = []
+    if VERSION_PATTERN.fullmatch(release_version) is None:
+        blockers.append("release version must be canonical semantic version without a leading v")
+        release_major = 0
+    else:
+        release_major = int(release_version.split(".", 1)[0])
     baseline = repository / "benchmarks" / "performance-baseline.json"
     update_root = repository / "release" / "update"
-    validate_baseline(baseline, blockers)
+    validate_baseline(baseline, release_major, blockers)
     validate_root_chain(update_root / EXPECTED_UPDATE_FILES[0], blockers)
-    validate_channel_specs(update_root, blockers)
+    validate_channel_specs(update_root, release_version, blockers)
+    qualification = "pre-v1" if release_major == 0 else "v1"
     return {
         "schema_version": 1,
         "status": "ready" if not blockers else "blocked",
+        "release_version": release_version,
+        "release_major": release_major,
+        "qualification": qualification,
+        "evidence": {
+            "core_baselines": "required",
+            "protected_soak": (
+                "not_claimed_for_pre_v1" if release_major == 0 else "required"
+            ),
+        },
         "blockers": sorted(set(blockers)),
     }
+
+
+def workspace_version(repository: Path) -> str:
+    manifest = repository / "Cargo.toml"
+    try:
+        document = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        version = document["workspace"]["package"]["version"]
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, KeyError, TypeError) as error:
+        raise ValueError(f"could not resolve workspace release version: {error}") from error
+    if not isinstance(version, str):
+        raise ValueError("workspace release version must be a string")
+    return version
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repository", type=Path, default=Path.cwd())
+    parser.add_argument("--release-version")
     parser.add_argument("--output", type=Path)
     arguments = parser.parse_args()
 
-    result = inspect(arguments.repository.resolve())
+    repository = arguments.repository.resolve()
+    release_version = arguments.release_version or workspace_version(repository)
+    result = inspect(repository, release_version)
     encoded = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if arguments.output is not None:
         arguments.output.parent.mkdir(parents=True, exist_ok=True)

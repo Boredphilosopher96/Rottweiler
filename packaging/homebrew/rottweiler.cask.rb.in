@@ -1,0 +1,15 @@
+cask "rottweiler" do
+  version "@VERSION@"
+  sha256 "@DARWIN_ARM64_SHA256@"
+
+  url "@DARWIN_ARM64_URL@"
+  name "Rottweiler"
+  desc "Provider-blind coding-agent harness with an OpenTUI frontend"
+  homepage "https://github.com/@HOMEPAGE_REPOSITORY@"
+
+  depends_on arch: :arm64
+
+  command_wrapper "rw",
+                  executable: "#{staged_path}/rottweiler-#{version}-darwin-arm64/bin/rw",
+                  env:        { "ROTTWEILER_PACKAGE_MANAGER" => "homebrew" }
+end

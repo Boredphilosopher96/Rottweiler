@@ -10,9 +10,9 @@ providers behind one internal message format, gives interactive and scripted
 clients the same session engine, and treats permissions, replay, persistence,
 and extensions as product foundations rather than UI concerns.
 
-Rottweiler is currently pre-v1. Build it from source or use the Homebrew HEAD
-formula for development and evaluation. Signed stable artifacts are not
-advertised until the repository's protected release gates have passed.
+Rottweiler is currently pre-v1. Signed releases pass the hosted core,
+performance, package, security, and WSL gates; the longer protected soak and
+product-qualification evidence becomes mandatory at v1.
 
 ![Rottweiler coordinating safe parallel coding work](docs/assets/rottweiler-hero.png)
 
@@ -43,17 +43,16 @@ advertised until the repository's protected release gates have passed.
 
 ## Install
 
-### Homebrew HEAD build
+### Homebrew
 
-The HEAD formula builds the complete application bundle from the current
-source:
+Install the signed, prebuilt Apple silicon macOS bundle from the Rottweiler tap:
 
 ```sh
-brew install --HEAD Boredphilosopher96/tap/rottweiler
+brew install --cask Boredphilosopher96/tap/rottweiler
 rw
 ```
 
-Upgrade a HEAD installation with `brew upgrade --fetch-HEAD rottweiler`.
+Upgrade it with `brew upgrade --cask rottweiler`.
 
 ### Build from source
 

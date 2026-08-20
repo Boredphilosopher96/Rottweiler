@@ -8,6 +8,7 @@ pub mod config;
 mod error;
 mod ir;
 mod protocol;
+pub mod update_contract;
 
 pub use error::Error;
 

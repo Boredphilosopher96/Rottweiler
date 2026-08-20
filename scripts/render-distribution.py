@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render pinned Homebrew and bootstrap installers from exact release archives."""
+"""Render pinned Homebrew packages and bootstrap from exact release archives."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import tempfile
 
 REPO = Path(__file__).resolve().parents[1]
 FORMULA_TEMPLATE = REPO / "packaging/homebrew/rottweiler.rb.in"
+CASK_TEMPLATE = REPO / "packaging/homebrew/rottweiler.cask.rb.in"
 BOOTSTRAP_TEMPLATE = REPO / "packaging/bootstrap/install.sh.in"
 SUPPORTED = {
     "darwin-arm64": ("Darwin-arm64", "macos", "Hardware::CPU.arm?"),
@@ -36,6 +37,7 @@ def parse_args() -> argparse.Namespace:
         help="exact release archive; repeat once per published platform",
     )
     parser.add_argument("--formula", required=True, type=Path)
+    parser.add_argument("--cask", required=True, type=Path)
     parser.add_argument("--bootstrap", required=True, type=Path)
     return parser.parse_args()
 
@@ -116,6 +118,22 @@ def render_formula(repository: str, version: str, archives: dict[str, Path]) -> 
     )
 
 
+def render_cask(repository: str, version: str, archives: dict[str, Path]) -> str:
+    archive = archives.get("darwin-arm64")
+    if archive is None:
+        raise ValueError("Homebrew Cask rendering requires the darwin-arm64 archive")
+    _, digest = artifact_metadata(archive)
+    return render_template(
+        CASK_TEMPLATE,
+        {
+            "@DARWIN_ARM64_URL@": release_url(repository, version, archive),
+            "@HOMEPAGE_REPOSITORY@": repository,
+            "@VERSION@": version,
+            "@DARWIN_ARM64_SHA256@": digest,
+        },
+    )
+
+
 def render_bootstrap(repository: str, version: str, archives: dict[str, Path]) -> str:
     cases: list[str] = []
     for platform in sorted(archives):
@@ -170,6 +188,7 @@ def main() -> None:
         raise ValueError("repository must be a GitHub OWNER/NAME pair")
     archives = load_archives(args.archive, args.version)
     write_atomic(args.formula, render_formula(args.repository, args.version, archives), 0o644)
+    write_atomic(args.cask, render_cask(args.repository, args.version, archives), 0o644)
     write_atomic(args.bootstrap, render_bootstrap(args.repository, args.version, archives), 0o755)
 
 

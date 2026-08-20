@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 use rw_types::config::{ThinkingLevel, UpdateChannel};
+use rw_types::update_contract::MAX_UPDATE_ARTIFACT_BYTES;
 use rw_types::{
     AccountingAttribution, Answer, ApprovalBinding, ApprovalDecision, Attachment, AttachmentData,
     Block, BudgetLevel, BudgetScope, BudgetUnit, CacheBreakpoint, ClientCommand, ClientId,
@@ -42,7 +43,6 @@ const UPDATE_SIGNATURE_DOMAIN: &[u8] = b"rottweiler-update-metadata-v1\0";
 const MAX_UPDATE_SPEC_BYTES: u64 = 768 * 1024;
 const MAX_UPDATE_KEYS: usize = 32;
 const MAX_UPDATE_TARGETS: usize = 32;
-const MAX_UPDATE_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_RELEASE_NOTES_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]

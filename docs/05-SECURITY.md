@@ -94,9 +94,10 @@ Sandbox implementation (`rw-sandbox`):
   Artifacts bind HTTPS URL-without-userinfo/query, channel, semantic version, platform, compressed length, and SHA-256. Bytes are verified before the tar/gzip parser runs. Extraction accepts exactly `install.sh`, `bin/rw`, `bin/rottweiler-tui`, `bin/rottweiler-wasm-host`, and one platform native OpenTUI library beneath one signed root directory; traversal, duplicates, links, devices, unexpected entries, bombs, and changing lengths are rejected in same-filesystem staging. Activation is an atomic `current` symlink switch with a private pending-state journal and retained previous generation. `--allow-downgrade` weakens only the signed product-version comparison. Global/config/environment proxy precedence is explicit, redirects are disabled, DNS is pinned for direct public destinations, and time/body/address limits are bounded; errors/logs never include proxy secrets or signed URLs. Unknown/direct-copy/package-managed layouts and WSL DrvFS are not modified.
 
   Distribution metadata is derived only from those exact completed archives.
-  The Homebrew formula binds each supported platform to its immutable tag URL
-  and SHA-256, installs the engine/TUI/native renderer together under private
-  `libexec`, and exposes only a package-manager-marked `rw` wrapper. Stable tap
+  The Homebrew Cask and Formula bind their supported platforms to immutable tag
+  URLs and SHA-256 digests, keep the engine, TUI, WASM host, and native renderer
+  together in Homebrew-managed storage, and expose only a package-manager-marked
+  `rw` wrapper. Stable tap
   publication requires a dedicated repository-scoped token and occurs only
   after the protected tag release is published; a missing token, tap, platform
   archive, or push verification fails the workflow. The secondary bootstrap is

@@ -32,7 +32,7 @@ def measured_baseline() -> dict[str, object]:
     }
 
 
-def channel_spec(channel: str) -> dict[str, object]:
+def channel_spec(channel: str, release_version: str = "1.0.0") -> dict[str, object]:
     return {
         "schema_version": 1,
         "role": "release",
@@ -42,8 +42,8 @@ def channel_spec(channel: str) -> dict[str, object]:
         "release_notes": "preflight fixture",
         "targets": {
             platform: {
-                "version": "1.0.0",
-                "url": f"https://updates.example.test/rottweiler-1.0.0-{platform}.tar.gz",
+                "version": release_version,
+                "url": f"https://updates.example.test/rottweiler-{release_version}-{platform}.tar.gz",
             }
             for platform in PLATFORMS
         },
@@ -51,7 +51,7 @@ def channel_spec(channel: str) -> dict[str, object]:
 
 
 class ReleaseReadinessTests(unittest.TestCase):
-    def fixture(self, root: Path) -> None:
+    def fixture(self, root: Path, *, release_version: str = "1.0.0") -> None:
         (root / "benchmarks").mkdir()
         update = root / "release" / "update"
         update.mkdir(parents=True)
@@ -86,12 +86,21 @@ class ReleaseReadinessTests(unittest.TestCase):
         )
         for channel in ("stable", "beta"):
             (update / f"{channel}.spec.json").write_text(
-                json.dumps(channel_spec(channel)), encoding="utf-8"
+                json.dumps(channel_spec(channel, release_version)), encoding="utf-8"
             )
 
-    def run_check(self, root: Path) -> subprocess.CompletedProcess[str]:
+    def run_check(
+        self, root: Path, *, release_version: str = "1.0.0"
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [sys.executable, str(SCRIPT), "--repository", str(root)],
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--repository",
+                str(root),
+                "--release-version",
+                release_version,
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -118,6 +127,39 @@ class ReleaseReadinessTests(unittest.TestCase):
             result = self.run_check(root)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("darwin-arm64/core baseline is not measured", result.stdout)
+
+    def test_pre_v1_requires_core_but_records_soak_as_not_claimed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root, release_version="0.1.0")
+            path = root / "benchmarks" / "performance-baseline.json"
+            baseline = json.loads(path.read_text(encoding="utf-8"))
+            for platform in PLATFORMS:
+                baseline["platforms"][platform]["suites"]["soak"][
+                    "baseline_kind"
+                ] = "bootstrap"
+            path.write_text(json.dumps(baseline), encoding="utf-8")
+            result = self.run_check(root, release_version="0.1.0")
+            document = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(document["qualification"], "pre-v1")
+        self.assertEqual(
+            document["evidence"]["protected_soak"], "not_claimed_for_pre_v1"
+        )
+
+    def test_v1_requires_measured_soak_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / "benchmarks" / "performance-baseline.json"
+            baseline = json.loads(path.read_text(encoding="utf-8"))
+            baseline["platforms"]["linux-x86_64"]["suites"]["soak"][
+                "baseline_kind"
+            ] = "bootstrap"
+            path.write_text(json.dumps(baseline), encoding="utf-8")
+            result = self.run_check(root)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("linux-x86_64/soak baseline is not measured", result.stdout)
 
     def test_rejects_missing_signing_inputs_and_split_channel_versions(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

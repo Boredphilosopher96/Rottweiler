@@ -30,11 +30,14 @@ jobs:
           case "$major" in
             ''|*[!0-9]*) echo "release version has an invalid major: $version" >&2; exit 1 ;;
           esac
-          printf 'major=%s\n' "$major" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\nmajor=%s\n' "$version" "$major" >> "$GITHUB_OUTPUT"
       - name: Validate measured baselines and public signing inputs
         id: repository_readiness
         continue-on-error: true
-        run: python3 scripts/check-release-readiness.py --output release-readiness.json
+        run: >-
+          python3 scripts/check-release-readiness.py
+          --release-version "${{ steps.release_version.outputs.version }}"
+          --output release-readiness.json
       - name: Validate protected release configuration
         id: protected_configuration
         continue-on-error: true
@@ -58,7 +61,6 @@ jobs:
         run: |
           set -euo pipefail
           required=(
-            SELF_HOSTED_RUNNERS_ENABLED
             UPDATE_ROOT_VERSION
             UPDATE_ROOT_THRESHOLD
             UPDATE_ROOT_KEYS_JSON
@@ -71,6 +73,7 @@ jobs:
           esac
           if [ "$RELEASE_MAJOR" -ge 1 ]; then
             required+=(
+              SELF_HOSTED_RUNNERS_ENABLED
               LIVE_ANTHROPIC_MODEL
               LIVE_OPENAI_MODEL
               EVAL_MODEL
@@ -90,8 +93,8 @@ jobs:
             printf 'missing protected release configuration: %s\n' "${missing[*]}" >&2
             exit 1
           fi
-          test "$SELF_HOSTED_RUNNERS_ENABLED" = "true"
           if [ "$RELEASE_MAJOR" -ge 1 ]; then
+            test "$SELF_HOSTED_RUNNERS_ENABLED" = "true"
             case "$EVAL_MODEL" in
               openai/*-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]|anthropic/*-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
               *) echo "EVAL_MODEL must select an immutable dated OpenAI or Anthropic model" >&2; exit 1 ;;

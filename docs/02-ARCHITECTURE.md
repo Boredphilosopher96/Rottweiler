@@ -86,9 +86,10 @@ visible in the crate that actually uses it.
 
 The process boundary is not a product boundary. Every supported release is one
 platform application bundle containing `rw`, `rottweiler-tui`, the private
-`rottweiler-wasm-host`, and exactly one native OpenTUI library. Homebrew installs
-the complete bundle together under private `libexec` and exposes only an `rw`
-wrapper; the standalone bootstrap downloads
+`rottweiler-wasm-host`, and exactly one native OpenTUI library. Homebrew's
+versioned Cask stages the exact macOS archive in its managed directory and
+exposes only a package-manager-marked `rw` wrapper; the versioned Formula keeps
+the same files together under `libexec`. The standalone bootstrap downloads
 the identical signed archive and its installer exposes only `rw`. Consequently
 ordinary install, launch, and close are each one user action even though crash
 isolation remains process-based. Source builds may expose component paths to

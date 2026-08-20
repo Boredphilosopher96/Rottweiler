@@ -154,9 +154,26 @@ class CiHardeningContractTests(unittest.TestCase):
 
         self.assertIn("--suite soak", soak)
         self.assertIn("--require-measured", soak)
-        self.assertIn("needs: [build-linux, build-macos]", soak)
+        self.assertIn("if: needs.runner-contract.outputs.release_major != '0'", soak)
+        self.assertIn("needs: [runner-contract, build-linux, build-macos]", soak)
+        qualification = workflow_job(workflow, "qualification-gate")
+        self.assertIn("if: ${{ always() }}", qualification)
+        self.assertIn("release-soak", qualification)
+        self.assertIn("test \"$RELEASE_SOAK_RESULT\" = skipped", qualification)
+        self.assertIn("test \"$RELEASE_SOAK_RESULT\" = success", qualification)
+        self.assertIn("not_claimed_for_pre_v1", qualification)
         sign_and_publish = workflow_job(workflow, "sign-and-publish")
-        self.assertIn("release-soak", sign_and_publish)
+        self.assertIn("qualification-gate", sign_and_publish)
+        self.assertNotIn("release-soak", sign_and_publish.split("    runs-on:", 1)[0])
+        self.assertIn("Casks/rottweiler.rb", sign_and_publish)
+        self.assertIn(
+            'packaging/homebrew/README.md "$tap/README.md"', sign_and_publish
+        )
+        tap_readme = (ROOT / "packaging/homebrew/README.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "brew install --cask Boredphilosopher96/tap/rottweiler", tap_readme
+        )
+        self.assertNotIn("--HEAD", tap_readme)
 
     def test_protected_performance_consumers_fail_closed_before_queueing(self) -> None:
         performance = (ROOT / ".github/workflows/performance.yml").read_text(
@@ -212,6 +229,7 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("workflow_call:", performance)
         self.assertIn("environment: release", preflight)
         self.assertIn("python3 scripts/check-release-readiness.py", preflight)
+        self.assertIn("--release-version", preflight)
         self.assertIn("python3 scripts/check-dogfood-gate.py", preflight)
         self.assertIn("id: repository_readiness", preflight)
         self.assertIn("id: protected_configuration", preflight)
@@ -428,6 +446,7 @@ class CiHardeningContractTests(unittest.TestCase):
                 "release-gate-evidence-${{ github.ref_name }}-${{ github.run_attempt }}",
                 "release-terminal-bench-${{ github.ref_name }}-${{ github.run_attempt }}",
                 "release-soak-${{ matrix.platform }}-${{ github.ref_name }}-${{ github.run_attempt }}",
+                "release-qualification-${{ github.ref_name }}-${{ github.run_attempt }}",
             ),
         }
         for workflow_name, evidence_names in expected_evidence_names.items():

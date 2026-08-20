@@ -14,20 +14,36 @@ concurrency:
 
 jobs:
   runner-contract:
-    name: Required release runner contract
+    name: Resolve exact release qualification
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      release_major: ${{ steps.release.outputs.major }}
+      qualification: ${{ steps.release.outputs.qualification }}
     steps:
-      - name: Fail closed when protected release runners are unavailable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate release identity, readiness, and runner tier
+        id: release
         env:
           SELF_HOSTED_RUNNERS_ENABLED: ${{ vars.ROTTWEILER_SELF_HOSTED_RUNNERS }}
         run: |
-          if [ "$SELF_HOSTED_RUNNERS_ENABLED" != "true" ]; then
-            echo "ROTTWEILER_SELF_HOSTED_RUNNERS must be true; release performance and acceptance jobs cannot queue without protected runners" >&2
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          test "$GITHUB_REF_NAME" = "v$version"
+          python3 scripts/check-release-readiness.py \
+            --release-version "$version" \
+            --output release-readiness.json
+          major=$(python3 -c 'import json; print(json.load(open("release-readiness.json"))["release_major"])')
+          qualification=$(python3 -c 'import json; print(json.load(open("release-readiness.json"))["qualification"])')
+          if [ "$major" -ge 1 ] && [ "$SELF_HOSTED_RUNNERS_ENABLED" != "true" ]; then
+            echo "ROTTWEILER_SELF_HOSTED_RUNNERS must be true for v1 protected soaks" >&2
             exit 1
           fi
+          printf 'major=%s\nqualification=%s\n' "$major" "$qualification" >> "$GITHUB_OUTPUT"
 
   linux-performance-build:
     name: Build isolated Linux performance binary
@@ -525,7 +541,8 @@ jobs:
 
   release-soak:
     name: Exact-tag eight-hour soak (${{ matrix.platform }})
-    needs: [build-linux, build-macos]
+    if: needs.runner-contract.outputs.release_major != '0'
+    needs: [runner-contract, build-linux, build-macos]
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 510
     strategy:
@@ -700,9 +717,87 @@ jobs:
           persist-credentials: false
       - run: crates/rw-sandbox/tests/linux_security_gate.sh
 
+  qualification-gate:
+    name: Admit exact tag for its release tier
+    if: ${{ always() }}
+    needs: [runner-contract, release-gate, release-terminal-bench, release-soak, wsl2-acceptance, release-linux-security]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require the complete tier-specific result set
+        env:
+          RELEASE_MAJOR: ${{ needs.runner-contract.outputs.release_major }}
+          QUALIFICATION: ${{ needs.runner-contract.outputs.qualification }}
+          RELEASE_GATE_RESULT: ${{ needs.release-gate.result }}
+          TERMINAL_BENCH_RESULT: ${{ needs.release-terminal-bench.result }}
+          RELEASE_SOAK_RESULT: ${{ needs.release-soak.result }}
+          WSL2_RESULT: ${{ needs.wsl2-acceptance.result }}
+          LINUX_SECURITY_RESULT: ${{ needs.release-linux-security.result }}
+        run: |
+          set -euo pipefail
+          for result in \
+            "$RELEASE_GATE_RESULT" \
+            "$TERMINAL_BENCH_RESULT" \
+            "$WSL2_RESULT" \
+            "$LINUX_SECURITY_RESULT"; do
+            test "$result" = success
+          done
+          case "$RELEASE_MAJOR" in
+            0)
+              test "$QUALIFICATION" = pre-v1
+              test "$RELEASE_SOAK_RESULT" = skipped
+              protected_soak=not_claimed_for_pre_v1
+              terminal_bench=not_claimed_for_pre_v1
+              dogfood=not_claimed_for_pre_v1
+              paid_provider_replay=not_claimed_for_pre_v1
+              ;;
+            ''|*[!0-9]*) echo "release major is invalid" >&2; exit 1 ;;
+            *)
+              test "$QUALIFICATION" = v1
+              test "$RELEASE_SOAK_RESULT" = success
+              protected_soak=passed
+              terminal_bench=passed
+              dogfood=passed
+              paid_provider_replay=passed
+              ;;
+          esac
+          python3 - <<PY
+          import json
+          import os
+
+          document = {
+              "schema_version": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "source_sha": os.environ["GITHUB_SHA"],
+              "tag": os.environ["GITHUB_REF_NAME"],
+              "qualification": os.environ["QUALIFICATION"],
+              "evidence": {
+                  "global_gate": "passed",
+                  "terminal_bench": "$terminal_bench",
+                  "protected_soak": "$protected_soak",
+                  "wsl2": "passed",
+                  "linux_security": "passed",
+                  "dogfood": "$dogfood",
+                  "paid_provider_replay": "$paid_provider_replay",
+              },
+          }
+          with open("release-qualification.json", "w", encoding="utf-8") as output:
+              json.dump(document, output, indent=2, sort_keys=True)
+              output.write("\n")
+          PY
+      - name: Retain exact-tag qualification evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-qualification-${{ github.ref_name }}-${{ github.run_attempt }}
+          path: release-qualification.json
+          if-no-files-found: error
+          retention-days: 90
+
   sign-and-publish:
     name: Sign metadata and publish
-    needs: [build-linux, build-macos, release-gate, release-terminal-bench, release-soak, wsl2-acceptance, release-linux-security]
+    needs: [build-linux, build-macos, qualification-gate]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -879,8 +974,10 @@ jobs:
             --archive "darwin-arm64=dist/unsigned/rottweiler-${GITHUB_REF_NAME#v}-darwin-arm64.tar.gz" \
             --archive "linux-x86_64=dist/unsigned/rottweiler-${GITHUB_REF_NAME#v}-linux-x86_64.tar.gz" \
             --formula dist/distribution/rottweiler.rb \
+            --cask dist/distribution/rottweiler.cask.rb \
             --bootstrap dist/distribution/rottweiler-install.sh
           ruby -c dist/distribution/rottweiler.rb
+          ruby -c dist/distribution/rottweiler.cask.rb
           sh -n dist/distribution/rottweiler-install.sh
       - name: Attest signed release set
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
@@ -937,7 +1034,7 @@ jobs:
           fi
           rm -rf "$publication"
           trap - EXIT
-      - name: Publish stable formula to the Homebrew tap
+      - name: Publish stable Homebrew packages to the tap
         if: ${{ !contains(github.ref_name, '-') }}
         shell: bash
         env:
@@ -960,8 +1057,11 @@ jobs:
           rm -rf "$tap"
           git clone --depth 1 git@github.com:Boredphilosopher96/homebrew-tap.git "$tap"
           test -d "$tap/Formula"
+          mkdir -p "$tap/Casks"
           install -m 644 dist/distribution/rottweiler.rb "$tap/Formula/rottweiler.rb"
-          git -C "$tap" add Formula/rottweiler.rb
+          install -m 644 dist/distribution/rottweiler.cask.rb "$tap/Casks/rottweiler.rb"
+          install -m 644 packaging/homebrew/README.md "$tap/README.md"
+          git -C "$tap" add Formula/rottweiler.rb Casks/rottweiler.rb README.md
           git -C "$tap" config user.name github-actions[bot]
           git -C "$tap" config user.email 41898282+github-actions[bot]@users.noreply.github.com
           if ! git -C "$tap" diff --cached --quiet; then

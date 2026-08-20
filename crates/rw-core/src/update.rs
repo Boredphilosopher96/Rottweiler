@@ -14,7 +14,7 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 use url::Url;
 
-use rw_types::config::UpdateChannel;
+use rw_types::{config::UpdateChannel, update_contract::MAX_UPDATE_ARTIFACT_BYTES};
 
 const SIGNATURE_DOMAIN: &[u8] = b"rottweiler-update-metadata-v1\0";
 const MAX_ENVELOPE_BYTES: usize = 1024 * 1024;
@@ -22,7 +22,6 @@ const MAX_PAYLOAD_BYTES: usize = 768 * 1024;
 const MAX_SIGNATURES: usize = 32;
 const MAX_KEYS: usize = 32;
 const MAX_TARGETS: usize = 32;
-const MAX_ARTIFACT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_RELEASE_NOTES_BYTES: usize = 64 * 1024;
 const MAX_ROOT_CHAIN: usize = 16;
 
@@ -711,7 +710,7 @@ fn validate_target(target: &ReleaseTarget) -> Result<(), UpdateVerificationError
         || url.query().is_some()
         || url.fragment().is_some()
         || target.length == 0
-        || target.length > MAX_ARTIFACT_BYTES
+        || target.length > MAX_UPDATE_ARTIFACT_BYTES
         || target.sha256.len() != 64
         || !target
             .sha256

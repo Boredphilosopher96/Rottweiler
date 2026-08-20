@@ -44,8 +44,8 @@ Terminal-Bench baseline, and the external dogfood-ledger secret documented in
 `docs/07-VERIFICATION.md`. Those v1 qualification inputs are not required for a
 pre-v1 tag. GitHub Models was retired on 2026-07-30 and is not a release
 dependency; Terminal-Bench selects the matching paid provider key only inside
-its step. The native macOS ARM64 runner
-and the Linux X64 soak runner must be online. Linux core measurements, WSL2,
+its step. For v1 and later, the native macOS ARM64 runner and the Linux X64
+soak runner must be online. Linux core measurements, WSL2,
 and Harbor's containers use fixed disposable GitHub-hosted images. These are
 prerequisites to signing for the applicable release tier: the workflow does not
 offer a skip flag for missing evidence or infrastructure.
@@ -55,8 +55,9 @@ validates the measured baseline provenance, committed public signing inputs,
 protected variables/secrets, and dogfood ledger, then invokes the same
 calibrated protected-performance workflow used by release qualification. The
 preflight cannot sign metadata, publish a GitHub release, update Homebrew, or
-substitute for the exact-tag soak and WSL2 gates, or for the v1+ Terminal-Bench
-and live replay gates.
+substitute for the exact-tag WSL2 gate. For v1 and later it also cannot
+substitute for the exact-tag protected soaks, Terminal-Bench, or live replay
+gates. Pre-v1 readiness records those as not claimed rather than measured.
 
 The tag workflow materializes those seeds as mode-0600 temporary files, signs
 the two channel documents, deletes the temporary directory, attests the archive

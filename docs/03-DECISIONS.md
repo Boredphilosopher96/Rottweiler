@@ -186,9 +186,11 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 
 **Decision.** Preserve ADR-001's separate supervised Rust-engine and OpenTUI
 processes, but ship them only as one complete platform bundle. `rw` is the sole
-public entrypoint. Homebrew is the primary distribution: private engine, TUI,
-and native renderer files live together under the formula's `libexec`, while a
-single package-manager-aware `rw` wrapper is linked into `PATH`. A generated
+public entrypoint. Homebrew is the primary distribution: the versioned macOS
+Cask stages the exact release archive in Homebrew's managed directory, while
+the versioned Formula keeps the same private engine, TUI, WASM host, and native
+renderer files together under `libexec`. Both expose one package-manager-aware
+`rw` wrapper in `PATH`. A generated
 HTTPS-only bootstrap is the secondary path and may install only an immutable
 tag archive whose exact URL, byte length, and SHA-256 were derived from that
 release. Homebrew updates use `brew upgrade`; the signed in-app updater remains
@@ -196,8 +198,8 @@ for the official versioned installer and refuses package-managed layouts.
 
 **Rationale.** The process split provides crash isolation, headless reuse, and
 future clients; it does not justify making users install, launch, or close two
-programs. Homebrew can keep runtime helpers private while selecting the correct
-native archive in one command. A source `cargo install` cannot deploy the
+programs. Homebrew can keep runtime helpers private while selecting the
+immutable native archive in one command. A source `cargo install` cannot deploy the
 Bun-compiled executable and native renderer as a managed sibling tree, so
 calling it a full installation would produce a broken interactive app. One
 byte-identical executable also cannot span macOS and Linux; one complete bundle
@@ -312,3 +314,36 @@ Consequently the "deterministic replay is sacred" tenet holds for plugin provide
 **Consequences (accepted).** “Any provider” currently entails a native-process supply-chain surface rather than the component tier's tighter capability boundary. The signed extension registry already protects signed WASM hook-component distribution; it does not make a native RPC provider a component or remove the native-process trust decision.
 
 **Revisit when.** The component model supplies a versioned provider capability with authenticated host calls that do not disclose credentials, incremental streaming with bounded backpressure and cancellation, recordable/redactable wire framing, and capability permissions that remain enforceable at each host boundary. Move providers through the existing manifest and dispatcher only after a conformance suite proves those contracts.
+
+---
+
+## ADR-026: Release qualification is derived from the major version
+
+**Status:** accepted 2026-08-20.
+
+**Decision.** The release tag remains the immutable publication identity, and
+its canonical semantic version selects one closed qualification tier. Every
+release requires measured core baselines plus the hosted global, native
+platform, package, security, and WSL acceptance gates. A major-zero release
+records protected soak, Terminal-Bench, dogfood, and paid provider replay as
+`not_claimed_for_pre_v1` and never schedules the self-hosted soak matrix. A
+major-one-or-later release requires measured soak baselines and successful
+results from every protected v1 gate. Callers cannot select or waive the tier.
+
+The tag workflow admits publication through one hosted aggregate job. For
+major zero it requires every common job to succeed and the protected soak job
+to be skipped by policy. For major one or later it requires that soak job to
+succeed. Failure, cancellation, or any unexpected skipped result blocks
+signing. The versioned Cask, Formula, bootstrap, signed metadata, and updater
+all consume the same release archives.
+
+**Rationale.** Bootstrap soak ceilings and offline self-hosted runners cannot
+honestly be called measured evidence, but they also should not prevent a
+pre-v1 release from making the narrower claims it actually proves. Deriving
+the tier from SemVer keeps that narrower path unavailable to v1 while avoiding
+a caller-controlled release bypass. Preserving the existing tag publisher and
+original archives keeps signing and rerun behavior in one established owner.
+
+**Revisit when.** Protected soak measurements and runners are continuously
+available for pre-v1 development, or the project needs a separately reviewed
+release-candidate handoff before creating tags.

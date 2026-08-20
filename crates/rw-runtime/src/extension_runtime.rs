@@ -2578,11 +2578,19 @@ mod tests {
             serde_json::to_vec(&manifest).expect("manifest JSON"),
         )
         .expect("manifest file");
+        let executable = plugin_root.join("plugin-entrypoint");
+        fs::write(&executable, b"#!/bin/sh\nexit 0\n").expect("plugin entrypoint");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+                .expect("entrypoint mode");
+        }
         (
             crate::extension_config::DiscoveredPlugin {
                 name: name.to_owned(),
                 enabled: true,
-                argv: vec!["/bin/sh".to_owned()],
+                argv: vec![executable.to_string_lossy().into_owned()],
                 cwd: plugin_root,
                 inherit_env: Vec::new(),
                 manifest_path,

@@ -18,17 +18,17 @@ use rw_core::{
     UpdateVerificationPolicy, VerifiedUpdate, prepare_update_network, restore_trusted_root_chain,
     verify_update_metadata_chain,
 };
+use rw_types::update_contract::MAX_UPDATE_ARTIFACT_BYTES;
 use serde::{Deserialize, Serialize};
 use tar::EntryType;
 use url::Url;
 
 const METADATA_LIMIT: usize = 1024 * 1024;
-const ARTIFACT_LIMIT: usize = 64 * 1024 * 1024;
 const STATE_LIMIT: u64 = 2 * 1024 * 1024;
 const ROOT_CHAIN_LIMIT: usize = 16;
 const MOUNTS_LIMIT: u64 = 1024 * 1024;
 const OS_RELEASE_LIMIT: u64 = 4096;
-const ARCHIVE_ENTRY_LIMIT: usize = 6;
+const ARCHIVE_ENTRY_LIMIT: usize = 7;
 const EXPANDED_LIMIT: u64 = 160 * 1024 * 1024;
 const STATE_MARKER: &str = ".update-state-initialized";
 
@@ -304,9 +304,10 @@ async fn install_verified_update(
     accepted_root_chain: Vec<RootChainEntry>,
     timeout: Duration,
 ) -> Result<()> {
+    let maximum_artifact_bytes = usize::try_from(MAX_UPDATE_ARTIFACT_BYTES).unwrap_or(usize::MAX);
     let artifact_limit = usize::try_from(verified.artifact_length())
         .ok()
-        .filter(|value| *value <= ARTIFACT_LIMIT)
+        .filter(|value| *value <= maximum_artifact_bytes)
         .ok_or_else(|| miette!("signed update artifact exceeds the supported download limit"))?;
     let artifact = client
         .fetch(verified.artifact_url(), artifact_limit, timeout)
@@ -566,6 +567,7 @@ fn expected_generation_files() -> BTreeMap<&'static str, (u64, u32)> {
         ("install.sh", (128 * 1024, 0o755)),
         ("bin/rw", (25 * 1024 * 1024, 0o755)),
         ("bin/rottweiler-tui", (100 * 1024 * 1024, 0o755)),
+        ("bin/rottweiler-wasm-host", (100 * 1024 * 1024, 0o755)),
         (native, (100 * 1024 * 1024, 0o644)),
     ])
 }
@@ -1377,6 +1379,7 @@ mod tests {
         for (relative, bytes) in [
             ("install.sh", b"#!/bin/sh\n".as_slice()),
             ("bin/rottweiler-tui", b"tui".as_slice()),
+            ("bin/rottweiler-wasm-host", b"wasm".as_slice()),
             ("bin/native-placeholder", b"native".as_slice()),
         ] {
             let relative = if relative == "bin/native-placeholder" {
@@ -1580,6 +1583,10 @@ mod tests {
         )
         .expect("exact archive");
         assert_eq!(fs::read(staging.join("bin/rw")).expect("rw"), b"rw");
+        assert_eq!(
+            fs::read(staging.join("bin/rottweiler-wasm-host")).expect("WASM host"),
+            b"wasm"
+        );
         assert!(
             fs::symlink_metadata(staging.join("bin/rw"))
                 .expect("metadata")
