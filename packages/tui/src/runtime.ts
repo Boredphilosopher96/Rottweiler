@@ -61,6 +61,7 @@ export interface RuntimeApp {
   setSessionId(sessionId: string): void
   beginInitialReplayBatch?(): void
   endInitialReplayBatch?(): void
+  resetConnectionProjections?(): void
 }
 
 export interface RuntimeEngineClient {
@@ -474,6 +475,12 @@ export class TuiEngineRuntime {
         if (initialReplayTimer !== undefined) clearTimeout(initialReplayTimer)
         initialReplayTimer = setTimeout(finishInitialReplayBatch, 25)
       }
+      const restartInitialReplayBatch = () => {
+        if (initialReplayBatch) return
+        initialReplayBatch = true
+        boundForBatch.beginInitialReplayBatch?.()
+        initialReplayTimer = setTimeout(finishInitialReplayBatch, 250)
+      }
       boundForBatch.beginInitialReplayBatch?.()
       initialReplayTimer = setTimeout(finishInitialReplayBatch, 250)
 
@@ -534,12 +541,29 @@ export class TuiEngineRuntime {
               const reconnectReady = subscriptionReady
               resolveSubscriptionReady()
               if (reconnectReady && !this.#config.replayMode) {
+                this.#requiredApp().resetConnectionProjections?.()
                 void this.#requestInitialProjections(
                   sessionId,
                   subscriptionController.signal,
                 )
               }
             }
+          },
+          onReplayCursorAhead: () => {
+            if (generation !== this.#sessionGeneration) return
+            const bound = this.#requiredApp()
+            restartInitialReplayBatch()
+            bound.resetConnectionProjections?.()
+            const initial = this.#config.replayMode
+              ? enterReplayMode(createInitialState(), sessionId)
+              : createInitialState()
+            bound.setState(
+              reduceRottweilerState(
+                initial,
+                transportReconnecting(bound.state.connection.attempt),
+              ),
+            )
+            this.#recoveringSequenceGap = false
           },
           onEvent: (event) => {
             if (

@@ -297,6 +297,78 @@ describe("authenticated UDS engine transport", () => {
     expect(delays).toEqual([1])
   })
 
+  test("resets an ahead replay cursor once and retries from the beginning", async () => {
+    const replayCompleted = {
+      type: "session_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "mock-client",
+        request_id: "replay-complete",
+        emitted_at: "2026-01-01T00:00:00Z",
+      },
+      session_id: "session-transport",
+      through_sequence: null,
+    } satisfies EngineEvent
+    const eventPaths: string[] = []
+    let eventRequests = 0
+    const client = new EngineHttpSseClient({
+      socketPath: "/private/cursor-ahead.sock",
+      bootstrapToken: "bootstrap",
+      fetch: (async (input: string | URL | Request) => {
+        const url = new URL(String(input))
+        if (url.pathname === "/v1/connect") {
+          return Response.json({ client_id: "mock-client", token: "mock-token" }, { status: 201 })
+        }
+        if (url.pathname === "/v1/command") {
+          return Response.json({ type: "accepted" }, { status: 202 })
+        }
+        eventPaths.push(`${url.pathname}${url.search}`)
+        eventRequests += 1
+        if (eventRequests === 1) {
+          return Response.json(
+            {
+              error: {
+                code: "replay_cursor_ahead",
+                message: "last seen sequence is ahead of the durable log",
+              },
+            },
+            { status: 409 },
+          )
+        }
+        return new Response(encodeSseJson(replayCompleted), {
+          headers: { "Content-Type": "text/event-stream" },
+        })
+      }) as typeof fetch,
+      scheduler: {
+        async sleep() {
+          throw new Error("cursor reset must retry without backoff")
+        },
+      },
+    })
+    const controller = new AbortController()
+    let cursor: string | null = "9"
+    let resets = 0
+
+    await client.subscribe({
+      attach,
+      signal: controller.signal,
+      getLastSeenSequence: () => cursor,
+      onReplayCursorAhead() {
+        resets += 1
+        cursor = null
+      },
+      onEvent() {
+        controller.abort()
+      },
+    })
+
+    expect(resets).toBe(1)
+    expect(eventPaths).toEqual([
+      "/v1/events?session_id=session-transport&last_seen_sequence=9",
+      "/v1/events?session_id=session-transport",
+    ])
+  })
+
   test("aborts a gapped attempt and immediately resumes from the last verified cursor", async () => {
     const events = {
       one: { type: "mode_changed", meta: durableMeta("1"), mode: "plan" },

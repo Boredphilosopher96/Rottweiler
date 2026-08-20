@@ -658,6 +658,8 @@ pub enum HostError {
     SessionIdentityMismatch,
     #[error("host request id was reused with a different command")]
     RequestConflict,
+    #[error("last seen sequence is ahead of the durable log")]
+    ReplayCursorAhead,
     #[error("host persistence failure: {0}")]
     Persistence(String),
     #[error("host query failure: {0}")]
@@ -3174,7 +3176,17 @@ impl EngineHost {
         last_seen: Option<SequenceId>,
     ) -> Result<mpsc::Receiver<Result<EngineEvent, HostError>>, HostError> {
         let session = if let Some(session_id) = &session_id {
-            Some(self.ready_session(session_id).await?)
+            let session = self.ready_session(session_id).await?;
+            let captured_tail = session.handle().last_sequence().await?;
+            let cursor_ahead = match (last_seen, captured_tail) {
+                (Some(_), None) => true,
+                (Some(seen), Some(tail)) => seen > tail,
+                (None, _) => false,
+            };
+            if cursor_ahead {
+                return Err(HostError::ReplayCursorAhead);
+            }
+            Some((session, captured_tail))
         } else {
             None
         };
@@ -3196,27 +3208,7 @@ impl EngineHost {
                 registry: client_events,
                 pending: provider_auth,
             };
-            if let Some(session) = session {
-                let captured_tail = match session.handle().last_sequence().await {
-                    Ok(tail) => tail,
-                    Err(error) => {
-                        let _ = send.send(Err(HostError::from(error))).await;
-                        return;
-                    }
-                };
-                let cursor_ahead = match (last_seen, captured_tail) {
-                    (Some(_), None) => true,
-                    (Some(seen), Some(tail)) => seen > tail,
-                    (None, _) => false,
-                };
-                if cursor_ahead {
-                    let _ = send
-                        .send(Err(HostError::Protocol(
-                            "last seen sequence is ahead of the durable log".to_owned(),
-                        )))
-                        .await;
-                    return;
-                }
+            if let Some((session, captured_tail)) = session {
                 let mut session_events = session
                     .handle()
                     .subscribe_client(bound.client_id.clone(), last_seen);
@@ -3737,6 +3729,7 @@ fn host_error_code(error: &HostError) -> &'static str {
         HostError::SessionNotLoaded(_) => "session_not_loaded",
         HostError::SessionIdentityMismatch => "session_identity_mismatch",
         HostError::RequestConflict => "request_id_conflict",
+        HostError::ReplayCursorAhead => "replay_cursor_ahead",
         HostError::Persistence(_) => "host_persistence_failure",
         HostError::Query(_) => "host_query_failure",
         HostError::Protocol(_) => "host_protocol_failure",
@@ -3994,7 +3987,9 @@ fn sanitized_provider_auth_error(error: &HostError) -> String {
         HostError::SessionNotLoaded(_) => "provider authentication session is unavailable",
         HostError::SessionCapacity => "provider authentication capacity is exhausted",
         HostError::Persistence(_) => "provider credential storage failed",
-        HostError::Protocol(_) => "provider authentication request was invalid",
+        HostError::Protocol(_) | HostError::ReplayCursorAhead => {
+            "provider authentication request was invalid"
+        }
         HostError::Query(message) if message.contains("no GitHub OAuth client id") => {
             "GitHub Copilot sign-in is unavailable in this build because it has no compatible OAuth client identity"
         }
@@ -5877,20 +5872,11 @@ mod tests {
             CommandOutcome::Accepted
         );
 
-        let mut invalid = host
+        let error = host
             .subscribe(bound.clone(), Some(session.clone()), Some(SequenceId(0)))
             .await
-            .expect("subscription channel");
-        let error = tokio::time::timeout(Duration::from_millis(250), invalid.recv())
-            .await
-            .expect("ahead cursor must not hang")
-            .expect("protocol error item")
-            .expect_err("sequence zero is ahead of an empty log");
-        assert!(matches!(
-            error,
-            HostError::Protocol(message)
-                if message == "last seen sequence is ahead of the durable log"
-        ));
+            .expect_err("sequence zero is synchronously rejected before subscription");
+        assert!(matches!(error, HostError::ReplayCursorAhead));
 
         let mut valid = host
             .subscribe(bound, Some(session.clone()), None)

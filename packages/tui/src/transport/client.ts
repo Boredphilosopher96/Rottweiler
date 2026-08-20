@@ -41,6 +41,7 @@ export interface EngineSubscriptionOptions {
   readonly onEvent: (event: WireEngineEvent) => void | Promise<void>
   readonly onConnection?: (update: TransportConnectionUpdate) => void
   readonly onReconnect?: () => void | Promise<void>
+  readonly onReplayCursorAhead?: () => void | Promise<void>
   readonly getLastSeenSequence?: () => string | null
   readonly requestId?: () => string
 }
@@ -183,6 +184,7 @@ export class EngineHttpSseClient {
   async subscribe(options: EngineSubscriptionOptions): Promise<void> {
     let attempt = 0
     let reconnecting = false
+    let replayCursorReset = false
     let lastSeen = options.getLastSeenSequence?.() ?? options.attach.last_seen_sequence ?? null
 
     while (!options.signal.aborted) {
@@ -239,6 +241,9 @@ export class EngineHttpSseClient {
           if (response.status === 401 || response.status === 403) {
             this.#clientAuth = null
           }
+          if (await isReplayCursorAheadResponse(response)) {
+            throw new ReplayCursorAheadError(response.status)
+          }
           throw new EngineTransportError("engine event stream rejected", response.status)
         }
         if (!response.body) {
@@ -273,6 +278,18 @@ export class EngineHttpSseClient {
       } catch (error) {
         if (options.signal.aborted || (eventStream.restart === null && isAbortError(error))) {
           break
+        }
+        if (error instanceof ReplayCursorAheadError) {
+          if (replayCursorReset || options.onReplayCursorAhead === undefined) {
+            throw error
+          }
+          await options.onReplayCursorAhead()
+          replayCursorReset = true
+          lastSeen = null
+          attempt = 0
+          reconnecting = true
+          options.onConnection?.({ phase: "disconnected", attempt })
+          continue
         }
         if (eventStream.restart !== null) {
           options.onConnection?.({ phase: "disconnected", attempt })
@@ -397,6 +414,13 @@ export class EngineTransportError extends Error {
   }
 }
 
+class ReplayCursorAheadError extends EngineTransportError {
+  constructor(status: number) {
+    super("engine replay cursor is ahead of the durable log", status)
+    this.name = "ReplayCursorAheadError"
+  }
+}
+
 function defaultEventsPath(sessionId: string, lastSeenSequence: string | null): string {
   const query = new URLSearchParams({ session_id: sessionId })
   if (lastSeenSequence !== null) {
@@ -420,6 +444,19 @@ function isCommandOutcome(value: unknown): value is CommandOutcome {
     typeof value.error.message === "string" &&
     typeof value.error.retryable === "boolean"
   )
+}
+
+async function isReplayCursorAheadResponse(response: Response): Promise<boolean> {
+  const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? ""
+  if (!contentType.includes("application/json")) return false
+  try {
+    const value: unknown = await response.json()
+    return isRecord(value) &&
+      isRecord(value.error) &&
+      value.error.code === "replay_cursor_ahead"
+  } catch {
+    return false
+  }
 }
 
 function parseEventJson(data: string): unknown {

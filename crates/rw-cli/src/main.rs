@@ -1683,10 +1683,12 @@ impl server::ServerEngine for HistoricalReplayEngine {
         last_seen: Option<SequenceId>,
     ) -> std::result::Result<
         tokio::sync::mpsc::Receiver<std::result::Result<EngineEvent, String>>,
-        String,
+        server::EventSubscriptionError,
     > {
         if session_id.as_ref() != Some(&self.session_id) {
-            return Err("historical replay session mismatch".to_owned());
+            return Err(server::EventSubscriptionError::Other(
+                "historical replay session mismatch".to_owned(),
+            ));
         }
         let events = Arc::clone(&self.events);
         let replay_session = self.session_id.clone();
@@ -2245,9 +2247,10 @@ impl server::ServerEngine for DeferredHostedEngine {
         last_seen: Option<SequenceId>,
     ) -> std::result::Result<
         tokio::sync::mpsc::Receiver<std::result::Result<EngineEvent, String>>,
-        String,
+        server::EventSubscriptionError,
     > {
-        self.loaded()?
+        self.loaded()
+            .map_err(server::EventSubscriptionError::Other)?
             .subscribe(bound_client, session_id, last_seen)
             .await
     }
@@ -3835,7 +3838,7 @@ mod tests {
             _last_seen: Option<rw_core::SequenceId>,
         ) -> std::result::Result<
             tokio::sync::mpsc::Receiver<std::result::Result<rw_core::EngineEvent, String>>,
-            String,
+            crate::server::EventSubscriptionError,
         > {
             let (_send, receive) = tokio::sync::mpsc::channel(1);
             Ok(receive)

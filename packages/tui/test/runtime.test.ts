@@ -46,6 +46,7 @@ class TestApp implements RuntimeApp {
   readonly connectionPhases: string[] = []
   initialReplayBatchesStarted = 0
   initialReplayBatchesFinished = 0
+  connectionProjectionResets = 0
 
   beginInitialReplayBatch(): void {
     this.initialReplayBatchesStarted += 1
@@ -53,6 +54,10 @@ class TestApp implements RuntimeApp {
 
   endInitialReplayBatch(): void {
     this.initialReplayBatchesFinished += 1
+  }
+
+  resetConnectionProjections(): void {
+    this.connectionProjectionResets += 1
   }
 
   handleEvent(event: WireEngineEvent): void {
@@ -267,6 +272,40 @@ class ReconnectingProjectionClient implements RuntimeEngineClient {
   async reconnect(): Promise<void> {
     await this.subscription?.onReconnect?.()
     this.subscription?.onConnection?.({ phase: "connected", attempt: 1 })
+  }
+}
+
+class CursorAheadClient implements RuntimeEngineClient {
+  readonly commands: ClientCommand[] = []
+
+  restartStream(): boolean {
+    return false
+  }
+
+  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+    this.commands.push(command)
+    return { type: "accepted" }
+  }
+
+  async subscribe(options: EngineSubscriptionOptions): Promise<void> {
+    options.onConnection?.({ phase: "connected", attempt: 0 })
+    await options.onEvent({
+      type: "session_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: "runtime-cursor-ahead",
+        request_id: "initial-replay-complete",
+        emitted_at: "2026-08-19T00:00:01Z",
+      },
+      session_id: options.attach.session_id,
+      through_sequence: "9",
+    })
+    await options.onReplayCursorAhead?.()
+    options.onConnection?.({ phase: "connected", attempt: 1 })
+    await new Promise<void>((resolve) => {
+      if (options.signal.aborted) resolve()
+      else options.signal.addEventListener("abort", () => resolve(), { once: true })
+    })
   }
 }
 
@@ -1228,6 +1267,47 @@ describe("OpenTUI engine runtime", () => {
     ])
     expect(reconnectedTypes).not.toContain("resume_session")
     expect(reconnectedTypes).not.toContain("send_message")
+
+    await runtime.stop()
+    await running
+  })
+
+  test("resets the session projection when the durable log rejects its cursor", async () => {
+    const client = new CursorAheadClient()
+    const app = new TestApp()
+    app.handleEvent({
+      type: "mode_changed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        session_id: "session-cursor-reset",
+        sequence_id: "9",
+        emitted_at: "2026-08-19T00:00:00Z",
+      },
+      mode: "plan",
+    })
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "session-cursor-reset",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+      },
+      client,
+      new MemoryFiles(),
+    )
+    runtime.bind(app)
+
+    const running = runtime.start()
+    await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
+
+    expect(app.connectionProjectionResets).toBe(2)
+    expect(app.initialReplayBatchesStarted).toBe(2)
+    expect(app.initialReplayBatchesFinished).toBe(1)
+    expect(app.state.lastSequence).toBeNull()
+    expect(app.state.mode).toBe("execute")
+    expect(app.state.connection.phase).toBe("connected")
 
     await runtime.stop()
     await running

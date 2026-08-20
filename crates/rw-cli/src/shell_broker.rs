@@ -710,7 +710,10 @@ mod tests {
             _bound_client: ClientId,
             _session_id: Option<SessionId>,
             _last_seen: Option<SequenceId>,
-        ) -> Result<mpsc::Receiver<Result<EngineEvent, String>>, String> {
+        ) -> Result<
+            mpsc::Receiver<Result<EngineEvent, String>>,
+            crate::server::EventSubscriptionError,
+        > {
             let (send, receive) = mpsc::channel(4);
             self.subscribed.notify_one();
             if !self.first_generation {

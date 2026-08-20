@@ -196,6 +196,27 @@ export class ProjectionRequestBroker {
     this.#modelSwitchRequests.clear()
   }
 
+  clearForReconnect(): void {
+    for (const kind of [
+      "workspace_status",
+      "workspace_diff",
+      "review",
+      "commands",
+      "modes",
+      "models",
+      "sessions",
+      "files",
+      "settings",
+      "settings_pending",
+      "permissions",
+      "mcp",
+      "runtime_services",
+      "subagents",
+      "provider_activation_models",
+    ] as const) this.#forget(kind)
+    this.#filePreview = null
+  }
+
   setFilePreview(pending: PendingFilePreview | null): void {
     this.#filePreview = pending
   }

@@ -408,7 +408,10 @@ pub trait ServerEngine: Send + Sync + 'static {
         bound_client: ClientId,
         session_id: Option<SessionId>,
         last_seen: Option<SequenceId>,
-    ) -> std::result::Result<mpsc::Receiver<std::result::Result<EngineEvent, String>>, String>;
+    ) -> std::result::Result<
+        mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+        EventSubscriptionError,
+    >;
 
     /// Releases a foreground-shell gate from the trusted CLI parent without
     /// transferring the interactive driver's lease.
@@ -434,6 +437,18 @@ pub trait ServerEngine: Send + Sync + 'static {
         _session_id: SessionId,
         _provider: String,
     ) -> std::result::Result<(), String>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EventSubscriptionError {
+    ReplayCursorAhead,
+    Other(String),
+}
+
+impl From<String> for EventSubscriptionError {
+    fn from(error: String) -> Self {
+        Self::Other(error)
+    }
 }
 
 /// Production adapter from the core multi-session host to the transport trait.
@@ -472,7 +487,10 @@ impl ServerEngine for HostedEngine {
         bound_client: ClientId,
         session_id: Option<SessionId>,
         last_seen: Option<SequenceId>,
-    ) -> std::result::Result<mpsc::Receiver<std::result::Result<EngineEvent, String>>, String> {
+    ) -> std::result::Result<
+        mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+        EventSubscriptionError,
+    > {
         let mut source = self
             .host
             .subscribe(
@@ -483,7 +501,10 @@ impl ServerEngine for HostedEngine {
                 last_seen,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match error {
+                rw_core::HostError::ReplayCursorAhead => EventSubscriptionError::ReplayCursorAhead,
+                other => EventSubscriptionError::Other(other.to_string()),
+            })?;
         let (send, receive) = mpsc::channel(HOST_EVENT_FORWARD_CAPACITY);
         tokio::spawn(async move {
             while let Some(event) = source.recv().await {
@@ -996,7 +1017,14 @@ async fn handle_request(
                 .await
             {
                 Ok(receiver) => sse_response(receiver),
-                Err(error) => error_response(StatusCode::BAD_REQUEST, &error),
+                Err(EventSubscriptionError::ReplayCursorAhead) => coded_error_response(
+                    StatusCode::CONFLICT,
+                    "replay_cursor_ahead",
+                    "last seen sequence is ahead of the durable log",
+                ),
+                Err(EventSubscriptionError::Other(error)) => {
+                    error_response(StatusCode::BAD_REQUEST, &error)
+                }
             }
         }
         _ => error_response(StatusCode::NOT_FOUND, "unknown engine endpoint"),
@@ -1133,6 +1161,19 @@ fn error_response(status: StatusCode, message: &str) -> Response<HttpBody> {
     json_response(status, bytes)
 }
 
+fn coded_error_response(status: StatusCode, code: &str, message: &str) -> Response<HttpBody> {
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }))
+    .unwrap_or_else(|_| {
+        br#"{"error":{"code":"transport_failure","message":"transport failure"}}"#.to_vec()
+    });
+    json_response(status, bytes)
+}
+
 fn unauthorized() -> Response<HttpBody> {
     error_response(StatusCode::UNAUTHORIZED, "engine authentication failed")
 }
@@ -1160,6 +1201,7 @@ mod tests {
         received: Mutex<Vec<(ClientId, ClientCommand)>>,
         completions: Mutex<Vec<ShellCompletionFixture>>,
         provider_keys: Mutex<Vec<(ClientId, SessionId, String, String)>>,
+        subscription_error: Mutex<Option<EventSubscriptionError>>,
     }
 
     type ShellCompletionFixture = (SessionId, ShellId, i32, Option<String>);
@@ -1195,8 +1237,18 @@ mod tests {
             _bound_client: ClientId,
             _session_id: Option<SessionId>,
             _last_seen: Option<SequenceId>,
-        ) -> std::result::Result<mpsc::Receiver<std::result::Result<EngineEvent, String>>, String>
-        {
+        ) -> std::result::Result<
+            mpsc::Receiver<std::result::Result<EngineEvent, String>>,
+            EventSubscriptionError,
+        > {
+            if let Some(error) = self
+                .subscription_error
+                .lock()
+                .expect("subscription error")
+                .clone()
+            {
+                return Err(error);
+            }
             let (send, receive) = mpsc::channel(1);
             send.send(Ok(EngineEvent::SessionsListed {
                 meta: CommandAckMeta {
@@ -1774,6 +1826,75 @@ mod tests {
                 .map(|(_, command)| command),
             Some(ClientCommand::ShutdownHost { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn replay_cursor_ahead_is_a_typed_rejection_before_sse_success() {
+        let root = tempdir().expect("runtime root");
+        let (runtime, listener) = ServerRuntime::create(root.path()).expect("runtime");
+        let bootstrap = fs::read_to_string(&runtime.paths.token).expect("bootstrap token");
+        let engine = Arc::new(StubEngine::default());
+        *engine
+            .subscription_error
+            .lock()
+            .expect("subscription error") = Some(EventSubscriptionError::ReplayCursorAhead);
+        let state = ServerState::new(engine, &runtime);
+        let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve(listener, state, shutdown_rx));
+
+        let connected = unix_request(
+            &runtime.paths.socket,
+            request_builder(Method::POST, "/v1/connect")
+                .header(AUTHORIZATION, format!("Bearer {}", bootstrap.trim()))
+                .body(Full::new(Bytes::new()))
+                .expect("connect request"),
+        )
+        .await;
+        let credentials: ClientCredentials = serde_json::from_slice(
+            &connected
+                .into_body()
+                .collect()
+                .await
+                .expect("connect body")
+                .to_bytes(),
+        )
+        .expect("client credentials");
+
+        let events = unix_request(
+            &runtime.paths.socket,
+            request_builder(
+                Method::GET,
+                "/v1/events?session_id=session-ahead&last_seen_sequence=9",
+            )
+            .header(AUTHORIZATION, format!("Bearer {}", credentials.token))
+            .header(CLIENT_HEADER, &credentials.client_id.0)
+            .header(ACCEPT, "text/event-stream")
+            .body(Full::new(Bytes::new()))
+            .expect("events request"),
+        )
+        .await;
+        assert_eq!(events.status(), StatusCode::CONFLICT);
+        let body: serde_json::Value = serde_json::from_slice(
+            &events
+                .into_body()
+                .collect()
+                .await
+                .expect("cursor rejection body")
+                .to_bytes(),
+        )
+        .expect("cursor rejection JSON");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "error": {
+                    "code": "replay_cursor_ahead",
+                    "message": "last seen sequence is ahead of the durable log"
+                }
+            })
+        );
+
+        shutdown.send(true).expect("stop server");
+        server.await.expect("server join").expect("server result");
     }
 
     #[tokio::test]

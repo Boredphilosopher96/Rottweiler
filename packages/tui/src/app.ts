@@ -1013,6 +1013,13 @@ export class RottweilerApp extends BoxRenderable {
     }
   }
 
+  resetConnectionProjections(): void {
+    this.#projectionRequests.clearForReconnect()
+    this.#commandsRequested = false
+    this.#modelsRequested = false
+    this.#projectionErrors = {}
+  }
+
   handleEvent(event: WireEngineEvent): void {
     if (this.#destroyed) return
     const eventRecord = event as unknown as Record<string, unknown>
