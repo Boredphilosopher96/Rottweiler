@@ -11,6 +11,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures_util::future::join_all;
 use rw_types::{
     ClientCommand, ClientId, ClientRole, CommandAckMeta, CommandDescriptor, CommandMeta,
     CommandOutcome, EngineError, EngineErrorCategory, EngineEvent, McpApprovalReview,
@@ -30,6 +31,7 @@ use crate::{
 };
 
 const HOST_EVENT_CAPACITY: usize = 256;
+const HOST_EVENT_STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 const SUBAGENT_REPLAY_BATCH_EVENTS: usize = 128;
 const SUBAGENT_REPLAY_BATCH_BYTES: usize = 128 * 1024;
 const MAX_WIRE_COMMANDS: usize = 512;
@@ -798,13 +800,13 @@ impl ClientEventChannel {
         subscribers.senders.is_empty()
     }
 
-    fn senders(&self) -> Vec<mpsc::Sender<EngineEvent>> {
+    fn senders(&self) -> Vec<(ClientEventSubscriptionId, mpsc::Sender<EngineEvent>)> {
         self.subscribers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .senders
-            .values()
-            .cloned()
+            .iter()
+            .map(|(id, sender)| (*id, sender.clone()))
             .collect()
     }
 }
@@ -3291,10 +3293,31 @@ impl EngineHost {
             return;
         };
         let _delivery = channel.delivery.lock().await;
-        let senders = channel.senders();
+        let mut senders = channel.senders();
         for event in events {
-            for sender in &senders {
-                let _ = sender.send(event.clone()).await;
+            let outcomes = join_all(senders.iter().map(|(id, sender)| {
+                let event = event.clone();
+                async move {
+                    (
+                        *id,
+                        tokio::time::timeout(HOST_EVENT_STALL_TIMEOUT, sender.send(event)).await,
+                    )
+                }
+            }))
+            .await;
+            let failed = outcomes
+                .into_iter()
+                .filter_map(|(id, outcome)| match outcome {
+                    Ok(Ok(())) => None,
+                    Ok(Err(_)) | Err(_) => Some(id),
+                })
+                .collect::<Vec<_>>();
+            for id in &failed {
+                channel.unsubscribe(*id);
+            }
+            senders.retain(|(id, _)| !failed.contains(id));
+            if senders.is_empty() {
+                break;
             }
         }
     }
@@ -4330,6 +4353,104 @@ mod tests {
         assert_eq!(session_lists.len(), COMMANDS);
         assert_eq!(acknowledgement_events, COMMANDS);
         assert_eq!(session_list_events, COMMANDS);
+    }
+
+    #[tokio::test]
+    async fn stalled_subscription_does_not_block_active_sibling() {
+        const COMMANDS: usize = 400;
+
+        let factory = Arc::new(StubFactory::new());
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 1,
+                max_deduplicated_requests: COMMANDS + 1,
+            },
+            factory,
+            Arc::new(StubQueries::default()),
+        )
+        .expect("host");
+        let client = BoundClient {
+            client_id: ClientId("stalled-sibling".to_owned()),
+        };
+        let mut stalled = host
+            .subscribe(client.clone(), None, None)
+            .await
+            .expect("stalled subscription");
+        let mut active = host
+            .subscribe(client.clone(), None, None)
+            .await
+            .expect("active subscription");
+
+        let dispatches = (0..COMMANDS)
+            .map(|index| {
+                let host = host.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    host.dispatch(
+                        client,
+                        ClientCommand::ListSessions {
+                            meta: meta("spoofed", &format!("sibling-{index}")),
+                        },
+                    )
+                    .await
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let started = Instant::now();
+        let delivered = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut acknowledgements = HashSet::new();
+            let mut session_lists = HashSet::new();
+            while acknowledgements.len() < COMMANDS || session_lists.len() < COMMANDS {
+                let event = active
+                    .recv()
+                    .await
+                    .expect("active subscription remains open")
+                    .expect("host result");
+                match event {
+                    EngineEvent::CommandAcknowledged { meta, .. }
+                        if meta.request_id.0.starts_with("sibling-") =>
+                    {
+                        acknowledgements.insert(meta.request_id);
+                    }
+                    EngineEvent::SessionsListed { meta, .. }
+                        if meta.request_id.0.starts_with("sibling-") =>
+                    {
+                        session_lists.insert(meta.request_id);
+                    }
+                    _ => {}
+                }
+            }
+            (acknowledgements.len(), session_lists.len())
+        })
+        .await;
+        eprintln!(
+            "active sibling completion: {delivered:?} in {:?}",
+            started.elapsed()
+        );
+
+        let stalled_events = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut count = 0;
+            while let Some(event) = stalled.recv().await {
+                event.expect("queued stalled result");
+                count += 1;
+            }
+            count
+        })
+        .await
+        .expect("stalled subscription closes after its deadline");
+        drop(active);
+        for dispatch in dispatches {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), dispatch)
+                    .await
+                    .expect("dispatch completed after subscriptions closed")
+                    .expect("dispatch task"),
+                CommandOutcome::Accepted
+            );
+        }
+        assert_eq!(delivered, Ok((COMMANDS, COMMANDS)));
+        assert!(stalled_events < COMMANDS * 2);
     }
 
     #[test]
