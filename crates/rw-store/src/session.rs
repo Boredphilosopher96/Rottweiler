@@ -99,6 +99,8 @@ pub struct SessionEventLog {
     path: PathBuf,
     next_sequence: u64,
     file: File,
+    validated_bytes: u64,
+    validated_hasher: blake3::Hasher,
     writer_state: SessionWriterState,
 }
 
@@ -130,10 +132,17 @@ impl SessionEventLog {
         ensure_regular_file(&file)?;
         lock_writer(&file)?;
         let next_sequence = recover_and_validate(&file)?;
+        let validated = read_opened_file(&file)?;
+        let validated_bytes =
+            u64::try_from(validated.len()).map_err(|_| SessionStoreError::LimitOverflow)?;
+        let mut validated_hasher = blake3::Hasher::new();
+        validated_hasher.update(&validated);
         Ok(Self {
             path,
             next_sequence,
             file,
+            validated_bytes,
+            validated_hasher,
             writer_state: SessionWriterState::Healthy,
         })
     }
@@ -238,10 +247,24 @@ impl SessionEventLog {
             return Ok(envelopes);
         }
         let pre_append_len = self.file.metadata()?.len();
+        if pre_append_len != self.validated_bytes {
+            self.writer_state = SessionWriterState::Poisoned;
+            return Err(SessionStoreError::CorruptEvent(
+                "event log length changed after validation",
+            ));
+        }
+        let appended_bytes =
+            u64::try_from(bytes.len()).map_err(|_| SessionStoreError::LimitOverflow)?;
+        let validated_bytes = self
+            .validated_bytes
+            .checked_add(appended_bytes)
+            .ok_or(SessionStoreError::LimitOverflow)?;
         if let Err(append_error) = append_event_bytes(&mut self.file, &bytes) {
             return Err(self.rollback_failed_append(pre_append_len, append_error));
         }
         self.next_sequence += count;
+        self.validated_bytes = validated_bytes;
+        self.validated_hasher.update(&bytes);
         Ok(envelopes)
     }
 
@@ -285,8 +308,9 @@ impl SessionEventLog {
 
     /// Loads complete events strictly after a durable sequence cursor.
     ///
-    /// The open writer has already validated the prefix. This path still reads
-    /// one stable descriptor snapshot, but decodes only the requested suffix.
+    /// The open writer fingerprints every validated append. This path checks
+    /// the complete stable snapshot against that fingerprint, then decodes only
+    /// the requested suffix.
     ///
     /// # Errors
     ///
@@ -297,6 +321,14 @@ impl SessionEventLog {
         after_sequence: Option<SequenceId>,
     ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
         let bytes = read_opened_file(&self.file)?;
+        if u64::try_from(bytes.len()).map_err(|_| SessionStoreError::LimitOverflow)?
+            != self.validated_bytes
+            || blake3::hash(&bytes) != self.validated_hasher.finalize()
+        {
+            return Err(SessionStoreError::CorruptEvent(
+                "event log changed after validation",
+            ));
+        }
         let start_sequence = match after_sequence {
             Some(sequence) => sequence
                 .0
@@ -3661,6 +3693,21 @@ mod tests {
             Err(SessionStoreError::EventPageCursorAhead)
         ));
 
+        let original =
+            std::fs::read(log.path()).unwrap_or_else(|error| panic!("test log must read: {error}"));
+        let mut mutated = original.clone();
+        mutated[0] = b'[';
+        std::fs::write(log.path(), &mutated)
+            .unwrap_or_else(|error| panic!("same-length mutation must succeed: {error}"));
+        assert!(matches!(
+            log.load_after::<FixtureEvent>(Some(SequenceId(1))),
+            Err(SessionStoreError::CorruptEvent(
+                "event log changed after validation"
+            ))
+        ));
+        std::fs::write(log.path(), original)
+            .unwrap_or_else(|error| panic!("test log restore must succeed: {error}"));
+
         OpenOptions::new()
             .write(true)
             .open(log.path())
@@ -3669,7 +3716,7 @@ mod tests {
         assert!(matches!(
             log.load_after::<FixtureEvent>(Some(SequenceId(1))),
             Err(SessionStoreError::CorruptEvent(
-                "event log is shorter than its durable tail"
+                "event log changed after validation"
             ))
         ));
     }
