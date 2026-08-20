@@ -392,6 +392,11 @@ override, then assert the complete supervisor process tree exits on default
 close. Homebrew tests also require `rw upgrade` to direct users to
 `brew upgrade rottweiler` rather than mutating the Cellar.
 
+Release preflight downloads the current public stable and beta envelopes and
+requires the candidate specs to advance their shared metadata version by
+exactly one. This catches a stale epoch before an immutable tag; the tag-time
+signer remains authoritative for signatures and the full channel transition.
+
 ## 7. Definition of Done (any change)
 
 1. Code + tests land together; new behavior has a replay fixture or property test.

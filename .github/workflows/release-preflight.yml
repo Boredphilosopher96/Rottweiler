@@ -125,12 +125,52 @@ jobs:
           Path(os.environ["LEDGER"]).write_bytes(base64.b64decode(encoded, validate=True))
           PY
           python3 scripts/check-dogfood-gate.py "$ledger" --through "$(date -u +%F)"
+      - name: Validate public channel metadata transition
+        id: channel_transition
+        continue-on-error: true
+        shell: bash
+        env:
+          UPDATE_BASE_URL: ${{ vars.ROTTWEILER_UPDATE_BASE_URL }}
+        run: |
+          set -euo pipefail
+          previous="$RUNNER_TEMP/rottweiler-previous-channel"
+          mkdir -p "$previous"
+          previous_args=()
+          for channel in stable beta; do
+            temporary="$previous/$channel.json.tmp"
+            status=$(curl \
+              --silent --show-error \
+              --proto '=https' \
+              --tlsv1.2 \
+              --max-redirs 0 \
+              --connect-timeout 10 \
+              --max-time 30 \
+              --max-filesize 1048576 \
+              --output "$temporary" \
+              --write-out '%{http_code}' \
+              "${UPDATE_BASE_URL}${channel}.json")
+            case "$status" in
+              200)
+                mv "$temporary" "$previous/$channel.json"
+                previous_args+=("--previous-$channel" "$previous/$channel.json")
+                ;;
+              404) rm -f "$temporary" ;;
+              *) echo "prior $channel metadata returned HTTP $status" >&2; exit 1 ;;
+            esac
+          done
+          python3 scripts/check-release-channel-advance.py \
+            --stable-spec release/update/stable.spec.json \
+            --beta-spec release/update/beta.spec.json \
+            "${previous_args[@]}" \
+            --output release-channel-transition.json
       - name: Retain non-secret readiness evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-preflight-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release-readiness.json
+          path: |
+            release-readiness.json
+            release-channel-transition.json
           if-no-files-found: warn
           retention-days: 30
       - name: Enforce aggregate release readiness
@@ -141,6 +181,7 @@ jobs:
           REPOSITORY_OUTCOME: ${{ steps.repository_readiness.outcome }}
           CONFIGURATION_OUTCOME: ${{ steps.protected_configuration.outcome }}
           DOGFOOD_OUTCOME: ${{ steps.dogfood.outcome }}
+          CHANNEL_TRANSITION_OUTCOME: ${{ steps.channel_transition.outcome }}
         run: |
           set -euo pipefail
           failed=()
@@ -149,6 +190,9 @@ jobs:
           fi
           if [ "$CONFIGURATION_OUTCOME" != success ]; then
             failed+=(protected-configuration)
+          fi
+          if [ "$CHANNEL_TRANSITION_OUTCOME" != success ]; then
+            failed+=(channel-metadata-transition)
           fi
           case "$RELEASE_MAJOR" in
             ''|*[!0-9]*) failed+=(release-version) ;;

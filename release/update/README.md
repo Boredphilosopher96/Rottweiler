@@ -61,6 +61,10 @@ The preflight cannot sign metadata, publish a GitHub release, update Homebrew, o
 substitute for the exact-tag WSL2 gate. For v1 and later it also cannot
 substitute for the exact-tag protected soaks, Terminal-Bench, or live replay
 gates. Pre-v1 readiness records those as not claimed rather than measured.
+Before sealing the candidate, preflight also downloads the public stable and
+beta envelopes and requires the checked-in channel specs to advance their
+shared metadata version by exactly one. Cryptographic authentication and the
+complete transition policy remain enforced again by the signer.
 
 The tag workflow materializes those seeds as mode-0600 temporary files, signs
 the two channel documents, deletes the temporary directory, attests the archive
