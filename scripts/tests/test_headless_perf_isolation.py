@@ -178,61 +178,33 @@ class HeadlessPerformanceIsolationTests(unittest.TestCase):
             macos.index("Headless performance gate"),
         )
 
-    def test_release_reuses_isolated_platform_measurements_independently(self) -> None:
+    def test_release_consumes_preflight_evidence_without_remeasuring(self) -> None:
         release = (REPO / ".github/workflows/release.yml").read_text(encoding="utf-8")
-        linux_builder = workflow_job(release, "linux-performance-build")
+        preflight = (REPO / ".github/workflows/release-preflight.yml").read_text(
+            encoding="utf-8"
+        )
+        contract = workflow_job(release, "runner-contract")
         linux = workflow_job(release, "build-linux")
         macos = workflow_job(release, "build-macos")
 
-        self.assertIn("scripts/prepare-linux-performance-binary.sh", linux_builder)
-        self.assertNotIn("  macos-performance-build:", release)
-        for platform, build, builder, other_builder, runner, checksum, gate in (
-            (
-                "linux",
-                linux,
-                "linux-performance-build",
-                "macos-performance-build",
-                "runs-on: ubuntu-24.04",
-                "sha256sum -c rw.sha256",
-                "Headless performance gate (Linux prebuilt binary)",
-            ),
-            (
-                "macos",
-                macos,
-                "runner-contract",
-                "linux-performance-build",
-                "runs-on: macos-15",
-                None,
-                "Headless performance gate (macOS measurement-host binary)",
-            ),
+        self.assertNotIn("  linux-performance-build:", release)
+        self.assertIn("uses: ./.github/workflows/performance.yml", preflight)
+        self.assertIn("release-candidate.py verify", contract)
+        self.assertIn("actions: read", contract)
+        for platform, build, runner in (
+            ("linux", linux, "runs-on: ubuntu-24.04"),
+            ("macos", macos, "runs-on: macos-15"),
         ):
             with self.subTest(platform=platform):
-                if platform == "macos":
-                    self.assertIn("needs: runner-contract", build)
-                else:
-                    self.assertIn(f"needs: [runner-contract, {builder}]", build)
-                self.assertNotIn(other_builder, build)
+                self.assertIn("needs: runner-contract", build)
                 self.assertIn(runner, build)
-                if platform == "macos":
-                    self.assertNotIn("actions/download-artifact@3e5f45b2", build)
-                    self.assertIn("scripts/prepare-macos-performance-binary.sh", build)
-                else:
-                    assert checksum is not None
-                    self.assertIn(checksum, build)
-                self.assertIn(gate, build)
-                self.assertNotIn("Headless performance gate (Linux source build)", build)
-                self.assertEqual(build.count("ROTTWEILER_PERF_PREBUILT_RW:"), 1)
-                self.assertEqual(build.count("ROTTWEILER_PERF_SAMPLES: 500"), 1)
-                self.assertIn("timeout-minutes: 60", build)
-                if platform == "macos":
-                    self.assertLess(
-                        build.index("Install Rust toolchain"), build.index(gate)
-                    )
-                else:
-                    self.assertLess(
-                        build.index(gate), build.index("Install Rust toolchain")
-                    )
+                self.assertIn("Build deterministic size-gated archive", build)
+                self.assertIn("Attest archive provenance", build)
+                self.assertIn("Upload unsigned archive for release signing", build)
                 self.assertIn("overwrite: true", build)
+                self.assertNotIn("perf_gate.sh", build)
+                self.assertNotIn("check-perf-baseline.py", build)
+                self.assertNotIn("ROTTWEILER_PERF_", build)
 
     def test_release_compresses_embedded_wasm_and_never_rewrites_compiled_elf(
         self,

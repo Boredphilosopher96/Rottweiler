@@ -102,6 +102,9 @@ class M8LinuxWrapperTests(unittest.TestCase):
             REPO / ".github/workflows/performance.yml"
         ).read_text(encoding="utf-8")
         nightly = (REPO / ".github/workflows/nightly.yml").read_text(encoding="utf-8")
+        preflight = (REPO / ".github/workflows/release-preflight.yml").read_text(
+            encoding="utf-8"
+        )
         release = (REPO / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
         main_test = ci.split("  test:", 1)[1].split("  security-tests:", 1)[0]
@@ -125,7 +128,8 @@ class M8LinuxWrapperTests(unittest.TestCase):
         self.assertIn("persist-credentials: false", nightly_release)
         self.assertIn("needs: [test, security-tests]", ci)
         self.assertIn("m8_release_gate_linux.sh", nightly)
-        self.assertIn("m8_release_gate_linux.sh", release_linux)
+        self.assertIn("uses: ./.github/workflows/performance.yml", preflight)
+        self.assertNotIn("m8_release_gate_linux.sh", release_linux)
 
 
 if __name__ == "__main__":

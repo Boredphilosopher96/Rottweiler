@@ -330,20 +330,31 @@ records protected soak, Terminal-Bench, dogfood, and paid provider replay as
 major-one-or-later release requires measured soak baselines and successful
 results from every protected v1 gate. Callers cannot select or waive the tier.
 
-The tag workflow admits publication through one hosted aggregate job. For
+The preflight runs the measured core performance graph once, then seals its
+readiness and both platform evidence sets into a candidate manifest bound to
+the exact source SHA, version, workflow run, and run attempt. The tag workflow
+must find a successful preflight for its peeled commit and byte-verify that
+manifest plus the retained evidence before it builds publication archives.
+Expired, missing, stale-attempt, or mismatched evidence blocks publication.
+
+The tag workflow then admits publication through one hosted aggregate job. For
 major zero it requires every common job to succeed and the protected soak job
 to be skipped by policy. For major one or later it requires that soak job to
 succeed. Failure, cancellation, or any unexpected skipped result blocks
 signing. The versioned Cask, Formula, bootstrap, signed metadata, and updater
-all consume the same release archives.
+all consume the same tag-built release archives.
 
 **Rationale.** Bootstrap soak ceilings and offline self-hosted runners cannot
 honestly be called measured evidence, but they also should not prevent a
 pre-v1 release from making the narrower claims it actually proves. Deriving
 the tier from SemVer keeps that narrower path unavailable to v1 while avoiding
-a caller-controlled release bypass. Preserving the existing tag publisher and
-original archives keeps signing and rerun behavior in one established owner.
+a caller-controlled release bypass. Measuring an exact commit twice made
+publication depend on unrelated hosted-runner noise even after qualification
+had passed. Binding retained preflight evidence to the commit preserves the
+performance authority without weakening it or rebuilding publication bytes
+outside the tag workflow. Preserving the existing tag publisher and original
+archives keeps signing and rerun behavior in one established owner.
 
 **Revisit when.** Protected soak measurements and runners are continuously
-available for pre-v1 development, or the project needs a separately reviewed
-release-candidate handoff before creating tags.
+available for pre-v1 development, or the project needs preflight-built archives
+to become publication inputs rather than authorization evidence.

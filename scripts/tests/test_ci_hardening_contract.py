@@ -174,6 +174,13 @@ class CiHardeningContractTests(unittest.TestCase):
             "brew install --cask Boredphilosopher96/tap/rottweiler", tap_readme
         )
         self.assertNotIn("--HEAD", tap_readme)
+        contract = workflow_job(workflow, "runner-contract")
+        self.assertIn("actions: read", contract)
+        self.assertIn("release-preflight.yml/runs", contract)
+        self.assertIn("release-candidate.py verify", contract)
+        self.assertIn('head_sha="$GITHUB_SHA"', contract)
+        self.assertIn('"head_branch": "main"', contract)
+        self.assertNotIn("  linux-performance-build:", workflow)
 
     def test_protected_performance_consumers_fail_closed_before_queueing(self) -> None:
         performance = (ROOT / ".github/workflows/performance.yml").read_text(
@@ -245,6 +252,11 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("if: steps.release_version.outputs.major != '0'", preflight)
         self.assertIn("uses: ./.github/workflows/performance.yml", preflight)
         self.assertIn("needs: repository-prerequisites", preflight)
+        candidate = workflow_job(preflight, "seal-candidate")
+        self.assertIn("needs: [repository-prerequisites, protected-performance]", candidate)
+        self.assertIn("release-candidate.py create", candidate)
+        self.assertIn("manual-performance-linux-x86_64", candidate)
+        self.assertIn("manual-performance-darwin-arm64", candidate)
         self.assertNotIn("gh release create", preflight)
         self.assertNotIn("git push", preflight)
         self.assertNotIn("HOMEBREW_TAP_TOKEN:", preflight.split("    steps:", 1)[0])
@@ -400,10 +412,11 @@ class CiHardeningContractTests(unittest.TestCase):
     def test_rerun_artifacts_preserve_producers_and_version_evidence(self) -> None:
         workflows = {
             name: (ROOT / f".github/workflows/{name}.yml").read_text(encoding="utf-8")
-            for name in ("performance", "nightly", "release")
+            for name in ("performance", "nightly", "release", "release-preflight")
         }
 
-        for workflow_name, workflow in workflows.items():
+        for workflow_name in ("performance", "nightly"):
+            workflow = workflows[workflow_name]
             with self.subTest(workflow=workflow_name, producer="linux"):
                 producer = workflow_job(workflow, "linux-performance-build")
                 self.assertIn(
@@ -441,12 +454,14 @@ class CiHardeningContractTests(unittest.TestCase):
                 "terminal-bench-${{ github.run_id }}-${{ github.run_attempt }}",
             ),
             "release": (
-                "performance-linux-x86_64-${{ github.ref_name }}-${{ github.run_attempt }}",
-                "performance-darwin-arm64-${{ github.ref_name }}-${{ github.run_attempt }}",
                 "release-gate-evidence-${{ github.ref_name }}-${{ github.run_attempt }}",
                 "release-terminal-bench-${{ github.ref_name }}-${{ github.run_attempt }}",
                 "release-soak-${{ matrix.platform }}-${{ github.ref_name }}-${{ github.run_attempt }}",
                 "release-qualification-${{ github.ref_name }}-${{ github.run_attempt }}",
+            ),
+            "release-preflight": (
+                "release-preflight-${{ github.run_id }}-${{ github.run_attempt }}",
+                "release-candidate-${{ github.run_id }}-${{ github.run_attempt }}",
             ),
         }
         for workflow_name, evidence_names in expected_evidence_names.items():

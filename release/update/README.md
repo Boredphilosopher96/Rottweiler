@@ -53,8 +53,11 @@ offer a skip flag for missing evidence or infrastructure.
 Before creating a tag, run the **Release preflight** workflow manually. It
 validates the measured baseline provenance, committed public signing inputs,
 protected variables/secrets, and dogfood ledger, then invokes the same
-calibrated protected-performance workflow used by release qualification. The
-preflight cannot sign metadata, publish a GitHub release, update Homebrew, or
+calibrated protected-performance workflow used by release qualification. Its
+final artifact binds the readiness and both platform performance evidence sets
+to the exact source SHA, version, run, and run attempt. The tag publisher
+requires and verifies that artifact; it does not repeat the noisy measurements.
+The preflight cannot sign metadata, publish a GitHub release, update Homebrew, or
 substitute for the exact-tag WSL2 gate. For v1 and later it also cannot
 substitute for the exact-tag protected soaks, Terminal-Bench, or live replay
 gates. Pre-v1 readiness records those as not claimed rather than measured.

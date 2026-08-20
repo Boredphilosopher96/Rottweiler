@@ -19,7 +19,7 @@ resolver = "3"
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.97"
@@ -92,14 +92,14 @@ ts-rs = { version = "12.0.1", features = ["serde-json-impl"] }
 url = "2.5"
 wasmtime = { version = "47.0.3", default-features = false, features = ["async", "component-model-async", "cranelift", "pulley", "runtime", "std"] }
 
-rw-context = { version = "0.1.0", path = "crates/rw-context" }
-rw-core = { version = "0.1.0", path = "crates/rw-core" }
-rw-ext = { version = "0.1.0", path = "crates/rw-ext" }
-rw-intel = { version = "0.1.0", path = "crates/rw-intel" }
-rw-mcp = { version = "0.1.0", path = "crates/rw-mcp" }
-rw-providers = { version = "0.1.0", path = "crates/rw-providers" }
-rw-runtime = { version = "0.1.0", path = "crates/rw-runtime" }
-rw-sandbox = { version = "0.1.0", path = "crates/rw-sandbox" }
-rw-store = { version = "0.1.0", path = "crates/rw-store" }
-rw-tools = { version = "0.1.0", path = "crates/rw-tools" }
-rw-types = { version = "0.1.0", path = "crates/rw-types" }
+rw-context = { version = "0.1.1", path = "crates/rw-context" }
+rw-core = { version = "0.1.1", path = "crates/rw-core" }
+rw-ext = { version = "0.1.1", path = "crates/rw-ext" }
+rw-intel = { version = "0.1.1", path = "crates/rw-intel" }
+rw-mcp = { version = "0.1.1", path = "crates/rw-mcp" }
+rw-providers = { version = "0.1.1", path = "crates/rw-providers" }
+rw-runtime = { version = "0.1.1", path = "crates/rw-runtime" }
+rw-sandbox = { version = "0.1.1", path = "crates/rw-sandbox" }
+rw-store = { version = "0.1.1", path = "crates/rw-store" }
+rw-tools = { version = "0.1.1", path = "crates/rw-tools" }
+rw-types = { version = "0.1.1", path = "crates/rw-types" }
