@@ -2605,7 +2605,10 @@ mod tests {
         let (second, second_manifest) = rollback_plugin(root.path(), "second");
         let configs = vec![first, second];
         let store = PrivatePluginApprovalStore::open(root.path()).expect("approval store");
-        for (config, manifest) in configs.iter().zip([first_manifest.clone(), second_manifest]) {
+        for (config, manifest) in configs
+            .iter()
+            .zip([first_manifest.clone(), second_manifest])
+        {
             let process = config.process_config().expect("process config");
             let origin = format!("user:{}", config.origin.path().display());
             rw_ext::approve_plugin_launch(&store, &manifest, &process, &origin).expect("approve");
