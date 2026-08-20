@@ -4686,17 +4686,20 @@ impl SessionEventSink for DurableEventSink {
         &self,
         last_seen: Option<SequenceId>,
     ) -> std::result::Result<Vec<EngineEvent>, AgentLoopError> {
-        let events = self
-            .load()
-            .map_err(|error| AgentLoopError::Persistence(error.to_string()))?;
-        Ok(events
-            .into_iter()
-            .filter(|event| {
-                event
-                    .meta()
-                    .is_some_and(|meta| last_seen.is_none_or(|last| meta.sequence_id > last))
-            })
-            .collect())
+        self.log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .load_after(last_seen)
+            .map(|events| events.into_iter().map(|envelope| envelope.event).collect())
+            .map_err(|error| AgentLoopError::Persistence(error.to_string()))
+    }
+
+    async fn last_sequence(&self) -> std::result::Result<Option<SequenceId>, AgentLoopError> {
+        Ok(self
+            .log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_sequence())
     }
 
     async fn budget_totals(
@@ -12925,6 +12928,53 @@ mod tests {
             .expect("append invalid event");
         drop(invalid);
         assert!(load_bounded_subagent_replay(invalid_storage.path(), &child, None).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "manual long-session reattach benchmark"]
+    async fn durable_event_sink_long_gap_metrics() {
+        const EVENTS: u64 = 20_000;
+        const TAIL_READS: usize = 10;
+
+        let storage = TempDir::new().expect("storage");
+        let session = SessionId("durable-gap-metrics".to_owned());
+        let mut log = SessionEventLog::open(storage.path(), &session.0).expect("event log");
+        let events = (0..EVENTS).map(|sequence| EngineEvent::SessionCreated {
+            meta: EventMeta {
+                protocol_version: SESSION_EVENT_VERSION,
+                session_id: session.clone(),
+                sequence_id: SequenceId(sequence),
+                emitted_at: "2026-01-01T00:00:00Z".to_owned(),
+                caused_by: None,
+            },
+            driver_client_id: ClientId("benchmark-driver".to_owned()),
+        });
+        log.append_batch(events).expect("benchmark event batch");
+        let sink = DurableEventSink::new(log, storage.path().to_owned(), session.0.clone())
+            .expect("durable sink");
+
+        let tail_started = std::time::Instant::now();
+        for _ in 0..TAIL_READS {
+            assert_eq!(
+                sink.last_sequence().await.expect("durable tail"),
+                Some(SequenceId(EVENTS - 1))
+            );
+        }
+        let tail_elapsed = tail_started.elapsed();
+
+        let gap_started = std::time::Instant::now();
+        let gap = sink
+            .read_after(Some(SequenceId(EVENTS - 101)))
+            .await
+            .expect("durable tail gap");
+        let gap_elapsed = gap_started.elapsed();
+        assert_eq!(gap.len(), 100);
+        eprintln!(
+            "durable_replay_metric events={EVENTS} tail_reads={TAIL_READS} tail_us={} tail_gap_us={} gap_events={}",
+            tail_elapsed.as_micros(),
+            gap_elapsed.as_micros(),
+            gap.len()
+        );
     }
 
     #[tokio::test]

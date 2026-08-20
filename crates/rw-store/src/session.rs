@@ -283,6 +283,55 @@ impl SessionEventLog {
         load_events(&self.file)
     }
 
+    /// Loads complete events strictly after a durable sequence cursor.
+    ///
+    /// The open writer has already validated the prefix. This path still reads
+    /// one stable descriptor snapshot, but decodes only the requested suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for I/O, JSON, schema, sequence corruption, or a cursor
+    /// ahead of the durable tail.
+    pub fn load_after<T: DeserializeOwned>(
+        &self,
+        after_sequence: Option<SequenceId>,
+    ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+        let bytes = read_opened_file(&self.file)?;
+        let start_sequence = match after_sequence {
+            Some(sequence) => sequence
+                .0
+                .checked_add(1)
+                .ok_or(SessionStoreError::EventPageCursorAhead)?,
+            None => 0,
+        };
+        if start_sequence > self.next_sequence {
+            return Err(SessionStoreError::EventPageCursorAhead);
+        }
+        if start_sequence == self.next_sequence {
+            return Ok(Vec::new());
+        }
+        let records_to_skip =
+            usize::try_from(start_sequence).map_err(|_| SessionStoreError::EventPageCursorAhead)?;
+        let mut skipped = 0_usize;
+        let start = bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .take(records_to_skip)
+            .try_fold(0_usize, |offset, record| {
+                skipped = skipped
+                    .checked_add(1)
+                    .ok_or(SessionStoreError::LimitOverflow)?;
+                offset
+                    .checked_add(record.len())
+                    .ok_or(SessionStoreError::LimitOverflow)
+            })?;
+        if skipped != records_to_skip {
+            return Err(SessionStoreError::CorruptEvent(
+                "event log is shorter than its durable tail",
+            ));
+        }
+        parse_events_bounded_from_sequence(&bytes[start..], usize::MAX, start_sequence)
+    }
+
     /// Loads an existing session log without acquiring the lifetime writer lock.
     ///
     /// This is the read-only boundary for host queries while the owning actor
@@ -2633,6 +2682,14 @@ fn parse_events_bounded<T: DeserializeOwned>(
     bytes: &[u8],
     max_events: usize,
 ) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
+    parse_events_bounded_from_sequence(bytes, max_events, 0)
+}
+
+fn parse_events_bounded_from_sequence<T: DeserializeOwned>(
+    bytes: &[u8],
+    max_events: usize,
+    first_sequence: u64,
+) -> Result<Vec<EventEnvelope<T>>, SessionStoreError> {
     let mut events = Vec::new();
     for line in BufReader::new(bytes).lines() {
         if events.len() >= max_events {
@@ -2648,8 +2705,11 @@ fn parse_events_bounded<T: DeserializeOwned>(
                 envelope.schema_version,
             ));
         }
-        let expected =
-            u64::try_from(events.len()).map_err(|_| SessionStoreError::SequenceOverflow)?;
+        let expected = first_sequence
+            .checked_add(
+                u64::try_from(events.len()).map_err(|_| SessionStoreError::SequenceOverflow)?,
+            )
+            .ok_or(SessionStoreError::SequenceOverflow)?;
         if envelope.sequence != SequenceId(expected) {
             return Err(SessionStoreError::CorruptEvent(
                 "non-contiguous event sequence",
@@ -3567,6 +3627,51 @@ mod tests {
                 .unwrap_or_else(|error| panic!("batch log must reread: {error}")),
             before
         );
+    }
+
+    #[test]
+    fn load_after_uses_an_exclusive_cursor_and_rejects_ahead() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "suffix")
+            .unwrap_or_else(|error| panic!("log must open: {error}"));
+        let appended = log
+            .append_batch((0..4).map(|index| FixtureEvent {
+                kind: "sample".to_owned(),
+                text: index.to_string(),
+            }))
+            .unwrap_or_else(|error| panic!("events must append: {error}"));
+
+        assert_eq!(
+            log.load_after::<FixtureEvent>(None)
+                .unwrap_or_else(|error| panic!("full suffix must load: {error}")),
+            appended
+        );
+        assert_eq!(
+            log.load_after::<FixtureEvent>(Some(SequenceId(1)))
+                .unwrap_or_else(|error| panic!("tail suffix must load: {error}")),
+            appended[2..]
+        );
+        assert!(
+            log.load_after::<FixtureEvent>(Some(SequenceId(3)))
+                .unwrap_or_else(|error| panic!("empty suffix must load: {error}"))
+                .is_empty()
+        );
+        assert!(matches!(
+            log.load_after::<FixtureEvent>(Some(SequenceId(4))),
+            Err(SessionStoreError::EventPageCursorAhead)
+        ));
+
+        OpenOptions::new()
+            .write(true)
+            .open(log.path())
+            .and_then(|file| file.set_len(0))
+            .unwrap_or_else(|error| panic!("test truncation must succeed: {error}"));
+        assert!(matches!(
+            log.load_after::<FixtureEvent>(Some(SequenceId(1))),
+            Err(SessionStoreError::CorruptEvent(
+                "event log is shorter than its durable tail"
+            ))
+        ));
     }
 
     #[test]
