@@ -530,7 +530,16 @@ export class TuiEngineRuntime {
             if (generation === this.#sessionGeneration) {
               this.#onConnection(update)
             }
-            if (update.phase === "connected") resolveSubscriptionReady()
+            if (update.phase === "connected") {
+              const reconnectReady = subscriptionReady
+              resolveSubscriptionReady()
+              if (reconnectReady && !this.#config.replayMode) {
+                void this.#requestInitialProjections(
+                  sessionId,
+                  subscriptionController.signal,
+                )
+              }
+            }
           },
           onEvent: (event) => {
             if (

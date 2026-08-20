@@ -6188,13 +6188,19 @@ describe("Rottweiler OpenTUI shell", () => {
       name: "docs.remote",
       endpoint: "https://example.com/mcp",
     }))
+    const refreshedList = emitted.findLast(
+      (command) => command.type === "list_mcp_servers",
+    )
+    if (refreshedList?.type !== "list_mcp_servers") {
+      throw new Error("missing refreshed MCP server list")
+    }
 
     app.handleEvent({
       type: "mcp_servers_listed",
       meta: {
         protocol_version: PROTOCOL_VERSION,
         client_id: "tui",
-        request_id: "mcp-list",
+        request_id: refreshedList.meta.request_id,
         emitted_at: "2026-01-01T00:00:00Z",
       },
       session_id: "session-local",
@@ -6452,6 +6458,10 @@ describe("Rottweiler OpenTUI shell", () => {
       type: "list_permissions",
       session_id: "session-permissions",
     }))
+    const listPermissions = emitted.findLast((command) => command.type === "list_permissions")
+    if (listPermissions?.type !== "list_permissions") {
+      throw new Error("missing permission list command")
+    }
     expect(app.picker.status.plainText).toContain("Loading permission rules")
     expect(app.picker.select.visible).toBeFalse()
     expect(app.picker.select.options).toHaveLength(0)
@@ -6465,7 +6475,7 @@ describe("Rottweiler OpenTUI shell", () => {
       meta: {
         protocol_version: PROTOCOL_VERSION,
         client_id: "permission-driver",
-        request_id: "permission-list",
+        request_id: listPermissions.meta.request_id,
         emitted_at: "2026-01-01T00:00:00Z",
       },
       session_id: "session-permissions",

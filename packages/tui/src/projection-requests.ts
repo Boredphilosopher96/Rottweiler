@@ -92,7 +92,24 @@ const MAX_PENDING_MODEL_SWITCH_REQUESTS = 128
 
 export class ProjectionRequestBroker {
   readonly #options: ProjectionRequestBrokerOptions
-  readonly #requests: Record<ProjectionRequestKind, string | null> = {
+  readonly #latestRequests: Record<ProjectionRequestKind, string | null> = {
+    commands: null,
+    modes: null,
+    models: null,
+    sessions: null,
+    files: null,
+    settings: null,
+    permissions: null,
+    mcp: null,
+    runtime_services: null,
+    workspace_status: null,
+    workspace_diff: null,
+    review: null,
+    settings_pending: null,
+    subagents: null,
+    provider_activation_models: null,
+  }
+  readonly #pendingRequests: Record<ProjectionRequestKind, string | null> = {
     commands: null,
     modes: null,
     models: null,
@@ -128,32 +145,32 @@ export class ProjectionRequestBroker {
 
   issue(kind: ProjectionRequestKind): RequestMeta {
     const meta = this.meta()
-    this.#requests[kind] = meta.request_id
+    this.#track(kind, meta.request_id)
     return meta
   }
 
   current(kind: ProjectionRequestKind): string | null {
-    return this.#requests[kind]
+    return this.#pendingRequests[kind]
   }
 
   accepts(kind: ProjectionRequestKind, requestId: string | null): boolean {
-    const current = this.#requests[kind]
-    return current === null || requestId === current
+    const latest = this.#latestRequests[kind]
+    return latest === null || requestId === latest
   }
 
   matches(kind: ProjectionRequestKind, requestId: string | null): boolean {
-    const current = this.#requests[kind]
-    return current !== null && requestId === current
+    const pending = this.#pendingRequests[kind]
+    return pending !== null && requestId === pending
   }
 
   clear(kind: ProjectionRequestKind): void {
-    this.#requests[kind] = null
+    this.#pendingRequests[kind] = null
     if (kind === "workspace_diff") this.#workspaceDiffPath = null
   }
 
   clearAll(): void {
-    for (const kind of Object.keys(this.#requests) as ProjectionRequestKind[]) {
-      this.#requests[kind] = null
+    for (const kind of Object.keys(this.#latestRequests) as ProjectionRequestKind[]) {
+      this.#forget(kind)
     }
     this.#workspaceDiffPath = null
     this.#filePreview = null
@@ -175,7 +192,7 @@ export class ProjectionRequestBroker {
       "mcp",
       "runtime_services",
       "subagents",
-    ] as const) this.clear(kind)
+    ] as const) this.#forget(kind)
     this.#modelSwitchRequests.clear()
   }
 
@@ -188,12 +205,14 @@ export class ProjectionRequestBroker {
   }
 
   markProviderActivationModels(): void {
-    this.#requests.provider_activation_models = this.#requests.models
+    const requestId = this.#latestRequests.models
+    this.#latestRequests.provider_activation_models = requestId
+    this.#pendingRequests.provider_activation_models = requestId
   }
 
   consumeProviderActivationModels(requestId: string | null): boolean {
-    if (this.#requests.provider_activation_models !== requestId) return false
-    this.clear("provider_activation_models")
+    if (this.#latestRequests.provider_activation_models !== requestId) return false
+    this.#forget("provider_activation_models")
     return true
   }
 
@@ -251,6 +270,10 @@ export class ProjectionRequestBroker {
         return this.accepts("models", requestId)
       case "settings_listed":
         return this.accepts("settings", requestId)
+      case "permissions_listed":
+        return this.accepts("permissions", requestId)
+      case "mcp_servers_listed":
+        return this.accepts("mcp", requestId)
       case "sessions_listed":
       case "sessions_search_ready":
         return this.accepts("sessions", requestId)
@@ -317,14 +340,14 @@ export class ProjectionRequestBroker {
   #trackCommand(command: ProjectionCommand, requestId: string): void {
     switch (command.type) {
       case "get_workspace_status":
-        this.#requests.workspace_status = requestId
+        this.#track("workspace_status", requestId)
         break
       case "get_workspace_diff":
-        this.#requests.workspace_diff = requestId
+        this.#track("workspace_diff", requestId)
         this.#workspaceDiffPath = command.path
         break
       case "get_session_review":
-        this.#requests.review = requestId
+        this.#track("review", requestId)
         break
       case "switch_model": {
         if (this.#modelSwitchRequests.size >= MAX_PENDING_MODEL_SWITCH_REQUESTS) {
@@ -336,37 +359,59 @@ export class ProjectionRequestBroker {
       }
       case "list_sessions":
       case "search_sessions":
-        this.#requests.sessions = requestId
+        this.#track("sessions", requestId)
         break
       case "list_settings":
-        this.#requests.settings = requestId
-        this.#requests.settings_pending = requestId
+        this.#latestRequests.settings = requestId
+        this.#track("settings_pending", requestId)
         break
       case "set_setting":
-        this.#requests.settings = requestId
+        this.#latestRequests.settings = requestId
         break
       case "list_permissions":
-        this.#requests.permissions = requestId
+        this.#track("permissions", requestId)
+        break
+      case "add_session_permission_rule":
+      case "remove_session_permission_rule":
+      case "revoke_permission_approval":
+        this.#latestRequests.permissions = requestId
         break
       case "list_mcp_servers":
-        this.#requests.mcp = requestId
+        this.#track("mcp", requestId)
+        break
+      case "add_mcp_http_server":
+      case "add_mcp_stdio_server":
+      case "remove_mcp_server":
+      case "approve_mcp_server":
+      case "set_mcp_server_enabled":
+        this.#latestRequests.mcp = requestId
         break
       case "list_runtime_services":
-        this.#requests.runtime_services = requestId
+        this.#track("runtime_services", requestId)
         break
       case "search_workspace_files":
-        this.#requests.files = requestId
+        this.#track("files", requestId)
         break
       case "list_commands":
-        this.#requests.commands = requestId
+        this.#track("commands", requestId)
         break
       case "list_modes":
-        this.#requests.modes = requestId
+        this.#track("modes", requestId)
         break
       case "list_models":
-        this.#requests.models = requestId
+        this.#track("models", requestId)
         break
     }
+  }
+
+  #track(kind: ProjectionRequestKind, requestId: string): void {
+    this.#latestRequests[kind] = requestId
+    this.#pendingRequests[kind] = requestId
+  }
+
+  #forget(kind: ProjectionRequestKind): void {
+    this.#latestRequests[kind] = null
+    this.clear(kind)
   }
 
   async #emitProjectionCommand(

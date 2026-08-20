@@ -242,6 +242,34 @@ class DelayedConnectionClient implements RuntimeEngineClient {
   }
 }
 
+class ReconnectingProjectionClient implements RuntimeEngineClient {
+  readonly commands: ClientCommand[] = []
+  subscription: EngineSubscriptionOptions | null = null
+
+  restartStream(): boolean {
+    return false
+  }
+
+  async postCommand(command: ClientCommand): Promise<CommandOutcome> {
+    this.commands.push(command)
+    return { type: "accepted" }
+  }
+
+  async subscribe(options: EngineSubscriptionOptions): Promise<void> {
+    this.subscription = options
+    options.onConnection?.({ phase: "connected", attempt: 0 })
+    await new Promise<void>((resolve) => {
+      if (options.signal.aborted) resolve()
+      else options.signal.addEventListener("abort", () => resolve(), { once: true })
+    })
+  }
+
+  async reconnect(): Promise<void> {
+    await this.subscription?.onReconnect?.()
+    this.subscription?.onConnection?.({ phase: "connected", attempt: 1 })
+  }
+}
+
 class BlockingShutdownClient implements RuntimeEngineClient {
   readonly commands: ClientCommand[] = []
   shutdownAborted = false
@@ -1152,6 +1180,57 @@ describe("OpenTUI engine runtime", () => {
     ])
     await runtime.stop()
     await starting
+  })
+
+  test("refreshes read projections after a ready reconnect without retrying mutations", async () => {
+    const client = new ReconnectingProjectionClient()
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/engine.sock",
+        bootstrapToken: "secret",
+        sessionId: "session-reconnect-projections",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+      },
+      client,
+      new MemoryFiles(),
+    )
+    runtime.bind(new TestApp())
+
+    const running = runtime.start()
+    await waitFor(() => client.commands.some((command) => command.type === "list_commands"))
+    const beforeReconnect = client.commands.length
+
+    await client.reconnect()
+    await waitFor(
+      () => client.commands
+        .slice(beforeReconnect)
+        .filter((command) => command.type === "list_commands").length === 1,
+    )
+
+    const reconnectedTypes = client.commands
+      .slice(beforeReconnect)
+      .map((command) => command.type)
+    expect(reconnectedTypes).toEqual([
+      "take_driver",
+      "list_models",
+      "list_modes",
+      "list_sessions",
+      "get_context",
+      "get_cost",
+      "get_workspace_status",
+      "list_settings",
+      "list_mcp_servers",
+      "list_runtime_services",
+      "list_permissions",
+      "list_commands",
+    ])
+    expect(reconnectedTypes).not.toContain("resume_session")
+    expect(reconnectedTypes).not.toContain("send_message")
+
+    await runtime.stop()
+    await running
   })
 
   test("switches sessions atomically and suppresses old-session commands and events", async () => {
