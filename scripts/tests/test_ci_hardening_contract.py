@@ -165,6 +165,13 @@ class CiHardeningContractTests(unittest.TestCase):
         sign_and_publish = workflow_job(workflow, "sign-and-publish")
         self.assertIn("qualification-gate", sign_and_publish)
         self.assertNotIn("release-soak", sign_and_publish.split("    runs-on:", 1)[0])
+        self.assertIn("if: >-", sign_and_publish)
+        self.assertIn("always()", sign_and_publish)
+        self.assertIn(
+            "needs.qualification-gate.result == 'success'", sign_and_publish
+        )
+        self.assertIn("needs.build-linux.result == 'success'", sign_and_publish)
+        self.assertIn("needs.build-macos.result == 'success'", sign_and_publish)
         self.assertIn("Casks/rottweiler.rb", sign_and_publish)
         self.assertIn(
             'packaging/homebrew/README.md "$tap/README.md"', sign_and_publish
@@ -181,6 +188,11 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn('head_sha="$GITHUB_SHA"', contract)
         self.assertIn('"head_branch": "main"', contract)
         self.assertNotIn("  linux-performance-build:", workflow)
+        deployment = workflow_job(workflow, "deploy-update-repository")
+        self.assertIn(
+            "if: ${{ always() && needs.sign-and-publish.result == 'success' }}",
+            deployment,
+        )
 
     def test_protected_performance_consumers_fail_closed_before_queueing(self) -> None:
         performance = (ROOT / ".github/workflows/performance.yml").read_text(

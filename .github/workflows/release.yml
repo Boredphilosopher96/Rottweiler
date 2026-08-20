@@ -746,6 +746,13 @@ jobs:
   sign-and-publish:
     name: Sign metadata and publish
     needs: [build-linux, build-macos, qualification-gate]
+    if: >-
+      ${{
+        always() &&
+        needs.build-linux.result == 'success' &&
+        needs.build-macos.result == 'success' &&
+        needs.qualification-gate.result == 'success'
+      }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -1025,6 +1032,7 @@ jobs:
   deploy-update-repository:
     name: Deploy no-redirect update repository
     needs: sign-and-publish
+    if: ${{ always() && needs.sign-and-publish.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment:
