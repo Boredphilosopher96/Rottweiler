@@ -2390,10 +2390,11 @@ pub(crate) async fn compose_hosted_actor(
         .unwrap_or_else(|| persisted_model_alias.clone());
     let driver_client_id = recovered.driver_client_id.clone();
     let shell_active = recovered.active_shell.is_some();
-    let durable_sink = Arc::new(DurableEventSink::new(
+    let durable_sink = Arc::new(DurableEventSink::new_hosted(
         log,
         options.storage_root.clone(),
         session_id.clone(),
+        &recovered_events,
     )?);
     durable_sink.reconcile_accounting(&recovered_events)?;
     let checkpoint_coordinator = Arc::new(DurableCheckpointCoordinator::from_stores(
@@ -4550,23 +4551,140 @@ struct DurableEventSink {
     log: Arc<Mutex<SessionEventLog>>,
     storage_root: PathBuf,
     session_id: String,
+    hosted_projection: Option<Mutex<HostedSessionProjection>>,
     prompt_shapes: Arc<PromptShapeJournal>,
     accounting_dirty: AtomicBool,
     todo_restore: Mutex<Option<TodoRestoreBinding>>,
 }
 
+struct HostedSessionProjection {
+    projection: SessionProjection,
+    explicit_title: bool,
+    saw_user_message: bool,
+}
+
+impl HostedSessionProjection {
+    fn from_events(session_id: &str, events: &[EngineEvent], path: &Path) -> Self {
+        let mut hosted = Self {
+            projection: SessionProjection {
+                summary: SessionSummary {
+                    id: session_id.to_owned(),
+                    title: "New session".to_owned(),
+                    updated_unix_ms: session_projection_updated_at(path),
+                    cost_micros: 0,
+                },
+                transcript: String::new(),
+                projected_through: None,
+            },
+            explicit_title: false,
+            saw_user_message: false,
+        };
+        hosted.apply(events, path);
+        hosted
+    }
+
+    fn apply(&mut self, events: &[EngineEvent], path: &Path) {
+        for event in events {
+            match event {
+                EngineEvent::SessionTitleUpdated { title, .. } => {
+                    self.projection.summary.title.clone_from(title);
+                    self.explicit_title = true;
+                }
+                EngineEvent::UserMessageAccepted { content, .. } => {
+                    if !self.saw_user_message && !self.explicit_title {
+                        self.projection.summary.title = compact_title(content);
+                    }
+                    self.saw_user_message = true;
+                    self.projection.transcript.push_str("user: ");
+                    self.projection.transcript.push_str(content);
+                    self.projection.transcript.push('\n');
+                }
+                EngineEvent::TextDelta { text, .. } => {
+                    self.projection.transcript.push_str(text);
+                }
+                EngineEvent::ToolCallFinished { output, .. } => {
+                    self.projection.transcript.push_str("\ntool: ");
+                    append_tool_output(&mut self.projection.transcript, output);
+                    self.projection.transcript.push('\n');
+                }
+                _ => {}
+            }
+            self.projection.projected_through = event.meta().map(|meta| meta.sequence_id);
+        }
+        self.projection.summary.updated_unix_ms = session_projection_updated_at(path);
+    }
+}
+
 impl DurableEventSink {
     fn new(log: SessionEventLog, storage_root: PathBuf, session_id: String) -> Result<Self> {
+        Self::new_with_hosted_projection(log, storage_root, session_id, None)
+    }
+
+    fn new_hosted(
+        log: SessionEventLog,
+        storage_root: PathBuf,
+        session_id: String,
+        recovered_events: &[EngineEvent],
+    ) -> Result<Self> {
+        let projection =
+            HostedSessionProjection::from_events(&session_id, recovered_events, log.path());
+        Self::new_with_hosted_projection(log, storage_root, session_id, Some(projection))
+    }
+
+    fn new_with_hosted_projection(
+        log: SessionEventLog,
+        storage_root: PathBuf,
+        session_id: String,
+        hosted_projection: Option<HostedSessionProjection>,
+    ) -> Result<Self> {
         let log = Arc::new(Mutex::new(log));
         let prompt_shapes = Arc::new(PromptShapeJournal::open(&storage_root, &session_id)?);
         Ok(Self {
             log,
             storage_root,
             session_id,
+            hosted_projection: hosted_projection.map(Mutex::new),
             prompt_shapes,
             accounting_dirty: AtomicBool::new(false),
             todo_restore: Mutex::new(None),
         })
+    }
+
+    async fn update_hosted_projection(&self, persisted: &[EngineEvent]) {
+        let projection = self.hosted_projection.as_ref().and_then(|hosted| {
+            let path = self
+                .storage_root
+                .join("sessions")
+                .join(&self.session_id)
+                .join("events.jsonl");
+            let mut hosted = hosted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            hosted.apply(persisted, &path);
+            persisted
+                .iter()
+                .any(is_session_projection_boundary)
+                .then(|| hosted.projection.clone())
+        });
+        let Some(projection) = projection else {
+            return;
+        };
+        let storage_root = self.storage_root.clone();
+        let update = move || upsert_session_projection(&storage_root, &projection);
+        let update_result = match tokio::runtime::Handle::current().runtime_flavor() {
+            tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(update),
+            _ => match tokio::task::spawn_blocking(update).await {
+                Ok(result) => result,
+                Err(error) => Err(miette!(error.to_string())),
+            },
+        };
+        if let Err(error) = update_result {
+            tracing::warn!(
+                session_id = %self.session_id,
+                reason = %error,
+                "hosted session search projection will retry at the next durable boundary"
+            );
+        }
     }
 
     fn bind_todo(&self, binding: TodoRestoreBinding) {
@@ -4671,6 +4789,7 @@ impl SessionEventSink for DurableEventSink {
                 _ => {}
             }
         }
+        self.update_hosted_projection(&persisted).await;
         if let Err(error) = self.reconcile_accounting(&persisted) {
             self.accounting_dirty.store(true, Ordering::Release);
             tracing::warn!(
@@ -12622,6 +12741,24 @@ fn update_one_session_index(
         .map_err(|error| miette!("session accounting could not update: {error}"))
 }
 
+fn is_session_projection_boundary(event: &EngineEvent) -> bool {
+    matches!(
+        event,
+        EngineEvent::SessionCreated { .. }
+            | EngineEvent::UserMessageAccepted { .. }
+            | EngineEvent::TurnFinished { .. }
+            | EngineEvent::SessionTitleUpdated { .. }
+            | EngineEvent::ConversationRewound { .. }
+    )
+}
+
+fn upsert_session_projection(storage_root: &Path, projection: &SessionProjection) -> Result<()> {
+    SessionIndex::open(storage_root)
+        .map_err(|error| miette!("session index could not open: {error}"))?
+        .upsert(projection)
+        .map_err(|error| miette!("session index could not update: {error}"))
+}
+
 fn project_accounting(
     session_id: &str,
     events: &[EngineEvent],
@@ -12705,58 +12842,18 @@ fn project_accounting(
 }
 
 fn project_session(session_id: &str, events: &[EngineEvent], path: &Path) -> SessionProjection {
-    let title = events
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            EngineEvent::SessionTitleUpdated { title, .. } => Some(title.clone()),
-            _ => None,
-        })
-        .or_else(|| {
-            events.iter().find_map(|event| match event {
-                EngineEvent::UserMessageAccepted { content, .. } => Some(compact_title(content)),
-                _ => None,
-            })
-        })
-        .unwrap_or_else(|| "New session".to_owned());
-    let mut transcript = String::new();
-    for event in events {
-        match event {
-            EngineEvent::UserMessageAccepted { content, .. } => {
-                transcript.push_str("user: ");
-                transcript.push_str(content);
-                transcript.push('\n');
-            }
-            EngineEvent::TextDelta { text, .. } => transcript.push_str(text),
-            EngineEvent::ToolCallFinished { output, .. } => {
-                transcript.push_str("\ntool: ");
-                append_tool_output(&mut transcript, output);
-                transcript.push('\n');
-            }
-            _ => {}
-        }
-    }
-    let updated_unix_ms = std::fs::metadata(path)
+    HostedSessionProjection::from_events(session_id, events, path).projection
+}
+
+fn session_projection_updated_at(path: &Path) -> i64 {
+    std::fs::metadata(path)
         .and_then(|metadata| metadata.modified())
         .unwrap_or_else(|_| SystemTime::now())
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis()
         .try_into()
-        .unwrap_or(i64::MAX);
-    SessionProjection {
-        summary: SessionSummary {
-            id: session_id.to_owned(),
-            title,
-            updated_unix_ms,
-            cost_micros: 0,
-        },
-        transcript,
-        projected_through: events
-            .last()
-            .and_then(EngineEvent::meta)
-            .map(|meta| meta.sequence_id),
-    }
+        .unwrap_or(i64::MAX)
 }
 
 fn compact_title(content: &str) -> String {

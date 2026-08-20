@@ -45,7 +45,7 @@ use rw_core::{
 use rw_providers::PricingTable;
 use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;
-use rw_store::session::{SessionEventLog, SessionIndex, UtcTimestamp};
+use rw_store::session::{SessionEventLog, SessionIndex, SessionStoreError, UtcTimestamp};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -89,6 +89,8 @@ const QUERY_DEADLINE: Duration = Duration::from_millis(100);
 // bounded, but do not count ordinary blocking-pool scheduling contention
 // against the interactive workspace-picker budget above.
 const SESSION_QUERY_DEADLINE: Duration = Duration::from_secs(2);
+const SESSION_INDEX_SEARCH_MAX_ATTEMPTS: usize = 5;
+const SESSION_INDEX_SEARCH_RETRY_DELAY: Duration = Duration::from_millis(5);
 const WORKSPACE_STATUS_DEADLINE: Duration = Duration::from_millis(750);
 const WORKSPACE_DIFF_DEADLINE: Duration = Duration::from_secs(2);
 const SESSION_EXPORT_DEADLINE: Duration = Duration::from_secs(30);
@@ -1593,15 +1595,14 @@ impl RuntimeSessionFactory {
         &self,
         query: &str,
         limit: u32,
-    ) -> Result<(Vec<SessionDescriptor>, bool), HostError> {
-        let requested = usize::try_from(limit)
-            .map_err(|_| HostError::Query("session search limit is unsupported".to_owned()))?;
+    ) -> Result<(Vec<SessionDescriptor>, bool), SessionStoreError> {
+        let requested =
+            usize::try_from(limit).map_err(|_| SessionStoreError::SearchLimitTooLarge)?;
         let rows = SessionIndex::search_read_only(
             &self.options.storage_root,
             query,
             requested.saturating_add(1),
-        )
-        .map_err(|_| HostError::Query("session index search failed".to_owned()))?;
+        )?;
         let truncated = rows.len() > requested;
         let descriptors = rows
             .into_iter()
@@ -1609,6 +1610,39 @@ impl RuntimeSessionFactory {
             .filter_map(|row| self.persisted_descriptor(&row.id).ok())
             .collect();
         Ok((descriptors, truncated))
+    }
+
+    async fn search_sessions_with_retry(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<(Vec<SessionDescriptor>, bool), HostError> {
+        for attempt in 1..=SESSION_INDEX_SEARCH_MAX_ATTEMPTS {
+            let factory = self.clone();
+            let query = query.to_owned();
+            let result = tokio::task::spawn_blocking(move || {
+                factory.search_sessions_blocking(&query, limit)
+            })
+            .await
+            .map_err(|_| HostError::Query("session search worker failed".to_owned()))?;
+            match result {
+                Ok(result) => return Ok(result),
+                Err(SessionStoreError::UnsafeSessionIndex)
+                    if attempt < SESSION_INDEX_SEARCH_MAX_ATTEMPTS =>
+                {
+                    tokio::time::sleep(SESSION_INDEX_SEARCH_RETRY_DELAY).await;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        reason = %error,
+                        attempt,
+                        "hosted session index search failed"
+                    );
+                    return Err(HostError::Query("session index search failed".to_owned()));
+                }
+            }
+        }
+        Err(HostError::Query("session index search failed".to_owned()))
     }
 }
 
@@ -1890,15 +1924,12 @@ impl SessionFactory for RuntimeSessionFactory {
         query: &str,
         limit: u32,
     ) -> Result<(Vec<SessionDescriptor>, bool), HostError> {
-        let factory = self.clone();
-        let query = query.to_owned();
         tokio::time::timeout(
             SESSION_QUERY_DEADLINE,
-            tokio::task::spawn_blocking(move || factory.search_sessions_blocking(&query, limit)),
+            self.search_sessions_with_retry(query, limit),
         )
         .await
         .map_err(|_| HostError::Query("session search deadline exceeded".to_owned()))?
-        .map_err(|_| HostError::Query("session search worker failed".to_owned()))?
     }
 }
 
@@ -3726,6 +3757,88 @@ mod tests {
             assert!(!truncated);
             blocker.await.expect("second blocker");
         });
+    }
+
+    #[tokio::test]
+    async fn hosted_create_and_rename_are_immediately_searchable() {
+        use rw_core::{
+            ClientCommand, ClientId, ClientRole, CommandMeta, CommandOutcome, PROTOCOL_VERSION,
+            RequestId,
+        };
+
+        let root = tempdir().expect("root");
+        let workspace = private_test_directory(&root.path().join("workspace"));
+        let factory = factory(root.path(), &workspace);
+        SessionIndex::open(&factory.options.storage_root).expect("empty session index");
+        let session_id = SessionId("hosted-search-freshness".to_owned());
+        let driver = ClientId("hosted-search-driver".to_owned());
+        let hosted = factory
+            .create(CreateSessionRequest {
+                session_id: session_id.clone(),
+                workspace: workspace.display().to_string(),
+                model: None,
+            })
+            .await
+            .expect("hosted session");
+        let mut events = hosted.handle().subscribe();
+        assert_eq!(
+            hosted
+                .handle()
+                .dispatch(ClientCommand::AttachSession {
+                    meta: CommandMeta {
+                        protocol_version: PROTOCOL_VERSION,
+                        client_id: driver.clone(),
+                        request_id: RequestId("hosted-search-attach".to_owned()),
+                    },
+                    session_id: session_id.clone(),
+                    last_seen_sequence: None,
+                    role: ClientRole::Driver,
+                })
+                .await
+                .expect("attach"),
+            CommandOutcome::Accepted
+        );
+        let (created, truncated) = factory
+            .search_persisted_sessions("New session", 10)
+            .await
+            .expect("search created session");
+        assert!(!truncated);
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].session_id, session_id);
+        assert_eq!(
+            hosted
+                .handle()
+                .dispatch(ClientCommand::RenameSession {
+                    meta: CommandMeta {
+                        protocol_version: PROTOCOL_VERSION,
+                        client_id: driver,
+                        request_id: RequestId("hosted-search-rename".to_owned()),
+                    },
+                    session_id: session_id.clone(),
+                    title: "Durable Search Rename".to_owned(),
+                })
+                .await
+                .expect("rename"),
+            CommandOutcome::Accepted
+        );
+        loop {
+            if matches!(
+                events.recv().await.expect("rename event"),
+                EngineEvent::SessionTitleUpdated { ref title, .. }
+                    if title == "Durable Search Rename"
+            ) {
+                break;
+            }
+        }
+
+        let (matches, truncated) = factory
+            .search_persisted_sessions("Durable Search Rename", 10)
+            .await
+            .expect("search renamed session");
+        assert!(!truncated);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].session_id, session_id);
+        assert_eq!(matches[0].title, "Durable Search Rename");
     }
 
     #[test]
