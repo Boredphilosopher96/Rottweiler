@@ -24,8 +24,9 @@ the payload is an [`EngineEvent`](schema/engine-event.schema.json).
   fields, while writers must continue emitting every required field.
 - New event variants require a client-protocol version change. Historical
   variants are never silently reinterpreted.
-- A partially written or malformed final line may be discarded during crash
-  recovery. A malformed non-final line is corruption and must fail closed.
+- An unterminated final line may be discarded during crash recovery. Any
+  newline-terminated malformed record is committed corruption and must fail
+  closed without rewriting the log.
 - Exports may redact payload content, but the durable log itself is the exact
   provider- and UI-neutral event stream used for replay.
 

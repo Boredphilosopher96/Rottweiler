@@ -111,7 +111,7 @@ enum SessionWriterState {
 
 impl SessionEventLog {
     /// Opens or creates `sessions/<id>/events.jsonl`, repairing an incomplete
-    /// or malformed final record left by a killed writer.
+    /// final record left by a killed writer.
     ///
     /// # Errors
     ///
@@ -2112,8 +2112,7 @@ fn recover_and_validate(file: &File) -> Result<u64, SessionStoreError> {
         let record_end = record_start
             .checked_add(record.len())
             .ok_or(SessionStoreError::LimitOverflow)?;
-        let is_final_record = record_end == bytes.len();
-        if is_final_record && record.last() != Some(&b'\n') {
+        if record_end == bytes.len() && record.last() != Some(&b'\n') {
             truncate_and_sync_event_file(
                 file,
                 u64::try_from(record_start).map_err(|_| SessionStoreError::LimitOverflow)?,
@@ -2121,24 +2120,11 @@ fn recover_and_validate(file: &File) -> Result<u64, SessionStoreError> {
             return Ok(next_sequence);
         }
 
-        let validated =
-            validate_recovered_event(&record[..record.len().saturating_sub(1)], next_sequence);
-        match validated {
-            Ok(()) => {
-                next_sequence = next_sequence
-                    .checked_add(1)
-                    .ok_or(SessionStoreError::SequenceOverflow)?;
-                record_start = record_end;
-            }
-            Err(_) if is_final_record => {
-                truncate_and_sync_event_file(
-                    file,
-                    u64::try_from(record_start).map_err(|_| SessionStoreError::LimitOverflow)?,
-                )?;
-                return Ok(next_sequence);
-            }
-            Err(error) => return Err(error),
-        }
+        validate_recovered_event(&record[..record.len().saturating_sub(1)], next_sequence)?;
+        next_sequence = next_sequence
+            .checked_add(1)
+            .ok_or(SessionStoreError::SequenceOverflow)?;
+        record_start = record_end;
     }
     Ok(next_sequence)
 }
@@ -3378,7 +3364,7 @@ mod tests {
     }
 
     #[test]
-    fn trailing_malformed_record_with_newline_is_truncated_on_open() {
+    fn trailing_malformed_record_with_newline_fails_closed_without_truncating() {
         let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
         let mut log = SessionEventLog::open(root.path(), "malformed-tail")
             .unwrap_or_else(|error| panic!("log must open: {error}"));
@@ -3387,8 +3373,7 @@ mod tests {
             text: "complete".to_owned(),
         })
         .unwrap_or_else(|error| panic!("event must append: {error}"));
-        let complete = std::fs::read(log.path())
-            .unwrap_or_else(|error| panic!("complete bytes must read: {error}"));
+        let path = log.path().to_path_buf();
         let mut file = OpenOptions::new()
             .append(true)
             .open(log.path())
@@ -3400,13 +3385,78 @@ mod tests {
         drop(file);
         drop(log);
 
-        let recovered = SessionEventLog::open(root.path(), "malformed-tail")
-            .unwrap_or_else(|error| panic!("malformed tail must recover: {error}"));
-        assert_eq!(recovered.next_sequence(), 1);
+        let before_open =
+            std::fs::read(&path).unwrap_or_else(|error| panic!("corrupt bytes must read: {error}"));
+        assert!(matches!(
+            SessionEventLog::open(root.path(), "malformed-tail"),
+            Err(SessionStoreError::Json(_))
+        ));
         assert_eq!(
-            std::fs::read(recovered.path())
-                .unwrap_or_else(|error| panic!("recovered bytes must read: {error}")),
-            complete
+            std::fs::read(path)
+                .unwrap_or_else(|error| panic!("preserved bytes must read: {error}")),
+            before_open
+        );
+    }
+
+    #[test]
+    fn trailing_unsupported_version_with_newline_fails_closed_without_truncating() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let log = SessionEventLog::open(root.path(), "unsupported-tail")
+            .unwrap_or_else(|error| panic!("log must open: {error}"));
+        let path = log.path().to_path_buf();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap_or_else(|error| panic!("tail file must open: {error}"));
+        file.write_all(b"{\"schema_version\":2,\"sequence\":\"0\",\"event\":{}}\n")
+            .unwrap_or_else(|error| panic!("unsupported tail must write: {error}"));
+        file.sync_data()
+            .unwrap_or_else(|error| panic!("unsupported tail must sync: {error}"));
+        drop(file);
+        drop(log);
+
+        let before_open = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("unsupported bytes must read: {error}"));
+        assert!(matches!(
+            SessionEventLog::open(root.path(), "unsupported-tail"),
+            Err(SessionStoreError::UnsupportedEventVersion(2))
+        ));
+        assert_eq!(
+            std::fs::read(path)
+                .unwrap_or_else(|error| panic!("preserved bytes must read: {error}")),
+            before_open
+        );
+    }
+
+    #[test]
+    fn trailing_non_contiguous_record_with_newline_fails_closed_without_truncating() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let log = SessionEventLog::open(root.path(), "non-contiguous-tail")
+            .unwrap_or_else(|error| panic!("log must open: {error}"));
+        let path = log.path().to_path_buf();
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap_or_else(|error| panic!("tail file must open: {error}"));
+        file.write_all(b"{\"schema_version\":1,\"sequence\":\"1\",\"event\":{}}\n")
+            .unwrap_or_else(|error| panic!("non-contiguous tail must write: {error}"));
+        file.sync_data()
+            .unwrap_or_else(|error| panic!("non-contiguous tail must sync: {error}"));
+        drop(file);
+        drop(log);
+
+        let before_open = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("non-contiguous bytes must read: {error}"));
+        assert!(matches!(
+            SessionEventLog::open(root.path(), "non-contiguous-tail"),
+            Err(SessionStoreError::CorruptEvent(
+                "non-contiguous event sequence"
+            ))
+        ));
+        assert_eq!(
+            std::fs::read(path)
+                .unwrap_or_else(|error| panic!("preserved bytes must read: {error}")),
+            before_open
         );
     }
 
