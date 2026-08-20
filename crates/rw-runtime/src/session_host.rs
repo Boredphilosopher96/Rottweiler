@@ -1626,6 +1626,9 @@ impl RuntimeSessionFactory {
             .await
             .map_err(|_| HostError::Query("session search worker failed".to_owned()))?;
             match result {
+                Ok((rows, _)) if rows.is_empty() && attempt < SESSION_INDEX_SEARCH_MAX_ATTEMPTS => {
+                    tokio::time::sleep(SESSION_INDEX_SEARCH_RETRY_DELAY).await;
+                }
                 Ok(result) => return Ok(result),
                 Err(SessionStoreError::UnsafeSessionIndex)
                     if attempt < SESSION_INDEX_SEARCH_MAX_ATTEMPTS =>
