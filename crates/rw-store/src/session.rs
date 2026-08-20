@@ -537,6 +537,10 @@ impl SessionEventLog {
         sync_event_file(&child.file)?;
         child.next_sequence =
             u64::try_from(event_count).map_err(|_| SessionStoreError::SequenceOverflow)?;
+        child.validated_bytes =
+            u64::try_from(target.len()).map_err(|_| SessionStoreError::LimitOverflow)?;
+        child.validated_hasher = blake3::Hasher::new();
+        child.validated_hasher.update(target);
         Ok(child)
     }
 
