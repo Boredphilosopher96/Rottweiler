@@ -23,8 +23,8 @@ use rw_ext::{
     ApprovalRequirement, ApprovalStore, ApprovalStoreError, CapabilityEnforcer, HookHandler,
     HookRegistration, METHOD_SESSION_INJECT_MESSAGE, METHOD_SESSION_SET_STATUS, METHOD_UI_NOTIFY,
     PluginBoundaryRedactor, PluginEventRouter, PluginHost, PluginHttpStreamResponse,
-    PluginManifest, PluginProviderHttpHandler, PluginRpcClient, PluginRpcError, PushHandler,
-    RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter, RpcToolAdapter,
+    PluginLauncher, PluginManifest, PluginProviderHttpHandler, PluginRpcClient, PluginRpcError,
+    PushHandler, RpcCommandAdapter, RpcHookHandler, RpcProviderAdapter, RpcToolAdapter,
     plugin_launch_approval_requirement,
 };
 use rw_ext::{
@@ -1344,6 +1344,28 @@ impl PluginSessionRuntime {
         let scratch = PrivateMcpScratch::create()?;
         let launcher = crate::plugin_process::SandboxedPluginLauncher::new(scratch.path(), helper)
             .map_err(|error| miette!(error.to_string()))?;
+        Self::start_with_launcher(
+            configs,
+            private_root,
+            workspace_roots,
+            &launcher,
+            &store,
+            redactor,
+            scratch,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_with_launcher(
+        configs: &[crate::extension_config::DiscoveredPlugin],
+        private_root: &Path,
+        workspace_roots: &[PathBuf],
+        launcher: &dyn PluginLauncher,
+        store: &dyn ApprovalStore,
+        redactor: Arc<SharedPluginRedactor>,
+        scratch: PrivateMcpScratch,
+    ) -> Result<Self> {
         let mut runtime = Self {
             hosts: Vec::new(),
             push_handlers: Vec::new(),
@@ -1356,16 +1378,20 @@ impl PluginSessionRuntime {
             _scratch: scratch,
         };
         for config in configs.iter().filter(|config| config.enabled) {
-            runtime
+            if let Err(error) = runtime
                 .start_plugin(
                     config,
                     workspace_roots,
-                    &launcher,
-                    &store,
+                    launcher,
+                    store,
                     private_root,
                     redactor.clone(),
                 )
-                .await?;
+                .await
+            {
+                runtime.shutdown().await;
+                return Err(error);
+            }
         }
         Ok(runtime)
     }
@@ -1374,8 +1400,8 @@ impl PluginSessionRuntime {
         &mut self,
         config: &crate::extension_config::DiscoveredPlugin,
         workspace_roots: &[PathBuf],
-        launcher: &crate::plugin_process::SandboxedPluginLauncher,
-        store: &PrivatePluginApprovalStore,
+        launcher: &dyn PluginLauncher,
+        store: &dyn ApprovalStore,
         private_root: &Path,
         redactor: Arc<SharedPluginRedactor>,
     ) -> Result<()> {
@@ -2414,7 +2440,11 @@ mod tests {
     };
     use rw_mcp::{McpClient, McpError, McpServerConfig, ServerState};
     use serde_json::{Value, json};
-    use std::time::Duration;
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 
     struct NoConnect;
     #[async_trait]
@@ -2425,6 +2455,185 @@ mod tests {
         ) -> std::result::Result<Arc<dyn McpClient>, McpError> {
             Err(McpError::Policy("offline fixture".to_owned()))
         }
+    }
+
+    #[derive(Default)]
+    struct RollbackProcess {
+        killed: AtomicUsize,
+        waited: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl rw_ext::SupervisedPluginProcess for RollbackProcess {
+        fn mark_capability_violation(&self, _violation: &rw_ext::CapabilityViolation) {}
+
+        fn kill_tree(&self) -> std::result::Result<(), rw_ext::PluginProcessError> {
+            self.killed.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        async fn wait(&self) -> std::result::Result<Option<i32>, rw_ext::PluginProcessError> {
+            self.waited.fetch_add(1, Ordering::AcqRel);
+            Ok(Some(0))
+        }
+    }
+
+    struct FailSecondPluginLauncher {
+        launches: AtomicUsize,
+        first_manifest: PluginManifest,
+        first_process: Arc<RollbackProcess>,
+    }
+
+    #[async_trait]
+    impl PluginLauncher for FailSecondPluginLauncher {
+        async fn launch(
+            &self,
+            config: &rw_ext::PluginProcessConfig,
+            _profile: &rw_ext::PluginSandboxProfile,
+        ) -> std::result::Result<rw_ext::LaunchedPluginProcess, rw_ext::PluginProcessError>
+        {
+            if self.launches.fetch_add(1, Ordering::AcqRel) == 1 {
+                return Err(rw_ext::PluginProcessError {
+                    message: "seeded second plugin startup failure".to_owned(),
+                });
+            }
+            let (host_stdin, plugin_input) = tokio::io::duplex(4096);
+            let (plugin_output, host_stdout) = tokio::io::duplex(4096);
+            let manifest = self.first_manifest.clone();
+            tokio::spawn(async move {
+                let mut input = BufReader::new(plugin_input);
+                let mut output = plugin_output;
+                let mut line = String::new();
+                while input.read_line(&mut line).await.expect("fixture read") != 0 {
+                    let frame: rw_ext::RpcFrame =
+                        serde_json::from_str(line.trim_end()).expect("host frame");
+                    line.clear();
+                    match frame {
+                        rw_ext::RpcFrame::Request(request)
+                            if request.method == rw_ext::METHOD_INITIALIZE =>
+                        {
+                            let response = rw_ext::RpcFrame::Success(rw_ext::RpcSuccess {
+                                jsonrpc: rw_ext::JSON_RPC_VERSION.to_owned(),
+                                id: Some(request.id),
+                                result: serde_json::to_value(&manifest).expect("manifest"),
+                            });
+                            output
+                                .write_all(
+                                    &rw_ext::encode_frame(&response, rw_ext::MAX_FRAME_BYTES)
+                                        .expect("response frame"),
+                                )
+                                .await
+                                .expect("response write");
+                        }
+                        rw_ext::RpcFrame::Request(request)
+                            if request.method == rw_ext::METHOD_SHUTDOWN =>
+                        {
+                            let response = rw_ext::RpcFrame::Success(rw_ext::RpcSuccess {
+                                jsonrpc: rw_ext::JSON_RPC_VERSION.to_owned(),
+                                id: Some(request.id),
+                                result: Value::Null,
+                            });
+                            output
+                                .write_all(
+                                    &rw_ext::encode_frame(&response, rw_ext::MAX_FRAME_BYTES)
+                                        .expect("response frame"),
+                                )
+                                .await
+                                .expect("response write");
+                        }
+                        rw_ext::RpcFrame::Notification(notification)
+                            if notification.method == rw_ext::METHOD_EXIT =>
+                        {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            Ok(rw_ext::LaunchedPluginProcess {
+                stdin: Box::pin(host_stdin),
+                stdout: Box::pin(BufReader::new(host_stdout)),
+                stderr: Box::pin(BufReader::new(tokio::io::empty())),
+                process: self.first_process.clone(),
+                executable_identity: config.executable_identity().clone(),
+            })
+        }
+    }
+
+    fn rollback_plugin(
+        root: &Path,
+        name: &str,
+    ) -> (crate::extension_config::DiscoveredPlugin, PluginManifest) {
+        let plugin_root = root.join(name);
+        fs::create_dir_all(&plugin_root).expect("plugin root");
+        let manifest = PluginManifest {
+            name: name.to_owned(),
+            version: "1.0.0".to_owned(),
+            protocol: rw_ext::MIN_PROTOCOL_VERSION,
+            capabilities: rw_ext::PluginCapabilities::default(),
+        };
+        let manifest_path = plugin_root.join("manifest.json");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec(&manifest).expect("manifest JSON"),
+        )
+        .expect("manifest file");
+        (
+            crate::extension_config::DiscoveredPlugin {
+                name: name.to_owned(),
+                enabled: true,
+                argv: vec!["/bin/sh".to_owned()],
+                cwd: plugin_root,
+                inherit_env: Vec::new(),
+                manifest_path,
+                allowed_domains: Vec::new(),
+                origin: ExecutableConfigOrigin::User(root.join("plugins.toml")),
+            },
+            manifest,
+        )
+    }
+
+    #[tokio::test]
+    async fn plugin_startup_failure_rolls_back_already_started_plugins() {
+        let root = tempfile::tempdir().expect("root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("mode");
+        }
+        let (first, first_manifest) = rollback_plugin(root.path(), "first");
+        let (second, second_manifest) = rollback_plugin(root.path(), "second");
+        let configs = vec![first, second];
+        let store = PrivatePluginApprovalStore::open(root.path()).expect("approval store");
+        for (config, manifest) in configs.iter().zip([first_manifest.clone(), second_manifest]) {
+            let process = config.process_config().expect("process config");
+            let origin = format!("user:{}", config.origin.path().display());
+            rw_ext::approve_plugin_launch(&store, &manifest, &process, &origin).expect("approve");
+        }
+        let process = Arc::new(RollbackProcess::default());
+        let launcher = FailSecondPluginLauncher {
+            launches: AtomicUsize::new(0),
+            first_manifest,
+            first_process: process.clone(),
+        };
+        let result = PluginSessionRuntime::start_with_launcher(
+            &configs,
+            root.path(),
+            &[root.path().to_path_buf()],
+            &launcher,
+            &store,
+            Arc::new(SharedPluginRedactor::new(
+                rw_providers::FixtureRedactor::default(),
+            )),
+            PrivateMcpScratch::create().expect("scratch"),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            process.waited.load(Ordering::Acquire) >= 1,
+            "the first plugin must be shut down and reaped before startup fails"
+        );
     }
 
     #[test]

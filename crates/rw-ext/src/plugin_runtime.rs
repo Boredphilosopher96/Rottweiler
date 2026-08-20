@@ -381,6 +381,16 @@ pub struct JsonRpcPluginClient {
     redactor: Arc<dyn PluginBoundaryRedactor>,
 }
 
+impl Drop for JsonRpcPluginClient {
+    fn drop(&mut self) {
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return;
+        }
+        self.closed.store(true, Ordering::Release);
+        let _ = self.process.kill_tree();
+    }
+}
+
 impl JsonRpcPluginClient {
     pub fn start(
         launched: LaunchedPluginProcess,
@@ -3140,6 +3150,42 @@ mod tests {
         assert_eq!(result.content, "fixture");
         host.shutdown().await.expect("shutdown");
         assert!(process.waited.load(Ordering::Acquire) >= 1);
+    }
+
+    #[tokio::test]
+    async fn dropping_launched_host_kills_process_without_explicit_shutdown() {
+        let root = TempDir::new().expect("tempdir");
+        let config = shell_config(&root)
+            .with_allowed_domains(["example.com"])
+            .expect("network allowlist");
+        let manifest = manifest();
+        let store = MemoryApproval::default();
+        approve_plugin_launch(&store, &manifest, &config, "project:drop").expect("approve");
+        let process = Arc::new(FakeProcess::default());
+        let host = PluginHost::launch_approved(
+            &MemoryLauncher {
+                manifest: manifest.clone(),
+                process: process.clone(),
+                push: None,
+                hang_method: None,
+            },
+            &store,
+            &config,
+            "project:drop",
+            &[root.path().to_path_buf()],
+            manifest,
+            Arc::new(DenyPushHandler),
+            Arc::new(NoopPluginBoundaryRedactor),
+        )
+        .await
+        .expect("launch");
+
+        drop(host);
+
+        assert!(
+            process.killed.load(Ordering::Acquire) >= 1,
+            "the final client owner must terminate an unshut plugin"
+        );
     }
 
     #[tokio::test]
