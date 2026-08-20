@@ -22,7 +22,7 @@ use rw_types::{
 };
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{Notify, broadcast, mpsc, watch};
+use tokio::sync::{mpsc, watch};
 
 use crate::{
     AgentLoopError, CachedModelCatalog, EventClock, ProviderApiKey, SessionHandle,
@@ -693,7 +693,7 @@ struct CachedDispatch {
 enum DedupeState {
     Running {
         payload_hash: String,
-        notify: Arc<Notify>,
+        completion: watch::Sender<bool>,
     },
     Complete {
         payload_hash: String,
@@ -751,6 +751,99 @@ struct ProviderAuthCompletionGuard {
     attempt_id: ProviderAuthAttemptId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ClientEventSubscriptionId(u64);
+
+#[derive(Default)]
+struct ClientEventSubscribers {
+    next_id: u64,
+    senders: HashMap<ClientEventSubscriptionId, mpsc::Sender<EngineEvent>>,
+}
+
+#[derive(Default)]
+struct ClientEventChannel {
+    delivery: tokio::sync::Mutex<()>,
+    subscribers: Mutex<ClientEventSubscribers>,
+}
+
+#[derive(Default)]
+struct ClientEventRegistry {
+    clients: HashMap<ClientId, Arc<ClientEventChannel>>,
+}
+
+impl ClientEventChannel {
+    fn subscribe(&self) -> (ClientEventSubscriptionId, mpsc::Receiver<EngineEvent>) {
+        let (sender, receiver) = mpsc::channel(HOST_EVENT_CAPACITY);
+        let mut subscribers = self
+            .subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let id = loop {
+            let id = ClientEventSubscriptionId(subscribers.next_id);
+            subscribers.next_id = subscribers.next_id.wrapping_add(1);
+            if !subscribers.senders.contains_key(&id) {
+                break id;
+            }
+        };
+        subscribers.senders.insert(id, sender);
+        (id, receiver)
+    }
+
+    fn unsubscribe(&self, id: ClientEventSubscriptionId) -> bool {
+        let mut subscribers = self
+            .subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        subscribers.senders.remove(&id);
+        subscribers.senders.is_empty()
+    }
+
+    fn senders(&self) -> Vec<mpsc::Sender<EngineEvent>> {
+        self.subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .senders
+            .values()
+            .cloned()
+            .collect()
+    }
+}
+
+impl ClientEventRegistry {
+    fn subscribe(
+        &mut self,
+        client_id: &ClientId,
+    ) -> (
+        Arc<ClientEventChannel>,
+        ClientEventSubscriptionId,
+        mpsc::Receiver<EngineEvent>,
+    ) {
+        let channel = Arc::clone(
+            self.clients
+                .entry(client_id.clone())
+                .or_insert_with(|| Arc::new(ClientEventChannel::default())),
+        );
+        let (id, receiver) = channel.subscribe();
+        (channel, id, receiver)
+    }
+
+    fn unsubscribe(
+        &mut self,
+        client_id: &ClientId,
+        channel: &Arc<ClientEventChannel>,
+        id: ClientEventSubscriptionId,
+    ) -> bool {
+        let Some(registered) = self.clients.get(client_id) else {
+            return false;
+        };
+        if !Arc::ptr_eq(registered, channel) || !channel.unsubscribe(id) {
+            return false;
+        }
+        self.clients.remove(client_id);
+        true
+    }
+}
+
 impl Drop for ProviderAuthCompletionGuard {
     fn drop(&mut self) {
         remove_provider_auth_reservation(&self.pending, &self.owner, &self.attempt_id);
@@ -773,16 +866,21 @@ impl Drop for ProviderAuthOpeningGuard {
 
 struct ProviderAuthSubscriptionGuard {
     client_id: ClientId,
-    receiver: broadcast::Receiver<EngineEvent>,
-    sender: broadcast::Sender<EngineEvent>,
+    subscription_id: ClientEventSubscriptionId,
+    receiver: mpsc::Receiver<EngineEvent>,
+    channel: Arc<ClientEventChannel>,
+    registry: Arc<Mutex<ClientEventRegistry>>,
     pending: Arc<PendingProviderAuths>,
 }
 
 impl Drop for ProviderAuthSubscriptionGuard {
     fn drop(&mut self) {
-        // This receiver is still counted during Drop. Cancel only when it is
-        // the client's final authenticated event subscription.
-        if self.sender.receiver_count() <= 1 {
+        let final_subscription = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unsubscribe(&self.client_id, &self.channel, self.subscription_id);
+        if final_subscription {
             self.pending.cancel_client(&self.client_id);
         }
     }
@@ -875,7 +973,7 @@ pub struct EngineHost {
     clock: Arc<dyn EventClock>,
     registry: Arc<tokio::sync::Mutex<HostRegistry>>,
     dedupe: Arc<Mutex<DedupeRegistry>>,
-    client_events: Arc<Mutex<HashMap<ClientId, broadcast::Sender<EngineEvent>>>>,
+    client_events: Arc<Mutex<ClientEventRegistry>>,
     provider_auth: Arc<PendingProviderAuths>,
     provider_mutation: Arc<tokio::sync::Mutex<()>>,
     provider_api_key_store: Arc<ProviderApiKeyStore>,
@@ -915,7 +1013,7 @@ impl EngineHost {
             clock: Arc::new(SystemEventClock),
             registry: Arc::new(tokio::sync::Mutex::new(HostRegistry::default())),
             dedupe: Arc::new(Mutex::new(DedupeRegistry::default())),
-            client_events: Arc::new(Mutex::new(HashMap::new())),
+            client_events: Arc::new(Mutex::new(ClientEventRegistry::default())),
             provider_auth: Arc::new(PendingProviderAuths::default()),
             provider_mutation: Arc::new(tokio::sync::Mutex::new(())),
             provider_api_key_store: Arc::new(|provider, api_key| {
@@ -1247,9 +1345,10 @@ impl EngineHost {
         let key = (bound.client_id.clone(), meta.request_id.clone());
         let session_id_hint = command_session_id(&command);
         let mut pending_command = Some(command);
+        let mut owns_execution = false;
 
         loop {
-            let wait = {
+            let (wait, launch, completed) = {
                 let mut dedupe = self
                     .dedupe
                     .lock()
@@ -1260,119 +1359,108 @@ impl EngineHost {
                         dispatch,
                         retry_same_request,
                     }) => {
-                        if existing != &payload_hash {
-                            drop(dedupe);
+                        if existing == &payload_hash {
+                            let cached = dispatch.clone();
+                            let retry_same_request = *retry_same_request;
+                            if retry_same_request {
+                                dedupe.entries.remove(&key);
+                                dedupe.order.retain(|queued| queued != &key);
+                            }
+                            (None, None, Some((cached.outcome, cached.events)))
+                        } else {
                             let outcome = rejected(
                                 "request_id_conflict",
                                 "request id was reused with a different command",
                             );
-                            self.emit_one(
-                                &bound.client_id,
-                                command_ack(
-                                    &meta,
-                                    session_id_hint.clone(),
-                                    outcome.clone(),
-                                    &*self.clock,
-                                ),
+                            let event = command_ack(
+                                &meta,
+                                session_id_hint.clone(),
+                                outcome.clone(),
+                                &*self.clock,
                             );
-                            return outcome;
+                            (None, None, Some((outcome, vec![event])))
                         }
-                        let cached = dispatch.clone();
-                        let retry_same_request = *retry_same_request;
-                        if retry_same_request {
-                            dedupe.entries.remove(&key);
-                            dedupe.order.retain(|queued| queued != &key);
-                        }
-                        drop(dedupe);
-                        self.emit_many(&bound.client_id, &cached.events);
-                        return cached.outcome;
                     }
                     Some(DedupeState::Running {
                         payload_hash: existing,
-                        notify,
+                        completion,
                     }) => {
-                        if existing != &payload_hash {
-                            drop(dedupe);
+                        if existing == &payload_hash {
+                            (Some(completion.subscribe()), None, None)
+                        } else {
                             let outcome = rejected(
                                 "request_id_conflict",
                                 "request id was reused with a different command",
                             );
-                            self.emit_one(
-                                &bound.client_id,
-                                command_ack(
-                                    &meta,
-                                    session_id_hint.clone(),
-                                    outcome.clone(),
-                                    &*self.clock,
-                                ),
+                            let event = command_ack(
+                                &meta,
+                                session_id_hint.clone(),
+                                outcome.clone(),
+                                &*self.clock,
                             );
-                            return outcome;
+                            (None, None, Some((outcome, vec![event])))
                         }
-                        Some(Arc::clone(notify).notified_owned())
                     }
                     None => {
-                        let notify = Arc::new(Notify::new());
+                        let (completion, wait) = watch::channel(false);
                         dedupe.entries.insert(
                             key.clone(),
                             DedupeState::Running {
                                 payload_hash: payload_hash.clone(),
-                                notify,
+                                completion,
                             },
                         );
                         dedupe.order.push_back(key.clone());
-                        drop(dedupe);
-                        let host = self.clone();
-                        let bound_client = bound.client_id.clone();
-                        let operation_key = key.clone();
-                        let operation_hash = payload_hash.clone();
                         let Some(operation) = pending_command.take() else {
                             return rejected(
                                 "request_state_invalid",
                                 "request execution state was unavailable",
                             );
                         };
-                        tokio::spawn(async move {
-                            let dispatch = host.execute(operation, operation_hash.clone()).await;
-                            host.complete_request(
-                                operation_key,
-                                operation_hash,
-                                &dispatch,
-                                &bound_client,
-                            );
-                        });
-                        let dedupe = self
-                            .dedupe
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        match dedupe.entries.get(&key) {
-                            Some(DedupeState::Running { notify, .. }) => {
-                                Some(Arc::clone(notify).notified_owned())
-                            }
-                            Some(DedupeState::Complete { .. }) | None => None,
-                        }
+                        (Some(wait), Some(operation), None)
                     }
                 }
             };
-            if let Some(wait) = wait {
-                wait.await;
+            if let Some((outcome, events)) = completed {
+                if !owns_execution {
+                    self.emit_many(&bound.client_id, &events).await;
+                }
+                return outcome;
+            }
+            if let Some(operation) = launch {
+                owns_execution = true;
+                let host = self.clone();
+                let bound_client = bound.client_id.clone();
+                let operation_key = key.clone();
+                let operation_hash = payload_hash.clone();
+                tokio::spawn(async move {
+                    let dispatch = host.execute(operation, operation_hash.clone()).await;
+                    host.complete_request(operation_key, operation_hash, &dispatch, &bound_client)
+                        .await;
+                });
+            }
+            if let Some(mut wait) = wait
+                && !*wait.borrow_and_update()
+            {
+                let _ = wait.changed().await;
             }
         }
     }
 
-    fn complete_request(
+    async fn complete_request(
         &self,
         key: (ClientId, RequestId),
         payload_hash: String,
         dispatch: &CachedDispatch,
         client_id: &ClientId,
     ) {
-        let notify = {
+        let completion = {
             let mut dedupe = self
                 .dedupe
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let notify = match dedupe.entries.get(&key) {
-                Some(DedupeState::Running { notify, .. }) => Some(Arc::clone(notify)),
+            let completion = match dedupe.entries.get(&key) {
+                Some(DedupeState::Running { completion, .. }) => Some(completion.clone()),
                 Some(DedupeState::Complete { .. }) | None => None,
             };
             dedupe.entries.insert(
@@ -1397,11 +1485,11 @@ impl EngineHost {
                     break;
                 }
             }
-            notify
+            completion
         };
-        self.emit_many(client_id, &dispatch.events);
-        if let Some(notify) = notify {
-            notify.notify_waiters();
+        self.emit_many(client_id, &dispatch.events).await;
+        if let Some(completion) = completion {
+            completion.send_replace(true);
         }
     }
 
@@ -3083,21 +3171,27 @@ impl EngineHost {
         session_id: Option<SessionId>,
         last_seen: Option<SequenceId>,
     ) -> Result<mpsc::Receiver<Result<EngineEvent, HostError>>, HostError> {
-        let sender = self.client_sender(&bound.client_id);
-        let host_events = sender.subscribe();
-        let (send, receive) = mpsc::channel(HOST_EVENT_CAPACITY);
         let session = if let Some(session_id) = &session_id {
             Some(self.ready_session(session_id).await?)
         } else {
             None
         };
+        let (channel, subscription_id, host_events) = self
+            .client_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .subscribe(&bound.client_id);
+        let (send, receive) = mpsc::channel(HOST_EVENT_CAPACITY);
         let clock = Arc::clone(&self.clock);
         let provider_auth = Arc::clone(&self.provider_auth);
+        let client_events = Arc::clone(&self.client_events);
         tokio::spawn(async move {
             let mut subscription = ProviderAuthSubscriptionGuard {
                 client_id: bound.client_id.clone(),
+                subscription_id,
                 receiver: host_events,
-                sender,
+                channel,
+                registry: client_events,
                 pending: provider_auth,
             };
             if let Some(session) = session {
@@ -3137,10 +3231,10 @@ impl EngineHost {
                 }
                 loop {
                     tokio::select! {
+                        () = send.closed() => return,
                         host = subscription.receiver.recv() => match host {
-                            Ok(event) => if send.send(Ok(event)).await.is_err() { return; },
-                            Err(broadcast::error::RecvError::Lagged(_)) => {},
-                            Err(broadcast::error::RecvError::Closed) => return,
+                            Some(event) => if send.send(Ok(event)).await.is_err() { return; },
+                            None => return,
                         },
                         event = session_events.recv() => match event {
                             Ok(event) => {
@@ -3172,14 +3266,12 @@ impl EngineHost {
                 }
             } else {
                 loop {
-                    match subscription.receiver.recv().await {
-                        Ok(event) => {
-                            if send.send(Ok(event)).await.is_err() {
-                                return;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {}
-                        Err(broadcast::error::RecvError::Closed) => return,
+                    tokio::select! {
+                        () = send.closed() => return,
+                        event = subscription.receiver.recv() => match event {
+                            Some(event) => if send.send(Ok(event)).await.is_err() { return; },
+                            None => return,
+                        },
                     }
                 }
             }
@@ -3187,25 +3279,23 @@ impl EngineHost {
         Ok(receive)
     }
 
-    fn client_sender(&self, client_id: &ClientId) -> broadcast::Sender<EngineEvent> {
-        let mut clients = self
+    async fn emit_many(&self, client_id: &ClientId, events: &[EngineEvent]) {
+        let channel = self
             .client_events
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        clients
-            .entry(client_id.clone())
-            .or_insert_with(|| broadcast::channel(HOST_EVENT_CAPACITY).0)
-            .clone()
-    }
-
-    fn emit_one(&self, client_id: &ClientId, event: EngineEvent) {
-        let _ = self.client_sender(client_id).send(event);
-    }
-
-    fn emit_many(&self, client_id: &ClientId, events: &[EngineEvent]) {
-        let sender = self.client_sender(client_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clients
+            .get(client_id)
+            .cloned();
+        let Some(channel) = channel else {
+            return;
+        };
+        let _delivery = channel.delivery.lock().await;
+        let senders = channel.senders();
         for event in events {
-            let _ = sender.send(event.clone());
+            for sender in &senders {
+                let _ = sender.send(event.clone()).await;
+            }
         }
     }
 
@@ -3248,7 +3338,8 @@ impl EngineHost {
                     false,
                     sanitized_provider_auth_error(&error),
                     Vec::new(),
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -3264,7 +3355,8 @@ impl EngineHost {
                     false,
                     sanitized_provider_auth_error(&error),
                     Vec::new(),
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -3281,7 +3373,8 @@ impl EngineHost {
                     false,
                     sanitized_provider_auth_error(&HostError::from(error)),
                     Vec::new(),
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -3324,14 +3417,16 @@ impl EngineHost {
                     false,
                     sanitized_provider_auth_error(&error),
                     Vec::new(),
-                );
+                )
+                .await;
                 return;
             }
         };
         // Credential persistence is the authentication result. Report it
         // immediately; activation and catalog discovery are independent
         // readiness work and must not relabel or delay a successful login.
-        self.emit_provider_auth_finished(&owner, attempt_id, &meta, true, message, warnings);
+        self.emit_provider_auth_finished(&owner, attempt_id, &meta, true, message, warnings)
+            .await;
         let activated = session
             .handle()
             .activate_provider(&owner.provider, Some(&snapshot.model_alias))
@@ -3363,11 +3458,12 @@ impl EngineHost {
                     .to_owned(),
             ),
         };
-        self.emit_provider_activation_finished(&owner, &meta, ready, readiness_message);
+        self.emit_provider_activation_finished(&owner, &meta, ready, readiness_message)
+            .await;
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn emit_provider_auth_finished(
+    async fn emit_provider_auth_finished(
         &self,
         owner: &ProviderAuthOwner,
         attempt_id: ProviderAuthAttemptId,
@@ -3387,10 +3483,11 @@ impl EngineHost {
                 message,
                 warnings,
             }],
-        );
+        )
+        .await;
     }
 
-    fn emit_provider_activation_finished(
+    async fn emit_provider_activation_finished(
         &self,
         owner: &ProviderAuthOwner,
         meta: &CommandMeta,
@@ -3406,7 +3503,8 @@ impl EngineHost {
                 success,
                 message,
             }],
-        );
+        )
+        .await;
     }
 
     async fn emit_refreshed_provider_catalog(
@@ -3445,7 +3543,8 @@ impl EngineHost {
                 cached: catalog.cached,
                 truncated: catalog.truncated,
             }],
-        );
+        )
+        .await;
         Some(provider_ready)
     }
 }
@@ -4002,11 +4101,12 @@ fn wire_mode_catalog(
 #[allow(clippy::expect_used)]
 mod tests {
     use std::{
+        collections::HashSet,
         sync::{
             Condvar,
             atomic::{AtomicU8, AtomicUsize},
         },
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use futures_util::stream;
@@ -4018,6 +4118,7 @@ mod tests {
     use rw_tools::ToolRegistry;
     use rw_types::{AttachmentData, CommandMeta, PROTOCOL_VERSION, config::PermissionDecision};
     use tempfile::TempDir;
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::{
@@ -4026,6 +4127,210 @@ mod tests {
         SessionCommandAction, SessionCommandContext, SessionCommandOutput, SessionEventSink,
         SessionRecoveredState, builtin_command_registry, builtin_hook_dispatcher,
     };
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn client_event_fanout_cleans_up_each_subscription() {
+        async fn expect_results(
+            events: &mut mpsc::Receiver<Result<EngineEvent, HostError>>,
+            request_id: &str,
+        ) {
+            let acknowledgement = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("command acknowledgement")
+                .expect("open subscription")
+                .expect("host result");
+            assert!(matches!(
+                acknowledgement,
+                EngineEvent::CommandAcknowledged { meta, .. }
+                    if meta.request_id.0 == request_id
+            ));
+            let result = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .expect("command result")
+                .expect("open subscription")
+                .expect("host result");
+            assert!(matches!(
+                result,
+                EngineEvent::SessionsListed { meta, .. }
+                    if meta.request_id.0 == request_id
+            ));
+        }
+
+        let (host, _factory) = host(1);
+        let client = BoundClient {
+            client_id: ClientId("fanout-client".to_owned()),
+        };
+        let mut first = host
+            .subscribe(client.clone(), None, None)
+            .await
+            .expect("first subscription");
+        let mut second = host
+            .subscribe(client.clone(), None, None)
+            .await
+            .expect("second subscription");
+
+        assert_eq!(
+            host.dispatch(
+                client.clone(),
+                ClientCommand::ListSessions {
+                    meta: meta("spoofed", "fanout-both"),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        expect_results(&mut first, "fanout-both").await;
+        expect_results(&mut second, "fanout-both").await;
+
+        drop(first);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let subscriber_count = host
+                    .client_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clients
+                    .get(&client.client_id)
+                    .map(|channel| {
+                        channel
+                            .subscribers
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .senders
+                            .len()
+                    });
+                if subscriber_count == Some(1) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first subscription cleanup");
+
+        assert_eq!(
+            host.dispatch(
+                client.clone(),
+                ClientCommand::ListSessions {
+                    meta: meta("spoofed", "fanout-second"),
+                },
+            )
+            .await,
+            CommandOutcome::Accepted
+        );
+        expect_results(&mut second, "fanout-second").await;
+
+        drop(second);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let registered = host
+                    .client_events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clients
+                    .contains_key(&client.client_id);
+                if !registered {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("final subscription cleanup");
+    }
+
+    #[tokio::test]
+    async fn connection_results_survive_slow_subscriber_backpressure() {
+        const COMMANDS: usize = 600;
+
+        let factory = Arc::new(StubFactory::new());
+        let host = EngineHost::new(
+            EngineHostConfig {
+                max_sessions: 1,
+                max_deduplicated_requests: COMMANDS + 1,
+            },
+            factory,
+            Arc::new(StubQueries::default()),
+        )
+        .expect("host");
+        let client = BoundClient {
+            client_id: ClientId("slow-subscriber".to_owned()),
+        };
+        let mut events = host
+            .subscribe(client.clone(), None, None)
+            .await
+            .expect("host subscription");
+        let started = Instant::now();
+        let dispatches = (0..COMMANDS)
+            .map(|index| {
+                let host = host.clone();
+                let client = client.clone();
+                tokio::spawn(async move {
+                    host.dispatch(
+                        client,
+                        ClientCommand::ListSessions {
+                            meta: meta("spoofed", &format!("slow-{index}")),
+                        },
+                    )
+                    .await
+                })
+            })
+            .collect::<Vec<_>>();
+
+        // Model a temporarily paused SSE consumer. The host may backpressure
+        // these commands, but it must not discard either connection result.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut acknowledgements = HashSet::new();
+        let mut session_lists = HashSet::new();
+        let mut acknowledgement_events = 0;
+        let mut session_list_events = 0;
+        while acknowledgements.len() < COMMANDS || session_lists.len() < COMMANDS {
+            let Ok(Some(Ok(event))) =
+                tokio::time::timeout(Duration::from_millis(250), events.recv()).await
+            else {
+                break;
+            };
+            match event {
+                EngineEvent::CommandAcknowledged { meta, .. }
+                    if meta.request_id.0.starts_with("slow-") =>
+                {
+                    acknowledgement_events += 1;
+                    acknowledgements.insert(meta.request_id);
+                }
+                EngineEvent::SessionsListed { meta, .. }
+                    if meta.request_id.0.starts_with("slow-") =>
+                {
+                    session_list_events += 1;
+                    session_lists.insert(meta.request_id);
+                }
+                _ => {}
+            }
+        }
+
+        for dispatch in dispatches {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), dispatch)
+                    .await
+                    .expect("dispatch completed after subscriber resumed")
+                    .expect("dispatch task"),
+                CommandOutcome::Accepted
+            );
+        }
+        eprintln!(
+            "slow subscriber delivered {}/{} acknowledgements and {}/{} results in {:?}",
+            acknowledgements.len(),
+            COMMANDS,
+            session_lists.len(),
+            COMMANDS,
+            started.elapsed()
+        );
+        assert_eq!(acknowledgements.len(), COMMANDS);
+        assert_eq!(session_lists.len(), COMMANDS);
+        assert_eq!(acknowledgement_events, COMMANDS);
+        assert_eq!(session_list_events, COMMANDS);
+    }
 
     #[test]
     fn subagent_replay_batches_are_lossless_and_fit_the_broadcast_window() {
