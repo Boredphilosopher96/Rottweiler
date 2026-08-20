@@ -9,7 +9,12 @@ import { colorContrast, pickerSelectionColors } from "../src/components/picker"
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../src/protocol"
 import { PROTOCOL_VERSION } from "../../../protocol/types"
 import { commandResultMarkdown } from "../src/render"
+import {
+  TuiEngineRuntime,
+  type RuntimeEngineClient,
+} from "../src/runtime"
 import { createInitialState, engineEvent, reduceRottweilerState } from "../src/state"
+import type { EngineSubscriptionOptions } from "../src/transport"
 import {
   daylightTheme,
   kennelTheme,
@@ -8026,6 +8031,101 @@ describe("Rottweiler OpenTUI shell", () => {
       captured_output: "interrupted",
     })
     expect(ordering).toEqual(["suspend", "resume"])
+  })
+
+  test("keeps slow historical replay side effects suppressed until the replay marker", async () => {
+    const setup = await createTestRenderer({ width: 72, height: 12, useThread: false })
+    renderer = setup.renderer
+    const transitions: string[] = []
+    let releaseReplay!: () => void
+    let markHistoricalEventDelivered!: () => void
+    const replayGate = new Promise<void>((resolve) => {
+      releaseReplay = resolve
+    })
+    const historicalEventDelivered = new Promise<void>((resolve) => {
+      markHistoricalEventDelivered = resolve
+    })
+    const client: RuntimeEngineClient = {
+      async postCommand() {
+        return { type: "accepted" }
+      },
+      restartStream() {
+        return false
+      },
+      async subscribe(options: EngineSubscriptionOptions) {
+        options.onConnection?.({ phase: "connected", attempt: 0 })
+        await Bun.sleep(275)
+        await options.onEvent({
+          type: "session_forked",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: "slow-replay-client",
+            request_id: "slow-replay-fork",
+            emitted_at: "2026-08-19T00:00:00Z",
+          },
+          parent_session_id: options.attach.session_id,
+          child: {
+            session_id: "historical-child",
+            workspace_name: "Historical fork",
+            model: "fast",
+            driver_client_id: null,
+            shell_active: false,
+          },
+          at_turn: "4",
+        })
+        markHistoricalEventDelivered()
+        await replayGate
+        await options.onEvent({
+          type: "session_replay_completed",
+          meta: {
+            protocol_version: PROTOCOL_VERSION,
+            client_id: "slow-replay-client",
+            request_id: "slow-replay-complete",
+            emitted_at: "2026-08-19T00:00:01Z",
+          },
+          session_id: options.attach.session_id,
+          through_sequence: null,
+        })
+        await new Promise<void>((resolve) => {
+          if (options.signal.aborted) resolve()
+          else options.signal.addEventListener("abort", () => resolve(), { once: true })
+        })
+      },
+    }
+    const app = createRottweilerApp(renderer, {
+      sessionId: "slow-replay-parent",
+      requestId: () => "slow-replay-fork",
+      onCommand: () => ({ type: "accepted" }),
+      onSessionSelect(sessionId) {
+        transitions.push(sessionId)
+      },
+    })
+    renderer.root.add(app)
+    app.composer.value = "/fork 4"
+    expect(await app.composer.submit()).toBeTrue()
+    const runtime = new TuiEngineRuntime(
+      {
+        socketPath: "/private/slow-replay.sock",
+        bootstrapToken: "secret",
+        sessionId: "slow-replay-parent",
+        lastSeenSequence: null,
+        lastSeenFile: null,
+        replayMode: false,
+      },
+      client,
+    )
+    runtime.bind(app)
+
+    const running = runtime.start()
+    await historicalEventDelivered
+    await Bun.sleep(0)
+    expect(transitions).toEqual([])
+
+    releaseReplay()
+    await Bun.sleep(0)
+    expect(transitions).toEqual([])
+    await runtime.stop()
+    await running
   })
 
   test("does not hand terminal ownership to a historical replay shell", async () => {

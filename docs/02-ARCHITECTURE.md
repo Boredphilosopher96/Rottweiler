@@ -445,6 +445,7 @@ shadow official capability metadata.
 Built on OpenTUI (per ADR-001), which supplies the retained component tree and the Zig renderer (double-buffered cell diffing, damage-tracked partial redraws) — do not reimplement rendering primitives it already provides. Our layer on top:
 - **Transcript** as a virtualized list over the session event log — only visible messages mount, so 10k-message sessions scroll at full speed; streaming deltas append to the tail component without re-laying-out history.
 - **SSE client** with reconnect + event-sequence resync (events carry monotonic ids; on reconnect the TUI replays the gap from the engine).
+- **Replay presentation boundary** is the engine's `session_replay_completed` marker. The TUI reduces historical events immediately but suppresses their live-only presentation effects until that marker arrives; stream termination only performs idempotent cleanup for an incomplete replay.
 - Components: markdown/syntax-highlighted blocks, collapsible tool calls, diff accept/reject view, fuzzy pickers, question prompts, nested subagent progress, status line.
 - Types for commands/events are **generated from `protocol/`**, never hand-written — drift between Rust and TS is a build failure, not a runtime bug.
 - Reducer delivery semantics are a local, compiler-exhaustive map over the generated

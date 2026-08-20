@@ -462,27 +462,18 @@ export class TuiEngineRuntime {
       this.#subscriptionController = subscriptionController
       this.#sessionId = sessionId
       const boundForBatch = this.#requiredApp()
-      let initialReplayTimer: ReturnType<typeof setTimeout> | undefined
       let initialReplayBatch = true
       const finishInitialReplayBatch = () => {
         if (!initialReplayBatch) return
         initialReplayBatch = false
-        if (initialReplayTimer !== undefined) clearTimeout(initialReplayTimer)
         boundForBatch.endInitialReplayBatch?.()
-      }
-      const extendInitialReplayBatch = () => {
-        if (!initialReplayBatch) return
-        if (initialReplayTimer !== undefined) clearTimeout(initialReplayTimer)
-        initialReplayTimer = setTimeout(finishInitialReplayBatch, 25)
       }
       const restartInitialReplayBatch = () => {
         if (initialReplayBatch) return
         initialReplayBatch = true
         boundForBatch.beginInitialReplayBatch?.()
-        initialReplayTimer = setTimeout(finishInitialReplayBatch, 250)
       }
       boundForBatch.beginInitialReplayBatch?.()
-      initialReplayTimer = setTimeout(finishInitialReplayBatch, 250)
 
       let subscriptionReady = false
       let resolveSubscriptionReady!: () => void
@@ -573,7 +564,6 @@ export class TuiEngineRuntime {
               return
             }
             const bound = this.#requiredApp()
-            extendInitialReplayBatch()
             if (
               isSessionForkedEvent(event) &&
               this.#forkRequests.get(event.meta.request_id) === event.parent_session_id

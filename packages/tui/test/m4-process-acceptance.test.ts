@@ -112,6 +112,17 @@ describe("M4 transport and process acceptance", () => {
       engine.commands.some((command) => command.type === "take_driver") &&
       engine.requests.some((request) => request.path === "/v1/events"),
     )
+    engine.emit({
+      type: "session_replay_completed",
+      meta: {
+        protocol_version: PROTOCOL_VERSION,
+        client_id: engine.clientId,
+        request_id: "m4-acceptance-replay-complete",
+        emitted_at: "2026-07-10T00:00:00Z",
+      },
+      session_id: SESSION_ID,
+      through_sequence: null,
+    } satisfies EngineEvent)
     const meta = (sequence: number) => ({
       protocol_version: PROTOCOL_VERSION,
       session_id: SESSION_ID,
