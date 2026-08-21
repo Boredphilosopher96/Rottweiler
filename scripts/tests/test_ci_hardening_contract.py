@@ -185,6 +185,8 @@ class CiHardeningContractTests(unittest.TestCase):
         self.assertIn("actions: read", contract)
         self.assertIn("release-preflight.yml/runs", contract)
         self.assertIn("release-candidate.py verify", contract)
+        self.assertIn('if [ "$major" -ge 1 ]; then', contract)
+        self.assertIn("preflight_run_id=0", contract)
         self.assertIn('head_sha="$GITHUB_SHA"', contract)
         self.assertIn('"head_branch": "main"', contract)
         self.assertNotIn("  linux-performance-build:", workflow)

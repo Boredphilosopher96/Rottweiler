@@ -42,6 +42,8 @@ jobs:
             --output release-readiness.json
           major=$(python3 -c 'import json; print(json.load(open("release-readiness.json"))["release_major"])')
           qualification=$(python3 -c 'import json; print(json.load(open("release-readiness.json"))["qualification"])')
+          preflight_run_id=0
+          if [ "$major" -ge 1 ]; then
           candidate_run=$(gh api --method GET \
             "repos/$GITHUB_REPOSITORY/actions/workflows/release-preflight.yml/runs" \
             -f branch=main \
@@ -101,14 +103,15 @@ jobs:
             echo "ROTTWEILER_SELF_HOSTED_RUNNERS must be true for v1 protected soaks" >&2
             exit 1
           fi
+          fi
           printf 'major=%s\nqualification=%s\npreflight_run_id=%s\n' \
             "$major" "$qualification" "$preflight_run_id" >> "$GITHUB_OUTPUT"
 
   build-linux:
     name: Build linux-x86_64
     needs: runner-contract
-    # Performance is qualified once by the exact-SHA preflight. This job owns
-    # only deterministic archive construction and publication inputs.
+    # V1 performance is qualified by the exact-SHA preflight. Pre-v1 builds
+    # publish after the ordinary main checks and release-readiness validation.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -205,8 +208,8 @@ jobs:
   build-macos:
     name: Build darwin-arm64
     needs: runner-contract
-    # Performance is qualified once by the exact-SHA preflight. This job owns
-    # only deterministic archive construction and publication inputs.
+    # V1 performance is qualified by the exact-SHA preflight. Pre-v1 builds
+    # publish after the ordinary main checks and release-readiness validation.
     runs-on: macos-15
     timeout-minutes: 60
     permissions:
