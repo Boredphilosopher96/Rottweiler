@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep, sleep_until};
 
 use crate::BackgroundProcessManager;
 use crate::registry::{
@@ -1967,22 +1967,81 @@ async fn copy_stream(
     stream: ToolOutputStream,
     output: Arc<dyn ToolOutputSink>,
 ) -> Result<(), ToolError> {
+    const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
+    const MAX_BATCH_BYTES: usize = 64 * 1024;
+
     let mut buffer = [0_u8; 8 * 1024];
+    let mut pending = Vec::with_capacity(buffer.len() + 4);
+    let mut content = String::with_capacity(MAX_BATCH_BYTES);
+    let mut deadline = None;
     loop {
-        let read = reader
-            .read(&mut buffer)
-            .await
-            .map_err(|error| ToolError::Output(error.to_string()))?;
+        if content.len() >= MAX_BATCH_BYTES {
+            emit_output_batch(&output, &stream, &mut content).await?;
+            deadline = None;
+        }
+        let read = if let Some(flush_at) = deadline {
+            tokio::select! {
+                biased;
+                () = sleep_until(flush_at) => None,
+                read = reader.read(&mut buffer) => Some(read),
+            }
+        } else {
+            Some(reader.read(&mut buffer).await)
+        };
+        let Some(read) = read else {
+            emit_output_batch(&output, &stream, &mut content).await?;
+            deadline = None;
+            continue;
+        };
+        let read = read.map_err(|error| ToolError::Output(error.to_string()))?;
         if read == 0 {
+            if !pending.is_empty() {
+                content.push_str(String::from_utf8_lossy(&pending).as_ref());
+                pending.clear();
+            }
+            emit_output_batch(&output, &stream, &mut content).await?;
             return Ok(());
         }
-        output
-            .emit(ToolOutputChunk {
-                stream: stream.clone(),
-                content: String::from_utf8_lossy(&buffer[..read]).into_owned(),
-            })
-            .await?;
+        pending.extend_from_slice(&buffer[..read]);
+        loop {
+            match std::str::from_utf8(&pending) {
+                Ok(complete) => {
+                    content.push_str(complete);
+                    pending.clear();
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    content.push_str(String::from_utf8_lossy(&pending[..valid]).as_ref());
+                    let Some(invalid) = error.error_len() else {
+                        pending.drain(..valid);
+                        break;
+                    };
+                    content.push('\u{fffd}');
+                    pending.drain(..valid + invalid);
+                }
+            }
+        }
+        if deadline.is_none() && !content.is_empty() {
+            deadline = Some(Instant::now() + FLUSH_INTERVAL);
+        }
     }
+}
+
+async fn emit_output_batch(
+    output: &Arc<dyn ToolOutputSink>,
+    stream: &ToolOutputStream,
+    content: &mut String,
+) -> Result<(), ToolError> {
+    if content.is_empty() {
+        return Ok(());
+    }
+    output
+        .emit(ToolOutputChunk {
+            stream: stream.clone(),
+            content: std::mem::take(content),
+        })
+        .await
 }
 
 async fn finish_output_task(
@@ -3174,6 +3233,33 @@ sys.exit(92)
                 .push(chunk);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn copy_stream_preserves_utf8_split_across_reads() {
+        let (mut writer, reader) = tokio::io::duplex(1);
+        let input = "left 💩 right".as_bytes().to_vec();
+        let write = tokio::spawn(async move {
+            for byte in input {
+                writer.write_all(&[byte]).await.expect("write byte");
+            }
+        });
+        let sink = Arc::new(RecordingSink::default());
+
+        copy_stream(reader, ToolOutputStream::Stdout, sink.clone())
+            .await
+            .expect("copy stream");
+        write.await.expect("writer task");
+
+        let rendered = sink
+            .0
+            .lock()
+            .expect("recording")
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<String>();
+        assert_eq!(rendered, "left 💩 right");
+        assert_eq!(sink.0.lock().expect("recording").len(), 1);
     }
 
     #[tokio::test]

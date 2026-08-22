@@ -1,0 +1,40 @@
+{
+  "controlled_profile": {
+    "codegen_units": 16,
+    "lto": "thin"
+  },
+  "profiles": {
+    "3": {
+      "binary_bytes": 36209968,
+      "engine_ready": {
+        "max_us": 24807,
+        "p50_us": 12232,
+        "p95_us": 17601,
+        "p99_us": 23663
+      },
+      "headless_print": {
+        "max_us": 107812,
+        "p50_us": 66412,
+        "p95_us": 81600,
+        "p99_us": 95181
+      }
+    },
+    "z": {
+      "binary_bytes": 26546624,
+      "engine_ready": {
+        "max_us": 43501,
+        "p50_us": 12269,
+        "p95_us": 20861,
+        "p99_us": 32402
+      },
+      "headless_print": {
+        "max_us": 140580,
+        "p50_us": 66715,
+        "p95_us": 75270,
+        "p99_us": 103241
+      }
+    }
+  },
+  "samples": 100,
+  "schema_version": 1
+}

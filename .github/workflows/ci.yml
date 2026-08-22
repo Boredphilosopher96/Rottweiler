@@ -68,22 +68,16 @@ jobs:
         working-directory: packages/plugin-docs
       - run: bun run build
         working-directory: packages/plugin-docs
-      - name: Generated TypeScript plugin scaffold conformance
+      - name: Packed TypeScript plugin scaffold conformance
         shell: bash
         run: |
           root="$(mktemp -d)"
           trap 'rm -rf "$root"' EXIT
+          candidate=$(cd packages/plugin-sdk && npm pack --silent --pack-destination "$root")
+          candidate="$root/$candidate"
+          test -s "$candidate"
           cargo run --locked --quiet -p rw-cli -- plugin scaffold --lang ts --name ci-fixture "$root/plugin"
-          SCAFFOLD="$root/plugin" SDK="$GITHUB_WORKSPACE/packages/plugin-sdk" python3 - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-          path = Path(os.environ["SCAFFOLD"]) / "package.json"
-          package = json.loads(path.read_text(encoding="utf-8"))
-          package["dependencies"]["@rottweiler/plugin"] = f"file:{os.environ['SDK']}"
-          path.write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
-          PY
-          bun install --cwd "$root/plugin"
+          npm install --prefix "$root/plugin" "$candidate"
           bun run --cwd "$root/plugin" typecheck
           bun test --cwd "$root/plugin"
           bun run --cwd "$root/plugin" build

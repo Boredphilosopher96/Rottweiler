@@ -771,6 +771,16 @@ jobs:
       - name: Install Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - run: rustup override set 1.97.1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+      - name: Install trusted-publishing npm client
+        run: npm install --global npm@11.5.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
       - name: Download unsigned macOS release archive
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -991,6 +1001,44 @@ jobs:
               dist/distribution/*
           fi
           rm -rf "$publication"
+          trap - EXIT
+      - name: Publish and consume the exact plugin SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#v}
+          test "$version" = "$(node -p 'require("./packages/plugin-sdk/package.json").version')"
+          bun install --cwd packages/plugin-sdk --frozen-lockfile
+          bun run --cwd packages/plugin-sdk typecheck
+          bun test --cwd packages/plugin-sdk
+          bun run --cwd packages/plugin-sdk build
+          candidate_root=$(mktemp -d "$RUNNER_TEMP/rottweiler-sdk-candidate.XXXXXX")
+          trap 'rm -rf "$candidate_root"' EXIT
+          mkdir "$candidate_root/candidate" "$candidate_root/registry"
+          candidate=$(cd packages/plugin-sdk && npm pack --silent --pack-destination "$candidate_root/candidate")
+          candidate="$candidate_root/candidate/$candidate"
+          test -s "$candidate"
+          if npm view "@rottweiler/plugin@$version" version >/dev/null 2>&1; then
+            observed=$(npm pack --silent "@rottweiler/plugin@$version" --pack-destination "$candidate_root/registry")
+            cmp "$candidate" "$candidate_root/registry/$observed"
+          else
+            npm publish --access public packages/plugin-sdk
+          fi
+          for attempt in $(seq 1 30); do
+            if npm view "@rottweiler/plugin@$version" version >/dev/null 2>&1; then
+              break
+            fi
+            test "$attempt" -lt 30
+            sleep 2
+          done
+          scaffold="$candidate_root/scaffold"
+          cargo run --locked --quiet -p rw-cli -- plugin scaffold --lang ts --name release-smoke "$scaffold"
+          bun install --cwd "$scaffold"
+          bun run --cwd "$scaffold" typecheck
+          bun test --cwd "$scaffold"
+          bun run --cwd "$scaffold" build
+          test -s "$scaffold/manifest.json"
+          rm -rf "$candidate_root"
           trap - EXIT
       - name: Publish stable Homebrew packages to the tap
         if: ${{ !contains(github.ref_name, '-') }}

@@ -47,14 +47,20 @@ import zigWasm from "../node_modules/@opentui/core/assets/zig/tree-sitter-zig.wa
 import webTreeSitterModule from "../node_modules/web-tree-sitter/tree-sitter.js" with { type: "file" }
 import webTreeSitterWasm from "../node_modules/web-tree-sitter/tree-sitter.wasm" with { type: "file" }
 
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
-import { lstatSync, readdirSync, rmSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { chmod, lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { randomUUID } from "node:crypto"
+import { homedir } from "node:os"
 import { dirname, join } from "node:path"
+
+declare const __ROTTWEILER_TREE_SITTER_ASSET_DIGEST__: string
 
 const MAX_ASSET_BYTES = 8 * 1024 * 1024
 const MAX_RUNTIME_BYTES = 32 * 1024 * 1024
 const COMPRESSED_ASSET_HEADER_BYTES = 8
+const TREE_SITTER_ASSET_DIGEST =
+  typeof __ROTTWEILER_TREE_SITTER_ASSET_DIGEST__ === "string"
+    ? __ROTTWEILER_TREE_SITTER_ASSET_DIGEST__
+    : `development-${process.pid}`
 
 const embeddedAssets = [
   ["parser.worker.js", parserWorker],
@@ -207,9 +213,21 @@ function parserConfiguration(assets: string, filetype: string) {
 
 /** Materialize Bun-embedded parser assets for OpenTUI's path-based worker API. */
 export async function materializeTreeSitterRuntime(): Promise<MaterializedTreeSitterRuntime> {
-  cleanupStaleTreeSitterRuntimes()
-  const root = await mkdtemp(join(tmpdir(), `rottweiler-tree-sitter-${process.pid}-`))
-  await chmod(root, 0o700)
+  const cacheParent = join(
+    process.env.ROTTWEILER_HOME?.trim() || join(homedir(), ".rottweiler"),
+    "cache",
+    "tree-sitter",
+  )
+  await mkdir(cacheParent, { recursive: true, mode: 0o700 })
+  await requirePrivateDirectory(cacheParent)
+  const root = join(cacheParent, TREE_SITTER_ASSET_DIGEST)
+  if (await completedCache(root)) return materializedRuntime(root)
+
+  const temporary = join(
+    cacheParent,
+    `.${TREE_SITTER_ASSET_DIGEST}.${process.pid}.${randomUUID()}.tmp`,
+  )
+  await mkdir(temporary, { mode: 0o700 })
   let total = 0
   try {
     for (const [relative, embeddedPath] of embeddedAssets) {
@@ -263,7 +281,7 @@ export async function materializeTreeSitterRuntime(): Promise<MaterializedTreeSi
       if (total > MAX_RUNTIME_BYTES) {
         throw new Error("embedded Tree-sitter runtime exceeds its size limit")
       }
-      const target = join(root, ...relative.split("/"))
+      const target = join(temporary, ...relative.split("/"))
       const directory = dirname(target)
       await mkdir(directory, { recursive: true, mode: 0o700 })
       await writeFile(target, bytes, { flag: "wx", mode: 0o600 })
@@ -278,65 +296,68 @@ export async function materializeTreeSitterRuntime(): Promise<MaterializedTreeSi
     }))
     total += packageManifest.byteLength
     if (total > MAX_RUNTIME_BYTES) throw new Error("embedded Tree-sitter runtime exceeds its size limit")
-    await writeFile(join(root, "node_modules/web-tree-sitter/package.json"), packageManifest, {
+    await writeFile(join(temporary, "node_modules/web-tree-sitter/package.json"), packageManifest, {
       flag: "wx",
       mode: 0o600,
     })
+    await writeFile(join(temporary, ".complete"), `${TREE_SITTER_ASSET_DIGEST}\n`, {
+      flag: "wx",
+      mode: 0o600,
+    })
+    try {
+      await rename(temporary, root)
+    } catch (error) {
+      if (!(error instanceof Error) || !("code" in error) ||
+        (error.code !== "EEXIST" && error.code !== "ENOTEMPTY")) throw error
+      await rm(temporary, { recursive: true, force: true })
+      if (!(await completedCache(root))) {
+        throw new Error("Tree-sitter cache publication raced with an invalid entry")
+      }
+    }
   } catch (error) {
-    await rm(root, { recursive: true, force: true })
+    await rm(temporary, { recursive: true, force: true })
     throw error
   }
-  let cleaned = false
-  const cleanupSync = () => {
-    if (cleaned) return
-    cleaned = true
-    rmSync(root, { recursive: true, force: true })
-  }
-  process.once("exit", cleanupSync)
+  return materializedRuntime(root)
+}
+
+function materializedRuntime(root: string): MaterializedTreeSitterRuntime {
   return {
     root,
     workerPath: join(root, "parser.worker.js"),
     assetsPath: join(root, "assets"),
-    async cleanup() {
-      if (cleaned) return
-      await rm(root, { recursive: true, force: true })
-      cleaned = true
-      process.off("exit", cleanupSync)
-    },
-    cleanupSync,
+    async cleanup() {},
+    cleanupSync() {},
   }
 }
 
-function cleanupStaleTreeSitterRuntimes(): void {
-  const directory = tmpdir()
+async function requirePrivateDirectory(path: string): Promise<void> {
+  const metadata = await lstat(path)
   const currentUid = typeof process.getuid === "function" ? process.getuid() : null
-  for (const entry of readdirSync(directory)) {
-    const match = /^rottweiler-tree-sitter-(\d+)-/.exec(entry)
-    if (match?.[1] === undefined) continue
-    const ownerPid = Number(match[1])
-    let running = false
-    try {
-      process.kill(ownerPid, 0)
-      running = true
-    } catch (error) {
-      running = (error as NodeJS.ErrnoException).code === "EPERM"
-    }
-    if (running) continue
-    const path = join(directory, entry)
-    let metadata
-    try {
-      metadata = lstatSync(path)
-    } catch {
-      continue
-    }
-    // Never follow or remove attacker-controlled links/special files. Only a
-    // private directory owned by this uid with the exact creation mode qualifies.
+  if (
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    (metadata.mode & 0o777) !== 0o700 ||
+    (currentUid !== null && metadata.uid !== currentUid)
+  ) {
+    throw new Error(`Tree-sitter cache directory is not private: ${path}`)
+  }
+}
+
+async function completedCache(root: string): Promise<boolean> {
+  try {
+    await requirePrivateDirectory(root)
+    const marker = join(root, ".complete")
+    const metadata = await lstat(marker)
+    const currentUid = typeof process.getuid === "function" ? process.getuid() : null
     if (
-      !metadata.isDirectory() ||
+      !metadata.isFile() ||
       metadata.isSymbolicLink() ||
-      (metadata.mode & 0o777) !== 0o700 ||
+      (metadata.mode & 0o777) !== 0o600 ||
       (currentUid !== null && metadata.uid !== currentUid)
-    ) continue
-    rmSync(path, { recursive: true, force: true })
+    ) return false
+    return (await readFile(marker, "utf8")) === `${TREE_SITTER_ASSET_DIGEST}\n`
+  } catch {
+    return false
   }
 }

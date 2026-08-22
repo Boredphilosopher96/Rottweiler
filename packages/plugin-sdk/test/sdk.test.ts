@@ -8,6 +8,7 @@ import {
   BoundedJsonWriter,
   definePlugin,
   LineTooLargeError,
+  parsePluginManifest,
   UnterminatedLineError,
   PluginServer,
   PROTOCOL_LIMITS,
@@ -664,13 +665,32 @@ describe("bounded transport and manifests", () => {
 })
 
 describe("scaffold", () => {
+  test("parses and freezes an inert manifest document", () => {
+    const manifest = parsePluginManifest({
+      name: "inert",
+      version: "1.0.0",
+      protocol: 1,
+      capabilities: {},
+    })
+    expect(manifest.name).toBe("inert")
+    expect(Object.isFrozen(manifest)).toBe(true)
+    expect(() => parsePluginManifest({
+      name: "inert",
+      version: "1.0.0",
+      protocol: 1,
+      capabilities: { unknown: [] },
+    })).toThrow("unknown field")
+  })
+
   test("is deterministic and contains the conformance hook and custom tool", () => {
     const first = renderTypeScriptScaffold({ name: "Policy Plugin" })
     expect(first).toEqual(renderTypeScriptScaffold({ name: "Policy Plugin" }))
     const source = first.find((file) => file.path === "src/index.ts")?.contents ?? ""
-    expect(source).toContain('name: "hello"')
-    expect(source).toContain('name: "pre_tool", failure_policy: "fail-closed"')
+    const manifest = first.find((file) => file.path === "manifest.json")?.contents ?? ""
+    expect(manifest).toContain('"name": "hello"')
+    expect(manifest).toContain('"failure_policy": "fail-closed"')
     expect(first.some((file) => file.path === "manifest.json")).toBe(true)
+    expect(source).toContain("parsePluginManifest(manifestDocument)")
   })
 
   test("matches the language-neutral canonical scaffold byte-for-byte", () => {
@@ -695,7 +715,7 @@ describe("scaffold", () => {
     const directory = await mkdtemp(join(tmpdir(), "rottweiler-sdk-scaffold-"))
     try {
       await scaffoldTypeScriptPlugin(directory, { name: "fixture" })
-      expect(await readFile(join(directory, "src/index.ts"), "utf8")).toContain('name: "fixture"')
+      expect(await readFile(join(directory, "manifest.json"), "utf8")).toContain('"name": "fixture"')
       await expect(scaffoldTypeScriptPlugin(directory, { name: "fixture" })).rejects.toMatchObject({ code: "EEXIST" })
       await scaffoldTypeScriptPlugin(directory, { name: "fixture", force: true })
     } finally {

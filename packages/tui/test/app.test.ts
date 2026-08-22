@@ -3,7 +3,11 @@ import { CliRenderEvents, type Selection } from "@opentui/core"
 import { createTestRenderer, type TestRenderer } from "@opentui/core/testing"
 import { homedir } from "node:os"
 
-import { createRottweilerApp, type PresentationFrameScheduler } from "../src/app"
+import {
+  createRottweilerApp,
+  deferPresentationForEvent,
+  type PresentationFrameScheduler,
+} from "../src/app"
 import { ToolBlockRenderable } from "../src/components"
 import { colorContrast, pickerSelectionColors } from "../src/components/picker"
 import type { ClientCommand, CommandOutcome, EngineEvent } from "../src/protocol"
@@ -250,6 +254,34 @@ describe("Rottweiler OpenTUI shell", () => {
 
     expect(app.transcript.scroller.scrollTop).toBeLessThan(before)
     expect(app.composer.editor.focused).toBeTrue()
+  })
+
+  test("restores the composer draft and transcript scroll after a process recycle", async () => {
+    const setup = await createTestRenderer({ width: 80, height: 16, useThread: false })
+    renderer = setup.renderer
+    const transcript = Array.from({ length: 40 }, (_, index) => ({
+      sequenceId: String(index + 1),
+      agentTurn: String(index + 1),
+      turn: {
+        role: "assistant" as const,
+        blocks: [{ type: "text" as const, text: `Retained line ${index}` }],
+        meta: { synthetic: false, summary: false },
+      },
+    }))
+    const app = createRottweilerApp(renderer)
+    renderer.root.add(app)
+    app.restoreRecycleState({ schemaVersion: 1, draft: "unfinished prompt", scrollTop: 5 })
+    app.setState({ ...app.state, transcript })
+    await setup.renderOnce()
+    app.applyPendingRecycleScroll()
+
+    expect(app.composer.value).toBe("unfinished prompt")
+    expect(app.transcript.scroller.scrollTop).toBe(5)
+    expect(app.recycleState()).toEqual({
+      schemaVersion: 1,
+      draft: "unfinished prompt",
+      scrollTop: 5,
+    })
   })
 
   test("does not clear a newer selection when an older clipboard write finishes", async () => {
@@ -584,6 +616,29 @@ describe("Rottweiler OpenTUI shell", () => {
     expect(presentationUpdates).toBe(1)
     expect(frame.callbacks.size).toBe(0)
     expect(app.transcript.streamingMarkdown.content).toHaveLength(100)
+  })
+
+  test("defers high-volume projections but presents interactive boundaries immediately", () => {
+    for (const type of [
+      "text_delta",
+      "thinking_delta",
+      "citation_delta",
+      "tool_output_delta",
+      "subagent_progress",
+      "context_usage_updated",
+    ] as const) {
+      expect(deferPresentationForEvent({ type }), type).toBeTrue()
+    }
+    for (const type of [
+      "tool_approval_needed",
+      "question_asked",
+      "user_shell_state_changed",
+      "conversation_rewound",
+      "turn_finished",
+      "host_shutdown",
+    ] as const) {
+      expect(deferPresentationForEvent({ type }), type).toBeFalse()
+    }
   })
 
   test("coalesces compaction text and thinking into one presentation frame", async () => {
@@ -2649,9 +2704,11 @@ describe("Rottweiler OpenTUI shell", () => {
     const setup = await createTestRenderer({ width: 96, height: 22, useThread: false })
     renderer = setup.renderer
     const emitted: ClientCommand[] = []
+    const presentationFrame = new ManualPresentationFrame()
     let request = 0
     const app = createRottweilerApp(renderer, {
       sessionId: "parent-session",
+      presentationFrame,
       requestId: () => `request-${++request}`,
       keybindings: {
         bindings: {
@@ -2847,6 +2904,7 @@ describe("Rottweiler OpenTUI shell", () => {
         call_index: 0,
       },
     })
+    presentationFrame.flush()
     expect(app.state.transcript).toEqual([])
     expect(app.visibleState.streamingTail?.text).toBe("Authentication uses a bounded token exchange.")
     expect(app.banner.plainText).toContain("◉ child agent · Audit authentication")
@@ -7785,7 +7843,9 @@ describe("Rottweiler OpenTUI shell", () => {
     const setup = await createTestRenderer({ width: 100, height: 20, useThread: false })
     renderer = setup.renderer
     const commands: ClientCommand[] = []
+    const presentationFrame = new ManualPresentationFrame()
     const app = createRottweilerApp(renderer, {
+      presentationFrame,
       onCommand(command) {
         commands.push(command)
         return { type: "accepted" }
@@ -7827,6 +7887,7 @@ describe("Rottweiler OpenTUI shell", () => {
       provider_input_tokens: "500",
       correction_millionths: "1000000",
     })
+    presentationFrame.flush()
     await setup.renderOnce()
     expect(app.statusLine.plainText).toContain("ctx 500/1.0k (50%)")
     expect(app.statusLine.plainText).toContain("git feature/live-status")

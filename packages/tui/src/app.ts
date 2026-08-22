@@ -183,6 +183,8 @@ export interface RottweilerAppOptions {
   readonly keybindings?: KeybindingConfiguration
   /** Injectable frame scheduler used to coalesce presentation-only stream deltas. */
   readonly presentationFrame?: PresentationFrameScheduler
+  /** Startup instrumentation invoked only after the composer accepts changed input. */
+  readonly onComposerInput?: (value: string) => void
   /** Host platform used for terminal compatibility decoding. Injectable for production-path tests. */
   readonly platform?: NodeJS.Platform
 }
@@ -200,6 +202,12 @@ interface PendingPresentationEvent {
 export interface TerminalHandoverAdapter {
   suspend(): void
   resume(): void
+}
+
+export interface TuiRecycleState {
+  readonly schemaVersion: 1
+  readonly draft: string
+  readonly scrollTop: number
 }
 
 type BudgetSettingKey =
@@ -440,6 +448,7 @@ export class RottweilerApp extends BoxRenderable {
   #composerNotice: string | null = null
   #pendingExport: PendingExport | null = null
   #lastComposerValue = ""
+  #pendingRecycleScrollTop: number | null = null
   #keybindings: CompiledKeybindings
   #inputMode: InputMode
   #vimFocus: VimFocus = "composer"
@@ -1157,7 +1166,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#state = next
     this.#presentation.enqueue(
       { event, eventRecord, commandRequestId, previous, next },
-      isPresentationStreamDelta(event),
+      deferPresentationForEvent(event),
     )
   }
 
@@ -1508,6 +1517,33 @@ export class RottweilerApp extends BoxRenderable {
     if (this.#destroyed) return
     this.#presentation.flushBeforeStateChange()
     this.#bindStateToComponents(state)
+  }
+
+  /** Snapshot process-local UI state before the supervisor recycles this renderer. */
+  recycleState(): TuiRecycleState {
+    return {
+      schemaVersion: 1,
+      draft: this.composer.value,
+      scrollTop: Math.max(0, this.transcript.scroller.scrollTop),
+    }
+  }
+
+  /** Restore the non-durable UI state that cannot be replayed from the engine. */
+  restoreRecycleState(state: TuiRecycleState): void {
+    this.composer.restoreDraft(state.draft, [])
+    this.#parentComposerDraft = { content: state.draft, attachments: [] }
+    this.#lastComposerValue = state.draft
+    this.#pendingRecycleScrollTop = state.scrollTop
+  }
+
+  /** Apply a restored offset after OpenTUI has laid out the replayed transcript. */
+  applyPendingRecycleScroll(): void {
+    if (
+      this.#pendingRecycleScrollTop === null ||
+      (this.#pendingRecycleScrollTop > 0 && this.#presentedState().transcript.length === 0)
+    ) return
+    this.transcript.setScrollOffset(this.#pendingRecycleScrollTop)
+    this.#pendingRecycleScrollTop = null
   }
 
   #bindStateToComponents(state: RottweilerState): void {
@@ -4188,6 +4224,7 @@ export class RottweilerApp extends BoxRenderable {
       this.#updateComposerAutocomplete(value)
       return
     }
+    this.#options.onComposerInput?.(value)
     this.transcript.clearBlockSelection()
     const hadPendingIntent = this.#pendingRewindIntent !== null
     this.#pendingRewindIntent = null
@@ -4438,7 +4475,7 @@ export class RottweilerApp extends BoxRenderable {
     this.#subagentErrorBaseline = this.#state.errors.at(-1)
     if (event.type === "turn_finished") this.#setSubagentActivity(subagentId, "idle")
     else if (event.type === "turn_started") this.#setSubagentActivity(subagentId, "running")
-    this.#presentation.markDirty(isPresentationStreamDelta(event))
+    this.#presentation.markDirty(deferPresentationForEvent(event))
   }
 
   #transitionSubagentReplay(
@@ -5469,12 +5506,87 @@ function approvalBinding(diff: unknown): ApprovalBinding | null {
   }
 }
 
-function isPresentationStreamDelta(event: WireEngineEvent): boolean {
-  return event.type === "text_delta" ||
-    event.type === "thinking_delta" ||
-    event.type === "citation_delta" ||
-    event.type === "compaction_text_delta" ||
-    event.type === "compaction_thinking_delta"
+const IMMEDIATE_PRESENTATION_EVENTS = new Set<WireEngineEvent["type"]>([
+  "command_acknowledged",
+  "context_snapshot_ready",
+  "cost_snapshot_ready",
+  "session_review_ready",
+  "session_review_updated",
+  "prompt_dump_ready",
+  "session_replay_completed",
+  "session_forked",
+  "session_exported",
+  "sessions_listed",
+  "subagents_listed",
+  "subagent_replay_batch",
+  "subagent_replay_completed",
+  "command_descriptors_listed",
+  "models_listed",
+  "modes_listed",
+  "settings_listed",
+  "permissions_listed",
+  "mcp_servers_listed",
+  "runtime_services_listed",
+  "workspace_files_found",
+  "workspace_roots_changed",
+  "workspace_status_ready",
+  "sessions_search_ready",
+  "workspace_file_preview_ready",
+  "workspace_diff_ready",
+  "host_shutdown",
+  "ui_notification",
+  "conversation_rewound",
+  "conversation_turn_committed",
+  "tool_approval_needed",
+  "question_asked",
+  "question_answered",
+  "tool_call_started",
+  "tool_call_finished",
+  "tool_diff_ready",
+  "tool_output_pruned",
+  "turn_started",
+  "turn_finished",
+  "user_message_accepted",
+  "message_queued",
+  "queued_message_removed",
+  "queued_messages_cleared",
+  "user_shell_state_changed",
+  "command_finished",
+  "mode_changed",
+  "model_changed",
+  "model_context_cleared",
+  "driver_changed",
+  "permission_mode_changed",
+  "budget_status_changed",
+  "context_item_pinned",
+  "context_item_evicted",
+  "compaction_started",
+  "compaction_finished",
+  "compaction_failed",
+  "compaction_attempt_started",
+  "compaction_attempt_finished",
+  "plan_submitted",
+  "plan_reviewed",
+  "subagent_spawned",
+  "subagent_finished",
+  "provider_configured",
+  "provider_activation_finished",
+  "provider_auth_started",
+  "provider_auth_finished",
+  "mcp_server_approval_reviewed",
+  "plugin_message_injected",
+  "plugin_status_changed",
+  "session_created",
+  "session_title_updated",
+  "guard_triggered",
+  "hook_failed",
+  "error",
+])
+
+export function deferPresentationForEvent(
+  event: { readonly type: WireEngineEvent["type"] },
+): boolean {
+  return !IMMEDIATE_PRESENTATION_EVENTS.has(event.type)
 }
 
 /** Build the retained OpenTUI application tree. */

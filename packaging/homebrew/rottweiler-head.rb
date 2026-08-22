@@ -36,7 +36,7 @@ class Rottweiler < Formula
     libexec.install "packages/tui/dist/rottweiler-tui"
     native = OS.mac? ? "libopentui.dylib" : "libopentui.so"
     libexec.install "packages/tui/dist/#{native}"
-    (bin/"rw").write_env_script libexec/"rw", ROTTWEILER_PACKAGE_MANAGER: "homebrew"
+    bin.install_symlink libexec/"rw"
   end
 
   test do

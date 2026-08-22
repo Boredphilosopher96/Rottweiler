@@ -9,9 +9,7 @@ cask "rottweiler" do
 
   depends_on arch: :arm64
 
-  command_wrapper "rw",
-                  executable: "#{staged_path}/rottweiler-#{version}-darwin-arm64/bin/rw",
-                  env:        { "ROTTWEILER_PACKAGE_MANAGER" => "homebrew" }
+  binary "#{staged_path}/rottweiler-#{version}-darwin-arm64/bin/rw", target: "rw"
 
   # Pre-v1 archives are checksum-verified but not yet Apple-notarized. Remove
   # quarantine before the first launch so Gatekeeper does not cache a rejected

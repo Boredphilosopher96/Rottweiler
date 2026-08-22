@@ -189,16 +189,18 @@ Property tests worth calling out:
 | Metric | Budget | How measured |
 |---|---|---|
 | Engine ready (serve socket accepting) | < 50ms | hyperfine on release binary, CI perf runner |
-| Cold start → TUI first paint (engine + OpenTUI spawn) | < 150ms | same |
+| Cold start → TUI process-start splash (engine + compiled client spawn) | < 150ms | same |
+| Cold start → transcript painted and composer accepts a keystroke | < 500ms | installed-artifact PTY driver sends and observes a real key |
 | Cold start → prompt ready (with project config + 3 MCP servers deferred) | < 250ms | same |
 | Headless print-mode start (pure Rust path, no Bun) | protected p99: macOS < 200ms, Linux < 80ms; PR smoke median < 80ms | same |
 | Input keystroke → echo | < 16ms | TUI latency harness (in-memory terminal, timestamped events) |
 | Streaming frame compute (layout + diff + buffer write; the harness measures compute, not display refresh) | macOS: p95 < 20ms, p99.9 < 33ms; Linux: p95 < 40ms, p99.9 < 66ms during 200 lines/s stream into 10MB transcript | stress fixture in TUI harness |
+| Mounted tool-output burst frame compute | macOS p95 < 20ms; Linux p95 < 40ms | 8 KiB deltas, 16 mounted tool cards, retained fenced history, live Tree-sitter |
 | Engine→TUI event latency over the socket, p99 | < 2ms | contract harness |
 | Turn overhead (engine time excluding provider latency) | protected p99: < 60ms; PR smoke median < 20ms | replay timing |
 | Compaction pause (UI blocked) | 0ms (fully async) | assertion: UI events processed during compaction |
 | Memory, 8-hour stress session (engine + TUI combined) | < 600 MiB RSS | soak test, nightly |
-| Release size | engine binary < 28MB; TUI bundle < 100MB on macOS / < 150MB on Linux | CI check |
+| Release size | engine binary < 40MB on macOS / < 28MB on Linux; TUI bundle < 100MB on macOS / < 150MB on Linux | CI check; macOS accepts the measured opt-level 3 size trade |
 
 The required manually dispatched protected-performance, nightly, and release
 headless gates enforce the platform ceilings above at p99 over 500 fresh
@@ -378,13 +380,13 @@ requires both the macOS and Linux publication families, and deterministically
 emits a Homebrew Formula, macOS Cask, and bootstrap from their exact bytes. Tests reverse
 the input order and require byte-identical output; assert immutable tag URLs,
 lengths, SHA-256 values, private `libexec` helpers, the sole public `rw`
-wrapper, HTTPS-only redirects, supported-host selection, and rejection of bad
+symlink, HTTPS-only redirects, supported-host selection, and rejection of bad
 names, duplicates, links, unsupported/missing platforms, length changes, and
 digest changes. Until notarization is configured, the generated pre-v1 Cask
 must disclose and encode its post-verification quarantine-removal postflight;
 a clean Cask install must launch `rw --version` before publication is called
 usable. The unadvertised development Formula still builds both locked
-Rust and Bun components with the same private-helper/public-wrapper layout. Stable release
+Rust and Bun components with the same private-helper/public-symlink layout. Stable release
 CI syntax-checks all generated files, attests and publishes them with the
 archives, and verifies the Homebrew tap's resulting `main` commit. Release and
 soak acceptance must invoke only the installed public `rw` with no TUI path

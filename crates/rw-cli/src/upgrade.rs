@@ -410,11 +410,14 @@ impl InstallLayout {
 }
 
 fn unsupported_layout() -> miette::Report {
-    unsupported_layout_for(std::env::var_os("ROTTWEILER_PACKAGE_MANAGER").as_deref())
+    let executable = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.canonicalize().ok());
+    unsupported_layout_for(executable.as_deref())
 }
 
-fn unsupported_layout_for(package_manager: Option<&std::ffi::OsStr>) -> miette::Report {
-    if package_manager == Some(std::ffi::OsStr::new("homebrew")) {
+fn unsupported_layout_for(executable: Option<&Path>) -> miette::Report {
+    if executable.is_some_and(homebrew_managed_executable) {
         return miette!(
             "this Rottweiler installation is managed by Homebrew; run `brew upgrade rottweiler` (self-update never modifies package-managed files)"
         );
@@ -422,6 +425,16 @@ fn unsupported_layout_for(package_manager: Option<&std::ffi::OsStr>) -> miette::
     miette!(
         "self-update requires the official versioned installation layout; reinstall with the signed release install.sh (package-managed and direct-copy binaries are not modified)"
     )
+}
+
+fn homebrew_managed_executable(executable: &Path) -> bool {
+    let components = executable
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components
+        .windows(2)
+        .any(|pair| matches!(pair, ["Cellar" | "Caskroom", "rottweiler"]))
 }
 
 fn decode_root_chain(bytes: &[u8]) -> Result<Vec<RootChainEntry>> {
@@ -1453,11 +1466,20 @@ mod tests {
 
     #[test]
     fn unsupported_homebrew_layout_preserves_refusal_with_package_guidance() {
-        let homebrew = unsupported_layout_for(Some(std::ffi::OsStr::new("homebrew"))).to_string();
+        let homebrew = unsupported_layout_for(Some(Path::new(
+            "/opt/homebrew/Caskroom/rottweiler/0.1.4/rottweiler-0.1.4-darwin-arm64/bin/rw",
+        )))
+        .to_string();
         assert!(homebrew.contains("brew upgrade rottweiler"));
         assert!(homebrew.contains("never modifies package-managed files"));
 
-        let unknown = unsupported_layout_for(Some(std::ffi::OsStr::new("other"))).to_string();
+        let formula = unsupported_layout_for(Some(Path::new(
+            "/home/linuxbrew/.linuxbrew/Cellar/rottweiler/0.1.4/libexec/rw",
+        )))
+        .to_string();
+        assert!(formula.contains("brew upgrade rottweiler"));
+
+        let unknown = unsupported_layout_for(Some(Path::new("/usr/local/bin/rw"))).to_string();
         assert!(unknown.contains("official versioned installation layout"));
         assert!(!unknown.contains("brew upgrade"));
     }

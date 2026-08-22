@@ -27,6 +27,7 @@ mod extension_cli;
 mod import;
 mod mcp_cli;
 mod mcp_server;
+mod parent_death;
 mod plugin_cli;
 mod plugin_dev;
 #[allow(dead_code)]
@@ -875,6 +876,7 @@ fn scripted_provider_options(
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
+    parent_death::arm_from_environment().into_diagnostic()?;
     if maybe_run_sandbox_helper(std::env::args_os()).map_err(|error| miette!(error.to_string()))? {
         return Ok(());
     }
@@ -2877,8 +2879,8 @@ fn resolve_tui_executable(
     if let Some(path) = override_path {
         return require_executable(path);
     }
-    // Package managers expose a public launcher through a symlink or exec
-    // wrapper while keeping the complete runtime in a private directory.
+    // Package managers expose a public launcher through a symlink while
+    // keeping the complete runtime in a private directory.
     // Resolve the executable that is actually running before looking for its
     // TUI sibling; never derive a helper path from an untrusted PATH entry.
     let installed = fs::canonicalize(current_executable).into_diagnostic()?;

@@ -4,7 +4,11 @@ import { CodeRenderable, type TreeSitterClient } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 
 import { createSyntaxStyle, nordTheme } from "../src/theme"
-import { stabilizeTreeSitterClient } from "../src/tree-sitter-client"
+import {
+  registerTreeSitterParsersLazily,
+  stabilizeTreeSitterClient,
+} from "../src/tree-sitter-client"
+import { embeddedParserConfigurations } from "../src/tree-sitter-runtime"
 
 interface ControlledHighlighter {
   readonly client: TreeSitterClient
@@ -29,6 +33,38 @@ function controlledHighlighter(): ControlledHighlighter {
 afterEach(() => mock.restore())
 
 describe("OpenTUI highlighting lifecycle", () => {
+  test("registers fenced-code grammars on first use instead of at startup", async () => {
+    const registered: string[] = []
+    const buffers = new Map<number, { filetype: string }>()
+    const client = {
+      addFiletypeParser(parser: { filetype: string }) {
+        registered.push(parser.filetype)
+      },
+      async highlightOnce() {
+        return {}
+      },
+      async createBuffer(id: number, _content: string, filetype: string) {
+        buffers.set(id, { filetype })
+        return true
+      },
+      async resetBuffer() {},
+      async updateBuffer() {},
+      getBuffer(id: number) {
+        return buffers.get(id)
+      },
+    } as unknown as TreeSitterClient
+    const lazy = registerTreeSitterParsersLazily(
+      client,
+      embeddedParserConfigurations("/tmp/tree-sitter-assets"),
+    )
+
+    expect(registered).toEqual([])
+    await lazy.highlightOnce("```ts\nconst answer = 42\n```", "markdown")
+    await lazy.highlightOnce("```ts\nconst answer = 43\n```", "markdown")
+
+    expect(registered).toEqual(["markdown", "markdown_inline", "typescript"])
+  })
+
   test("does not report expected parser cancellation after a code renderable is destroyed", async () => {
     const warnings: unknown[][] = []
     spyOn(console, "warn").mockImplementation((...arguments_: unknown[]) => {

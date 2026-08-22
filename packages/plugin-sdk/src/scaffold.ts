@@ -35,7 +35,7 @@ export function renderTypeScriptScaffold(options: ScaffoldOptions = {}): readonl
             test: "bun test",
             typecheck: "tsc --noEmit",
           },
-          dependencies: { "@rottweiler/plugin": "^0.1.0" },
+          dependencies: { "@rottweiler/plugin": "^0.1.4" },
           devDependencies: { "@types/bun": "^1.3.14", typescript: "^7.0.2" },
         },
         null,
@@ -51,6 +51,7 @@ export function renderTypeScriptScaffold(options: ScaffoldOptions = {}): readonl
             module: "Preserve",
             moduleResolution: "Bundler",
             noEmit: true,
+            resolveJsonModule: true,
             strict: true,
             target: "ES2022",
             types: ["bun"],
@@ -84,7 +85,7 @@ export function renderTypeScriptScaffold(options: ScaffoldOptions = {}): readonl
     },
     {
       path: "src/index.ts",
-      contents: `import { definePlugin, runPlugin } from "@rottweiler/plugin"\n\nexport const plugin = definePlugin({\n  manifest: {\n    name: ${JSON.stringify(name)},\n    version: "0.1.0",\n    protocol: 1,\n    capabilities: {\n      tools: [{\n        name: "hello",\n        description: "Return a greeting",\n        schema: { type: "object", properties: { name: { type: "string" } } },\n        caps: ["reads-fs"],\n      }],\n      hooks: [{ name: "pre_tool", failure_policy: "fail-closed" }],\n    },\n  },\n  handlers: {\n    tools: {\n      hello: ({ input }) => ({\n        content: \`Hello, \${String(input.name ?? "world")}!\`,\n        data: { text: \`Hello, \${String(input.name ?? "world")}!\` },\n      }),\n    },\n    hooks: {\n      pre_tool: ({ payload }) =>\n        payload.name === "bash"\n          ? { decision: "deny", message: "This plugin blocks shell execution" }\n          : { decision: "allow" },\n    },\n  },\n})\n\nif (import.meta.main) await runPlugin(plugin)\n`,
+      contents: `import { definePlugin, parsePluginManifest, runPlugin } from "@rottweiler/plugin"\nimport manifestDocument from "../manifest.json"\n\nexport const plugin = definePlugin({\n  manifest: parsePluginManifest(manifestDocument),\n  handlers: {\n    tools: {\n      hello: ({ input }) => ({\n        content: \`Hello, \${String(input.name ?? "world")}!\`,\n        data: { text: \`Hello, \${String(input.name ?? "world")}!\` },\n      }),\n    },\n    hooks: {\n      pre_tool: ({ payload }) =>\n        payload.name === "bash"\n          ? { decision: "deny", message: "This plugin blocks shell execution" }\n          : { decision: "allow" },\n    },\n  },\n})\n\nif (import.meta.main) await runPlugin(plugin)\n`,
     },
     {
       path: "test/plugin.test.ts",

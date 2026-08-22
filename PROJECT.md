@@ -10,7 +10,7 @@ Build the best-performing coding agent harness: instant startup, 60fps TUI, aggr
 
 ## Core Tenets (non-negotiable, in priority order)
 
-1. **Rust engine, OpenTUI frontend.** All agent logic — session loop, tools, router, sandbox, context engine — is pure Rust with no embedded JS runtime. The TUI is **OpenTUI** (TypeScript, Bun-compiled to a self-contained executable) talking to the engine over the client protocol, exactly like opencode's frontend/core split (ADR-001). Engine ready < 50ms; first paint < 150ms.
+1. **Rust engine, OpenTUI frontend.** All agent logic — session loop, tools, router, sandbox, context engine — is pure Rust with no embedded JS runtime. The TUI is **OpenTUI** (TypeScript, Bun-compiled to a self-contained executable) talking to the engine over the client protocol, exactly like opencode's frontend/core split (ADR-001). Engine ready < 50ms; the process-start splash < 150ms; an accepted composer keystroke after transcript paint < 500ms.
 2. **One application.** Engine and TUI remain separate supervised processes internally, but distribution, installation, launch, upgrade, and default shutdown treat them as one product. Users install one complete platform bundle, invoke only `rw`, and never start or manage an engine or TUI helper themselves (ADR-018).
 3. **Fast and responsive.** Never block the render loop. Every user action acknowledges in < 16ms. Streaming tokens render as they arrive. OpenTUI's Zig renderer (damage-tracked partial redraws) is the reason it's in the stack — use it properly.
 4. **Batteries included.** Compaction, subagent orchestration, plan/discuss/execute modes, model router, cost tracking, MCP, sandboxing — built in, not plugins.

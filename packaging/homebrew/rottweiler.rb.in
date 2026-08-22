@@ -16,7 +16,7 @@ class Rottweiler < Formula
     # The engine, compiled OpenTUI client, and its native renderer are one
     # application bundle. Only the supervising `rw` entrypoint is public.
     libexec.install Dir["bin/*"]
-    (bin/"rw").write_env_script libexec/"rw", ROTTWEILER_PACKAGE_MANAGER: "homebrew"
+    bin.install_symlink libexec/"rw"
   end
 
   test do

@@ -68,8 +68,14 @@ const MAX_CATALOG_TEXT_BYTES: usize = 512;
 /// Production live-catalog source using the same secure provider composition
 /// boundary as inference.
 pub struct ProviderModelCatalogSource {
-    factory: ProviderFactory,
+    credentials_path: PathBuf,
+    pricing: ModelCatalogPricing,
     config: Config,
+}
+
+enum ModelCatalogPricing {
+    Loaded(PricingTable),
+    Path(PathBuf),
 }
 
 impl ProviderModelCatalogSource {
@@ -80,9 +86,39 @@ impl ProviderModelCatalogSource {
         config: Config,
     ) -> Self {
         Self {
-            factory: ProviderFactory::system(credentials_path, pricing),
+            credentials_path: credentials_path.into(),
+            pricing: ModelCatalogPricing::Loaded(pricing),
             config,
         }
+    }
+
+    /// Builds a catalog source that defers pricing-table I/O and parsing until
+    /// the first live model-catalog discovery.
+    #[must_use]
+    pub fn system_from_pricing_path(
+        credentials_path: impl Into<PathBuf>,
+        pricing_path: impl Into<PathBuf>,
+        config: Config,
+    ) -> Self {
+        Self {
+            credentials_path: credentials_path.into(),
+            pricing: ModelCatalogPricing::Path(pricing_path.into()),
+            config,
+        }
+    }
+
+    async fn factory(&self) -> Result<ProviderFactory, ModelCatalogError> {
+        let pricing = match &self.pricing {
+            ModelCatalogPricing::Loaded(pricing) => pricing.clone(),
+            ModelCatalogPricing::Path(path) if path.is_file() => PricingTable::load(path)
+                .await
+                .map_err(|error| ModelCatalogError(error.to_string()))?,
+            ModelCatalogPricing::Path(_) => PricingTable::default(),
+        };
+        Ok(ProviderFactory::system(
+            self.credentials_path.clone(),
+            pricing,
+        ))
     }
 
     /// Builds a provider inventory without resolving credentials or claiming
@@ -109,7 +145,8 @@ impl ProviderModelCatalogSource {
 #[async_trait]
 impl ModelCatalogSource for ProviderModelCatalogSource {
     async fn discover(&self) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
-        self.factory
+        self.factory()
+            .await?
             .discover_model_catalog(&self.config)
             .await
             .map_err(|error| ModelCatalogError(error.to_string()))
@@ -119,7 +156,8 @@ impl ModelCatalogSource for ProviderModelCatalogSource {
         &self,
         provider: &str,
     ) -> Result<ModelCatalogSnapshot, ModelCatalogError> {
-        self.factory
+        self.factory()
+            .await?
             .discover_provider_model_catalog(&self.config, provider)
             .await
             .map_err(|error| ModelCatalogError(error.to_string()))

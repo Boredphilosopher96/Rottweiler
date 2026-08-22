@@ -96,8 +96,9 @@ Sandbox implementation (`rw-sandbox`):
   Distribution metadata is derived only from those exact completed archives.
   The Homebrew Cask and Formula bind their supported platforms to immutable tag
   URLs and SHA-256 digests, keep the engine, TUI, WASM host, and native renderer
-  together in Homebrew-managed storage, and expose only a package-manager-marked
-  `rw` wrapper. Stable tap
+  together in Homebrew-managed storage, and expose only an `rw` symlink. The
+  CLI recognizes canonical Cellar and Caskroom paths without trusting a
+  caller-controlled environment marker. Stable tap
   publication requires a dedicated repository-scoped token and occurs only
   after the protected tag release is published; a missing token, tap, platform
   archive, or push verification fails the workflow. The secondary bootstrap is

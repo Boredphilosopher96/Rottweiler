@@ -229,8 +229,7 @@ function string(value: JsonValue | undefined, label: string): string {
   return value
 }
 
-function validateDefinition(definition: PluginDefinition): void {
-  const { manifest, handlers } = definition
+function validateManifest(manifest: PluginManifest): void {
   requireKeys(manifest, "manifest", ["name", "version", "protocol", "capabilities"])
   requireKeys(manifest.capabilities, "capabilities", [
     "tools", "commands", "hooks", "providers", "event_subscriptions", "push",
@@ -244,32 +243,24 @@ function validateDefinition(definition: PluginDefinition): void {
     throw new Error("plugin manifest exceeds the protocol size limit")
   }
 
-  const pairs: readonly [string, readonly string[], readonly string[]][] = [
-    ["tool", (manifest.capabilities.tools ?? []).map((entry) => entry.name), Object.keys(handlers.tools ?? {})],
-    ["command", (manifest.capabilities.commands ?? []).map((entry) => entry.name), Object.keys(handlers.commands ?? {})],
+  const declaredCapabilities: readonly [string, readonly string[]][] = [
+    ["tool", (manifest.capabilities.tools ?? []).map((entry) => entry.name)],
+    ["command", (manifest.capabilities.commands ?? []).map((entry) => entry.name)],
     [
       "hook",
       (manifest.capabilities.hooks ?? []).map((entry) => (typeof entry === "string" ? entry : entry.name)),
-      Object.keys(handlers.hooks ?? {}),
     ],
     [
       "provider",
       (manifest.capabilities.providers ?? []).map((entry) => entry["alias-prefix"]),
-      Object.keys(handlers.providers ?? {}),
     ],
-    ["event", [...(manifest.capabilities.event_subscriptions ?? [])], Object.keys(handlers.events ?? {})],
+    ["event", [...(manifest.capabilities.event_subscriptions ?? [])]],
   ]
-  for (const [kind, declared, implemented] of pairs) {
+  for (const [kind, declared] of declaredCapabilities) {
     if (declared.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind) {
       throw new Error(`too many ${kind} capabilities`)
     }
     requireUnique(declared, kind)
-    for (const name of implemented) {
-      if (!declared.includes(name)) throw new Error(`${kind} handler ${name} exceeds the manifest`)
-    }
-    for (const name of declared) {
-      if (!implemented.includes(name)) throw new Error(`${kind} capability ${name} has no handler`)
-    }
   }
   const push = manifest.capabilities.push ?? []
   if (push.length > PROTOCOL_LIMITS.maxCapabilitiesPerKind) throw new Error("too many push capabilities")
@@ -329,17 +320,6 @@ function validateDefinition(definition: PluginDefinition): void {
       throw new Error("protocol 1 providers cannot declare protocol 2 capabilities or credentials")
     }
   }
-  const declaredModelProviders = (manifest.capabilities.providers ?? [])
-    .filter((provider) => provider.capabilities?.includes("models") === true)
-    .map((provider) => provider["alias-prefix"])
-  const implementedModelProviders = Object.keys(handlers.providerModels ?? {})
-  requireUnique(implementedModelProviders, "provider models handler")
-  for (const prefix of implementedModelProviders) {
-    if (!declaredModelProviders.includes(prefix)) throw new Error(`provider models handler ${prefix} exceeds the manifest`)
-  }
-  for (const prefix of declaredModelProviders) {
-    if (!implementedModelProviders.includes(prefix)) throw new Error(`provider models capability ${prefix} has no handler`)
-  }
   const validToolCapabilities = new Set(["reads-fs", "writes-fs", "network", "exec"])
   for (const tool of manifest.capabilities.tools ?? []) {
     if (new Set(tool.caps).size !== tool.caps.length || tool.caps.some((capability) => !validToolCapabilities.has(capability))) {
@@ -358,6 +338,45 @@ function validateDefinition(definition: PluginDefinition): void {
     if (typeof hook !== "string" && hook.failure_policy !== "fail-open" && hook.failure_policy !== "fail-closed") {
       throw new Error(`hook ${hook.name} has an invalid failure policy`)
     }
+  }
+}
+
+function validateDefinition(definition: PluginDefinition): void {
+  const { manifest, handlers } = definition
+  validateManifest(manifest)
+  const pairs: readonly [string, readonly string[], readonly string[]][] = [
+    ["tool", (manifest.capabilities.tools ?? []).map((entry) => entry.name), Object.keys(handlers.tools ?? {})],
+    ["command", (manifest.capabilities.commands ?? []).map((entry) => entry.name), Object.keys(handlers.commands ?? {})],
+    [
+      "hook",
+      (manifest.capabilities.hooks ?? []).map((entry) => (typeof entry === "string" ? entry : entry.name)),
+      Object.keys(handlers.hooks ?? {}),
+    ],
+    [
+      "provider",
+      (manifest.capabilities.providers ?? []).map((entry) => entry["alias-prefix"]),
+      Object.keys(handlers.providers ?? {}),
+    ],
+    ["event", [...(manifest.capabilities.event_subscriptions ?? [])], Object.keys(handlers.events ?? {})],
+  ]
+  for (const [kind, declared, implemented] of pairs) {
+    for (const name of implemented) {
+      if (!declared.includes(name)) throw new Error(`${kind} handler ${name} exceeds the manifest`)
+    }
+    for (const name of declared) {
+      if (!implemented.includes(name)) throw new Error(`${kind} capability ${name} has no handler`)
+    }
+  }
+  const declaredModelProviders = (manifest.capabilities.providers ?? [])
+    .filter((provider) => provider.capabilities?.includes("models") === true)
+    .map((provider) => provider["alias-prefix"])
+  const implementedModelProviders = Object.keys(handlers.providerModels ?? {})
+  requireUnique(implementedModelProviders, "provider models handler")
+  for (const prefix of implementedModelProviders) {
+    if (!declaredModelProviders.includes(prefix)) throw new Error(`provider models handler ${prefix} exceeds the manifest`)
+  }
+  for (const prefix of declaredModelProviders) {
+    if (!implementedModelProviders.includes(prefix)) throw new Error(`provider models capability ${prefix} has no handler`)
   }
 }
 
@@ -1077,6 +1096,24 @@ export function definePlugin(definition: PluginDefinition): PluginDefinition {
   validateDefinition(definition)
   lockDefinition(definition)
   return definition
+}
+
+/** Parse inert manifest data before any plugin code is approved or started. */
+export function parsePluginManifest(value: unknown): PluginManifest {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("plugin manifest must be an object")
+  }
+  const manifest = value as PluginManifest
+  if (
+    manifest.capabilities === null
+    || typeof manifest.capabilities !== "object"
+    || Array.isArray(manifest.capabilities)
+  ) {
+    throw new Error("plugin manifest capabilities must be an object")
+  }
+  validateManifest(manifest)
+  deepFreeze(manifest)
+  return manifest
 }
 
 export async function runPlugin(definition: PluginDefinition, options: RunOptions = {}): Promise<void> {

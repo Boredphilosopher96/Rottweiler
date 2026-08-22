@@ -47,10 +47,10 @@ incremental = false
 
 [profile.release]
 strip = true
-# macOS is the latency-leading target. Official release builds route through
-# scripts/cargo-release.sh, which keeps this macOS profile and selects `s` for
-# Linux where the same binary needs more loop optimization.
-opt-level = "z"
+# Official release builds route through scripts/cargo-release.sh. Its native
+# macOS profile uses the measured speed winner; Linux retains its independently
+# size-qualified `s` override until the same comparison runs there.
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"

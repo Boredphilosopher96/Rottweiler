@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@rottweiler/plugin": "^0.1.0"
+    "@rottweiler/plugin": "^0.1.4"
   },
   "devDependencies": {
     "@types/bun": "^1.3.14",

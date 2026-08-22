@@ -18,7 +18,7 @@ Format: context → decision → rationale → revisit-when. The implementing ag
 
 **Consequences (accepted).**
 - Two build toolchains (cargo + bun) and a protocol contract test suite between them (see 07 §2).
-- Startup budget is split: engine ready < 50ms, TUI first paint < 150ms total (Bun-compiled binaries cold-start in tens of ms; opencode demonstrates this is achievable).
+- Startup has three independently named budgets: engine ready < 50ms, the TUI process-start splash < 150ms total, and an accepted composer keystroke after transcript paint < 500ms. The splash is feedback, not evidence that the application is interactive.
 - Distribution artifact is larger because a Bun-compiled executable embeds the Bun runtime. The binary-size gate applies to the Rust engine only; the TUI bundle has platform-specific budgets (< 100MB on macOS, < 150MB on Linux) — a knowing trade for the renderer. Linux release builds fail closed unless the copied OpenTUI native library can be stripped with the trusted system `strip` binary.
 - If the TUI process dies, the engine survives; `rw` reattaches (this must be a tested behavior, not an accident).
 
@@ -190,7 +190,8 @@ public entrypoint. Homebrew is the primary distribution: the versioned macOS
 Cask stages the exact release archive in Homebrew's managed directory, while
 the versioned Formula keeps the same private engine, TUI, WASM host, and native
 renderer files together under `libexec`. Both expose one package-manager-aware
-`rw` wrapper in `PATH`. A generated
+`rw` symlink in `PATH`; the executable recognizes canonical Homebrew Cellar and
+Caskroom paths when directing upgrades. A generated
 HTTPS-only bootstrap is the secondary path and may install only an immutable
 tag archive whose exact URL, byte length, and SHA-256 were derived from that
 release. Homebrew updates use `brew upgrade`; the signed in-app updater remains
@@ -365,3 +366,38 @@ archives keeps signing and rerun behavior in one established owner.
 **Revisit when.** Protected soak measurements and runners are continuously
 available for pre-v1 development, or the project needs preflight-built archives
 to become publication inputs rather than authorization evidence.
+
+---
+
+## ADR-027: TypeScript source plugins use a sealed, per-plugin process host
+
+**Status:** accepted design 2026-08-22; implementation is staged and must not be
+reported as shipped until the extracted-release acceptance passes.
+
+**Decision.** Rottweiler will ship one private, authenticated TypeScript host and
+spawn one sandboxed host process per active TypeScript plugin. Production resolves
+an inert manifest plus an exact source and locked-dependency graph into a sealed,
+content-addressed bundle, then runs that bundle through the existing approval,
+`PluginLauncher`, `PluginHost`, capability, and adapter path. `manifest.json` is
+the single authored capability declaration and is imported through the SDK's
+validating boundary; authority is never discovered by executing unapproved
+TypeScript. Live development is a separate session-scoped, actor-owned generation
+path with a fixed ephemeral capability ceiling, atomic per-turn registry snapshots,
+last-good reload, and production restoration on detach. The generic executable
+RPC tier remains supported.
+
+**Rationale.** A release-owned runtime removes the embedded Bun copy from every
+plugin without moving JavaScript into the Rust engine or combining unrelated
+plugins into one failure and authority domain. Sealing from a two-pass private
+snapshot makes source approval describe the bytes that execute. Resolving the new
+artifact into the current process contract minimizes the production migration;
+reserving actor-owned generations keeps the later Pi-like development loop from
+requiring unsafe mutable registries.
+
+**Specification.** `docs/design/typescript-source-plugin-host.md` defines the
+preparation protocol, identity and sandbox rules, failure states, live attachment,
+release gates, migration checkpoints, and non-goals.
+
+**Revisit when.** The compiled-host feasibility spike cannot load a sealed external
+ESM module under both native sandboxes, or a shared-process design can prove equal
+kernel authority and crash containment. Either outcome requires a superseding ADR.

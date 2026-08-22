@@ -1415,6 +1415,7 @@ export class TranscriptRenderable extends BoxRenderable {
   #turns: RottweilerState["turns"] | null = null
   #subagents: RottweilerState["subagents"] | null = null
   #workspaceRoots: RottweilerState["workspaceRoots"] | null = null
+  #historicalTurnIds = new Set<string>()
   #agentName = "Rottweiler"
   #tailReasoningTurnId: string | null = null
   #compactionAttempt: number | null = null
@@ -1654,6 +1655,7 @@ export class TranscriptRenderable extends BoxRenderable {
   }
 
   update(state: RottweilerState, agentName = "Rottweiler"): void {
+    const previousStreamingTurnId = this.#state?.streamingTail?.turnId ?? null
     this.#state = state
     this.#agentName = truncateToCells(agentName.replace(/\s+/g, " ").trim(), 48) || "Child agent"
     const transcriptChanged = this.#transcript !== state.transcript
@@ -1666,11 +1668,18 @@ export class TranscriptRenderable extends BoxRenderable {
         this.#reasoningExpansion.set(entryKey(committed), this.#tailReasoning.expanded)
       }
     }
+    const streamingTurnId = state.streamingTail?.turnId ?? null
+    if (transcriptChanged || previousStreamingTurnId !== streamingTurnId) {
+      this.#historicalTurnIds = new Set(
+        state.transcript
+          .map((entry) => entry.agentTurn)
+          .filter((turnId) => turnId !== streamingTurnId),
+      )
+    }
     const historicalToolsChanged = this.#tools !== state.tools && toolProjectionChangedForHistory(
       this.#tools,
       state.tools,
-      state.transcript,
-      state.streamingTail?.turnId ?? null,
+      this.#historicalTurnIds,
     )
     const cardProjectionChanged =
       historicalToolsChanged ||
@@ -2024,15 +2033,9 @@ export class TranscriptRenderable extends BoxRenderable {
 function toolProjectionChangedForHistory(
   previous: RottweilerState["tools"] | null,
   next: RottweilerState["tools"],
-  transcript: readonly TranscriptEntry[],
-  streamingTurnId: string | null,
+  historicalTurns: ReadonlySet<string>,
 ): boolean {
   if (previous === null) return true
-  const historicalTurns = new Set(
-    transcript
-      .map((entry) => entry.agentTurn)
-      .filter((turnId) => turnId !== streamingTurnId),
-  )
   const ids = new Set([...Object.keys(previous), ...Object.keys(next)])
   for (const id of ids) {
     const before = previous[id]

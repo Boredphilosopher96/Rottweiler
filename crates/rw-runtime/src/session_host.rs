@@ -42,7 +42,6 @@ use rw_core::{
     WorkspaceFileMatch, WorkspaceFilePreview, WorkspaceStatus, begin_provider_login,
     builtin_command_registry, project_session_events,
 };
-use rw_providers::PricingTable;
 use rw_store::catalog_cache::{load_model_catalog_cache, store_model_catalog_cache};
 use rw_store::config::ConfigLoader;
 use rw_store::session::{SessionEventLog, SessionIndex, SessionStoreError, UtcTimestamp};
@@ -322,20 +321,9 @@ impl RuntimeSessionFactory {
         options.allowed_workspaces.clone_from(&allowed);
         crate::session_runtime::initialize_private_storage_root(&options.storage_root)
             .map_err(|_| HostError::Persistence("host storage could not initialize".to_owned()))?;
-        let pricing_path = options.storage_root.join("models.toml");
-        let pricing = if pricing_path.is_file() {
-            let contents = fs::read_to_string(&pricing_path).map_err(|_| {
-                HostError::Persistence("cached model metadata could not be read".to_owned())
-            })?;
-            PricingTable::from_toml(&contents).map_err(|_| {
-                HostError::Persistence("cached model metadata is invalid".to_owned())
-            })?
-        } else {
-            PricingTable::default()
-        };
-        let live_source = ProviderModelCatalogSource::system(
+        let live_source = ProviderModelCatalogSource::system_from_pricing_path(
             options.credentials_path.clone(),
-            pricing,
+            options.storage_root.join("models.toml"),
             options.config.clone(),
         );
         let catalog_cache_path = options.storage_root.join("model-catalog.json");
@@ -3702,6 +3690,37 @@ mod tests {
                 .expect("private test directory permissions");
         }
         fs::canonicalize(path).expect("canonical private test directory")
+    }
+
+    #[tokio::test]
+    async fn factory_initialization_defers_pricing_catalog_parse() {
+        let root = tempdir().expect("root");
+        let workspace = private_test_directory(&root.path().join("workspace"));
+        let storage_root = private_test_directory(&root.path().join("state"));
+        fs::write(storage_root.join("models.toml"), "not valid pricing").expect("pricing fixture");
+
+        let factory = RuntimeSessionFactory::new(RuntimeHostOptions {
+            credentials_path: storage_root.join("credentials.json"),
+            storage_root,
+            config: Config::default(),
+            allowed_workspaces: vec![workspace],
+            permission_mode: Some(PermissionMode::Strict),
+            max_turns: 2,
+            provider_mode: HostedProviderMode::DeterministicReplay {
+                provider_name: "offline-host".to_owned(),
+                scripts: Vec::new(),
+                event_delay_ms: 0,
+            },
+            dangerously_trust: false,
+            wait_for_execution_lease: false,
+        })
+        .expect("readiness must not parse pricing");
+
+        let error = factory
+            .model_catalog(true, None, None)
+            .await
+            .expect_err("the first live catalog lookup must report invalid pricing");
+        assert!(error.to_string().contains("invalid pricing table"));
     }
 
     #[test]

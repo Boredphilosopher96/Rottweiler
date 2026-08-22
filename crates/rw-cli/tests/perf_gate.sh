@@ -232,6 +232,9 @@ if not smoke and turn_p99 >= protected_turn_limit_ms:
         f"zero-latency full-turn p99 {turn_p99:.3f}ms exceeds "
         f"{protected_turn_limit_ms}ms"
     )
-if binary_bytes >= 28_000_000:
-    raise SystemExit(f"release binary size {binary_bytes} exceeds 28MB")
+binary_limit = 40_000_000 if sys.platform == "darwin" else 28_000_000
+if binary_bytes >= binary_limit:
+    raise SystemExit(
+        f"release binary size {binary_bytes} exceeds {binary_limit // 1_000_000}MB"
+    )
 PY

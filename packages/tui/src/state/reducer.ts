@@ -77,6 +77,14 @@ function retainRecentTools(
   return next
 }
 
+function updateTool(
+  current: RottweilerState["tools"],
+  toolCallId: string,
+  tool: ToolProjection,
+): RottweilerState["tools"] {
+  return { ...current, [toolCallId]: tool }
+}
+
 function isSuccessfulTodoCheckpoint(tool: ToolProjection): boolean {
   return (
     tool.name === "todo" &&
@@ -989,7 +997,7 @@ function applyKnownEvent(
       }
       return {
         ...state,
-        tools: retainRecentTools(state.tools, event.tool_call_id, tool),
+        tools: updateTool(state.tools, event.tool_call_id, tool),
         streamingTail: attachToolToTail(state.streamingTail, event.turn_id, event.tool_call_id),
       }
     }
@@ -1010,7 +1018,7 @@ function applyKnownEvent(
       }
       return {
         ...state,
-        tools: retainRecentTools(
+        tools: updateTool(
           state.tools,
           event.tool_call_id,
           { ...existing, diff: event.diff },
@@ -1035,7 +1043,7 @@ function applyKnownEvent(
       }
       return {
         ...state,
-        tools: retainRecentTools(state.tools, event.tool_call_id, {
+        tools: updateTool(state.tools, event.tool_call_id, {
           ...existing,
           chunks: [...existing.chunks, { stream: event.stream, chunk: event.chunk }],
         }),

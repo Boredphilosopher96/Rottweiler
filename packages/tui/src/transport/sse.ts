@@ -21,10 +21,9 @@ const DEFAULT_MAX_LINE_BYTES = DEFAULT_MAX_DATA_BYTES + 16
 /** A bounded, incremental parser for the event-stream wire format. */
 export class SseParser {
   readonly #decoder = new TextDecoder()
-  readonly #encoder = new TextEncoder()
   readonly #maxLineBytes: number
   readonly #maxDataBytes: number
-  #line: number[] = []
+  #line = new Uint8Array()
   #data: string[] = []
   #dataBytes = 0
   #event: string | undefined
@@ -38,15 +37,22 @@ export class SseParser {
 
   push(chunk: Uint8Array): SseMessage[] {
     const messages: SseMessage[] = []
-    for (const byte of chunk) {
-      if (byte === 0x0a) {
-        this.#consumeLine(messages)
-        continue
-      }
-      this.#line.push(byte)
-      if (this.#line.length > this.#maxLineBytes) {
+    let offset = 0
+    while (offset < chunk.length) {
+      const newline = chunk.indexOf(0x0a, offset)
+      const end = newline < 0 ? chunk.length : newline
+      const segment = chunk.subarray(offset, end)
+      if (this.#line.length + segment.length > this.#maxLineBytes) {
         throw new SseLimitError("SSE line exceeds configured byte limit")
       }
+      if (newline < 0) {
+        this.#line = appendBytes(this.#line, segment)
+        break
+      }
+      const line = this.#line.length === 0 ? segment : appendBytes(this.#line, segment)
+      this.#line = new Uint8Array()
+      this.#consumeLine(line, messages)
+      offset = newline + 1
     }
     return messages
   }
@@ -54,18 +60,16 @@ export class SseParser {
   finish(): SseMessage[] {
     const messages: SseMessage[] = []
     if (this.#line.length > 0) {
-      this.#consumeLine(messages)
+      this.#consumeLine(this.#line, messages)
+      this.#line = new Uint8Array()
     }
     this.#dispatch(messages)
     return messages
   }
 
-  #consumeLine(messages: SseMessage[]): void {
-    if (this.#line.at(-1) === 0x0d) {
-      this.#line.pop()
-    }
-    const line = this.#decoder.decode(Uint8Array.from(this.#line))
-    this.#line = []
+  #consumeLine(bytes: Uint8Array, messages: SseMessage[]): void {
+    const lineBytes = bytes.at(-1) === 0x0d ? bytes.subarray(0, -1) : bytes
+    const line = this.#decoder.decode(lineBytes)
 
     if (line.length === 0) {
       this.#dispatch(messages)
@@ -78,14 +82,17 @@ export class SseParser {
     const colon = line.indexOf(":")
     const field = colon < 0 ? line : line.slice(0, colon)
     let value = colon < 0 ? "" : line.slice(colon + 1)
+    const colonByte = lineBytes.indexOf(0x3a)
+    let valueByteStart = colonByte < 0 ? lineBytes.length : colonByte + 1
     if (value.startsWith(" ")) {
       value = value.slice(1)
+      valueByteStart += 1
     }
 
     switch (field) {
       case "data": {
         const separatorBytes = this.#data.length === 0 ? 0 : 1
-        const valueBytes = this.#encoder.encode(value).byteLength
+        const valueBytes = lineBytes.length - valueByteStart
         this.#dataBytes += separatorBytes + valueBytes
         if (this.#dataBytes > this.#maxDataBytes) {
           throw new SseLimitError("SSE event data exceeds configured byte limit")
@@ -129,6 +136,15 @@ export class SseParser {
     this.#id = undefined
     this.#retry = undefined
   }
+}
+
+function appendBytes(prefix: Uint8Array, suffix: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (prefix.length === 0) return suffix.slice()
+  if (suffix.length === 0) return prefix.slice()
+  const combined = new Uint8Array(prefix.length + suffix.length)
+  combined.set(prefix)
+  combined.set(suffix, prefix.length)
+  return combined
 }
 
 export class SseLimitError extends Error {

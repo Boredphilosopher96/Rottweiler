@@ -9,6 +9,7 @@ import {
   statSync,
 } from "node:fs"
 import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import { tmpdir } from "node:os"
 import { dirname, isAbsolute, join } from "node:path"
 
@@ -78,6 +79,11 @@ const selectedNativeLibrary =
       ? "libopentui.dylib"
       : "libopentui.so"
 const selectedNativePath = join(selectedNativeDirectory, selectedNativeLibrary)
+const treeSitterAssetDigest = createHash("sha256")
+  .update(readFileSync(join(import.meta.dir, "bun.lock")))
+  .update(readFileSync(join(import.meta.dir, "src/tree-sitter-runtime.ts")))
+  .update(readFileSync(join(import.meta.dir, "src/tree-sitter-client.ts")))
+  .digest("hex")
 function stripLinuxNativeLibrary(path: string): void {
   if (process.platform !== "linux") return
   const stripExecutable = process.env.ROTTWEILER_STRIP_BIN ?? "/usr/bin/strip"
@@ -208,6 +214,9 @@ try {
     format: "esm",
     minify: true,
     bytecode: true,
+    define: {
+      __ROTTWEILER_TREE_SITTER_ASSET_DIGEST__: JSON.stringify(`sha256-${treeSitterAssetDigest}`),
+    },
     plugins: [compressedTreeSitterAssets, nativePrelude],
   })
 } finally {
@@ -242,13 +251,18 @@ try {
   const smokeExecutable = join(smokeDirectory, "rottweiler-tui")
   const smokeNative = join(smokeDirectory, selectedNativeLibrary)
   const smokeReport = join(smokeDirectory, "report.json")
+  const smokeHome = join(smokeDirectory, "home")
   copyFileSync(outputExecutable, smokeExecutable)
   copyFileSync(outputNativePath, smokeNative)
   const smoke = spawnSync(smokeExecutable, [], {
     cwd: smokeDirectory,
     encoding: "utf8",
     timeout: 30_000,
-    env: { ...process.env, ROTTWEILER_TREE_SITTER_SMOKE_REPORT: smokeReport },
+    env: {
+      ...process.env,
+      ROTTWEILER_HOME: smokeHome,
+      ROTTWEILER_TREE_SITTER_SMOKE_REPORT: smokeReport,
+    },
   })
   if (smoke.error !== undefined || smoke.status !== 0 || !existsSync(smokeReport)) {
     throw new Error(
@@ -259,6 +273,7 @@ try {
   if (!report.frame?.includes("const answer = 42")) {
     throw new Error("compiled embedded-parser smoke did not report highlighted fenced code")
   }
+  rmSync(smokeHome, { recursive: true, force: true })
   const entries = readdirSync(smokeDirectory).sort()
   if (entries.join("\n") !== [selectedNativeLibrary, "report.json", "rottweiler-tui"].sort().join("\n")) {
     throw new Error("compiled TUI required unexpected adjacent parser assets")

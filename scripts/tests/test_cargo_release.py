@@ -57,7 +57,7 @@ class CargoReleaseTests(unittest.TestCase):
 
     def test_native_profiles_force_host_target_and_exact_artifact_directory(self) -> None:
         for host, optimization in [
-            ("aarch64-apple-darwin", "z"),
+            ("aarch64-apple-darwin", "3"),
             ("x86_64-unknown-linux-gnu", "s"),
         ]:
             with self.subTest(host=host):

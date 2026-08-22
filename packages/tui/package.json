@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "bun run build.ts",
+    "diagnose:rss": "bun run scripts/opentui-rss-harness.ts",
     "test": "bun test --max-concurrency=1 --path-ignore-patterns='test/perf/**'",
     "test:perf": "bun test test/perf/m4-transport-performance.test.ts && bun test test/perf/performance.test.ts",
     "typecheck": "tsc --noEmit"

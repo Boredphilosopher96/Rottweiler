@@ -117,7 +117,7 @@ class DistributionRenderTests(unittest.TestCase):
 
             self.assertIn('libexec.install Dir["bin/*"]', formula_text)
             self.assertIn(
-                '(bin/"rw").write_env_script libexec/"rw", ROTTWEILER_PACKAGE_MANAGER: "homebrew"',
+                'bin.install_symlink libexec/"rw"',
                 formula_text,
             )
             self.assertNotIn('bin.install "rottweiler-tui"', formula_text)
@@ -129,15 +129,8 @@ class DistributionRenderTests(unittest.TestCase):
             self.assertIn("brew upgrade", formula_text)
             self.assertIn('cask "rottweiler" do', cask_text)
             self.assertIn('depends_on arch: :arm64', cask_text)
-            self.assertIn('command_wrapper "rw"', cask_text)
-            self.assertIn(
-                'executable: "#{staged_path}/rottweiler-#{version}-darwin-arm64/bin/rw"',
-                cask_text,
-            )
-            self.assertIn(
-                'env:        { "ROTTWEILER_PACKAGE_MANAGER" => "homebrew" }',
-                cask_text,
-            )
+            self.assertIn('binary "#{staged_path}/rottweiler-#{version}-darwin-arm64/bin/rw", target: "rw"', cask_text)
+            self.assertNotIn("ROTTWEILER_PACKAGE_MANAGER", cask_text)
             self.assertIn('system_command "/usr/bin/xattr"', cask_text)
             self.assertIn(
                 'args: ["-dr", "com.apple.quarantine", "#{staged_path}/rottweiler-#{version}-darwin-arm64"]',
@@ -260,7 +253,7 @@ class DistributionRenderTests(unittest.TestCase):
         self.assertIn('libexec.install "packages/tui/dist/rottweiler-tui"', text)
         self.assertIn('libexec.install "#{release_dir}/rottweiler-wasm-host"', text)
         self.assertIn(
-            '(bin/"rw").write_env_script libexec/"rw", ROTTWEILER_PACKAGE_MANAGER: "homebrew"',
+            'bin.install_symlink libexec/"rw"',
             text,
         )
         self.assertNotIn('bin.install "rottweiler-tui"', text)

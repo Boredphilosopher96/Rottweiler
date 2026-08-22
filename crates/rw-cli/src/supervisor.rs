@@ -23,10 +23,12 @@ const TOKEN_FILE_ENV: &str = "ROTTWEILER_ENGINE_TOKEN_FILE";
 const SESSION_ENV: &str = "ROTTWEILER_SESSION_ID";
 const LAST_SEEN_ENV: &str = "ROTTWEILER_LAST_SEEN_SEQUENCE";
 const LAST_SEEN_FILE_ENV: &str = "ROTTWEILER_LAST_SEEN_FILE";
+const TUI_RECYCLE_STATE_FILE_ENV: &str = "ROTTWEILER_TUI_RECYCLE_STATE_FILE";
 const FORK_OPERATION_DIRECTORY_ENV: &str = "ROTTWEILER_FORK_OPERATION_DIRECTORY";
 const WAIT_FOR_EXECUTION_LEASE_ARG: &str = "--wait-for-execution-lease";
 const TUI_KEYBINDINGS_ENV: &str = "ROTTWEILER_TUI_KEYBINDINGS";
 const TUI_THEME_ENV: &str = "ROTTWEILER_TUI_THEME";
+const SUPERVISOR_PID_ENV: &str = crate::parent_death::SUPERVISOR_PID_ENV;
 const ENGINE_STDERR_TAIL_BYTES: usize = 16 * 1024;
 const TUI_RECYCLE_EXIT_CODE: i32 = 75;
 
@@ -788,10 +790,14 @@ fn engine_spec(config: &SupervisorConfig) -> ChildSpec {
     if config.dangerously_trust {
         args.push(OsString::from("--dangerously-trust"));
     }
+    let mut env = connection_env(config, None);
+    if config.detach {
+        env.remove(&OsString::from(SUPERVISOR_PID_ENV));
+    }
     ChildSpec {
         program: config.rw_executable.clone(),
         args,
-        env: connection_env(config, None),
+        env,
         stdio: if config.in_memory_replay_script.is_some() {
             // Hidden deterministic harnesses retain engine diagnostics in the
             // owning PTY. Production live-provider launches remain quiet.
@@ -870,8 +876,19 @@ fn connection_env(
             config.last_seen_file.as_os_str().to_owned(),
         ),
         (
+            OsString::from(TUI_RECYCLE_STATE_FILE_ENV),
+            config
+                .last_seen_file
+                .with_file_name("tui-recycle-state.json")
+                .into_os_string(),
+        ),
+        (
             OsString::from(FORK_OPERATION_DIRECTORY_ENV),
             config.fork_operation_directory.as_os_str().to_owned(),
+        ),
+        (
+            OsString::from(SUPERVISOR_PID_ENV),
+            OsString::from(std::process::id().to_string()),
         ),
     ]);
     if let Some(last_seen) = last_seen {
@@ -1010,6 +1027,10 @@ mod tests {
         assert_eq!(
             tui.env.get(&OsString::from(LAST_SEEN_FILE_ENV)),
             Some(&OsString::from("/private/run/last-seen"))
+        );
+        assert_eq!(
+            tui.env.get(&OsString::from(TUI_RECYCLE_STATE_FILE_ENV)),
+            Some(&OsString::from("/private/run/tui-recycle-state.json"))
         );
         assert_eq!(
             tui.env.get(&OsString::from(FORK_OPERATION_DIRECTORY_ENV)),

@@ -28,7 +28,9 @@ from dataclasses import dataclass
 
 
 FIRST_PAINT_MARKER = b"Rottweiler"
-TUI_FIRST_PAINT_MARKER = b"ROTTWEILER_TUI_FIRST_PAINT"
+TUI_PROCESS_START_MARKER = b"ROTTWEILER_TUI_PROCESS_START"
+TUI_TRANSCRIPT_PAINTED_MARKER = b"ROTTWEILER_TUI_TRANSCRIPT_PAINTED"
+TUI_INTERACTIVE_MARKER = b"ROTTWEILER_TUI_INTERACTIVE"
 DRIVER_READY_MARKER = b"ROTTWEILER_TUI_DRIVER_READY"
 PROMPT_MARKER = "M4_REATTACH_PROMPT_7f40"
 RESPONSE_MARKER = "M4_REATTACH_RESPONSE_34d1"
@@ -38,6 +40,7 @@ SHELL_INTERRUPT_MARKER = "M4_SHELL_CHILD_INTERRUPT_82bc"
 SHELL_EXIT_MARKER = "Shell · exited 23"
 BLOCKED_TURN_MARKER = "M4_BLOCKED_AGENT_TURN_6d77"
 SHELL_SECRET_VALUE = "M4_SHELL_SECRET_d10f7e62"
+REPRESENTATIVE_PRICING_MODEL_COUNT = 4_000
 # The gate drives an xterm-compatible PTY, so send the same carriage return a
 # physical Return key produces there. Kitty's CSI-u encoding is only emitted by
 # terminals after negotiating that protocol and is not portable PTY input.
@@ -363,6 +366,34 @@ default = "ask"
     path = home / "config.toml"
     path.write_text(config, encoding="utf-8")
     path.chmod(0o600)
+    write_representative_pricing_catalog(home / "models.toml")
+
+
+def write_representative_pricing_catalog(path: pathlib.Path) -> None:
+    """Seed the gate with the catalog size of a used installation."""
+    entries = [
+        'source_url = "https://models.dev/api.json"',
+        'snapshot_date = "2026-08-22"',
+        'revision = "m4-representative-fixture-v1"',
+    ]
+    for index in range(REPRESENTATIVE_PRICING_MODEL_COUNT):
+        model = "gpt-5-mini" if index == 0 else f"synthetic-{index:04d}"
+        entries.extend(
+            [
+                "",
+                f'[models."fixture/{model}"]',
+                f'display_name = "M4 fixture model {index:04d}"',
+                "max_context_tokens = 128000",
+                "max_output_tokens = 16384",
+                "supports_tools = true",
+                "supports_thinking = true",
+                'reasoning_efforts = ["low", "medium", "high"]',
+                "input_per_million_micros_usd = 250000",
+                "output_per_million_micros_usd = 2000000",
+            ]
+        )
+    path.write_text("\n".join(entries) + "\n", encoding="utf-8")
+    path.chmod(0o600)
 
 
 def isolated_env(home: pathlib.Path, tui: pathlib.Path | None = None) -> dict[str, str]:
@@ -485,6 +516,26 @@ def spawn_pty(
     return PtyProcess(pid, fd)
 
 
+def spawn_wrapped_pty(
+    executable: pathlib.Path,
+    env: dict[str, str],
+    cwd: pathlib.Path,
+    arguments: list[str] | None = None,
+) -> PtyProcess:
+    """Keep the PTY session leader alive while its supervised child is killed."""
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.chdir(cwd)
+        child = os.fork()
+        if child == 0:
+            os.execve(str(executable), [str(executable), *(arguments or [])], env)
+        os.waitpid(child, 0)
+        while True:
+            signal.pause()
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    return PtyProcess(pid, fd)
+
+
 def read_until(process: PtyProcess, marker: bytes, timeout: float = 5.0) -> bytes:
     return read_until_all(process, (marker,), timeout)
 
@@ -520,6 +571,22 @@ def read_until_all(
         f"PTY process {process.pid} did not render markers {markers!r} ({child_status}); "
         f"tail={bytes(captured[-4000:])!r}"
     )
+
+
+def wait_for_pty_exit(process: PtyProcess, timeout: float) -> int:
+    """Drain terminal teardown output while waiting for a PTY child to exit."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found, status = os.waitpid(process.pid, os.WNOHANG)
+        if found == process.pid:
+            return status
+        ready, _, _ = select.select(
+            [process.fd], [], [], min(0.05, deadline - time.monotonic())
+        )
+        if ready:
+            with contextlib.suppress(OSError):
+                os.read(process.fd, 65536)
+    raise TimeoutError(f"PTY process {process.pid} did not exit within {timeout} seconds")
 
 
 def stop_pty(process: PtyProcess) -> None:
@@ -595,7 +662,7 @@ def one_startup_sample(
     workspace: pathlib.Path,
     port: int,
     index: int,
-) -> tuple[float, float]:
+) -> tuple[float, float, float]:
     sample_root = root / f"sample-{index}"
     sample_root.mkdir(mode=0o700)
     wall_started_ms = time.time_ns() / 1_000_000
@@ -611,8 +678,11 @@ def one_startup_sample(
                 "ROTTWEILER_ENGINE_TOKEN_FILE": str(runtime.token_path),
                 "ROTTWEILER_SESSION_ID": f"m4-perf-{index}",
                 "ROTTWEILER_LAST_SEEN_FILE": str(sample_root / "run" / "last-seen"),
-                "ROTTWEILER_FIRST_PAINT_MARKER": TUI_FIRST_PAINT_MARKER.decode("ascii"),
-                "ROTTWEILER_FIRST_PAINT_EPOCH": "1",
+                "ROTTWEILER_PROCESS_START_MARKER": TUI_PROCESS_START_MARKER.decode("ascii"),
+                "ROTTWEILER_PROCESS_START_EPOCH": "1",
+                "ROTTWEILER_TRANSCRIPT_PAINTED_MARKER": TUI_TRANSCRIPT_PAINTED_MARKER.decode("ascii"),
+                "ROTTWEILER_INTERACTIVE_MARKER": TUI_INTERACTIVE_MARKER.decode("ascii"),
+                "ROTTWEILER_INTERACTIVE_EPOCH": "1",
             }
         )
         tui_process = spawn_pty(tui, env, workspace)
@@ -621,22 +691,35 @@ def one_startup_sample(
         # start is hidden and the total measures their real concurrent path.
         wait_for_health(runtime)
         ready_ms = (time.perf_counter_ns() - started) / 1_000_000
-        captured = read_until(tui_process, TUI_FIRST_PAINT_MARKER)
-        timestamp_prefix = TUI_FIRST_PAINT_MARKER + b":"
+        captured = read_until(tui_process, TUI_PROCESS_START_MARKER)
+        timestamp_prefix = TUI_PROCESS_START_MARKER + b":"
         try:
             emitted_at_ms = float(
                 captured.split(timestamp_prefix, 1)[1].splitlines()[0].decode("ascii")
             )
         except (IndexError, UnicodeDecodeError, ValueError) as error:
-            raise RuntimeError("TUI first-frame marker omitted its emission timestamp") from error
-        paint_ms = emitted_at_ms - wall_started_ms
-        if paint_ms <= 0 or paint_ms > 5_000:
-            raise RuntimeError(f"TUI first-paint timestamp was implausible: {paint_ms}ms")
-        # Both independently-started processes must be ready for the combined
-        # cold-start gate. The later of engine readiness and the shipped,
-        # user-visible splash is the actual first usable paint boundary.
-        combined_ms = max(ready_ms, paint_ms)
-        return ready_ms, combined_ms
+            raise RuntimeError("TUI process-start marker omitted its emission timestamp") from error
+        process_start_ms = emitted_at_ms - wall_started_ms
+        if process_start_ms <= 0 or process_start_ms > 5_000:
+            raise RuntimeError(
+                f"TUI process-start timestamp was implausible: {process_start_ms}ms"
+            )
+        read_until(tui_process, TUI_TRANSCRIPT_PAINTED_MARKER)
+        os.write(tui_process.fd, b"x")
+        interactive = read_until(tui_process, TUI_INTERACTIVE_MARKER)
+        timestamp_prefix = TUI_INTERACTIVE_MARKER + b":"
+        try:
+            interactive_at_ms = float(
+                interactive.split(timestamp_prefix, 1)[1].splitlines()[0].decode("ascii")
+            )
+        except (IndexError, UnicodeDecodeError, ValueError) as error:
+            raise RuntimeError("TUI interactive marker omitted its emission timestamp") from error
+        interactive_ms = interactive_at_ms - wall_started_ms
+        if interactive_ms <= 0 or interactive_ms > 5_000:
+            raise RuntimeError(
+                f"TUI interactive timestamp was implausible: {interactive_ms}ms"
+            )
+        return ready_ms, max(ready_ms, process_start_ms), max(ready_ms, interactive_ms)
     finally:
         if tui_process is not None:
             stop_pty(tui_process)
@@ -669,25 +752,34 @@ def performance_gate(
         for index in range(samples)
     ]
     engine = [measurement[0] for measurement in measurements]
-    combined = [measurement[1] for measurement in measurements]
+    process_start = [measurement[1] for measurement in measurements]
+    interactive = [measurement[2] for measurement in measurements]
     engine_p99 = percentile(engine, 0.99)
-    combined_p99 = percentile(combined, 0.99)
+    process_start_p99 = percentile(process_start, 0.99)
+    interactive_p99 = percentile(interactive, 0.99)
     print(
         "M4 release startup: "
         f"samples={samples}; engine_ms p50={statistics.median(engine):.3f} "
         f"p99={engine_p99:.3f} max={max(engine):.3f}; "
-        f"engine_plus_tui_first_paint_ms p50={statistics.median(combined):.3f} "
-        f"p99={combined_p99:.3f} max={max(combined):.3f}"
+        f"engine_plus_tui_process_start_ms p50={statistics.median(process_start):.3f} "
+        f"p99={process_start_p99:.3f} max={max(process_start):.3f}; "
+        f"tui_interactive_ms p50={statistics.median(interactive):.3f} "
+        f"p99={interactive_p99:.3f} max={max(interactive):.3f}"
     )
     if engine_p99 >= 50:
         raise RuntimeError(f"engine-ready p99 {engine_p99:.3f}ms exceeds 50ms")
-    if combined_p99 >= 150:
+    if process_start_p99 >= 150:
         raise RuntimeError(
-            f"cold engine plus compiled-TUI first-paint p99 {combined_p99:.3f}ms exceeds 150ms"
+            f"cold engine plus compiled-TUI process-start p99 {process_start_p99:.3f}ms exceeds 150ms"
+        )
+    if interactive_p99 >= 500:
+        raise RuntimeError(
+            f"cold compiled-TUI interactive p99 {interactive_p99:.3f}ms exceeds 500ms"
         )
     return {
         "engine_ready_p99_us": math.ceil(engine_p99 * 1000),
-        "tui_first_paint_p99_us": math.ceil(combined_p99 * 1000),
+        "tui_process_start_p99_us": math.ceil(process_start_p99 * 1000),
+        "tui_interactive_p99_us": math.ceil(interactive_p99 * 1000),
     }
 
 
@@ -903,6 +995,16 @@ def wait_for_engine_child(
     raise RuntimeError("supervisor did not expose the engine child")
 
 
+def wait_for_supervisor_child(parent: int, executable: pathlib.Path) -> int:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        for pid, command in child_processes(parent):
+            if str(executable) in command and " serve" not in command:
+                return pid
+        time.sleep(0.01)
+    raise RuntimeError("PTY wrapper did not expose the supervisor child")
+
+
 def supervisor_reattach_gate(
     rw: pathlib.Path,
     tui: pathlib.Path,
@@ -953,16 +1055,11 @@ def supervisor_reattach_gate(
         )
         owned_children = descendant_pids(process.pid)
         os.write(process.fd, b"\x03")
-        deadline = time.monotonic() + 8
-        wait_status: int | None = None
-        while time.monotonic() < deadline:
-            found, status = os.waitpid(process.pid, os.WNOHANG)
-            if found == process.pid:
-                wait_status = status
-                break
-            time.sleep(0.01)
-        if wait_status is None:
+        try:
+            wait_status = wait_for_pty_exit(process, timeout=8)
+        except TimeoutError:
             raise RuntimeError("normal TUI Ctrl-C did not stop the installed-bundle supervisor")
+
         exit_code = os.waitstatus_to_exitcode(wait_status)
         if exit_code != 0:
             raise RuntimeError(
@@ -990,6 +1087,86 @@ def supervisor_reattach_gate(
             terminate_process_tree(process.pid)
         with contextlib.suppress(OSError):
             os.close(process.fd)
+
+
+def supervisor_parent_death_gate(
+    rw: pathlib.Path,
+    tui: pathlib.Path,
+    root: pathlib.Path,
+    workspace: pathlib.Path,
+    port: int,
+) -> None:
+    home = root / "supervisor-parent-death-home"
+    write_config(home, port)
+    runtime_root = home / "run"
+    env = isolated_env(home)
+    env["ROTTWEILER_DRIVER_READY_MARKER"] = DRIVER_READY_MARKER.decode("ascii")
+    process: PtyProcess | None = spawn_wrapped_pty(
+        rw,
+        env,
+        workspace,
+        ["--dangerously-trust"],
+    )
+    try:
+        supervisor = wait_for_supervisor_child(process.pid, rw)
+        read_until(process, DRIVER_READY_MARKER, timeout=20)
+        engine = wait_for_engine_child(supervisor, rw)
+        tui_child = wait_for_tui_child(supervisor, tui)
+        os.kill(supervisor, signal.SIGKILL)
+
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            live = [pid for pid in (supervisor, engine, tui_child) if process_exists(pid)]
+            if not live:
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError(
+                "SIGKILLed supervisor left parent-watched children alive: "
+                f"pids={live!r}"
+            )
+        stop_pty(process)
+        process = None
+
+        # Launching the same workspace must succeed without deleting a lock or
+        # runtime directory by hand. The execution lease is a kernel flock, so
+        # the meaningful recovery proof is that the orphaned engine released it.
+        process = spawn_pty(rw, env, workspace, ["--dangerously-trust"])
+        read_until(process, DRIVER_READY_MARKER, timeout=20)
+        owned_children = descendant_pids(process.pid)
+        terminate_process_tree(process.pid)
+        with contextlib.suppress(OSError):
+            os.close(process.fd)
+        process = None
+
+        cleanup_deadline = time.monotonic() + 5
+        while time.monotonic() < cleanup_deadline:
+            live = [pid for pid in owned_children if process_exists(pid)]
+            live_runtime_descriptors = []
+            for descriptor in runtime_root.glob("engine-*/runtime.json"):
+                try:
+                    runtime_pid = int(json.loads(descriptor.read_text(encoding="utf-8"))["pid"])
+                except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                    continue
+                if process_exists(runtime_pid):
+                    live_runtime_descriptors.append(descriptor)
+            if not live and not live_runtime_descriptors:
+                break
+            time.sleep(0.01)
+        else:
+            raise RuntimeError(
+                "parent-death recovery leaked children or a live runtime descriptor: "
+                f"children={live!r} runtime={live_runtime_descriptors!r}"
+            )
+        print(
+            "M4 supervisor parent death: SIGKILL reaped the engine and TUI; the same "
+            "workspace relaunched without manual lease recovery"
+        )
+    finally:
+        if process is not None:
+            terminate_process_tree(process.pid)
+            with contextlib.suppress(OSError):
+                os.close(process.fd)
 
 
 def shell_handover_gate(
@@ -1494,6 +1671,7 @@ def main() -> int:
                 metrics.update(socket_latency_gate(rw, root, workspace, port, args.samples))
             if not args.skip_supervisor:
                 supervisor_reattach_gate(rw, tui, root, workspace, port)
+                supervisor_parent_death_gate(rw, tui, root, workspace, port)
             if not args.skip_shell:
                 shell_handover_gate(rw, tui, root, workspace, port)
             if args.ssh_loopback is not None:

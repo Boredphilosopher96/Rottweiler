@@ -4,6 +4,7 @@
     "module": "Preserve",
     "moduleResolution": "Bundler",
     "noEmit": true,
+    "resolveJsonModule": true,
     "strict": true,
     "target": "ES2022",
     "types": [

@@ -1,6 +1,9 @@
 import { writeStartupSplash } from "./startup"
 import { enhancedKeyboardOptions } from "./keybindings"
-import { stabilizeTreeSitterClient } from "./tree-sitter-client"
+import {
+  registerTreeSitterParsersLazily,
+  stabilizeTreeSitterClient,
+} from "./tree-sitter-client"
 
 type RuntimeBootstrap =
   | {
@@ -9,19 +12,32 @@ type RuntimeBootstrap =
     }
   | { readonly runtime: null; readonly error: unknown }
 
-function markFirstPaint(): void {
-  const marker = process.env.ROTTWEILER_FIRST_PAINT_MARKER
+function emitStartupMarker(markerVariable: string, epochVariable?: string): void {
+  const marker = process.env[markerVariable]
   if (marker === undefined || marker.length === 0) return
   const emittedAt =
-    process.env.ROTTWEILER_FIRST_PAINT_EPOCH === "1"
+    epochVariable !== undefined && process.env[epochVariable] === "1"
       ? `:${performance.timeOrigin + performance.now()}`
       : ""
   process.stdout.write(`\n${marker}${emittedAt}\n`)
-  delete process.env.ROTTWEILER_FIRST_PAINT_MARKER
-  delete process.env.ROTTWEILER_FIRST_PAINT_EPOCH
+  delete process.env[markerVariable]
+  if (epochVariable !== undefined) delete process.env[epochVariable]
 }
 
 async function main(): Promise<void> {
+  const expectedSupervisorPid = Number.parseInt(
+    process.env.ROTTWEILER_SUPERVISOR_PID ?? "",
+    10,
+  )
+  const recycleStatePath = process.env.ROTTWEILER_TUI_RECYCLE_STATE_FILE
+  let supervisorDeathTimer: ReturnType<typeof setInterval> | undefined
+  if (Number.isSafeInteger(expectedSupervisorPid) && expectedSupervisorPid > 1) {
+    supervisorDeathTimer = setInterval(() => {
+      if (process.ppid === expectedSupervisorPid) return
+      process.exit(143)
+    }, 100)
+    supervisorDeathTimer.unref()
+  }
   // Keep OpenTUI and its native library behind the shipped startup paint.
   // A static import here would execute before this module body and make the
   // apparent splash wait on the native backend it is meant to cover.
@@ -38,6 +54,9 @@ async function main(): Promise<void> {
     stop(): Promise<void>
   } | null = null
   let treeSitterRuntime: import("./tree-sitter-runtime").MaterializedTreeSitterRuntime | null = null
+  let treeSitterParsers: ReturnType<
+    typeof import("./tree-sitter-runtime").embeddedParserConfigurations
+  > = []
   let exitRequested = false
   let rssRecycleTimer: ReturnType<typeof setInterval> | undefined
   const renderer = await openTui.createCliRenderer({
@@ -48,6 +67,7 @@ async function main(): Promise<void> {
     useKittyKeyboard: enhancedKeyboardOptions,
     onDestroy: () => {
       if (rssRecycleTimer !== undefined) clearInterval(rssRecycleTimer)
+      if (supervisorDeathTimer !== undefined) clearInterval(supervisorDeathTimer)
       // Closing the renderer must release the SSE/runtime handles so a normal
       // Ctrl+C can let the process end naturally. Never force exit 0 here:
       // OpenTUI also destroys after terminal/native setup failures, whose
@@ -68,10 +88,26 @@ async function main(): Promise<void> {
     resolveFirstFrame = resolve
   })
   let firstFrameMarked = false
+  let appMounted = false
+  let transcriptPainted = false
+  let composerAcceptedInput = false
+  let interactiveMarked = false
   renderer.on(openTui.CliRenderEvents.FRAME, () => {
-    if (firstFrameMarked) return
-    firstFrameMarked = true
-    resolveFirstFrame?.()
+    if (!firstFrameMarked) {
+      firstFrameMarked = true
+      resolveFirstFrame?.()
+    }
+    if (!appMounted) return
+    if (!transcriptPainted) {
+      transcriptPainted = true
+      emitStartupMarker("ROTTWEILER_TRANSCRIPT_PAINTED_MARKER")
+    }
+    if (!composerAcceptedInput || interactiveMarked) return
+    interactiveMarked = true
+    emitStartupMarker(
+      "ROTTWEILER_INTERACTIVE_MARKER",
+      "ROTTWEILER_INTERACTIVE_EPOCH",
+    )
   })
 
   const startupFrame = new openTui.TextRenderable(renderer, {
@@ -140,12 +176,22 @@ async function main(): Promise<void> {
     const { assetsPath, root, workerPath } = treeSitterRuntime
     process.env.OTUI_ASSET_ROOT = root
     process.env.OTUI_TREE_SITTER_WORKER_PATH = workerPath
-    openTui.addDefaultParsers(embeddedParserConfigurations(assetsPath))
+    treeSitterParsers = embeddedParserConfigurations(assetsPath)
+    openTui.addDefaultParsers(
+      treeSitterParsers.filter(
+        ({ filetype }) => filetype === "markdown" || filetype === "markdown_inline",
+      ),
+    )
   } catch {
     // Markdown remains readable if a locked-down host cannot create the
     // ephemeral parser runtime. Never fail application startup for highlighting.
   }
-  const treeSitterClient = stabilizeTreeSitterClient(openTui.getTreeSitterClient())
+  const treeSitterClient = stabilizeTreeSitterClient(
+    registerTreeSitterParsersLazily(
+      openTui.getTreeSitterClient(),
+      treeSitterParsers,
+    ),
+  )
   void treeSitterClient.initialize().catch(() => {
     // Markdown remains readable if a terminal cannot start a worker. OpenTUI
     // reports the parser failure; the application must stay usable.
@@ -162,6 +208,9 @@ async function main(): Promise<void> {
     theme,
     systemThemeMode: terminalThemeMode,
     treeSitterClient,
+    onComposerInput: (value) => {
+      if (transcriptPainted && value.length > 0) composerAcceptedInput = true
+    },
     onCommand: async (command) => {
       const bootstrap = await runtimeBootstrap
       return (await bootstrap.runtime?.sendCommand(command)) ?? null
@@ -201,8 +250,15 @@ async function main(): Promise<void> {
       })
     },
   })
+  const { readTuiRecycleState, writeTuiRecycleState } = await import("./recycle-state")
+  const recycledState = readTuiRecycleState(recycleStatePath)
+  if (recycledState !== null) {
+    app.restoreRecycleState(recycledState)
+    renderer.on(openTui.CliRenderEvents.FRAME, () => app.applyPendingRecycleScroll())
+  }
   startupFrame.destroy()
   renderer.root.add(app)
+  appMounted = true
   // OpenTUI's native allocator can retain released render graphs during very
   // long tool-heavy sessions. The host already supervises this private TUI and
   // replays durable state after an exit, so recycle before allocator residency
@@ -216,10 +272,11 @@ async function main(): Promise<void> {
     // the OS-backed high-water mark and reliably observes that native growth.
     const observedRss = Math.max(
       process.memoryUsage.rss(),
-      process.resourceUsage().maxRSS,
+      process.resourceUsage().maxRSS * 1024,
     )
     if (exitRequested || observedRss < tuiRssRecycleBytes) return
     exitRequested = true
+    writeTuiRecycleState(recycleStatePath, app.recycleState())
     process.exitCode = 75
     renderer.destroy()
   }, 100)
@@ -281,7 +338,7 @@ async function parseKeybindingsFromEnvironment(source: string | undefined) {
 }
 
 writeStartupSplash(process.stdout)
-markFirstPaint()
+emitStartupMarker("ROTTWEILER_PROCESS_START_MARKER", "ROTTWEILER_PROCESS_START_EPOCH")
 void main().catch((error: unknown) => {
   process.stderr.write(
     `rottweiler TUI failed to start: ${error instanceof Error ? error.message : "unknown error"}\n`,

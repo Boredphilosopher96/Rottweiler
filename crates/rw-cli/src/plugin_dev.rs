@@ -167,7 +167,7 @@ async fn initialize(mut child: LaunchedPluginProcess, trace: Trace) -> Result<Ru
     let handshake = async {
         let initialize = json!({
             "jsonrpc":"2.0", "id":"rottweiler-dev-init", "method":"initialize",
-            "params":{"host":"rottweiler-dev","protocol":1,"min_protocol":1,"max_frame_bytes":MAX_FRAME_BYTES}
+            "params":{"host":"rottweiler","protocol":1,"min_protocol":1,"max_frame_bytes":MAX_FRAME_BYTES}
         });
         write_frame(&mut child.stdin, &initialize).await?;
         let frame = tokio::time::timeout(RPC_DEADLINE, read_frame(&mut child.stdout))
@@ -696,6 +696,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn cli_scaffold_typechecks_tests_and_crosses_the_rust_host() {
         let temporary = tempfile::tempdir().expect("scaffold root");
         let scaffold = temporary.path().join("fixture");
@@ -786,6 +787,24 @@ mod tests {
         ));
         host.shutdown().await.expect("scaffold shutdown");
         assert_eq!(launcher.launches.load(Ordering::SeqCst), 1);
+
+        let dev_launcher = Arc::new(DirectLauncher {
+            launches: AtomicUsize::new(0),
+        });
+        let (_stop_tx, stop_rx) = watch::channel(false);
+        supervise(
+            dev_launcher.clone(),
+            resolve_target(&scaffold).expect("development target"),
+            stop_rx,
+            Arc::new(|_| {}),
+            SupervisorOptions {
+                max_launches: Some(1),
+                ..SupervisorOptions::default()
+            },
+        )
+        .await
+        .expect("generated SDK plugin must accept the development handshake");
+        assert_eq!(dev_launcher.launches.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

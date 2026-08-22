@@ -1,14 +1,22 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, renameSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { tmpdir } from "node:os"
 import {
   createTestRenderer,
   MockTreeSitterClient,
   type TestRenderer,
 } from "@opentui/core/testing"
+import { TreeSitterClient } from "@opentui/core"
 
 import { createRottweilerApp } from "../../src/app"
-import { createInitialState, type RottweilerState } from "../../src/state"
+import {
+  createInitialState,
+  engineEvent,
+  reduceRottweilerState,
+  type RottweilerState,
+} from "../../src/state"
+import { PROTOCOL_VERSION } from "../../src/protocol"
 
 const emittedMetrics: Record<string, number> = {}
 
@@ -19,6 +27,7 @@ afterAll(() => {
     "tui_frame_p95_us",
     "tui_frame_p999_us",
     "tui_input_echo_best_p99_us",
+    "tui_tool_output_frame_p95_us",
     "tui_vim_echo_best_p99_us",
   ]
   expect(Object.keys(emittedMetrics).sort()).toEqual(expected)
@@ -36,13 +45,16 @@ describe("M4 executable TUI performance budgets", () => {
   const frameP95BudgetMs = process.platform === "linux" ? 40 : 20
   const frameP999BudgetMs = process.platform === "linux" ? 66 : 33
   let renderer: TestRenderer | undefined
-  let treeSitter: MockTreeSitterClient | undefined
+  let treeSitter: MockTreeSitterClient | TreeSitterClient | undefined
+  let parserDataPath: string | undefined
 
   afterEach(async () => {
     renderer?.destroy()
     renderer = undefined
     await treeSitter?.destroy()
     treeSitter = undefined
+    if (parserDataPath !== undefined) rmSync(parserDataPath, { recursive: true, force: true })
+    parserDataPath = undefined
   })
 
   test("retained transcript streaming frame compute stays inside p95/p99.9 budgets", async () => {
@@ -57,8 +69,9 @@ describe("M4 executable TUI performance budgets", () => {
       gatherStats: true,
     })
     renderer = setup.renderer
-    treeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
-    treeSitter.setMockResult({ highlights: [] })
+    const mockTreeSitter = new MockTreeSitterClient({ autoResolveTimeout: 0 })
+    mockTreeSitter.setMockResult({ highlights: [] })
+    treeSitter = mockTreeSitter
     const payload = "x".repeat(1_020)
     const transcript = Array.from({ length: 400 }, (_, index) => ({
       sequenceId: String(index + 1),
@@ -83,10 +96,10 @@ describe("M4 executable TUI performance budgets", () => {
     }
     const app = createRottweilerApp(renderer, {
       initialState: base,
-      treeSitterClient: treeSitter,
+      treeSitterClient: mockTreeSitter,
     })
     renderer.root.add(app)
-    await setup.waitFor(() => treeSitter?.isHighlighting() === false)
+    await setup.waitFor(() => mockTreeSitter.isHighlighting() === false)
     await setup.flush()
     expect(app.transcript.mountedEntryCount).toBe(16)
 
@@ -180,6 +193,86 @@ describe("M4 executable TUI performance budgets", () => {
     // as input/render compute. A compute regression still moves every trial.
     for (const trialP99 of trialP99s) expect(trialP99).toBeLessThan(16)
   })
+
+  test("mounted tool-output bursts stay inside the frame budget with live Tree-sitter", async () => {
+    Bun.gc(true)
+    parserDataPath = mkdtempSync(join(tmpdir(), "rottweiler-tool-output-perf-"))
+    treeSitter = new TreeSitterClient({
+      dataPath: parserDataPath,
+      workerPath: join(import.meta.dir, "../../node_modules/@opentui/core/parser.worker.js"),
+    })
+    await treeSitter.initialize()
+    const setup = await createTestRenderer({
+      width: 100,
+      height: 30,
+      useThread: false,
+      gatherStats: true,
+    })
+    renderer = setup.renderer
+    const transcript = Array.from({ length: 40 }, (_, index) => ({
+      sequenceId: String(index + 1),
+      agentTurn: String(index + 1),
+      turn: {
+        role: "assistant" as const,
+        blocks: [{
+          type: "text" as const,
+          text: `Result ${index}\n\n\`\`\`typescript\nconst value${index} = ${index}\n\`\`\``,
+        }],
+        meta: { synthetic: false, summary: false },
+      },
+    }))
+    let state: RottweilerState = { ...createInitialState(), transcript }
+    const meta = (sequence: number) => ({
+      protocol_version: PROTOCOL_VERSION,
+      session_id: "tool-output-performance",
+      sequence_id: String(1_000 + sequence),
+      emitted_at: "2026-08-22T00:00:00Z",
+    })
+    state = reduceRottweilerState(state, engineEvent({
+      type: "turn_started",
+      meta: meta(0),
+      turn_id: "tool-output-turn",
+    }))
+    for (let index = 0; index < 16; index += 1) {
+      state = reduceRottweilerState(state, engineEvent({
+        type: "tool_call_started",
+        meta: meta(index + 1),
+        turn_id: "tool-output-turn",
+        tool_call_id: `mounted-tool-${index}`,
+        name: "bash",
+        args: { command: `fixture-${index}` },
+        call_index: index,
+      }))
+    }
+    const app = createRottweilerApp(renderer, { initialState: state, treeSitterClient: treeSitter })
+    renderer.root.add(app)
+    await setup.flush()
+    expect(app.transcript.mountedEntryCount).toBe(16)
+    expect(app.transcript.streamingCard.visible).toBeTrue()
+    Bun.gc(true)
+
+    const samples: number[] = []
+    const chunk = "output-line 0123456789abcdef\n".repeat(293).slice(0, 8 * 1_024)
+    for (let index = 0; index < 120; index += 1) {
+      const started = process.cpuUsage()
+      state = reduceRottweilerState(state, engineEvent({
+        type: "tool_output_delta",
+        meta: meta(100 + index),
+        turn_id: "tool-output-turn",
+        tool_call_id: "mounted-tool-15",
+        stream: "stdout",
+        chunk,
+      }))
+      app.setState(state)
+      await setup.renderOnce()
+      const used = process.cpuUsage(started)
+      samples.push((used.user + used.system) / 1_000)
+    }
+
+    const p95 = percentile(samples.slice(10), 0.95)
+    emittedMetrics.tui_tool_output_frame_p95_us = Math.ceil(p95 * 1_000)
+    expect(p95).toBeLessThan(frameP95BudgetMs)
+  }, 20_000)
 
   test("Vim mode dispatch and insert echo stay below 16ms p99", async () => {
     Bun.gc(true)

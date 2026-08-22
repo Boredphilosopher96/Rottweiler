@@ -1,9 +1,10 @@
 #!/bin/sh
 set -eu
 
-# Release optimization is deliberately platform-specific. Apple startup is
-# instruction-cache sensitive and is fastest with the smaller z profile; Linux
-# needs s to stay under the same size budget without sacrificing its turn path.
+# Release optimization is deliberately platform-specific. A controlled
+# 100-sample macOS comparison recorded in
+# benchmarks/release-optimization-2026-08-22.json selected opt-level 3. Linux
+# retains its independently size-qualified s profile until measured there.
 # Official packages and performance evidence are native-only. Force Cargo's
 # host target so user or ancestor build.target configuration cannot redirect
 # output while a gate inspects or packages a stale host-path executable.
@@ -28,7 +29,7 @@ done
 target=$(rustc -vV | sed -n 's/^host: //p')
 
 case "$target" in
-  *-apple-darwin) optimization=z ;;
+  *-apple-darwin) optimization=3 ;;
   *-linux-gnu|*-linux-musl) optimization=s ;;
   *)
     echo "cargo-release: unsupported release target: $target" >&2

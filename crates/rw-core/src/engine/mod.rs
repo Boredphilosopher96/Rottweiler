@@ -11596,6 +11596,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn known_subscription_capacity_produces_nonzero_post_turn_context_usage() {
+        let root = TempDir::new().expect("tempdir");
+        let mut model = M3Model::new([stop_script(
+            "subscription response",
+            &[TokenUsage {
+                input_tokens: 700,
+                output_tokens: 36,
+                ..TokenUsage::default()
+            }],
+        )]);
+        // This is the exact capability shape produced by the enriched
+        // openai_codex route for a known 400k model.
+        model.metadata = ModelContextMetadata {
+            max_context_tokens: Some(400_000),
+            max_output_tokens: Some(128_000),
+            cache_breakpoints: Some(CacheBreakpointSupport::Automatic),
+        };
+        model.cost_override = Some(Cost::SubscriptionQuota {
+            used: Some("736".to_owned()),
+            unit: Some("tokens".to_owned()),
+        });
+        let handle = SessionActor::spawn(config(
+            root.path(),
+            Arc::new(model),
+            Arc::new(ToolRegistry::new()),
+            PermissionDecision::Allow,
+            builtin_hook_dispatcher().expect("hooks"),
+        ))
+        .expect("actor");
+        let mut events = handle.subscribe();
+        handle
+            .send_message("complete a turn")
+            .await
+            .expect("message");
+        let events = collect_turn(&mut events).await;
+
+        assert!(events.iter().any(|event| matches!(
+            event.kind,
+            PendingEvent::ContextUsage {
+                usable_tokens: 380_000,
+                reserved_tokens: 20_000,
+                context_window_known: true,
+                provider_input_tokens: 700,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn one_hundred_fifty_turn_overflow_compacts_and_continues_through_actor() {
         let root = TempDir::new().expect("tempdir");
