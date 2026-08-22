@@ -644,6 +644,92 @@ impl SessionEventLog {
     }
 }
 
+/// Removes abandoned session directories whose unlocked log has no user or
+/// turn event. Sessions with a user turn or any sibling artifact are preserved.
+///
+/// # Errors
+///
+/// Returns an error when the sessions directory cannot be inspected or an
+/// already-qualified empty directory cannot be atomically quarantined.
+pub fn garbage_collect_empty_sessions(root: &Path) -> Result<Vec<String>, SessionStoreError> {
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        return Ok(Vec::new());
+    }
+
+    #[cfg(unix)]
+    {
+        let sessions_root = root.join("sessions");
+        let entries = match fs::read_dir(&sessions_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut candidates = entries.collect::<Result<Vec<_>, _>>()?;
+        candidates.sort_by_key(std::fs::DirEntry::file_name);
+        let mut removed = Vec::new();
+        for entry in candidates {
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let Some(session_id) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            if validate_session_id(&session_id).is_err() {
+                continue;
+            }
+            let directory = entry.path();
+            if !directory_contains_only_event_log(&directory)? {
+                continue;
+            }
+            let log = match SessionEventLog::open(root, &session_id) {
+                Ok(log) => log,
+                Err(SessionStoreError::Io(error))
+                    if error.kind() == std::io::ErrorKind::WouldBlock =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let events = log.load::<serde_json::Value>()?;
+            let has_user_turn = events.iter().any(|event| {
+                matches!(
+                    event.event.get("type").and_then(serde_json::Value::as_str),
+                    Some("turn_started" | "user_message_accepted")
+                )
+            });
+            if has_user_turn || !directory_contains_only_event_log(&directory)? {
+                continue;
+            }
+            let quarantine = root.join(format!(
+                ".empty-session-{}-{session_id}",
+                std::process::id()
+            ));
+            match fs::rename(&directory, &quarantine) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            }
+            fs::remove_file(quarantine.join("events.jsonl"))?;
+            fs::remove_dir(&quarantine)?;
+            drop(log);
+            removed.push(session_id);
+        }
+        Ok(removed)
+    }
+}
+
+#[cfg(unix)]
+fn directory_contains_only_event_log(directory: &Path) -> Result<bool, SessionStoreError> {
+    let entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+    if entries.len() != 1 || entries[0].file_name() != "events.jsonl" {
+        return Ok(false);
+    }
+    let metadata = fs::symlink_metadata(entries[0].path())?;
+    Ok(metadata.file_type().is_file())
+}
+
 /// One denormalized row in the session listing/search index.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionSummary {
@@ -655,6 +741,8 @@ pub struct SessionSummary {
     pub updated_unix_ms: i64,
     /// Accumulated ordinary micro-dollar equivalent, when applicable.
     pub cost_micros: i64,
+    /// Number of accepted user turns represented by this projection.
+    pub turn_count: i64,
 }
 
 /// One complete, rebuildable projection of a session event log.
@@ -1529,6 +1617,18 @@ impl SessionIndex {
         Ok(())
     }
 
+    /// Removes one disposable projection after its zero-event log was garbage-collected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-id or `SQLite` error.
+    pub fn remove(&self, session_id: &str) -> Result<(), SessionStoreError> {
+        validate_session_id(session_id)?;
+        self.connection()?
+            .execute("DELETE FROM sessions WHERE id=?1", [session_id])?;
+        Ok(())
+    }
+
     /// Atomically replaces every derived row from caller-projected event logs.
     ///
     /// The JSONL logs remain authoritative; callers use this after any missing
@@ -1657,11 +1757,13 @@ impl SessionIndex {
                title TEXT NOT NULL,
                updated_unix_ms INTEGER NOT NULL,
                cost_micros INTEGER NOT NULL,
+               turn_count INTEGER NOT NULL DEFAULT 0,
                transcript TEXT NOT NULL,
                projected_sequence TEXT
              );",
         )?;
-        ensure_projection_column(&connection)?;
+        ensure_projection_columns(&connection)?;
+        backfill_unknown_turn_counts(&connection, self.path.parent().unwrap_or(Path::new(".")))?;
         ensure_accounting_schema(&connection)?;
         connection.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
@@ -1694,7 +1796,7 @@ impl SessionIndex {
         let limit = i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?;
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT id,title,updated_unix_ms,cost_micros FROM sessions \
+            "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions \
              ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
         )?;
         let rows = statement.query_map([limit], summary_from_row)?;
@@ -1716,12 +1818,17 @@ impl SessionIndex {
         }
         let limit = i64::try_from(limit).map_err(|_| SessionStoreError::LimitOverflow)?;
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
-            "SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros \
+        let turn_count = if session_index_has_turn_count(&connection)? {
+            "s.turn_count"
+        } else {
+            "0"
+        };
+        let mut statement = connection.prepare(&format!(
+            "SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,{turn_count} \
              FROM sessions_fts f JOIN sessions s ON s.rowid=f.rowid \
              WHERE sessions_fts MATCH ?1 \
-             ORDER BY bm25(sessions_fts),s.updated_unix_ms DESC,s.id ASC LIMIT ?2",
-        )?;
+             ORDER BY bm25(sessions_fts),s.updated_unix_ms DESC,s.id ASC LIMIT ?2"
+        ))?;
         let rows = statement.query_map(params![query, limit], summary_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -1768,12 +1875,17 @@ impl SessionIndex {
         if !same_file_identity(&before, &after) {
             return Err(SessionStoreError::UnsafeSessionIndex);
         }
-        let mut statement = connection.prepare(
-            "SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros \
+        let turn_count = if session_index_has_turn_count(&connection)? {
+            "s.turn_count"
+        } else {
+            "0"
+        };
+        let mut statement = connection.prepare(&format!(
+            "SELECT s.id,s.title,s.updated_unix_ms,s.cost_micros,{turn_count} \
              FROM sessions_fts f JOIN sessions s ON s.rowid=f.rowid \
              WHERE sessions_fts MATCH ?1 \
-             ORDER BY bm25(sessions_fts),s.updated_unix_ms DESC,s.id ASC LIMIT ?2",
-        )?;
+             ORDER BY bm25(sessions_fts),s.updated_unix_ms DESC,s.id ASC LIMIT ?2"
+        ))?;
         let rows = statement.query_map(params![query, limit], summary_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -1812,10 +1924,15 @@ impl SessionIndex {
         if !same_file_identity(&before, &after) {
             return Err(SessionStoreError::UnsafeSessionIndex);
         }
-        let mut statement = connection.prepare(
-            "SELECT id,title,updated_unix_ms,cost_micros FROM sessions \
-             ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1",
-        )?;
+        let turn_count = if session_index_has_turn_count(&connection)? {
+            "turn_count"
+        } else {
+            "0"
+        };
+        let mut statement = connection.prepare(&format!(
+            "SELECT id,title,updated_unix_ms,cost_micros,{turn_count} FROM sessions \
+             ORDER BY updated_unix_ms DESC,id ASC LIMIT ?1"
+        ))?;
         let rows = statement.query_map([limit], summary_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -1830,7 +1947,7 @@ impl SessionIndex {
         let connection = self.connection()?;
         connection
             .query_row(
-                "SELECT id,title,updated_unix_ms,cost_micros FROM sessions WHERE id=?1",
+                "SELECT id,title,updated_unix_ms,cost_micros,turn_count FROM sessions WHERE id=?1",
                 [id],
                 summary_from_row,
             )
@@ -2131,6 +2248,7 @@ fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionSummary>
         title: row.get(1)?,
         updated_unix_ms: row.get(2)?,
         cost_micros: row.get(3)?,
+        turn_count: row.get(4)?,
     })
 }
 
@@ -2140,17 +2258,19 @@ fn upsert_projection(
 ) -> Result<(), SessionStoreError> {
     connection.execute(
         "INSERT INTO sessions(\
-           id,title,updated_unix_ms,cost_micros,transcript,projected_sequence\
-         ) VALUES (?1,?2,?3,?4,?5,?6) \
+           id,title,updated_unix_ms,cost_micros,turn_count,transcript,projected_sequence\
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7) \
          ON CONFLICT(id) DO UPDATE SET title=excluded.title, \
          updated_unix_ms=excluded.updated_unix_ms, \
-         cost_micros=excluded.cost_micros, transcript=excluded.transcript, \
+         cost_micros=excluded.cost_micros, turn_count=excluded.turn_count, \
+         transcript=excluded.transcript, \
          projected_sequence=excluded.projected_sequence",
         params![
             projection.summary.id,
             projection.summary.title,
             projection.summary.updated_unix_ms,
             projection.summary.cost_micros,
+            projection.summary.turn_count,
             projection.transcript,
             projection
                 .projected_through
@@ -2160,7 +2280,7 @@ fn upsert_projection(
     Ok(())
 }
 
-fn ensure_projection_column(connection: &Connection) -> Result<(), SessionStoreError> {
+fn ensure_projection_columns(connection: &Connection) -> Result<(), SessionStoreError> {
     let mut statement = connection.prepare("PRAGMA table_info(sessions)")?;
     let columns = statement
         .query_map([], |row| row.get::<_, String>(1))?
@@ -2171,7 +2291,54 @@ fn ensure_projection_column(connection: &Connection) -> Result<(), SessionStoreE
             [],
         )?;
     }
+    if !columns.iter().any(|column| column == "turn_count") {
+        connection.execute(
+            "ALTER TABLE sessions ADD COLUMN turn_count INTEGER NOT NULL DEFAULT -1",
+            [],
+        )?;
+    }
     Ok(())
+}
+
+fn backfill_unknown_turn_counts(
+    connection: &Connection,
+    storage_root: &Path,
+) -> Result<(), SessionStoreError> {
+    let session_ids = {
+        let mut statement = connection.prepare("SELECT id FROM sessions WHERE turn_count < 0")?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for session_id in session_ids {
+        let Ok(events) =
+            SessionEventLog::load_existing::<serde_json::Value>(storage_root, &session_id)
+        else {
+            continue;
+        };
+        let turn_count = events.iter().fold(0_i64, |count, event| {
+            if event.event.get("type").and_then(serde_json::Value::as_str)
+                == Some("user_message_accepted")
+            {
+                count.saturating_add(1)
+            } else {
+                count
+            }
+        });
+        connection.execute(
+            "UPDATE sessions SET turn_count=?1 WHERE id=?2 AND turn_count < 0",
+            params![turn_count, session_id],
+        )?;
+    }
+    Ok(())
+}
+
+fn session_index_has_turn_count(connection: &Connection) -> Result<bool, SessionStoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(sessions)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|column| column == "turn_count"))
 }
 
 fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
@@ -3177,13 +3344,61 @@ mod tests {
         AccountingLedger, EventEnvelope, MAX_SEARCH_INDEX_BYTES, MAX_SEARCH_INDEX_WAL_BYTES,
         ProjectionStatus, SessionEventLog, SessionEventPageLimits, SessionIndex, SessionProjection,
         SessionStoreError, SessionSummary, TurnAccountingEntry, UtcDayKey, UtcTimestamp,
-        install_append_fault, upsert_projection,
+        garbage_collect_empty_sessions, install_append_fault, upsert_projection,
     };
 
     #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
     struct FixtureEvent {
         kind: String,
         text: String,
+    }
+
+    #[test]
+    fn empty_session_gc_removes_only_unlocked_turnless_directories() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let mut removable = SessionEventLog::open(root.path(), "session-removable")
+            .unwrap_or_else(|error| panic!("empty log must open: {error}"));
+        removable
+            .append(serde_json::json!({"type": "session_created"}))
+            .unwrap_or_else(|error| panic!("startup event must append: {error}"));
+        drop(removable);
+        let active = SessionEventLog::open(root.path(), "session-active")
+            .unwrap_or_else(|error| panic!("active log must open: {error}"));
+        let preserved = SessionEventLog::open(root.path(), "session-preserved")
+            .unwrap_or_else(|error| panic!("preserved log must open: {error}"));
+        std::fs::write(
+            root.path().join("sessions/session-preserved/metadata.json"),
+            b"{}",
+        )
+        .unwrap_or_else(|error| panic!("metadata fixture must write: {error}"));
+        drop(preserved);
+        let mut meaningful = SessionEventLog::open(root.path(), "session-meaningful")
+            .unwrap_or_else(|error| panic!("meaningful log must open: {error}"));
+        meaningful
+            .append(serde_json::json!({"type": "turn_started"}))
+            .unwrap_or_else(|error| panic!("turn event must append: {error}"));
+        drop(meaningful);
+
+        let removed = garbage_collect_empty_sessions(root.path())
+            .unwrap_or_else(|error| panic!("empty session collection must work: {error}"));
+        assert_eq!(removed, vec!["session-removable"]);
+        assert!(!root.path().join("sessions/session-removable").exists());
+        assert!(
+            root.path()
+                .join("sessions/session-active/events.jsonl")
+                .is_file()
+        );
+        assert!(
+            root.path()
+                .join("sessions/session-preserved/metadata.json")
+                .is_file()
+        );
+        assert!(
+            root.path()
+                .join("sessions/session-meaningful/events.jsonl")
+                .is_file()
+        );
+        drop(active);
     }
 
     #[test]
@@ -3759,12 +3974,14 @@ mod tests {
             title: "Rust parser".to_owned(),
             updated_unix_ms: 10,
             cost_micros: 7,
+            turn_count: 2,
         };
         let second = SessionSummary {
             id: "second".to_owned(),
             title: "TypeScript UI".to_owned(),
             updated_unix_ms: 20,
             cost_micros: 9,
+            turn_count: 4,
         };
         index
             .upsert(&SessionProjection {
@@ -3829,6 +4046,70 @@ mod tests {
                 .unwrap_or_else(|error| panic!("stale watermark must query: {error}")),
             ProjectionStatus::Stale { .. }
         ));
+    }
+
+    #[test]
+    fn read_only_listing_tolerates_a_pre_turn_count_index() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let connection = rusqlite::Connection::open(root.path().join("index.sqlite"))
+            .unwrap_or_else(|error| panic!("legacy index must open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions(
+                   id TEXT NOT NULL UNIQUE,
+                   title TEXT NOT NULL,
+                   updated_unix_ms INTEGER NOT NULL,
+                   cost_micros INTEGER NOT NULL,
+                   transcript TEXT NOT NULL,
+                   projected_sequence TEXT
+                 );
+                 INSERT INTO sessions VALUES(
+                   'legacy-session','Legacy session',10,0,'legacy transcript','0'
+                 );",
+            )
+            .unwrap_or_else(|error| panic!("legacy schema must write: {error}"));
+        drop(connection);
+
+        let listed = SessionIndex::list_read_only(root.path(), 10)
+            .unwrap_or_else(|error| panic!("legacy index must remain readable: {error}"));
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "legacy-session");
+        assert_eq!(listed[0].turn_count, 0);
+    }
+
+    #[test]
+    fn opening_a_legacy_index_backfills_authoritative_turn_counts() {
+        let root = tempdir().unwrap_or_else(|error| panic!("tempdir must create: {error}"));
+        let mut log = SessionEventLog::open(root.path(), "legacy-session")
+            .unwrap_or_else(|error| panic!("legacy event log must open: {error}"));
+        for _ in 0..3 {
+            log.append(serde_json::json!({"type": "user_message_accepted"}))
+                .unwrap_or_else(|error| panic!("legacy turn must append: {error}"));
+        }
+        drop(log);
+        let connection = rusqlite::Connection::open(root.path().join("index.sqlite"))
+            .unwrap_or_else(|error| panic!("legacy index must open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions(
+                   id TEXT NOT NULL UNIQUE,
+                   title TEXT NOT NULL,
+                   updated_unix_ms INTEGER NOT NULL,
+                   cost_micros INTEGER NOT NULL,
+                   transcript TEXT NOT NULL,
+                   projected_sequence TEXT
+                 );
+                 INSERT INTO sessions VALUES(
+                   'legacy-session','Legacy session',10,0,'legacy transcript','2'
+                 );",
+            )
+            .unwrap_or_else(|error| panic!("legacy schema must write: {error}"));
+        drop(connection);
+
+        let migrated = SessionIndex::open(root.path())
+            .and_then(|index| index.list(10))
+            .unwrap_or_else(|error| panic!("legacy index must migrate: {error}"));
+        assert_eq!(migrated[0].turn_count, 3);
     }
 
     #[test]
@@ -4523,6 +4804,7 @@ mod tests {
                 title: "old".to_owned(),
                 updated_unix_ms: 1,
                 cost_micros: 0,
+                turn_count: 1,
             },
             transcript: "obsolete".to_owned(),
             projected_through: Some(SequenceId(0)),
@@ -4536,6 +4818,7 @@ mod tests {
                 title: "new".to_owned(),
                 updated_unix_ms: 2,
                 cost_micros: 1,
+                turn_count: 2,
             },
             transcript: "authoritative".to_owned(),
             projected_through: Some(SequenceId(u64::MAX)),
@@ -4593,6 +4876,7 @@ mod tests {
                 title: "Needle session".to_owned(),
                 updated_unix_ms: 7,
                 cost_micros: 0,
+                turn_count: 1,
             },
             transcript: "deterministic needle transcript".to_owned(),
             projected_through: Some(SequenceId(0)),
@@ -4640,6 +4924,7 @@ mod tests {
                 title: "Fresh WAL needle".to_owned(),
                 updated_unix_ms: 11,
                 cost_micros: 0,
+                turn_count: 1,
             },
             transcript: "committed only in the held writer WAL".to_owned(),
             projected_through: Some(SequenceId(4)),

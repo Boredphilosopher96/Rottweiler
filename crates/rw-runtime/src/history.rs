@@ -1156,6 +1156,7 @@ mod tests {
                         title: id.to_owned(),
                         updated_unix_ms: updated,
                         cost_micros: 0,
+                        turn_count: 0,
                     },
                     transcript: String::new(),
                     projected_through: None,

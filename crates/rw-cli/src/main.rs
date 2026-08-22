@@ -1434,23 +1434,7 @@ fn render_session_search(
 ) -> Result<()> {
     match format {
         OutputFormat::Text => {
-            for session in sessions {
-                let title = session
-                    .title
-                    .chars()
-                    .map(|character| {
-                        if character.is_control() {
-                            ' '
-                        } else {
-                            character
-                        }
-                    })
-                    .collect::<String>();
-                println!(
-                    "{}\t{}\t{}\t{}",
-                    session.id, session.updated_unix_ms, session.cost_micros, title
-                );
-            }
+            print!("{}", render_session_search_text(sessions)?);
         }
         OutputFormat::Json => {
             let values = sessions
@@ -1459,6 +1443,7 @@ fn render_session_search(
                     serde_json::json!({
                         "id":session.id,"title":session.title,
                         "updated_unix_ms":session.updated_unix_ms,"cost_micros":session.cost_micros,
+                        "turn_count":session.turn_count,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1471,12 +1456,44 @@ fn render_session_search(
                     serde_json::json!({
                         "id":session.id,"title":session.title,
                         "updated_unix_ms":session.updated_unix_ms,"cost_micros":session.cost_micros,
+                        "turn_count":session.turn_count,
                     })
                 );
             }
         }
     }
     Ok(())
+}
+
+fn render_session_search_text(sessions: &[rw_store::session::SessionSummary]) -> Result<String> {
+    use std::fmt::Write as _;
+
+    let mut output = String::from("UPDATED (UTC)\tTURNS\tTITLE\tSESSION\n");
+    for session in sessions {
+        let unix_millis = u64::try_from(session.updated_unix_ms)
+            .map_err(|_| miette!("session update time is before the Unix epoch"))?;
+        let timestamp = rw_store::session::UtcTimestamp::from_unix_millis(unix_millis)
+            .map_err(|error| miette!("session update time is invalid: {error}"))?;
+        let updated = timestamp.as_str()[..16].replace('T', " ");
+        let title = session
+            .title
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect::<String>();
+        writeln!(
+            output,
+            "{updated}\t{}\t{title}\t{}",
+            session.turn_count, session.id,
+        )
+        .into_diagnostic()?;
+    }
+    Ok(output)
 }
 
 async fn run_local_tui(cli: &Cli) -> Result<()> {
@@ -3787,12 +3804,30 @@ mod tests {
         Cli, Command, DeferredHostedEngine, DetachedServerReady, McpServerCommand, ModelsCommand,
         OutputFormat, PromptCommand, RuntimeDirectoryGuard, UpgradeChannel,
         append_execution_lease_restart_flag, create_guarded_server_runtime,
-        discover_local_workspace, ensure_folder_trust_grantable, resolve_tui_executable,
-        scripted_provider_options, sync_install_paths, valid_bootstrap_token,
-        validate_cli_option_scope, write_github_device_prompt, write_private_file_atomic,
+        discover_local_workspace, ensure_folder_trust_grantable, render_session_search_text,
+        resolve_tui_executable, scripted_provider_options, sync_install_paths,
+        valid_bootstrap_token, validate_cli_option_scope, write_github_device_prompt,
+        write_private_file_atomic,
     };
     #[cfg(unix)]
     use super::{rustix_device_id, rustix_mode_bits};
+
+    #[test]
+    fn recent_session_text_labels_dates_turns_and_ids_without_fake_cost() {
+        let sessions = [rw_store::session::SessionSummary {
+            id: "session-fixture".to_owned(),
+            title: "Investigate startup".to_owned(),
+            updated_unix_ms: 1_776_508_645_000,
+            cost_micros: 0,
+            turn_count: 3,
+        }];
+
+        assert_eq!(
+            render_session_search_text(&sessions)
+                .unwrap_or_else(|error| panic!("text must render: {error}")),
+            "UPDATED (UTC)\tTURNS\tTITLE\tSESSION\n2026-04-18 10:37\t3\tInvestigate startup\tsession-fixture\n"
+        );
+    }
 
     #[cfg(unix)]
     #[test]

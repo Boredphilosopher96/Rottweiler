@@ -1,4 +1,5 @@
-import type { Cost, CostSnapshot, ToolOutput, Turn, Usage } from "../protocol"
+import type { ContextSnapshot, Cost, CostSnapshot, ToolOutput, Turn, Usage } from "../protocol"
+import type { ModelChoice } from "../state"
 
 export const COMMAND_PREVIEW_MAX_LINES = 6
 
@@ -56,6 +57,54 @@ export function formatSessionCost(
     return `${(decimal(snapshot.session_ai_credit_micros) / 1_000_000).toFixed(3)} credits`
   }
   return `$${(decimal(snapshot.session_cost_micros_usd) / 1_000_000).toFixed(3)}`
+}
+
+/** Context capacity for the one-row status surface, without inventing a zero limit. */
+export function formatStatusContext(snapshot: ContextSnapshot): string {
+  if (!snapshot.context_window_known) {
+    return `ctx ${formatTokenCount(snapshot.used_tokens)} · limit unknown`
+  }
+  return `ctx ${formatTokenCount(snapshot.used_tokens)}/${formatTokenCount(snapshot.usable_tokens)} (${formatPercent(snapshot.used_tokens, snapshot.usable_tokens)})`
+}
+
+/** Resolves a role alias back to the catalog's stable provider-qualified route. */
+export function formatStatusModel(
+  model: string,
+  provider: string | null,
+  choices: readonly ModelChoice[],
+): string {
+  if (model.includes("/")) return model
+  const concrete = choices.find((choice) =>
+    choice.id === model || choice.alias === model || choice.aliases?.includes(model) === true,
+  )
+  if (concrete?.id !== undefined) return concrete.id
+  return provider === null ? model : `${provider}/${model}`
+}
+
+/** Uses the active non-monetary route when the accounting snapshot has no priced turn yet. */
+export function formatStatusSessionCost(
+  snapshot: CostSnapshot | null,
+  provider: string | null,
+  fallbackTokens: string | null,
+): string {
+  if (
+    provider === "openai_codex" ||
+    provider === "openai_subscription"
+  ) {
+    if (
+      snapshot === null ||
+      (decimal(snapshot.session_subscription_quota_entries) === 0 &&
+        decimal(snapshot.session_ai_credit_micros) === 0 &&
+        decimal(snapshot.session_cost_micros_usd) === 0)
+    ) return "quota —"
+  }
+  if (
+    provider === "github_copilot" &&
+    (snapshot === null ||
+      (decimal(snapshot.session_ai_credit_micros) === 0 &&
+        decimal(snapshot.session_cost_micros_usd) === 0))
+  ) return "credits —"
+  return formatSessionCost(snapshot, fallbackTokens)
 }
 
 function subscriptionQuota(snapshot: CostSnapshot): string | null {

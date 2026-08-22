@@ -3461,6 +3461,7 @@ describe("Rottweiler OpenTUI shell", () => {
         used_tokens: "2000",
         usable_tokens: "10000",
         reserved_tokens: "1000",
+        context_window_known: true,
         stable_prefix_hash: "fixture",
         cache_hit_basis_points: 0,
       },

@@ -468,3 +468,166 @@ comparison plus a qualified fat-LTO build, and UI-2 has a full-turn subscription
 capability regression test with a non-zero usable context window. PLG-1's external
 registry publication and the PLG-2/PLG-4 production phases remain open for the
 reasons recorded in the resolution section.
+
+---
+
+# Round 2 — 2026-08-22, post-remediation
+
+Driven against the local release build at `e242231`
+(`target/aarch64-apple-darwin/release/rw` + `packages/tui/dist/rottweiler-tui`)
+through a pty with a real terminal-screen model (`pyte`), so every screen quoted
+below is the actual rendered frame rather than a byte-stream approximation.
+
+Scope this round: **things a user feels**, not gate integrity.
+
+## Confirmed fixed — verified by driving the product
+
+- **Warm launch is now 92–100 ms to a usable screen** (median of 5), against the
+  ~390 ms first real frame measured in round 1. The interactive path is genuinely
+  fast now.
+- **The Tree-sitter cache works.** Cold cache costs **+32 ms** on one launch
+  (129 ms vs 97 ms) and nothing thereafter. SPD-5 landed cleanly.
+- **COR-1 is fixed.** Streaming ~2.7 MB of deliberately multibyte-heavy shell
+  output (box-drawing, CJK, emoji) across hundreds of 8 KiB boundaries produced
+  **zero `U+FFFD`** across ~16,000 multibyte glyphs.
+- **The trust gate is excellent and needs no work.** A new directory containing
+  `.agents/commands/*.md` and `.agents/hooks.toml` halts before the TUI, prints
+  the exact inventory with per-file hashes and byte counts, diffs against the last
+  trusted state, and defaults to No. Recorded here so it is not re-litigated.
+
+## Corrections to round 1
+
+- **UI-2 was mis-attributed.** I flagged it as a possible engine regression. It is
+  not: the engine correctly reports `context_window_known: false` with a
+  human-readable reason, and the remediation's engine-side test is right. The
+  defect is in the status-line renderer — see UX-1.
+- The "empty palette with no explanation" I half-observed in round 1 was an
+  artifact of my own byte-stream extraction. The TUI correctly shows
+  `No matches for "…"`. Not a finding.
+
+---
+
+- [x] **UX-1 · P1 · [verified] · ~half a day** — the status line contradicts the
+      engine on three of its five segments, on every session, permanently.
+      This is one screen, captured at one instant, with `/context` open:
+
+      /context   →  3.9k tokens used · context limit unavailable
+      status bar →  ◉ execute │ model fast │ ctx 3.9k/0 (—%) │ $0.000 │ cache —
+
+      Three separate losses, all in the same renderer:
+
+      1. **`ctx 3.9k/0 (—%)`.** `packages/tui/src/components/panels.ts:1094` formats
+         `used/usable (percent)` and never consults
+         `state.context.contextWindowKnown` — even though the field is carried in
+         the projection (`state/reducer.ts:1397`) and
+         `render/command-presentation.ts:108,125` uses it correctly, which is why
+         `/context` gets it right. A user reads `/0` as "broken" or "no context
+         left", not "not yet known". It appears within ~500 ms of every launch and
+         never clears on a subscription route.
+      2. **`$0.000`.** `render/format.ts:58` falls through to a USD default when no
+         usage has accrued yet. The engine emits
+         `{"kind":"subscription_quota","used":"6616","unit":"tokens"}` on
+         `turn_finished`, and `formatSessionCost` handles that correctly *once
+         entries exist* — but at rest, which is what the user stares at, it asserts
+         a dollar figure. `docs/06-ROADMAP.md` M1 AC explicitly requires that
+         subscription usage be "labeled quota/cost-unavailable rather than `$0` API
+         cost".
+      3. **The model label flips representation.** Idle shows
+         `model openai_codex/gpt-5.4-mini`; after any activity the same session
+         shows `model fast`. Reproduced in 2/2 trials. Same model, two naming
+         conventions, no user action.
+      **Fix:** render `ctx 3.9k · limit unknown` when `contextWindowKnown` is false;
+      make the cost fallback route-aware (`quota —` rather than `$0.000` when the
+      bound provider is a subscription or credit route); pick one model naming
+      convention and hold it.
+      **Assessment:** the highest user-experience return per line of code in either
+      round. Nothing is broken underneath — the engine models all three states
+      correctly and one sibling renderer already proves it. This is purely the most
+      looked-at surface in the product discarding data it already has. It also
+      explains why round 1 misdiagnosed the context meter: the status line was the
+      only evidence visible, and it was lying.
+
+- [x] **UX-2 · P1 · [verified] · ~1 day** — 72% of the session store is empty
+      sessions, and the command for finding your way back is unusable.
+      Every `rw` launch materializes a durable session record, whether or not the
+      user ever types anything. Measured directly: **137 session directories, 99
+      with no `turn_started` at all**, and **14 created during this audit alone**
+      by launches that only opened and closed.
+      The downstream surface is `rw sessions recent` — documented as "Alias for
+      `list`, optimized for quickly finding a resume target":
+
+      session-8312fdd1dd0707708e64e5b7fe125b55	1783867587936	0	New session
+      session-17974c86cfcf6667034a5d7d17e8235c	1783867571911	0	New session
+      session-2999d9004c9bd07c7aafa230d380244e	1783867531771	0	create hello.py …
+
+      Four compounding problems in the one command a user reaches for to get back
+      to work: opaque 40-character ids; **raw epoch milliseconds** where a human
+      date belongs; an **unlabeled third column** (`cost_micros`, `main.rs:1450`)
+      that is permanently `0` on a subscription route and therefore conveys nothing
+      to this user ever; and titles that are ~72% `New session`. There is no header
+      row, so the columns must be guessed.
+      **Fix:** do not materialize a session until the first user message (or GC
+      turn-less sessions on startup); humanize the `text` output contract with a
+      header, a relative/absolute date, and a turn count; drop or label the cost
+      column, and omit it entirely on routes where monetary cost is unavailable.
+      **Assessment:** two independent fixes and the cheap one is worth doing alone.
+      Even with perfect formatting, a list that is three-quarters `New session` is
+      noise — so fix the creation policy first, then the formatter. Worth checking
+      whether `rw sessions search` walks all 137 directories, because the empty ones
+      are pure cost on every search.
+
+- [x] **UX-3 · P1 · [verified] · ~1 day** — cold start is 2.1 s, and that is what
+      every install and every upgrade feels like.
+      Launching from freshly copied binaries (cold page cache, exactly the state
+      after `brew install` or `brew upgrade`):
+
+      | state | first output | ready |
+      |---|---|---|
+      | cold binaries | 2,037 ms | **2,091 ms** |
+      | warm binaries | 61 ms | 100 ms |
+
+      Isolated to paging, not to any application work: `rw --version` alone is
+      **~550 ms cold vs 8.4 ms warm** across three fresh-inode trials. The cost
+      scales with pages faulted in, and the SPD-6 remediation grew the engine from
+      **16.9 MB to 29.7 MB** (`opt-level = 3` + fat LTO) plus an 80.5 MB TUI bundle.
+      **The tradeoff is real and currently only half-measured:** warm latency
+      roughly halved, cold start got worse, and `tui_interactive_p99_us` (200 ms)
+      measures the warm state only. That is the same shape as MSR-1/2/3 — a gate
+      that models a state users are not in at the moment that matters most.
+      **Fix:** add a cold-start ruler that drops the page cache (or launches from a
+      freshly written copy) so the number exists; then treat it as a real budget.
+      Options if it needs to come down: `posix_fadvise`/`MADV_WILLNEED` prefetch on
+      the TUI bundle, splitting rarely-used engine subsystems out of the hot path,
+      or revisiting `opt-level` now that both sides of the tradeoff can be measured.
+      **Assessment:** I am not arguing the `opt-level = 3` decision was wrong — the
+      100-sample evidence for the warm win is solid and warm is the common case. I
+      am arguing that the decision is currently being made on one number when there
+      are two, and the unmeasured one is the first impression a new user gets. Get
+      the ruler first; the remedy is a separate question and may well be "accept it".
+
+## Resolution — round 2
+
+| Finding | Resolution |
+|---|---|
+| UX-1 | The status presenter now honors `context_window_known`, resolves role aliases through the retained model catalog, recovers the provider from that concrete route, and uses `quota —` or `credits —` for an unaccounted non-monetary route. The focused renderer regression covers the exact `3.9k`, `fast`, and zero-cost state above. |
+| UX-2 | Startup garbage collection removes only unlocked session directories whose sole artifact is an event log with no `turn_started` or `user_message_accepted` event. Active writers, user turns, and directories with sibling artifacts are preserved. Empty sessions are no longer indexed on exit; stale empty index rows are removed after collection. The index now stores accepted user-turn counts and backfills legacy rows from authoritative logs. Human `sessions list`, `recent`, and `search` output is headed `UPDATED (UTC) / TURNS / TITLE / SESSION`; the meaningless cost column is absent, while JSON retains cost and adds `turn_count`. Search remains a bounded SQLite FTS snapshot query rather than a walk of session directories. |
+| UX-3 | M4 now runs three first executions from independent freshly written copies before its warmups. It separately measures `rw --version` and the complete interactive engine/TUI/native bundle, publishes both maxima, and enforces absolute limits of 1.0 s and 3.0 s. On the exact rebuilt Darwin release artifacts the measured maxima were **650.215 ms** and **1,484.648 ms**. Those values are measured Darwin baselines; Linux carries explicit bootstrap ceilings until a protected native calibration replaces them. The warm `opt-level = 3` decision is retained because the newly measured cold side remains within the accepted budget. |
+
+Round 2 is resolved as a truthful-interface, session-hygiene, and measurement
+change. In particular, UX-3 does not claim that a first install is as fast as a
+warm launch; it makes that separate first-install cost visible and budgeted.
+
+## Method — round 2
+
+- Driven through a pty with `pyte` modelling the real screen, so quoted frames are
+  what a user would actually see. Round 1's raw byte-stream extraction produced at
+  least one false observation (see Corrections), which is why this round switched.
+- Launch timings: 5 warm trials per configuration, medians reported; cold trials
+  use freshly copied binaries to guarantee cold pages.
+- Session-store counts taken directly from `~/.rottweiler/sessions`, before and
+  after the audit, by testing each `events.jsonl` for `turn_started`.
+- Cost and context behaviour read from durable `events.jsonl` payloads rather than
+  inferred from the UI.
+- No model calls were made; nothing in this round consumed provider quota. The one
+  question that needs a real turn — whether `context_window_known` becomes true
+  after the first subscription response — is left open rather than guessed.

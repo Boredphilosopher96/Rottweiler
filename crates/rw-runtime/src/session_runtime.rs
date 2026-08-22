@@ -55,6 +55,7 @@ use rw_store::{
     session::{
         AccountingLedger, SessionEventLog, SessionEventPageLimits, SessionIndex, SessionProjection,
         SessionStoreError, SessionSummary, TurnAccountingEntry, UtcTimestamp,
+        garbage_collect_empty_sessions,
     },
     trust::FolderTrustStore,
 };
@@ -1293,6 +1294,7 @@ pub async fn run(options: RunOptions) -> Result<()> {
         .ok_or_else(|| miette!("configuration root has no parent"))?
         .to_path_buf();
     initialize_private_storage_root(&storage_root).into_diagnostic()?;
+    collect_abandoned_empty_sessions(&storage_root)?;
     let loaded_config = config_loader.load().into_diagnostic()?;
     for warning in loaded_config.warnings() {
         eprintln!("warning: {}", warning.message());
@@ -2269,6 +2271,7 @@ pub(crate) async fn compose_hosted_actor(
         ));
     }
     initialize_private_storage_root(&options.storage_root).into_diagnostic()?;
+    collect_abandoned_empty_sessions(&options.storage_root)?;
 
     let session_id = options.session_id.0.clone();
     let log = SessionEventLog::open(&options.storage_root, &session_id)
@@ -4572,6 +4575,7 @@ impl HostedSessionProjection {
                     title: "New session".to_owned(),
                     updated_unix_ms: session_projection_updated_at(path),
                     cost_micros: 0,
+                    turn_count: 0,
                 },
                 transcript: String::new(),
                 projected_through: None,
@@ -4595,6 +4599,8 @@ impl HostedSessionProjection {
                         self.projection.summary.title = compact_title(content);
                     }
                     self.saw_user_message = true;
+                    self.projection.summary.turn_count =
+                        self.projection.summary.turn_count.saturating_add(1);
                     self.projection.transcript.push_str("user: ");
                     self.projection.transcript.push_str(content);
                     self.projection.transcript.push('\n');
@@ -12828,7 +12834,9 @@ fn refresh_session_index(storage_root: &Path) -> Result<()> {
                 let log = SessionEventLog::open(storage_root, &id)
                     .map_err(|error| miette!("session {id:?} could not open: {error}"))?;
                 let events = load_session_events(&log)?;
-                projections.push(project_session(&id, &events, log.path()));
+                if session_has_user_turn(&events) {
+                    projections.push(project_session(&id, &events, log.path()));
+                }
                 let inherited_through = inherited_accounting_through(storage_root, &id)?;
                 accounting_entries.extend(project_accounting(&id, &events, inherited_through)?);
             }
@@ -12841,12 +12849,46 @@ fn refresh_session_index(storage_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn collect_abandoned_empty_sessions(storage_root: &Path) -> Result<()> {
+    let removed = garbage_collect_empty_sessions(storage_root)
+        .map_err(|error| miette!("empty session cleanup failed: {error}"))?;
+    if removed.is_empty() || !storage_root.join("index.sqlite").is_file() {
+        return Ok(());
+    }
+    let index = SessionIndex::open(storage_root)
+        .map_err(|error| miette!("session index could not open: {error}"))?;
+    for session_id in &removed {
+        index
+            .remove(session_id)
+            .map_err(|error| miette!("empty session index cleanup failed: {error}"))?;
+    }
+    tracing::debug!(count = removed.len(), "removed abandoned empty sessions");
+    Ok(())
+}
+
+fn session_has_user_turn(events: &[EngineEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            EngineEvent::TurnStarted { .. } | EngineEvent::UserMessageAccepted { .. }
+        )
+    })
+}
+
 fn update_one_session_index(
     storage_root: &Path,
     session_id: &str,
     sink: &DurableEventSink,
 ) -> Result<()> {
     let events = sink.load()?;
+    if !session_has_user_turn(&events) {
+        if storage_root.join("index.sqlite").is_file() {
+            SessionIndex::open(storage_root)
+                .and_then(|index| index.remove(session_id))
+                .map_err(|error| miette!("empty session index cleanup failed: {error}"))?;
+        }
+        return Ok(());
+    }
     let path = storage_root
         .join("sessions")
         .join(session_id)

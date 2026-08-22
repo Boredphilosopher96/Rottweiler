@@ -1,9 +1,77 @@
 import { describe, expect, test } from "bun:test"
 
-import { CustomSpeedScroll, diffStats, filetypeForPath, formatCost, formatSessionCost, formatTokenCount, getScrollAcceleration, minimalUnifiedDiff, presentableUnifiedDiff, splitDiffVisualRows, toolOutputText, truncateUnifiedDiff, turnMarkdown, turnReasoningMarkdown } from "../src/render"
+import { CustomSpeedScroll, diffStats, filetypeForPath, formatCost, formatSessionCost, formatStatusContext, formatStatusModel, formatStatusSessionCost, formatTokenCount, getScrollAcceleration, minimalUnifiedDiff, presentableUnifiedDiff, splitDiffVisualRows, toolOutputText, truncateUnifiedDiff, turnMarkdown, turnReasoningMarkdown } from "../src/render"
 import { embeddedParserConfigurations } from "../src/tree-sitter-runtime"
 
 describe("bounded retained rendering", () => {
+  test("keeps unknown context, route billing, and model identity truthful", () => {
+    expect(formatStatusContext({
+      turn_id: "1",
+      stable_prefix_hash: "fixture",
+      used_tokens: "3900",
+      usable_tokens: "0",
+      reserved_tokens: "0",
+      context_window_known: false,
+      context_window_reason: "provider did not report a context limit",
+      cache_breakpoints: [],
+      items: [],
+    })).toBe("ctx 3.9k · limit unknown")
+
+    const models = [{
+      alias: "openai_codex/gpt-5.4-mini",
+      id: "openai_codex/gpt-5.4-mini",
+      displayName: "GPT-5.4 mini",
+      provider: "openai_codex",
+      providers: ["openai_codex"],
+      aliases: ["fast"],
+      current: true,
+      available: true,
+      vision: true,
+      thinking: true,
+      toolCalling: true,
+    }]
+    expect(formatStatusModel("fast", "openai_codex", models))
+      .toBe("openai_codex/gpt-5.4-mini")
+
+    const zeroCost = {
+      utc_day: "2026-08-22",
+      turns: [],
+      session_usage: {
+        input_tokens: "0",
+        output_tokens: "0",
+        cache_read_tokens: "0",
+        cache_write_tokens: "0",
+        reasoning_tokens: "0",
+      },
+      session_cost_micros_usd: "0",
+      session_ai_credit_micros: "0",
+      daily_cost_micros_usd: "0",
+      daily_ai_credit_micros: "0",
+      trailing_minute_cost_micros_usd: "0",
+      trailing_minute_ai_credit_micros: "0",
+      cache_hit_basis_points: 0,
+      session_cost_cap_micros_usd: null,
+      daily_cost_cap_micros_usd: null,
+      session_ai_credit_cap_micros: null,
+      daily_ai_credit_cap_micros: null,
+      spend_rate_alarm_micros_usd_per_minute: null,
+      ai_credit_rate_alarm_micros_per_minute: null,
+      hard_cap_reached: false,
+      session_monetary_accounting_complete: true,
+      daily_monetary_accounting_complete: true,
+      session_subscription_quota_entries: "0",
+      session_cost_unavailable_entries: "0",
+      session_non_usd_monetary_entries: "0",
+      daily_subscription_quota_entries: "0",
+      daily_cost_unavailable_entries: "0",
+      daily_non_usd_monetary_entries: "0",
+    }
+    expect(formatStatusSessionCost(zeroCost, "openai_codex", "3900"))
+      .toBe("quota —")
+    expect(formatStatusSessionCost(zeroCost, "github_copilot", "3900"))
+      .toBe("credits —")
+  })
+
   test("only exposes filetypes backed by the embedded parser catalog", () => {
     const configured = new Set(
       embeddedParserConfigurations("/tmp/parser-assets")

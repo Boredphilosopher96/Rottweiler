@@ -12,9 +12,9 @@ import {
 import {
   commandPreview,
   filetypeForPath,
-  formatPercent,
-  formatSessionCost,
-  formatTokenCount,
+  formatStatusContext,
+  formatStatusModel,
+  formatStatusSessionCost,
   formatToolArguments,
   presentError,
   presentableUnifiedDiff,
@@ -1091,7 +1091,7 @@ export class StatusLineRenderable extends TextRenderable {
     const context =
       state.context === null
         ? (hasSessionActivity ? "ctx —" : null)
-        : `ctx ${formatTokenCount(state.context.used_tokens)}/${formatTokenCount(state.context.usable_tokens)} (${formatPercent(state.context.used_tokens, state.context.usable_tokens)})`
+        : formatStatusContext(state.context)
     const cache =
       state.cost === null
         ? (hasSessionActivity ? "cache —" : null)
@@ -1099,6 +1099,12 @@ export class StatusLineRenderable extends TextRenderable {
         ? "cache —"
         : `cache ${(state.cost.cache_hit_basis_points / 100).toFixed(0)}%`
     const pluginStatus = Object.entries(state.pluginStatuses).at(-1)
+    const statusModel = state.model === null
+      ? null
+      : formatStatusModel(state.model, state.provider, state.models)
+    const statusProvider = statusModel?.includes("/") === true
+      ? statusModel.slice(0, statusModel.indexOf("/"))
+      : state.provider
     this.content = [
       ...(this.#inputMode === null
         ? []
@@ -1112,19 +1118,15 @@ export class StatusLineRenderable extends TextRenderable {
         ? []
         : [`◉ ${state.mode ?? "—"}${permissionMode === null ? "" : ` · ${permissionMode}`}`]),
       ...(waitingApproval === undefined ? [] : [`approval · ${toolDisplayName(waitingApproval.name)}`]),
-      state.model === null
+      statusModel === null
         ? `model not selected${
             this.#modelPickerKeycap === null ? "" : ` · ${this.#modelPickerKeycap}`
           }`
-        : `model ${
-            state.provider === null || state.model.includes("/")
-              ? state.model
-              : `${state.provider}/${state.model}`
-          }`,
+        : `model ${statusModel}`,
       ...(context === null ? [] : [context]),
       ...(state.cost === null && !hasSessionActivity
         ? []
-        : [formatSessionCost(state.cost, state.context?.used_tokens ?? null)]),
+        : [formatStatusSessionCost(state.cost, statusProvider, state.context?.used_tokens ?? null)]),
       ...(cache === null ? [] : [cache]),
       ...(this.#branch === null && !hasSessionActivity
         ? []

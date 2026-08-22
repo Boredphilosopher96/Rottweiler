@@ -3736,6 +3736,7 @@ mod tests {
                         title: "Scheduling delay".to_owned(),
                         updated_unix_ms: 1,
                         cost_micros: 0,
+                        turn_count: 1,
                     },
                     transcript: "durable query scheduling".to_owned(),
                     projected_through: None,

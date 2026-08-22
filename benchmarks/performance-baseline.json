@@ -6,11 +6,13 @@
       "suites": {
         "core": {
           "baseline_kind": "measured",
-          "provenance": "2026-08-22 exact local darwin-arm64 release measurements at f67909b plus the field-audit remediation working tree: 100-sample headless and M4 startup/UDS gates, real-renderer TUI frame fixtures, and exact built artifact sizes; mcp_prompt_ready retains the reviewed native ARM64 maximum from GitHub Actions run 30655148886 pending the next protected calibration",
+          "provenance": "2026-08-22 exact local darwin-arm64 release measurements at f67909b plus the field-audit remediation working tree: 100-sample headless and M4 startup/UDS gates, real-renderer TUI frame fixtures, and exact built artifact sizes; round-2 first-launch maxima at e242231 plus the remediation working tree use three freshly written artifact copies; mcp_prompt_ready retains the reviewed native ARM64 maximum from GitHub Actions run 30655148886 pending the next protected calibration",
           "metrics": {
             "engine_binary_bytes": 29658880,
             "engine_ready_p99_us": 19048,
             "headless_print_p99_us": 80632,
+            "installed_first_interactive_max_us": 1484648,
+            "installed_first_version_max_us": 650215,
             "mcp_prompt_ready_p99_us": 59102,
             "tui_bundle_bytes": 85314304,
             "tui_frame_p95_us": 3367,
@@ -37,11 +39,13 @@
       "suites": {
         "core": {
           "baseline_kind": "bootstrap",
-          "provenance": "2026-08-22 ruler migration bootstrap: retained reviewed Linux measurements from GitHub Actions runs 30651316120, 30653992032, 30655148886, 30656726278, 30656728117, 30662542666, 30684369607, and 30684468691; process-start reuses the prior splash observation, while interactive and mounted tool-output values are hard product ceilings until the first protected Linux calibration replaces this suite with measured evidence",
+          "provenance": "2026-08-22 ruler migration bootstrap: retained reviewed Linux measurements from GitHub Actions runs 30651316120, 30653992032, 30655148886, 30656726278, 30656728117, 30662542666, 30684369607, and 30684468691; process-start reuses the prior splash observation, while installed-first, interactive, and mounted tool-output values are hard product ceilings until the first protected Linux calibration replaces this suite with measured evidence",
           "metrics": {
             "engine_binary_bytes": 26375800,
             "engine_ready_p99_us": 6031,
             "headless_print_p99_us": 69361,
+            "installed_first_interactive_max_us": 3000000,
+            "installed_first_version_max_us": 1000000,
             "mcp_prompt_ready_p99_us": 10699,
             "tui_bundle_bytes": 137155816,
             "tui_frame_p95_us": 34148,

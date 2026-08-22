@@ -65,6 +65,8 @@ class PerfBaselineTests(unittest.TestCase):
         linux = document["platforms"]["linux-x86_64"]["suites"]["core"]["metrics"]
         self.assertEqual(darwin["engine_binary_bytes"], 29_658_880)
         self.assertEqual(darwin["headless_print_p99_us"], 80_632)
+        self.assertEqual(darwin["installed_first_interactive_max_us"], 1_484_648)
+        self.assertEqual(darwin["installed_first_version_max_us"], 650_215)
         self.assertEqual(darwin["turn_overhead_p99_us"], 17_049)
         self.assertEqual(darwin["tui_bundle_bytes"], 85_314_304)
         self.assertEqual(darwin["engine_ready_p99_us"], 19_048)
@@ -79,6 +81,8 @@ class PerfBaselineTests(unittest.TestCase):
         self.assertEqual(darwin["uds_event_p99_us"], 281)
         self.assertEqual(linux["engine_binary_bytes"], 26_375_800)
         self.assertEqual(linux["headless_print_p99_us"], 69_361)
+        self.assertEqual(linux["installed_first_interactive_max_us"], 3_000_000)
+        self.assertEqual(linux["installed_first_version_max_us"], 1_000_000)
         self.assertEqual(linux["turn_overhead_p99_us"], 49_490)
         self.assertEqual(linux["tui_bundle_bytes"], 137_155_816)
         self.assertEqual(linux["mcp_prompt_ready_p99_us"], 10_699)

@@ -31,10 +31,18 @@ def main() -> int:
     baseline_text = json.dumps(baseline, sort_keys=True)
     require("tui_first_paint_p99_us" not in m4, "obsolete first-paint metric remains in M4")
     require("tui_first_paint_p99_us" not in baseline_text, "obsolete first-paint metric remains in baseline")
+    require(
+        baseline_text.count("installed_first_interactive_max_us") == 2
+        and baseline_text.count("installed_first_version_max_us") == 2,
+        "installed first-launch metrics are missing from a platform baseline",
+    )
     require_contains(
         "crates/rw-cli/tests/m4_release_gate.py",
         "tui_process_start_p99_us",
         "tui_interactive_p99_us",
+        "installed_first_launch_gate",
+        "installed_first_version_max_us",
+        "installed_first_interactive_max_us",
         "REPRESENTATIVE_PRICING_MODEL_COUNT = 4_000",
         "supervisor_parent_death_gate",
     )
@@ -50,6 +58,25 @@ def main() -> int:
     require_contains("packages/tui/scripts/opentui-rss-harness.ts", "createTestRenderer")
     require_contains("packages/tui/src/tree-sitter-runtime.ts", "TREE_SITTER_ASSET_DIGEST", '"tree-sitter"')
     require_contains("packages/tui/src/tree-sitter-client.ts", "registerTreeSitterParsersLazily")
+    require_contains(
+        "packages/tui/src/render/format.ts",
+        "formatStatusContext",
+        "limit unknown",
+        "formatStatusModel",
+        "formatStatusSessionCost",
+        'return "quota —"',
+    )
+    require_contains(
+        "crates/rw-store/src/session.rs",
+        "garbage_collect_empty_sessions",
+        "turn_count",
+        "backfill_unknown_turn_counts",
+    )
+    require_contains(
+        "crates/rw-cli/src/main.rs",
+        "UPDATED (UTC)",
+        '"turn_count":session.turn_count',
+    )
     require_contains("crates/rw-cli/src/parent_death.rs", "NOTE_EXIT", "set_parent_process_death_signal")
     require_contains(
         "benchmarks/release-optimization-2026-08-22.json",

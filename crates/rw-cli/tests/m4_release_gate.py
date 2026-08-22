@@ -783,6 +783,88 @@ def performance_gate(
     }
 
 
+def installed_first_launch_gate(
+    source_rw: pathlib.Path,
+    source_tui: pathlib.Path,
+    source_tui_native: pathlib.Path,
+    root: pathlib.Path,
+    workspace: pathlib.Path,
+    port: int,
+    samples: int,
+) -> dict[str, int]:
+    """Measure the first execution of freshly written installed artifacts."""
+    version: list[float] = []
+    interactive: list[float] = []
+    for index in range(samples):
+        version_bin = root / f"installed-first-version-{index}" / "bin"
+        version_bin.mkdir(mode=0o700, parents=True)
+        version_rw = version_bin / "rw"
+        shutil.copyfile(source_rw, version_rw)
+        version_rw.chmod(0o700)
+        started = time.perf_counter_ns()
+        result = subprocess.run(
+            [str(version_rw), "--version"],
+            cwd=workspace,
+            env=isolated_env(root / f"installed-first-version-home-{index}"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        version.append((time.perf_counter_ns() - started) / 1_000_000)
+        if result.returncode != 0 or not result.stdout.startswith(b"rw "):
+            raise RuntimeError(
+                "freshly installed rw --version failed: "
+                f"rc={result.returncode} stderr={result.stderr[-2000:]!r}"
+            )
+
+        artifact_bin = root / f"installed-first-interactive-{index}" / "bin"
+        artifact_bin.mkdir(mode=0o700, parents=True)
+        rw = artifact_bin / "rw"
+        tui = artifact_bin / "rottweiler-tui"
+        native = artifact_bin / source_tui_native.name
+        for source, destination in [
+            (source_rw, rw),
+            (source_tui, tui),
+            (source_tui_native, native),
+        ]:
+            shutil.copyfile(source, destination)
+        rw.chmod(0o700)
+        tui.chmod(0o700)
+        measurement_root = root / f"installed-first-measurement-{index}"
+        measurement_root.mkdir(mode=0o700)
+        interactive.append(
+            one_startup_sample(
+                rw,
+                tui,
+                measurement_root,
+                workspace,
+                port,
+                0,
+            )[2]
+        )
+
+    version_max = max(version)
+    interactive_max = max(interactive)
+    print(
+        "M4 installed first launch: "
+        f"samples={samples}; version_ms median={statistics.median(version):.3f} "
+        f"max={version_max:.3f}; interactive_ms median={statistics.median(interactive):.3f} "
+        f"max={interactive_max:.3f}"
+    )
+    if version_max >= 1_000:
+        raise RuntimeError(
+            f"installed first rw --version max {version_max:.3f}ms exceeds 1000ms"
+        )
+    if interactive_max >= 3_000:
+        raise RuntimeError(
+            f"installed first interactive max {interactive_max:.3f}ms exceeds 3000ms"
+        )
+    return {
+        "installed_first_version_max_us": math.ceil(version_max * 1000),
+        "installed_first_interactive_max_us": math.ceil(interactive_max * 1000),
+    }
+
+
 def mint_client(runtime: Runtime) -> tuple[str, str]:
     bootstrap = runtime.token_path.read_text(encoding="ascii").strip()
     connection = UnixHttpConnection(runtime.socket_path)
@@ -1612,6 +1694,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rw", type=pathlib.Path, required=True)
     parser.add_argument("--tui", type=pathlib.Path, required=True)
     parser.add_argument("--samples", type=int, default=100)
+    parser.add_argument("--installed-first-samples", type=int, default=3)
     parser.add_argument("--skip-performance", action="store_true")
     parser.add_argument("--skip-supervisor", action="store_true")
     parser.add_argument("--skip-shell", action="store_true")
@@ -1632,6 +1715,8 @@ def main() -> int:
     args = parse_args()
     if args.samples < 100 and not args.skip_performance:
         raise RuntimeError("p99 release gate requires at least 100 samples")
+    if args.installed_first_samples < 3 and not args.skip_performance:
+        raise RuntimeError("installed first-launch gate requires at least 3 samples")
     if args.metrics_json is not None and args.skip_performance:
         raise RuntimeError("metric output requires the complete M4 performance gate")
     repo = args.repo.resolve()
@@ -1667,6 +1752,17 @@ def main() -> int:
         workspace.mkdir(mode=0o700)
         with fixture_origin() as port:
             if not args.skip_performance:
+                metrics.update(
+                    installed_first_launch_gate(
+                        source_rw,
+                        source_tui,
+                        source_tui_native,
+                        root,
+                        workspace,
+                        port,
+                        args.installed_first_samples,
+                    )
+                )
                 metrics.update(performance_gate(rw, tui, root, workspace, port, args.samples))
                 metrics.update(socket_latency_gate(rw, root, workspace, port, args.samples))
             if not args.skip_supervisor:
