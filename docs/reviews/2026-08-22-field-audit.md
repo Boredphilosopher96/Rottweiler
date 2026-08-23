@@ -631,3 +631,202 @@ warm launch; it makes that separate first-install cost visible and budgeted.
 - No model calls were made; nothing in this round consumed provider quota. The one
   question that needs a real turn — whether `context_window_known` becomes true
   after the first subscription response — is left open rather than guessed.
+
+---
+
+# Round 3 — 2026-08-22, engine pass
+
+Read-only source review at `e242231`. No files were modified. Files under active
+edit in the working tree at the time (`history.rs`, `session_host.rs`,
+`session_runtime.rs`, `store/session.rs`, `panels.ts`, `format.ts`) were excluded
+from analysis so nothing half-written was reported as a defect.
+
+**Why this round exists.** Rounds 1 and 2 worked outside-in: run the binary,
+measure a boundary, then read only the code path that explains the measurement.
+That method structurally over-finds instrument defects and cannot see logic that
+is wrong but plausible. This round went after the second kind: the context
+engine, the turn loop, the safe-list classifier, and the provider adapters, read
+on their own terms rather than in service of a number.
+
+---
+
+- [ ] **ENG-1 · P0 · [verified] · ~half a day** — on 157 catalog models the
+      compaction threshold collapses to zero, turning one user message into 32
+      summarisation calls.
+      `crates/rw-context/src/budget.rs` computes the ADR-010 reserve as
+      `min(20_000, max_output_tokens)` and the trigger as
+      `context_window − reserved`. The reserve bears no relationship to the window
+      it is subtracted from, so when `max_output ≥ context_window` and the window
+      is at or below 20k, `threshold_tokens` saturates to **0** — and
+      `would_overflow` is `total_tokens >= 0`, which is true at zero tokens.
+      I re-implemented the arithmetic independently and ran it across all 5,031
+      entries of the shipped `~/.rottweiler/models.toml`:
+
+      | model | ctx | max_output | reserve | threshold |
+      |---|---|---|---|---|
+      | `azure/gpt-4` | 8,192 | 8,192 | 8,192 | **0** |
+      | `azure/gpt-3.5-turbo-0125` | 16,384 | 16,384 | 16,384 | **0** |
+      | `amazon-bedrock/qwen.qwen3-32b-v1:0` | 16,384 | 16,384 | 16,384 | **0** |
+      | `openai/gpt-5.4-mini` (your route) | 400,000 | 128,000 | 20,000 | 380,000 ✓ |
+
+      **157 of 5,031** entries produce a zero threshold; a further **154** land at
+      or below half their window. The trigger sits inside the agent loop at
+      `crates/rw-core/src/engine/turn/mod.rs:4550`, which runs
+      `for _ in 0..config.max_turns` with `DEFAULT_MAX_TURNS = 32`
+      (`crates/rw-cli/src/main.rs:176`). So on an affected model a single user
+      message produces up to **32 full compaction model calls**, each summarising
+      and discarding conversation, before the loop stops with "maximum of 32
+      provider iterations reached". The user pays for all 32 and gets no answer.
+      The invariant is already known and already enforced — but only against
+      humans. `OverflowPolicy::validate()` rejects a *user-supplied* reserve that
+      exhausts the window (`ExplicitReserveExhaustsWindow`), while its own doc
+      comment deliberately exempts runtime metadata: *"remains observable through
+      `calculate()` even when internally inconsistent."* The unit test
+      `reserve_at_or_above_window_is_immediate_overflow` locks the behaviour in as
+      intended.
+      **Fix:** clamp the reserve against the window it is drawn from — e.g.
+      `min(20_000, max_output, context_window / 2)` — so a threshold can never
+      reach zero; then apply `validate()` to catalog metadata as well as to user
+      overrides, and treat an inconsistent entry as an *unknown* window (no
+      auto-compaction) rather than as permanent overflow.
+      **Assessment:** P0 on scope of damage, not on breadth — 3% of the catalog,
+      and your own route is unaffected, which is exactly why it has gone unnoticed.
+      For a user who selects one of those models the product does not degrade, it
+      fails completely and expensively on the first message. The correct principle
+      for the fix is that inconsistent metadata should fail toward *doing nothing*,
+      never toward compacting forever; the current code fails the other way.
+
+- [ ] **ENG-2 · P1 · [code] · ~1 day** — Anthropic prompt caching covers the tool
+      definitions and nothing else, so coverage decays toward zero as a session
+      grows.
+      Two decisions compound. `crates/rw-context/src/assembly.rs` restricts the
+      stable prefix to `System | ProjectInstructions | SkillIndex` —
+      `Conversation` is explicitly not eligible — and emits exactly **one**
+      `CacheBreakpoint`, placed after that region. Anthropic permits four.
+      Then `crates/rw-providers/src/anthropic.rs:406` spends that single
+      breakpoint on the wrong block:
+
+      ```rust
+      if tools_marked {
+          tools.last_mut()["cache_control"] = json!({ "type": "ephemeral" });
+      } else if let Some(index) = last_stable_system {
+          system[index]["cache_control"] = json!({ "type": "ephemeral" });
+      }
+      ```
+
+      `cache_control` marks a *prefix* boundary and the wire order is
+      tools → system → messages, so marking the last **tool** caches the tool
+      definitions and stops, whereas marking the last **system** block would have
+      cached tools *and* system. The branches are mutually exclusive and a coding
+      agent always has tools, so the system prompt, `AGENTS.md`, and the skill
+      index sit outside the cache boundary permanently — and the conversation was
+      never eligible in the first place.
+      Measured on a live session, resting context is **Tools 3.7k + System 152 =
+      3.9k tokens**, so cache coverage decays with transcript growth: ~95% at turn
+      one, ~7% at 50k, ~2% at 150k. Cache reads bill at roughly a tenth of base
+      input, so the conversation is re-sent at full price every turn and the
+      latency benefit of a cache read never arrives.
+      This is invisible to the M3 acceptance criterion: "simulated cache-hit rate
+      ≥ 80%" is computed by `rw-context/src/cache.rs` over whether the
+      stable-prefix bytes repeat, and a 3.7k prefix repeats perfectly. The hit rate
+      is real; the thing being hit is tiny.
+      **Confirm in one turn:** run any Anthropic-routed session past ~20k tokens
+      and read `cache_read_tokens` off `turn_finished`. If it plateaus near 3.7k
+      instead of tracking the transcript, this is it.
+      **Fix:** always mark the last stable system block — it strictly dominates
+      marking the tool — and add a second breakpoint after the settled conversation
+      prefix so history caches incrementally, which is why the API allows four.
+      **Assessment:** tagged `[code]` honestly. The mechanism follows from
+      Anthropic's documented prefix semantics, but your configuration routes
+      through `openai_codex`, so I had no live Anthropic session to confirm it
+      against and did not want to spend your quota guessing. Note that the
+      `else if` is not a trade-off with an upside — marking the system block caches
+      a strict superset of marking the tool — so the branch as written is worse
+      than either alternative in every case. A test currently asserts the current
+      behaviour, so that test moves with the fix.
+
+- [ ] **ENG-3 · P1 · [code] · ~half a day** — the doom-loop guard only catches
+      consecutive identical failures, which is not the loop agents get into.
+      `crates/rw-core/src/engine/turn/mod.rs:1954` keeps a single slot
+      (`last_failure: Option<String>`) and a counter that fires at
+      `DEFAULT_DOOM_LOOP_LIMIT = 5` (`crates/rw-runtime/src/session_runtime.rs:96`).
+      Two ordinary situations walk straight past it:
+
+      ```text
+      // 1. alternating failures — the signature differs each time, counter resets to 1
+      edit(stale ctx) ✗ → read(file) ✗ → edit(stale ctx) ✗ → read(file) ✗ → …
+
+      // 2. any success clears the slot outright
+      if !result.is_error { self.last_failure = None; self.identical_failures = 0; }
+      read(file) ✓ → edit(stale ctx) ✗ → read(file) ✓ → edit(stale ctx) ✗ → …
+      ```
+
+      The second pattern — read the file, attempt the edit, fail on stale context,
+      re-read, attempt again — is the most common way a coding agent gets stuck,
+      and the interleaved successful `read` resets the counter every cycle. The
+      guard can only ever fire on a tool that fails five times in a row with
+      byte-identical arguments *and* byte-identical output, with nothing
+      succeeding in between.
+      The M2 acceptance fixture is "tool failing 5× identically", so the test and
+      the implementation agree precisely — and both describe a loop rarer than the
+      one users hit. The only real backstop is `max_turns = 32`, which is not a
+      doom-loop detector; it is a bill.
+      **Fix:** replace the single slot with a bounded window of recent failure
+      signatures and count repeats within it rather than requiring adjacency, and
+      decay per-signature counts instead of clearing on an unrelated success. A
+      cheap addition that catches most of the remainder: track repeated
+      *(tool, arguments)* pairs regardless of outcome, since a progressing agent
+      rarely issues the same call with the same arguments five times.
+      **Assessment:** the fix is small and self-contained, but it changes a
+      user-visible safety behaviour, so it wants a fixture per real loop shape
+      (alternating, success-interleaved, and the existing identical case) rather
+      than a threshold tweak. Worth deciding explicitly whether the guard should
+      interrupt or merely warn on the softer patterns — a false stuck-interruption
+      mid-task is its own bad experience.
+
+## Read and found sound
+
+Recorded so these are not re-opened. Each was read looking for a specific failure
+mode and did not have one.
+
+- **`rw-context/src/prune.rs`** — the backward walk protects the newest two user
+  turns exactly, stops at prior summary and prune markers, keeps pinned and
+  protected tools out of the ordinary 40k window without consuming it, admits a
+  tool result atomically (the only correct choice, since a result cannot be half
+  protected), and applies the reclaim threshold strictly.
+- **`rw-context/src/compaction.rs`** — planning is pure and deterministic, strips
+  media from both blocks and mixed tool parts, orders pins by `(order, item_id)`,
+  and replays the last *real* (non-synthetic) user turn intact on provider
+  overflow while dropping the partial assistant response.
+- **`rw-providers/src/openai.rs`** — streaming tool state is keyed by
+  `(choice_index, tool_index)`, a reused active index is rejected, id and name are
+  required at start, and argument accumulation is bounded at 1 MiB.
+- **`rw-tools/src/bash.rs`** — the safe-list classifier rejects interpolation and
+  control syntax before tokenisation and requires *every* compound segment to be
+  independently safe; user globs are accepted only from the user config layer.
+- **`rw-context/src/budget.rs` reconciliation** — includes all three input
+  partitions without double counting, guards the zero-denominator path, and clamps
+  the correction factor to [0.25, 4.0].
+
+## Method — round 3
+
+- Read-only. No files modified; files under concurrent edit excluded.
+- ENG-1's arithmetic was re-implemented independently and executed against all
+  5,031 catalog entries rather than reasoned about, which is why it carries
+  `[verified]` while ENG-2 and ENG-3 carry `[code]`.
+- No model calls; no provider quota consumed.
+- `[code]` items each name the single observation that would settle them, rather
+  than being left as assertions.
+
+## Still unread
+
+Roughly 100k lines of Rust have not been reviewed. The areas most likely to hold
+the next round of defects, in rough order of user impact:
+
+1. The permission decision matrix beyond the safe-list — pattern rules,
+   remembered approvals, and the `ask`-tier supplement path.
+2. Store replay and rewind invariants, and sequence-gap recovery.
+3. Subagent orchestration semantics — budget attribution, depth limits, and
+   partial-failure handling.
+4. Sandbox escape surfaces on both Seatbelt and Landlock.
+5. The TOON serializer, which the M3 AC credits with ≥30% token reduction.
