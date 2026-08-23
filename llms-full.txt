@@ -1,0 +1,1121 @@
+# Rottweiler coding agent
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/
+Source owners: README.md, PROJECT.md
+
+- **One engine, every workflow:** The TUI, one-shot prompts, remote clients, and MCP use the same durable session engine.
+- **Safe where it matters:** Project trust, explicit permissions, sandboxing, and credential isolation are engine boundaries—not UI promises.
+- **Built to be extended:** Commands, skills, modes, MCP, hooks, WASM, and RPC plugins meet documented contracts.
+
+## Productive in a terminal. Reliable in automation.
+
+Rottweiler combines a compiled OpenTUI frontend with a headless Rust engine.
+Interactive work feels immediate, while scripts get structured output, bounded
+turns, explicit permission modes, and deterministic replay. Sessions survive
+process exits and remain searchable, resumable, forkable, rewindable, and
+exportable.
+
+### Start in five minutes
+Install the complete bundle, validate it, configure one provider, and run
+your first task. [Follow the quick start](/Rottweiler/docs/installation/).
+
+### Automate a real task
+Use JSON or streaming JSON, set a turn budget, and select an explicit
+permission policy. [Build a headless workflow](/Rottweiler/docs/tutorials/automate-a-task/).
+
+### Give an agent the docs
+Point an agent at [`llms.txt`](/Rottweiler/llms.txt), the complete
+[`llms-full.txt`](/Rottweiler/llms-full.txt), or the structured
+[`docs-index.json`](/Rottweiler/docs-index.json).
+
+## One product, one source of truth
+
+The documentation, copyable examples, raw Markdown, search index, and API
+artifacts are built together. Release targets and schemas are projected from
+their machine-owned sources instead of being redefined in prose.
+
+## Open contracts, not hidden doors
+
+Rottweiler publishes JSON Schemas and TypeScript projections for its Client
+API, durable session log, and Plugin API. Built-in execution still
+goes through the same registries and permission boundaries exposed to
+extensions. Download the [machine-readable artifacts](/Rottweiler/docs/reference/plugin-api/)
+or browse the [architecture](/Rottweiler/docs/concepts/architecture/).
+
+---
+
+# Contributing
+Section: contributing
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/contributing/
+Source owners: PROJECT.md, .github/workflows/ci.yml
+
+Read `PROJECT.md` before changing code. It records the product tenets and maps
+the maintainer architecture documents.
+
+## Build the complete product
+
+```sh
+rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+bun install --cwd packages/tui --frozen-lockfile
+scripts/build-release.sh
+```
+
+The release builder compiles and validates every required sibling executable.
+
+## Preserve ownership
+
+- Add a fact to its domain owner, then generate or check projections.
+- Do not copy protocol values into docs, SDKs, hosts, or tests.
+- Do not add compatibility aliases. Migrate callers and delete the obsolete
+  surface in the same change.
+- Keep UI behavior in the client and session behavior in the Rust engine.
+- Keep `/updates/**` under the release workflow's exclusive ownership.
+
+## Before opening a pull request
+
+Run the focused checks for the code you changed, then follow
+[Verification](./verification.md) for repository gates.
+
+---
+
+# Verification
+Section: contributing
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/contributing/verification/
+Source owners: docs/07-VERIFICATION.md, .github/workflows/ci.yml
+
+The main CI matrix runs on macOS and Linux. Start with the gates that match your
+change, then run the complete set before delivery when practical.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
+cargo run --locked --quiet -p xtask -- codegen --check
+cargo run --locked --quiet -p rw-plugin-protocol --bin rw-plugin-protocol-codegen -- --check
+python3 scripts/check-dependency-direction.py
+python3 scripts/check-ownership.py
+python3 scripts/check-toolchain-ownership.py
+python3 scripts/check-network-boundaries.py
+```
+
+Package checks:
+
+```sh
+bun run --cwd packages/plugin-sdk typecheck
+bun test --cwd packages/plugin-sdk
+bun run --cwd packages/plugin-sdk build
+bun run --cwd packages/tui typecheck
+bun test --cwd packages/tui
+bun run --cwd packages/tui build
+bun run --cwd packages/docs-site check
+bun test --cwd packages/docs-site
+bun run --cwd packages/docs-site build
+```
+
+Performance, security, SSH loopback, release, and protected soak gates are
+tiered by workflow. Do not describe a queued or intentionally unrun gate as
+passing.
+
+---
+
+# Documentation
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/
+Source owners: release/update/stable.spec.json, docs/07-VERIFICATION.md
+
+Use this documentation to install Rottweiler, complete a first task, automate
+work, configure providers and security, extend the product, and integrate its
+public APIs.
+
+## Choose a path
+
+- New to Rottweiler? Start with [Installation](./installation.md) and then run a
+  [first session](./first-session.md).
+- Ready to automate? Follow [Automate a task](./tutorials/automate-a-task.md).
+- Configuring models? Read [Providers](./providers.md) and
+  [Models and routing](./guides/models-and-routing.md).
+- Integrating another tool? Use the [MCP tutorial](./tutorials/connect-mcp.md) or
+  browse the [Client API](./reference/client-api.md).
+- Evaluating the security boundary? Read [Security and trust](./guides/security-and-trust.md).
+
+## Agent entry points
+
+- [`llms.txt`](/Rottweiler/llms.txt) is the compact documentation map.
+- [`llms-full.txt`](/Rottweiler/llms-full.txt) concatenates every public page with
+  its source owners.
+- [`docs-index.json`](/Rottweiler/docs-index.json) is a versioned JSON catalog.
+- `/raw/product/` contains frontmatter-free product Markdown.
+
+---
+
+# Architecture
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/concepts/architecture/
+Source owners: docs/02-ARCHITECTURE.md, architecture/ownership.toml
+
+Rottweiler is one product with deliberately separate processes.
+
+```text
+rw supervisor
+├── Rust session engine
+│   ├── provider adapters and router
+│   ├── context and compaction
+│   ├── tools, permissions, sandbox, and trust
+│   └── durable event storage and replay
+├── compiled OpenTUI client
+├── WASM extension host
+└── TypeScript plugin host
+```
+
+Only `rw` is public. Sibling executables are bundle members supervised by the
+application.
+
+## Why the engine is headless
+
+The terminal UI, one-shot prompts, remote clients, tests, and MCP server all use
+the same session behavior. A UI cannot silently acquire its own routing,
+permission, persistence, or extension rules.
+
+## Provider boundary
+
+Providers adapt external wire formats into one internal message and event
+model. Bounded catalog information can cross into clients; credentials,
+endpoints, proxy state, and provider implementation details remain in Rust.
+
+## Extension boundary
+
+Declarative extensions are data until trusted. Executable hooks, MCP servers,
+WASM components, and RPC plugins cross explicit capability and approval
+boundaries. Built-in registrations use the same registries where the product
+claims extension parity.
+
+---
+
+# Ownership model
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/concepts/ownership/
+Source owners: architecture/ownership.toml, scripts/check-ownership.py
+
+Every piece of data and every feature has one semantic owner. Other layers
+consume projections; they do not redefine the fact.
+
+| Concern | Owner |
+|---|---|
+| Provider-neutral session behavior | Rust engine |
+| Visual interaction and rendering | OpenTUI client |
+| Config fields and typed defaults | `rw-types` |
+| Config discovery and precedence | `rw-store` |
+| Plugin API values and limits | `rw-plugin-protocol` |
+| Release archive membership | `contracts/release-contract.json` |
+| Signed published targets | signed update channel metadata |
+| Durable session envelope | session schema owner and checked projections |
+| Public documentation experience | `packages/docs-site` |
+| Signed update origin subtree | release workflow |
+
+Generated schemas, fixtures, SDK declarations, raw Markdown, agent indexes, and
+HTML are projections. A projection has a drift check or is created during the
+build; it does not become a second hand-maintained authority.
+
+Compatibility aliases are not part of this model. Callers move to the owned
+surface and obsolete APIs are deleted.
+
+---
+
+# First session
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/first-session/
+Source owners: crates/rw-cli/src/main.rs, crates/rw-store/src/config.rs
+
+Run these commands inside the repository you want Rottweiler to work on.
+
+## 1. Check the installation
+
+```sh
+rw config check
+rw doctor
+```
+
+`rw doctor` is network-free unless you add `--network`. It checks the product
+bundle, storage, configuration, and local prerequisites without unexpectedly
+contacting a provider.
+
+## 2. Configure a route
+
+User configuration normally lives at `~/.rottweiler/config.toml`. Define a
+model alias and a provider without storing the secret in the file:
+
+```toml
+[models]
+default = "fast"
+
+[models.aliases]
+fast = ["anthropic/<model-id>"]
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_credential = "providers.anthropic.api_key"
+```
+
+Replace `<model-id>` with an identifier returned by provider discovery. Store
+the key through Rottweiler's hidden terminal prompt:
+
+```sh
+rw config check
+rw auth set-key anthropic
+rw models list --refresh
+```
+
+OAuth and device-flow providers use `rw auth login <provider>` instead. See
+[Providers](./providers.md) for supported adapter kinds and gateway controls.
+
+## 3. Run a task
+
+Start the terminal application:
+
+```sh
+rw
+```
+
+Or run one bounded, non-interactive task:
+
+```sh
+rw -p "Map this repository and identify its three riskiest boundaries" \
+  --permission-mode strict \
+  --max-turns 12
+```
+
+Inside the TUI, `/help` lists live commands and keybindings. `/models`,
+`/permissions`, `/context`, `/agents`, `/mcp`, `/rewind`, and `/review` are good
+starting points.
+
+## 4. Continue the work
+
+```sh
+rw sessions list
+rw --continue
+```
+
+Use `rw --resume <session-id>` when you need an exact session rather than the
+most recently updated one.
+
+---
+
+# Extensions
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/guides/extensions/
+Source owners: crates/rw-ext/src/discovery.rs, crates/rw-plugin-protocol/src/lib.rs
+
+Choose the smallest extension mechanism that fits the job.
+
+| Need | Mechanism |
+|---|---|
+| Reusable prompt | Command |
+| Instructions and resources | Skill |
+| Specialized delegated role | Agent |
+| Multi-step orchestration | Workflow |
+| Interaction and tool policy | Mode |
+| Lifecycle side effect | Hook |
+| External tool/service | MCP |
+| Capability-scoped in-process hook | WASM component |
+| Tools, commands, hooks, events, or provider dialect | RPC plugin |
+
+Project extension files use `.agents/` directories and participate in the
+trust inventory. Plugin and MCP execution also require their own fingerprint-
+bound approvals.
+
+RPC plugins communicate through bounded JSON-RPC frames on stdio. The host
+validates the manifest before executing the process and checks every call
+against declared capabilities.
+
+Use the [TypeScript plugin SDK](../reference/plugin-sdk.md) to scaffold, validate,
+develop, and package a plugin.
+
+---
+
+# Models and routing
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/guides/models-and-routing/
+Source owners: crates/rw-core/src/provider_factory.rs, crates/rw-types/src/config.rs
+
+The engine addresses model aliases rather than spreading provider-specific IDs
+through sessions and clients.
+
+## Define an alias
+
+```toml
+[models]
+default = "coding"
+
+[models.aliases]
+coding = [
+  "anthropic/<primary-model>",
+  "openai/<fallback-model>",
+]
+```
+
+Candidates are ordered. Routing applies configured availability, capabilities,
+limits, and fallback policy without changing the provider-neutral session
+format.
+
+## Inspect the catalog
+
+```sh
+rw models list --refresh
+rw models show coding
+```
+
+The catalog can expose bounded display metadata and sanitized auth or
+reachability state. Provider endpoints, credential references and values,
+proxy details, wire errors, and routing internals stay inside the Rust engine.
+
+## Pricing
+
+User configuration can declare per-model USD API rates. Pricing precedence is
+whole-record: user configuration, then authenticated provider discovery, then
+models.dev. Fields are not blended from multiple sources. Subscription and
+Copilot routes use quota or credit accounting and reject dollar pricing rather
+than appearing as free API routes.
+
+---
+
+# Security and trust
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/guides/security-and-trust/
+Source owners: crates/rw-store/src/trust.rs, crates/rw-types/src/config.rs, docs/05-SECURITY.md
+
+Rottweiler separates permission to read repository files from permission to
+execute repository-controlled configuration.
+
+## Project trust
+
+Commands, skills, agents, workflows, modes, hooks, MCP servers, and plugins in a
+project remain inert until their exact inventory is trusted.
+
+```sh
+rw trust status
+rw trust grant
+rw trust revoke
+```
+
+Changing the executable inventory invalidates the recorded decision. If the
+inventory cannot be read completely, Rottweiler discards the partial result and
+does not mint a trust fingerprint.
+
+`--dangerously-trust` is for automation that establishes checkout identity
+outside Rottweiler. It does not persist a trust decision.
+
+## Permissions
+
+- `strict` asks before operations that require approval.
+- `auto-safe` automatically permits operations classified as safe.
+- `yolo` removes interactive approval prompts.
+
+None of these modes removes canonical workspace roots, project trust, or the
+platform sandbox.
+
+## Credentials
+
+Configuration stores credential references, not values. API keys and OAuth
+tokens do not enter config rendering, session logs, replay, exports, provider
+catalog UI, or plugin processes. Provider plugins can request host-mediated
+authenticated HTTP using an approved credential reference without receiving
+the secret.
+
+## Report a vulnerability
+
+Do not open a public issue for a suspected sandbox escape, credential exposure,
+signature failure, or permission bypass. Use the repository's
+[private vulnerability reporting form](https://github.com/Boredphilosopher96/Rottweiler/security/advisories/new).
+
+---
+
+# Troubleshooting
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/guides/troubleshooting/
+Source owners: crates/rw-cli/src/doctor.rs, crates/rw-cli/src/main.rs
+
+Start with local evidence:
+
+```sh
+rw --version
+rw config check
+rw doctor
+rw trust status
+```
+
+## Provider or credential problems
+
+Network checks are opt-in:
+
+```sh
+rw doctor --network
+rw models list --refresh
+```
+
+Use `rw auth set-key <provider>` for API-key routes and `rw auth login
+<provider>` for configured browser or device flows. Do not put secret values in
+TOML to make a test pass.
+
+## An extension does not load
+
+Check project trust first. Invalid or unreadable artifacts are skipped with a
+diagnostic; the rest of the application can still start. Re-run `rw trust
+status` after any executable extension file changes.
+
+## The application starts incompletely
+
+Verify that you installed the complete release bundle. A standalone Rust binary
+does not include the terminal executable, native renderer, WASM host, and plugin
+host. Reinstall using [Installation](../installation.md).
+
+## Upgrade or rollback
+
+```sh
+rw upgrade --channel stable
+rw upgrade --rollback
+```
+
+Use `--channel beta` only when you intentionally accept a prerelease update
+channel. Signed metadata prevents version rollback unless rollback is explicit.
+
+---
+
+# Installation
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/installation/
+Source owners: packaging/homebrew/README.md, contracts/release-contract.json, scripts/build-release.sh
+
+Rottweiler is one application made from several supervised processes. Install
+the complete bundle; installing only the Rust CLI does not install the terminal
+frontend, native renderer, WASM host, or plugin host.
+
+## macOS with Homebrew
+
+The Homebrew cask supports Apple silicon macOS.
+
+```sh
+brew install --cask Boredphilosopher96/tap/rottweiler
+rw --version
+rw doctor
+```
+
+Upgrade later with:
+
+```sh
+brew upgrade --cask rottweiler
+```
+
+Homebrew verifies the release checksum. The cask is not Apple-notarized.
+
+## Linux or WSL2
+
+The installer supports x86-64 Linux and WSL2. Download the version-pinned
+bootstrap, inspect it if your environment requires that, then run it. The
+bootstrap verifies the archive length and SHA-256 digest before invoking the
+installer inside the archive.
+
+```sh
+curl --fail --location --proto '=https' --tlsv1.2 \
+  --output rottweiler-install.sh \
+  https://github.com/Boredphilosopher96/Rottweiler/releases/download/v0.1.4/rottweiler-install.sh
+sh rottweiler-install.sh
+rw --version
+rw doctor
+```
+
+Do not rewrite the URL to `latest`: the bootstrap is intentionally pinned to
+one version and one set of archive digests.
+
+## Build from source
+
+Source builds require Rust 1.97.1, Bun 1.3.14, and the normal native build tools
+for your platform. The release builder is the sole source-build recipe because
+it compiles and validates every required sibling executable.
+
+```sh
+git clone https://github.com/Boredphilosopher96/Rottweiler.git
+cd Rottweiler
+rustup toolchain install 1.97.1 --profile minimal
+bun install --cwd packages/tui --frozen-lockfile
+scripts/build-release.sh
+```
+
+The command prints the validated archive path. Extract that archive and run its
+`install.sh`, or use it as the complete portable bundle.
+
+## Next step
+
+Continue with [First session](./first-session.md) to configure a provider without
+putting a credential in TOML.
+
+---
+
+# Providers
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/providers/
+Source owners: crates/rw-types/src/config.rs, crates/rw-core/src/provider_factory.rs
+
+Rottweiler keeps provider wire formats behind one internal message model. A
+session selects a model alias; routing resolves that alias to an ordered list
+of provider/model candidates.
+
+## Adapter kinds
+
+User configuration supports these provider kinds:
+
+- `anthropic`
+- `openai`
+- `openai_chat`
+- `openai_codex`
+- `github_copilot`
+- `openai_compatible`
+- `openai_compatible_responses`
+
+Use the dedicated kind when one exists. The compatible kinds are typed gateway
+surfaces, not arbitrary wire dialects.
+
+## Credentials
+
+Reference credentials from configuration and enter their values through
+Rottweiler:
+
+```toml
+[providers.work]
+kind = "openai_compatible_responses"
+base_url = "https://api.example.com/v1"
+api_key_credential = "providers.work.api_key"
+```
+
+```sh
+rw auth set-key work
+```
+
+ChatGPT subscription and GitHub Copilot credentials remain isolated from API
+key providers. Rottweiler does not copy credentials from another developer
+tool.
+
+## Compatible gateways
+
+The gateway surface supports static `headers`, credential-backed
+`header_credentials`, bearer/custom-header/no primary auth, `extra_query`,
+`extra_body`, a `{model}` `path_template`, model ID remapping, and user-declared
+pricing. It rejects reserved headers, duplicate authentication, query-string
+credentials, and subscription transport overrides.
+
+Provider definitions are user-scoped. Project configuration cannot replace
+them, even after the project is trusted.
+
+## Inspect before running
+
+```sh
+rw config check
+rw models list --refresh
+rw models show <alias-or-model>
+```
+
+`config check` prints the effective value and provenance of configuration
+without rendering credential values.
+
+---
+
+# CLI reference
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/reference/cli/
+Source owners: crates/rw-cli/src/main.rs
+
+`rw` is the only public executable. Run `rw <command> --help` for the exact
+flags accepted by the installed version.
+
+## Top-level workflows
+
+| Invocation | Purpose |
+|---|---|
+| `rw` | Start the supervised terminal application. |
+| `rw -p <prompt>` | Run one prompt without the TUI. |
+| `rw --remote <host>` | Run the local TUI against an engine reached over SSH. |
+| `rw serve` | Start the engine client server. |
+| `rw prompt dump` | Inspect the assembled prompt. |
+
+## Global session and policy flags
+
+| Flag | Meaning |
+|---|---|
+| `--permission-mode <strict\|auto-safe\|yolo>` | Select the non-interactive permission policy. |
+| `--max-turns <count>` | Bound provider iterations in one user turn. |
+| `--model <alias>` | Override the provider-neutral model alias. |
+| `--add-dir <path>` | Add a canonical workspace root. Repeatable. |
+| `--resume <session>` | Resume one exact durable session. |
+| `--continue` | Continue the most recently updated session. |
+| `--dangerously-trust` | Enable project execution for this run without persisting trust. |
+| `--output-format <text\|json\|stream-json>` | Select headless output. |
+
+## Configuration, models, and authentication
+
+```text
+rw config check
+rw models list [--refresh]
+rw models show <model-or-alias>
+rw models refresh
+rw auth login <provider>
+rw auth set-key <provider>
+```
+
+## Trust and extensions
+
+```text
+rw trust status
+rw trust grant
+rw trust revoke
+rw plugin scaffold --lang ts --name <name> <path>
+rw plugin dev <path> --session <id|current> --allow-dev-exec
+rw plugin status
+rw plugin approve <plugin>
+rw plugin revoke <plugin>
+rw extension registry list
+rw extension registry install <source>
+rw extension status
+rw extension enable <name>
+rw extension disable <name>
+```
+
+## MCP
+
+```text
+rw mcp login <server>
+rw mcp-server stdio [--workspace <path>]
+```
+
+## Durable work and diagnostics
+
+```text
+rw sessions list [--limit <count>]
+rw sessions search <query> [--limit <count>]
+rw replay <session>
+rw export <session> [--format markdown|html|json]
+rw stats
+rw import <claude|opencode|pi> --source-root <path> --dry-run
+rw doctor [--network]
+rw upgrade [--channel stable|beta]
+```
+
+Aliases are not part of the CLI contract. The command tree has one spelling for
+each operation.
+
+---
+
+# Client API
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/reference/client-api/
+Source owners: crates/rw-types/src/protocol.rs, protocol/schema/client-command.schema.json, protocol/schema/engine-event.schema.json
+
+The Client API keeps session logic in the Rust engine. Clients render events
+and send commands; they do not own routing, tools, persistence, permissions,
+compaction, or replay.
+
+## Behavior
+
+- Clients establish a connection and receive an initial session snapshot.
+- Every mutating command carries the identity required by the engine boundary.
+- Engine events are ordered and use generated schemas shared with TypeScript.
+- Disconnecting a client does not make that client the owner of the session.
+
+## Canonical artifacts
+
+- [Client command schema](/Rottweiler/generated/client/client-command.schema.json)
+- [Engine event schema](/Rottweiler/generated/client/engine-event.schema.json)
+- [Block schema](/Rottweiler/generated/client/block.schema.json)
+- [Tool output schema](/Rottweiler/generated/client/tool-output.schema.json)
+- [Generated TypeScript](/Rottweiler/generated/client/types.ts)
+
+The same code generator owns the Rust and TypeScript projections and the
+fixtures used for cross-language contract tests.
+
+---
+
+# Configuration reference
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/reference/configuration/
+Source owners: crates/rw-types/src/config.rs, crates/rw-store/src/config.rs
+
+Configuration is TOML. `rw config check` is the authoritative way to view the
+effective value and provenance for an installed version.
+
+## User file discovery
+
+Rottweiler uses the first applicable user configuration root:
+
+1. `$ROTTWEILER_HOME/config.toml`
+2. `$XDG_CONFIG_HOME/rottweiler/config.toml`
+3. `$HOME/.rottweiler/config.toml`
+
+The project file is `<workspace>/.rottweiler/config.toml`.
+
+## Precedence
+
+Values resolve in this order, with later layers winning:
+
+1. built-in defaults;
+2. user configuration;
+3. trusted project configuration;
+4. environment overrides;
+5. CLI overrides.
+
+Project configuration is not a path to user secrets or global security policy.
+Provider definitions, permissions, network and proxy policy, sandbox rules,
+telemetry, and update channel remain user-scoped.
+
+## Core sections
+
+The configuration model covers:
+
+- `engine` for session and subagent concurrency;
+- `models` and `models.aliases` for provider-neutral routing;
+- `compaction` and `budget` for context and spend guardrails;
+- `providers` for typed provider adapters and credential references;
+- `network` and `websearch` for guarded outbound access;
+- `permissions` and `sandbox` for execution policy;
+- `toolchain` for declarative formatter, linter, and test hooks;
+- `telemetry`, `updates`, and `ui` for their explicit product settings.
+
+MCP servers are stored separately in user-scoped `mcp.toml`. Commands, skills,
+agents, modes, workflows, and plugins are discovered from their own extension
+files and manifests; `config.toml` does not redefine those owners.
+
+Exact accepted fields are versioned with the binary. Use:
+
+```sh
+rw config check
+rw doctor
+```
+
+Unknown or unsafe configuration fails at the boundary instead of becoming an
+untyped bag passed into runtime logic.
+
+## Example
+
+```toml
+[models]
+default = "coding"
+
+[models.aliases]
+coding = ["anthropic/<model-id>"]
+
+[providers.anthropic]
+kind = "anthropic"
+api_key_credential = "providers.anthropic.api_key"
+```
+
+Store the referenced value with `rw auth set-key anthropic`.
+
+---
+
+# Platforms and releases
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/reference/platforms-and-releases/
+Source owners: contracts/release-contract.json, release/update/stable.spec.json
+
+## Supported release targets
+
+| Target | Operating system | Signed archive |
+|---|---|---|
+| `darwin-arm64` | macOS (arm64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.4-darwin-arm64.tar.gz) |
+| `linux-x86_64` | Linux (x86_64) | [Download](https://boredphilosopher96.github.io/Rottweiler/updates/rottweiler-0.1.4-linux-x86_64.tar.gz) |
+
+The release contract understands additional build shapes, but only targets in
+the signed update specification are advertised as released platforms.
+
+## Bundle membership
+
+A complete release contains:
+
+- `rw`, the public application and Rust supervisor;
+- `rottweiler-tui`, the compiled OpenTUI client;
+- the OpenTUI native renderer library;
+- `rottweiler-wasm-host`;
+- `rottweiler-plugin-host`;
+- the archive installer.
+
+The archive contract owns names, modes, per-member size ceilings, and platform
+native-library names.
+
+## Updates
+
+`rw upgrade` consumes signed root and channel metadata from the no-redirect
+update origin. Stable and beta are explicit channels. Immutable archives remain
+available under `/updates/`; the documentation deployment does not own or
+modify that subtree.
+
+Browse the [GitHub releases](https://github.com/Boredphilosopher96/Rottweiler/releases)
+for archive checksums and attestations.
+
+---
+
+# Plugin API
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/reference/plugin-api/
+Source owners: crates/rw-plugin-protocol/src/lib.rs, packages/plugin-sdk/PROTOCOL.md
+
+The Plugin API uses newline-framed JSON-RPC over standard input and output.
+The protocol crate owns method names, limits, validation, manifest
+normalization, fingerprints, schemas, fixtures, and TypeScript projections.
+
+## Lifecycle
+
+1. The host validates the manifest and approval fingerprint.
+2. The host starts the executable with bounded stdio.
+3. Host and plugin exchange initialization identities.
+4. The plugin serves only declared contributions and capabilities.
+5. The host requests shutdown and enforces bounded process cleanup.
+
+## Contributions
+
+Plugins can provide tools, commands, hooks, event subscriptions, and provider
+adapters. Provider adapters publish a bounded model catalog and can request
+host-mediated authenticated HTTP using an approved credential reference. The
+plugin never receives the credential value.
+
+## Canonical artifacts
+
+- [JSON Schema](/Rottweiler/generated/plugin/schema.json)
+- [Wire example](/Rottweiler/generated/plugin/wire-example.json)
+- [Frontmatter-free reference Markdown](/Rottweiler/raw/product/reference/plugin-api.md)
+
+These files are copied from checked protocol projections during the site build.
+The site does not recreate method names, constants, or limits.
+
+---
+
+# TypeScript plugin SDK
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/reference/plugin-sdk/
+Source owners: packages/plugin-sdk/src/index.ts, packages/plugin-sdk/package.json, packages/plugin-host/src/index.ts, crates/rw-cli/src/plugin_dev.rs
+
+The TypeScript SDK supplies the typed manifest, handlers, server, and project
+scaffold used by Rottweiler plugins.
+
+## Public exports
+
+- `definePlugin(definition)` validates and locks a typed plugin definition.
+- `parsePluginManifest(value)` validates an external manifest at the boundary.
+- `runPlugin(plugin)` serves the plugin over the bounded stdio API.
+- `PluginServer` exposes the lower-level server lifecycle.
+- `SafeRpcError` returns an intentional bounded RPC error.
+- Protocol request, response, capability, manifest, context, and contribution
+  types are exported from the package root.
+- The `./scaffold` export owns deterministic plugin project generation.
+
+## Minimal plugin
+
+```ts
+import { definePlugin, parsePluginManifest, runPlugin } from "@rottweiler/plugin"
+import manifestDocument from "../manifest.json"
+
+const plugin = definePlugin({
+  manifest: parsePluginManifest(manifestDocument),
+  handlers: {
+    tools: {
+      example_echo: ({ input }) => ({
+        content: String(input.message ?? "hello"),
+        data: input,
+      }),
+    },
+  },
+})
+
+await runPlugin(plugin)
+```
+
+The manifest is the capability boundary. Declaring a capability does not by
+itself grant approval; the host binds approval to the manifest fingerprint.
+
+## Scaffold a project
+
+```sh
+rw plugin scaffold --lang ts --name example.tools ./example-plugin
+cd example-plugin
+bun run typecheck
+bun test
+bun run build
+```
+
+The source target is exactly `source`. An executable target is exactly an
+argument vector plus an optional working directory.
+
+## Develop against a live session
+
+```sh
+rw plugin dev ./example-plugin --session current --allow-dev-exec
+```
+
+The development command performs bounded rebuild, validation, activation, and
+shutdown. Manifest and source changes rerun the declared build rather than
+patching a running plugin.
+
+See the [Plugin API](./plugin-api.md) for the language-neutral contract.
+
+---
+
+# Session log
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/reference/session-log/
+Source owners: protocol/session-log.md, protocol/session-event-envelope.schema.json
+
+Sessions are persisted as an append-only event stream. The durable envelope is
+separate from the live client protocol so UI transport changes do not rewrite
+history.
+
+## Properties
+
+- Each event has a schema version and stable identity fields.
+- Replay reconstructs session behavior from the event stream.
+- Resume, fork, rewind, checkpoints, search, and export operate on durable
+  storage rather than TUI memory.
+- Provider recordings preserve enough information for deterministic execution
+  at the supported fidelity boundary.
+- Export redaction happens before Markdown, HTML, or JSON leaves the engine.
+
+## Canonical artifact
+
+Download the [session-event envelope JSON Schema](/Rottweiler/generated/session/event-envelope.schema.json).
+The schema, Rust schema-version constant, and maintainer format reference are
+checked together in the repository.
+
+---
+
+# Automate a task
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/tutorials/automate-a-task/
+Source owners: crates/rw-cli/src/main.rs, crates/rw-runtime/src/session_runtime.rs
+
+This tutorial turns a repository review into a script-friendly operation.
+
+## Run one bounded prompt
+
+```sh
+rw -p "Review the staged patch. Report correctness issues before style issues." \
+  --permission-mode strict \
+  --max-turns 12 \
+  --output-format json
+```
+
+The three permission modes are `strict`, `auto-safe`, and `yolo`. `yolo`
+removes interactive approvals; it does not remove workspace, trust, or platform
+sandbox boundaries.
+
+## Stream events
+
+Use streaming JSON when a caller needs progress instead of one final document:
+
+```sh
+rw -p "Run the focused tests and explain any failure" \
+  --permission-mode auto-safe \
+  --max-turns 16 \
+  --output-format stream-json > run.jsonl
+```
+
+Each line is independently parseable JSON. Treat the stream as an event log,
+not terminal prose.
+
+## Add piped context
+
+Standard input can carry a bounded artifact alongside the prompt:
+
+```sh
+git diff --staged | rw -p "Review this patch for regressions" \
+  --permission-mode strict \
+  --max-turns 8
+```
+
+Do not use `yolo` merely to avoid designing an approval policy. Prefer the
+least-powerful mode that can complete the operation.
+
+---
+
+# Connect MCP
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/tutorials/connect-mcp/
+Source owners: crates/rw-cli/src/mcp_cli.rs, crates/rw-core/src/mcp.rs
+
+Rottweiler can consume configured MCP servers and can expose its own guarded
+tool surface over standard input/output.
+
+## Use Rottweiler as an MCP client
+
+Declare servers in the user or trusted project MCP configuration, then inspect
+them in the TUI with `/mcp`. HTTP servers that use Authorization Code with PKCE
+can start login from the CLI:
+
+```sh
+rw mcp login <server-name>
+```
+
+Project MCP configuration participates in the project extension inventory. It
+does not execute until the exact inventory is trusted.
+
+## Use Rottweiler as an MCP server
+
+Expose one workspace over stdio:
+
+```sh
+rw mcp-server stdio --workspace /absolute/path/to/project
+```
+
+Configure that command in the client that will launch Rottweiler. The MCP
+connection does not bypass Rottweiler's workspace, permission, trust, or
+sandbox boundaries.
+
+## Verify the boundary
+
+Run `rw trust status` in the workspace and use `rw config check` to inspect the
+effective policy before connecting an automated client.
+
+---
+
+# Resume, replay, and export a session
+Section: product
+Canonical URL: https://boredphilosopher96.github.io/Rottweiler/docs/tutorials/manage-a-session/
+Source owners: crates/rw-cli/src/main.rs, crates/rw-store/src/session.rs
+
+Rottweiler persists session events so the UI process is not the owner of your
+work.
+
+## Find the session
+
+```sh
+rw sessions list --limit 20
+rw sessions search "release audit" --limit 10
+```
+
+## Continue it
+
+Continue the most recently updated session:
+
+```sh
+rw --continue
+```
+
+Or choose the exact ID printed by `sessions list`:
+
+```sh
+rw --resume <session-id>
+```
+
+## Replay the history
+
+```sh
+rw replay <session-id>
+```
+
+Replay reconstructs behavior from the durable event stream. It is useful for
+debugging, reviewing tool activity, and checking what a client displayed.
+
+## Export a shareable transcript
+
+```sh
+rw export <session-id> --format markdown --output review.md
+rw export <session-id> --format html --output review.html
+rw export <session-id> --format json --output review.json
+```
+
+Exports pass through the transcript redactor. Still inspect an export before
+sharing it; repository content can itself contain sensitive information.

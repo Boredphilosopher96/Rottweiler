@@ -1,0 +1,1932 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ClientCommand",
+  "description": "Commands accepted by the headless engine from any client.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelAlias"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "create_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "cwd"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "last_seen_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/ClientRole"
+        },
+        "type": {
+          "type": "string",
+          "const": "resume_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "role"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "last_seen_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/ClientRole"
+        },
+        "type": {
+          "type": "string",
+          "const": "attach_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "role"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "content": {
+          "type": "string"
+        },
+        "attachments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Attachment"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "send_message"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "content",
+        "attachments"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "interrupt"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "tool_call_id": {
+          "$ref": "#/$defs/ToolCallId"
+        },
+        "decision": {
+          "$ref": "#/$defs/ApprovalDecision"
+        },
+        "binding": {
+          "description": "Required when the pending approval displayed a unified diff. The\nactor rejects missing or stale bindings without consuming the ask.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalBinding"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "approve_tool"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "tool_call_id",
+        "decision"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "decision": {
+          "$ref": "#/$defs/PlanDecision"
+        },
+        "revisions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "approve_plan"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "decision"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "answers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Answer"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "answer_question"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "question_id",
+        "answers"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "mode": {
+          "$ref": "#/$defs/ModeId"
+        },
+        "type": {
+          "type": "string",
+          "const": "switch_mode"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "mode"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "model": {
+          "$ref": "#/$defs/ModelAlias"
+        },
+        "provider": {
+          "description": "When set, route only through this configured provider for the\nselected alias instead of using the alias's automatic fallback chain.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "type": {
+          "type": "string",
+          "const": "switch_model"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "model"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "instructions": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "compact"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "at_turn": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation_id": {
+          "description": "Stable client-generated identity retained until the correlated fork completes.",
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "fork"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "operation_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "target": {
+          "$ref": "#/$defs/RewindTarget"
+        },
+        "type": {
+          "type": "string",
+          "const": "rewind"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "target"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "take_driver"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "command": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "user_shell_started"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "command"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "shell_id": {
+          "$ref": "#/$defs/ShellId"
+        },
+        "status": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "captured_output": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "user_shell_ended"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "shell_id",
+        "status"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "source": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "attach_development_plugin"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "source"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "detach_development_plugin"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "item_id": {
+          "$ref": "#/$defs/ContextItemId"
+        },
+        "type": {
+          "type": "string",
+          "const": "pin_context"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "item_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "item_id": {
+          "$ref": "#/$defs/ContextItemId"
+        },
+        "type": {
+          "type": "string",
+          "const": "evict_context"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "item_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_context"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_cost"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_session_review"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "decision": {
+          "$ref": "#/$defs/ReviewFileDecision"
+        },
+        "current_hash": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "review_file"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "path",
+        "decision",
+        "current_hash"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "turn_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TurnId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "dump_prompt"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_sessions"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "query": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "search_sessions"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "query",
+        "limit"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_commands"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_modes"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SessionId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refresh": {
+          "type": "boolean",
+          "default": false
+        },
+        "type": {
+          "type": "string",
+          "const": "list_models"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_settings"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "set_setting"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "key",
+        "value"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_mcp_servers"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_runtime_services"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "endpoint": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "add_mcp_http_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name",
+        "endpoint"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "executable": {
+          "type": "string"
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "environment": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/McpEnvironmentEntry"
+          }
+        },
+        "type": {
+          "type": "string",
+          "const": "add_mcp_stdio_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name",
+        "executable",
+        "args",
+        "environment"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "remove_mcp_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "review_mcp_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "approve_mcp_server"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name",
+        "fingerprint"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "set_mcp_server_enabled"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "name",
+        "enabled"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_permissions"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/$defs/PermissionDecision"
+        },
+        "type": {
+          "type": "string",
+          "const": "add_session_permission_rule"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "pattern",
+        "action"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "remove_session_permission_rule"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "rule_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "position": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "remove_queued_message"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "position"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "clear_queued_messages"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "title": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "rename_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "title"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "format": {
+          "$ref": "#/$defs/TranscriptFormat"
+        },
+        "output_path": {
+          "type": "string"
+        },
+        "force": {
+          "type": "boolean"
+        },
+        "type": {
+          "type": "string",
+          "const": "export_session"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "format",
+        "output_path",
+        "force"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "approval_id": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/PermissionApprovalScope"
+        },
+        "type": {
+          "type": "string",
+          "const": "revoke_permission_approval"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "approval_id",
+        "scope"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "begin_provider_auth"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "configure_builtin_provider"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/ProviderAuthAttemptId"
+        },
+        "type": {
+          "type": "string",
+          "const": "complete_provider_auth"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider",
+        "attempt_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/ProviderAuthAttemptId"
+        },
+        "type": {
+          "type": "string",
+          "const": "cancel_provider_auth"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "provider",
+        "attempt_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "query": {
+          "type": "string"
+        },
+        "limit": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "search_workspace_files"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "query",
+        "limit"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "preview_workspace_file"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "path",
+        "max_bytes"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "get_workspace_status"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "path": {
+          "type": "string"
+        },
+        "max_bytes": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "type": {
+          "type": "string",
+          "const": "get_workspace_diff"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "path",
+        "max_bytes"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "type": {
+          "type": "string",
+          "const": "list_subagents"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "after_sequence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SequenceId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "type": "string",
+          "const": "replay_subagent"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "content": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string",
+          "const": "continue_subagent"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id",
+        "content"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "type": {
+          "type": "string",
+          "const": "interrupt_subagent"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "session_id": {
+          "$ref": "#/$defs/SessionId"
+        },
+        "subagent_id": {
+          "$ref": "#/$defs/SubagentId"
+        },
+        "type": {
+          "type": "string",
+          "const": "close_subagent"
+        }
+      },
+      "required": [
+        "type",
+        "meta",
+        "session_id",
+        "subagent_id"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "meta": {
+          "$ref": "#/$defs/CommandMeta"
+        },
+        "type": {
+          "type": "string",
+          "const": "shutdown_host"
+        }
+      },
+      "required": [
+        "type",
+        "meta"
+      ]
+    }
+  ],
+  "$defs": {
+    "CommandMeta": {
+      "description": "Metadata common to commands from all client transports.",
+      "type": "object",
+      "properties": {
+        "protocol_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "client_id": {
+          "$ref": "#/$defs/ClientId"
+        },
+        "request_id": {
+          "$ref": "#/$defs/RequestId"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "client_id",
+        "request_id"
+      ]
+    },
+    "ClientId": {
+      "description": "Stable identifier of a connected client.",
+      "type": "string"
+    },
+    "RequestId": {
+      "description": "Client-generated identifier used to correlate a command.",
+      "type": "string"
+    },
+    "ModelAlias": {
+      "description": "Provider-blind model alias resolved by the engine router.",
+      "type": "string"
+    },
+    "SessionId": {
+      "description": "Stable identifier of an engine session.",
+      "type": "string"
+    },
+    "SequenceId": {
+      "description": "Monotonic per-session sequence encoded as a decimal string on the wire.",
+      "type": "string"
+    },
+    "ClientRole": {
+      "description": "Whether a client mutates the session or only observes it.",
+      "type": "string",
+      "enum": [
+        "driver",
+        "observer"
+      ]
+    },
+    "Attachment": {
+      "description": "User-provided content attached to a message.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "source_path": {
+          "description": "Optional normalized workspace-relative source path. Local absolute paths\nnever cross the client protocol; their in-band content may still be\nattached under a safe basename.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "media_type": {
+          "type": "string"
+        },
+        "data": {
+          "$ref": "#/$defs/AttachmentData"
+        }
+      },
+      "required": [
+        "name",
+        "media_type",
+        "data"
+      ]
+    },
+    "AttachmentData": {
+      "description": "In-band attachment data; protocol messages never require shared files.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "text"
+            }
+          },
+          "required": [
+            "type",
+            "content"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "data": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "inline_base64"
+            }
+          },
+          "required": [
+            "type",
+            "data"
+          ]
+        }
+      ]
+    },
+    "ToolCallId": {
+      "description": "Stable identifier assigned to a model tool call.",
+      "type": "string"
+    },
+    "ApprovalDecision": {
+      "description": "A driver's decision at the permission chokepoint.",
+      "type": "string",
+      "enum": [
+        "allow_once",
+        "allow_session",
+        "allow_project",
+        "deny"
+      ]
+    },
+    "ApprovalBinding": {
+      "description": "Optional structured unified diff attached to a mutating-tool approval.",
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "string"
+        },
+        "arguments_hash": {
+          "type": "string"
+        },
+        "base_hash": {
+          "type": "string"
+        },
+        "diff_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "proposal_id",
+        "arguments_hash",
+        "base_hash",
+        "diff_hash"
+      ]
+    },
+    "PlanDecision": {
+      "description": "Driver response to a submitted plan.",
+      "type": "string",
+      "enum": [
+        "approve",
+        "reject"
+      ]
+    },
+    "QuestionId": {
+      "description": "Stable identifier of an interactive question.",
+      "type": "string"
+    },
+    "Answer": {
+      "description": "One answer returned for a question entry.",
+      "type": "object",
+      "properties": {
+        "question_id": {
+          "$ref": "#/$defs/QuestionId"
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "question_id",
+        "values"
+      ]
+    },
+    "ModeId": {
+      "description": "Open identifier of a built-in or extension-provided mode.",
+      "type": "string"
+    },
+    "TurnId": {
+      "description": "Stable identifier of a conversation turn.",
+      "type": "string"
+    },
+    "RewindTarget": {
+      "description": "Rewind destination selected by a client.",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "turn_id": {
+              "$ref": "#/$defs/TurnId"
+            },
+            "type": {
+              "type": "string",
+              "const": "turn"
+            }
+          },
+          "required": [
+            "type",
+            "turn_id"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "checkpoint_id": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "checkpoint"
+            }
+          },
+          "required": [
+            "type",
+            "checkpoint_id"
+          ]
+        }
+      ]
+    },
+    "ShellId": {
+      "description": "Engine-generated identifier of one foreground user shell.",
+      "type": "string"
+    },
+    "ContextItemId": {
+      "description": "Stable identifier of one assembled context item.",
+      "type": "string"
+    },
+    "ReviewFileDecision": {
+      "description": "Driver decision for one file in the cumulative session review.",
+      "type": "string",
+      "enum": [
+        "accept",
+        "revert"
+      ]
+    },
+    "McpEnvironmentEntry": {
+      "description": "One explicit environment entry for a stdio MCP server.\n\nThe value is carried on the authenticated command wire but never exposed by\ndebug formatting.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "value"
+      ]
+    },
+    "PermissionDecision": {
+      "description": "Default permission decision used when no rule matches.",
+      "oneOf": [
+        {
+          "description": "Ask the active driver for approval.",
+          "type": "string",
+          "const": "ask"
+        },
+        {
+          "description": "Allow the operation.",
+          "type": "string",
+          "const": "allow"
+        },
+        {
+          "description": "Deny the operation.",
+          "type": "string",
+          "const": "deny"
+        }
+      ]
+    },
+    "TranscriptFormat": {
+      "description": "Stable transcript formats shared by CLI and authenticated clients.",
+      "type": "string",
+      "enum": [
+        "markdown",
+        "html",
+        "json"
+      ]
+    },
+    "PermissionApprovalScope": {
+      "description": "Scope of a remembered exact approval.",
+      "type": "string",
+      "enum": [
+        "session",
+        "project"
+      ]
+    },
+    "ProviderAuthAttemptId": {
+      "description": "Connection-scoped identifier of one provider authentication attempt.",
+      "type": "string"
+    },
+    "SubagentId": {
+      "description": "Stable identifier of a child agent session.",
+      "type": "string"
+    }
+  }
+}

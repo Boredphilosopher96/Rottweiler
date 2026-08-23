@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "product": "Rottweiler",
+  "documentation_sections": [
+    "product",
+    "contributing"
+  ],
+  "pages": [
+    {
+      "title": "Rottweiler coding agent",
+      "description": "Fast local coding-agent infrastructure with a Rust engine, durable sessions, explicit trust, and a responsive terminal interface.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/overview.md",
+      "source_owners": [
+        "README.md",
+        "PROJECT.md"
+      ]
+    },
+    {
+      "title": "Contributing",
+      "description": "Build the complete product, follow repository ownership boundaries, and use the checked architecture and verification documents.",
+      "section": "contributing",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/contributing/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/contributing/overview.md",
+      "source_owners": [
+        "PROJECT.md",
+        ".github/workflows/ci.yml"
+      ]
+    },
+    {
+      "title": "Verification",
+      "description": "Run Rottweiler's formatting, lint, test, code-generation, ownership, documentation, security, and package gates.",
+      "section": "contributing",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/contributing/verification/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/contributing/verification.md",
+      "source_owners": [
+        "docs/07-VERIFICATION.md",
+        ".github/workflows/ci.yml"
+      ]
+    },
+    {
+      "title": "Documentation",
+      "description": "Install Rottweiler, complete real workflows, configure the product, and integrate its APIs.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/documentation.md",
+      "source_owners": [
+        "release/update/stable.spec.json",
+        "docs/07-VERIFICATION.md"
+      ]
+    },
+    {
+      "title": "Architecture",
+      "description": "How the Rust engine, supervised clients, providers, tools, storage, and extension hosts form one Rottweiler application.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/concepts/architecture/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/concepts/architecture.md",
+      "source_owners": [
+        "docs/02-ARCHITECTURE.md",
+        "architecture/ownership.toml"
+      ]
+    },
+    {
+      "title": "Ownership model",
+      "description": "The one-owner rule that keeps Rottweiler protocols, configuration, releases, sessions, and documentation coherent.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/concepts/ownership/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/concepts/ownership.md",
+      "source_owners": [
+        "architecture/ownership.toml",
+        "scripts/check-ownership.py"
+      ]
+    },
+    {
+      "title": "First session",
+      "description": "Validate Rottweiler, add one provider credential, inspect available models, and complete a first coding task.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/first-session/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/first-session.md",
+      "source_owners": [
+        "crates/rw-cli/src/main.rs",
+        "crates/rw-store/src/config.rs"
+      ]
+    },
+    {
+      "title": "Extensions",
+      "description": "Choose commands, skills, agents, workflows, modes, hooks, MCP, WASM, or RPC plugins without widening the engine boundary.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/guides/extensions/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/guides/extensions.md",
+      "source_owners": [
+        "crates/rw-ext/src/discovery.rs",
+        "crates/rw-plugin-protocol/src/lib.rs"
+      ]
+    },
+    {
+      "title": "Models and routing",
+      "description": "Build provider-neutral model aliases, fallback chains, capabilities, pricing, and inspectable routing decisions.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/guides/models-and-routing/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/guides/models-and-routing.md",
+      "source_owners": [
+        "crates/rw-core/src/provider_factory.rs",
+        "crates/rw-types/src/config.rs"
+      ]
+    },
+    {
+      "title": "Security and trust",
+      "description": "Understand project trust, permission modes, workspace boundaries, credential isolation, sandboxing, and secure automation.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/guides/security-and-trust/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/guides/security-and-trust.md",
+      "source_owners": [
+        "crates/rw-store/src/trust.rs",
+        "crates/rw-types/src/config.rs",
+        "docs/05-SECURITY.md"
+      ]
+    },
+    {
+      "title": "Troubleshooting",
+      "description": "Diagnose configuration, bundle, provider, trust, model, storage, and upgrade problems without guessing.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/guides/troubleshooting/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/guides/troubleshooting.md",
+      "source_owners": [
+        "crates/rw-cli/src/doctor.rs",
+        "crates/rw-cli/src/main.rs"
+      ]
+    },
+    {
+      "title": "Installation",
+      "description": "Install the complete Rottweiler bundle on Apple silicon macOS or x86-64 Linux and verify it.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/installation/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/installation.md",
+      "source_owners": [
+        "packaging/homebrew/README.md",
+        "contracts/release-contract.json",
+        "scripts/build-release.sh"
+      ]
+    },
+    {
+      "title": "Providers",
+      "description": "Configure built-in model providers, subscription access, and typed OpenAI-compatible gateways without leaking credentials.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/providers/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/providers.md",
+      "source_owners": [
+        "crates/rw-types/src/config.rs",
+        "crates/rw-core/src/provider_factory.rs"
+      ]
+    },
+    {
+      "title": "CLI reference",
+      "description": "Public rw commands, global flags, machine output, session controls, diagnostics, extensions, MCP, and upgrades.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/reference/cli/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/cli.md",
+      "source_owners": [
+        "crates/rw-cli/src/main.rs"
+      ]
+    },
+    {
+      "title": "Client API",
+      "description": "Commands and events shared by the terminal UI, remote clients, tests, and other supervised Rottweiler clients.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/reference/client-api/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/client-api.md",
+      "source_owners": [
+        "crates/rw-types/src/protocol.rs",
+        "protocol/schema/client-command.schema.json",
+        "protocol/schema/engine-event.schema.json"
+      ]
+    },
+    {
+      "title": "Configuration reference",
+      "description": "Configuration discovery, precedence, project trust, typed provider records, and security-sensitive user-only settings.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/reference/configuration/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/configuration.md",
+      "source_owners": [
+        "crates/rw-types/src/config.rs",
+        "crates/rw-store/src/config.rs"
+      ]
+    },
+    {
+      "title": "Platforms and releases",
+      "description": "Signed release targets, complete bundle membership, update channels, and the boundary between supported release and build shapes.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/reference/platforms-and-releases/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/platforms-and-releases.md",
+      "source_owners": [
+        "contracts/release-contract.json",
+        "release/update/stable.spec.json"
+      ]
+    },
+    {
+      "title": "Plugin API",
+      "description": "Language-neutral JSON-RPC contract for Rottweiler tools, commands, hooks, events, providers, and host-mediated services.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/reference/plugin-api/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/plugin-api.md",
+      "source_owners": [
+        "crates/rw-plugin-protocol/src/lib.rs",
+        "packages/plugin-sdk/PROTOCOL.md"
+      ]
+    },
+    {
+      "title": "TypeScript plugin SDK",
+      "description": "Scaffold, validate, develop, and package a capability-bound TypeScript plugin.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/reference/plugin-sdk/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/plugin-sdk.md",
+      "source_owners": [
+        "packages/plugin-sdk/src/index.ts",
+        "packages/plugin-sdk/package.json",
+        "packages/plugin-host/src/index.ts",
+        "crates/rw-cli/src/plugin_dev.rs"
+      ]
+    },
+    {
+      "title": "Session log",
+      "description": "Durable append-only event envelope used for resume, replay, search, rewind, compaction, and redacted export.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/reference/session-log/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/session-log.md",
+      "source_owners": [
+        "protocol/session-log.md",
+        "protocol/session-event-envelope.schema.json"
+      ]
+    },
+    {
+      "title": "Automate a task",
+      "description": "Run Rottweiler non-interactively with bounded turns, explicit permissions, structured output, and piped repository context.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/tutorials/automate-a-task/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/tutorials/automate-a-task.md",
+      "source_owners": [
+        "crates/rw-cli/src/main.rs",
+        "crates/rw-runtime/src/session_runtime.rs"
+      ]
+    },
+    {
+      "title": "Connect MCP",
+      "description": "Use Rottweiler as an MCP client for trusted tools or expose one workspace through Rottweiler's MCP server.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/tutorials/connect-mcp/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/tutorials/connect-mcp.md",
+      "source_owners": [
+        "crates/rw-cli/src/mcp_cli.rs",
+        "crates/rw-core/src/mcp.rs"
+      ]
+    },
+    {
+      "title": "Resume, replay, and export a session",
+      "description": "Find durable sessions, continue exact work, inspect deterministic history, and create redacted exports.",
+      "section": "product",
+      "url": "https://boredphilosopher96.github.io/Rottweiler/docs/tutorials/manage-a-session/",
+      "raw_url": "https://boredphilosopher96.github.io/Rottweiler/raw/product/tutorials/manage-a-session.md",
+      "source_owners": [
+        "crates/rw-cli/src/main.rs",
+        "crates/rw-store/src/session.rs"
+      ]
+    }
+  ]
+}

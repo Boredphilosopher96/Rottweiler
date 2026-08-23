@@ -1,0 +1,41 @@
+# Rottweiler
+
+> A fast, local coding-agent harness with a Rust engine, durable sessions, explicit permissions, and open extension protocols.
+
+This is the complete product documentation. Prefer raw Markdown links when loading context.
+
+## Product documentation
+
+- [Rottweiler coding agent](https://boredphilosopher96.github.io/Rottweiler/raw/product/overview.md): Fast local coding-agent infrastructure with a Rust engine, durable sessions, explicit trust, and a responsive terminal interface.
+- [Documentation](https://boredphilosopher96.github.io/Rottweiler/raw/product/documentation.md): Install Rottweiler, complete real workflows, configure the product, and integrate its APIs.
+- [Architecture](https://boredphilosopher96.github.io/Rottweiler/raw/product/concepts/architecture.md): How the Rust engine, supervised clients, providers, tools, storage, and extension hosts form one Rottweiler application.
+- [Ownership model](https://boredphilosopher96.github.io/Rottweiler/raw/product/concepts/ownership.md): The one-owner rule that keeps Rottweiler protocols, configuration, releases, sessions, and documentation coherent.
+- [First session](https://boredphilosopher96.github.io/Rottweiler/raw/product/first-session.md): Validate Rottweiler, add one provider credential, inspect available models, and complete a first coding task.
+- [Extensions](https://boredphilosopher96.github.io/Rottweiler/raw/product/guides/extensions.md): Choose commands, skills, agents, workflows, modes, hooks, MCP, WASM, or RPC plugins without widening the engine boundary.
+- [Models and routing](https://boredphilosopher96.github.io/Rottweiler/raw/product/guides/models-and-routing.md): Build provider-neutral model aliases, fallback chains, capabilities, pricing, and inspectable routing decisions.
+- [Security and trust](https://boredphilosopher96.github.io/Rottweiler/raw/product/guides/security-and-trust.md): Understand project trust, permission modes, workspace boundaries, credential isolation, sandboxing, and secure automation.
+- [Troubleshooting](https://boredphilosopher96.github.io/Rottweiler/raw/product/guides/troubleshooting.md): Diagnose configuration, bundle, provider, trust, model, storage, and upgrade problems without guessing.
+- [Installation](https://boredphilosopher96.github.io/Rottweiler/raw/product/installation.md): Install the complete Rottweiler bundle on Apple silicon macOS or x86-64 Linux and verify it.
+- [Providers](https://boredphilosopher96.github.io/Rottweiler/raw/product/providers.md): Configure built-in model providers, subscription access, and typed OpenAI-compatible gateways without leaking credentials.
+- [CLI reference](https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/cli.md): Public rw commands, global flags, machine output, session controls, diagnostics, extensions, MCP, and upgrades.
+- [Client API](https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/client-api.md): Commands and events shared by the terminal UI, remote clients, tests, and other supervised Rottweiler clients.
+- [Configuration reference](https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/configuration.md): Configuration discovery, precedence, project trust, typed provider records, and security-sensitive user-only settings.
+- [Platforms and releases](https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/platforms-and-releases.md): Signed release targets, complete bundle membership, update channels, and the boundary between supported release and build shapes.
+- [Plugin API](https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/plugin-api.md): Language-neutral JSON-RPC contract for Rottweiler tools, commands, hooks, events, providers, and host-mediated services.
+- [TypeScript plugin SDK](https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/plugin-sdk.md): Scaffold, validate, develop, and package a capability-bound TypeScript plugin.
+- [Session log](https://boredphilosopher96.github.io/Rottweiler/raw/product/reference/session-log.md): Durable append-only event envelope used for resume, replay, search, rewind, compaction, and redacted export.
+- [Automate a task](https://boredphilosopher96.github.io/Rottweiler/raw/product/tutorials/automate-a-task.md): Run Rottweiler non-interactively with bounded turns, explicit permissions, structured output, and piped repository context.
+- [Connect MCP](https://boredphilosopher96.github.io/Rottweiler/raw/product/tutorials/connect-mcp.md): Use Rottweiler as an MCP client for trusted tools or expose one workspace through Rottweiler's MCP server.
+- [Resume, replay, and export a session](https://boredphilosopher96.github.io/Rottweiler/raw/product/tutorials/manage-a-session.md): Find durable sessions, continue exact work, inspect deterministic history, and create redacted exports.
+
+## Contributing
+
+- [Contributing](https://boredphilosopher96.github.io/Rottweiler/raw/contributing/overview.md): Build the complete product, follow repository ownership boundaries, and use the checked architecture and verification documents.
+- [Verification](https://boredphilosopher96.github.io/Rottweiler/raw/contributing/verification.md): Run Rottweiler's formatting, lint, test, code-generation, ownership, documentation, security, and package gates.
+
+## Machine-readable artifacts
+
+- [Documentation index](https://boredphilosopher96.github.io/Rottweiler/docs-index.json): Versioned page catalog with source owners.
+- [Plugin API schema](https://boredphilosopher96.github.io/Rottweiler/generated/plugin/schema.json): Canonical plugin contract.
+- [Client command schema](https://boredphilosopher96.github.io/Rottweiler/generated/client/client-command.schema.json): Canonical Client API command schema.
+- [Session envelope schema](https://boredphilosopher96.github.io/Rottweiler/generated/session/event-envelope.schema.json): Durable session-event envelope.
